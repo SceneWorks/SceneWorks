@@ -293,3 +293,138 @@ def install(root,manifest,request):
     write(archive/'bundle.json',value);manifest['calibration_carry_forward']=dict(path=DIRECTORY+'/bundle.json',sha256=file_hash(archive/'bundle.json'),claim=binding)
     carried_repair(manifest,root/'run',value)
     return archive
+
+
+# One reviewed policy transition, not a caller-selected source/hash exception.
+OWNERSHIP_V7_SHA256='54ddc476a1e4e924f0b6f7c25be1c6713ab9791c2e11a31c6f5ae2a9d1ccaf92'
+OWNERSHIP_V8_SHA256='db699fd2f69d693e169485c05486e98294986aed9bb53621ec4bd9bc1f4e231e'
+OWNERSHIP_BLOCKED_JOBS={
+    '39032307669-1':'ValueError: foreign process appeared on leased physical GPU1',
+    '39032793002-1':'ValueError: desktop baseline identity changed for PID4',
+}
+
+
+def ownership_policy_bridge(old,new):
+    """Permit exactly the independently reviewed System/idle-subset patch."""
+    from evaluate import file_hash
+    need(file_hash(old)==OWNERSHIP_V7_SHA256 and file_hash(new)==OWNERSHIP_V8_SHA256,
+         'ownership repair differs from the exact reviewed policy transition')
+
+
+def ownership_config_binding(manifest):
+    values=json.loads(json.dumps(manifest['configs']))
+    for config in values:
+        config.pop('files')
+        config['settings'].pop('calibration_source_root',None)
+    return values
+
+
+def ownership_request(request):
+    required={'kind','campaign','protocol_sha256','prepared_sha256','prepare_job','prepare_job_receipt_sha256','failed_jobs','prior_claim','authorization'}
+    need(set(request)==required and request['kind']=='ownership_policy_v7' and request['campaign']=='sc-26322-reference-v7','only fixed v7 ownership repair permitted')
+    need(isinstance(request['prepare_job'],str) and re.fullmatch(r'[0-9]+-[0-9]+',request['prepare_job']),'exact ownership source preparation job required')
+    need(set(request['failed_jobs'])==set(OWNERSHIP_BLOCKED_JOBS),'exact two pre-execution blocked jobs required')
+    hashes=[request[k] for k in ('protocol_sha256','prepared_sha256','prepare_job_receipt_sha256')]+list(request['failed_jobs'].values())
+    need(all(isinstance(v,str) and re.fullmatch(r'[0-9a-f]{64}',v) for v in hashes),'exact ownership repair receipt hashes required')
+
+
+def ownership_source_records(root,request):
+    """Read the unchanged v7 archive; no new calibration or scoring ever started."""
+    from evaluate import read,unseal,file_hash
+    from calibration_source import carried
+    ownership_request(request)
+    old=unseal(read(root/'protocol.lock.json'));prep=read(root/'prepared.json')
+    need(read(root/'protocol.lock.json')['sha256']==request['protocol_sha256'] and file_hash(root/'prepared.json')==request['prepared_sha256']==old['preparation']['sha256'],'v7 original protocol/preparation changed')
+    need(prep['harness']['ownership.py']==OWNERSHIP_V7_SHA256 and {p.name:file_hash(p) for p in (root/'harness').iterdir() if p.is_file()}==prep['harness'],'v7 original executed harness changed')
+    need(read(root/'run'/DIRECTORY/'bundle.json').get('kind')=='klein_metrics_v6','only original fixed v5/v6/v7 archive allowed')
+    need({p.name for p in (root/'run').iterdir()}=={DIRECTORY},'v7 contains new execution artifacts; ownership repair cannot retry them')
+    rows,parity=carried(old,root/'run')
+    need({r['cell']['config_id'] for r in rows.values()}==set(CARRIED) and all(r['status']=='ok' for r in rows.values()) and len(parity)==1,'ownership repair requires unchanged four successes and first parity')
+    need(old['calibration_carry_forward']['claim']==request['prior_claim'],'v6 to v7 claim binding changed')
+    need(file_hash(root/'run'/DIRECTORY/'repair-claim.json')==request['prior_claim']['sha256'],'v6 to v7 claim bytes changed')
+    prepare=read(root/'source-prepare-job.json')
+    need(file_hash(root/'source-prepare-job.json')==request['prepare_job_receipt_sha256'] and prepare['mode']=='prepare' and prepare['status']=='completed' and prepare['job']==request['prepare_job'] and prepare['transport_sha256']==prep['harness']['bootstrap.py'] and prepare['sceneworks_source']==prep['sceneworks_source'] and prepare['inference']==prep['inference'] and prepare['accelerator_execution_requested'] is False,'v7 source preparation job changed')
+    blocked=root/'blocked-jobs'
+    need({p.name for p in blocked.iterdir()}=={j+'.json' for j in OWNERSHIP_BLOCKED_JOBS},'blocked job archive closure changed')
+    original_root=old['preparation']['path'].replace('\\','/').rsplit('/',1)[0]
+    need(prepare['root'].replace('\\','/')==original_root,'v7 original preparation root changed')
+    for job_id,error in OWNERSHIP_BLOCKED_JOBS.items():
+        path=blocked/(job_id+'.json');job=read(path)
+        need(file_hash(path)==request['failed_jobs'][job_id] and job['mode']=='calibration' and job['status']=='failed' and job['job']==job_id and job['error']==error and job['root'].replace('\\','/')==original_root and job['transport_sha256']==prep['harness']['bootstrap.py'] and job['sceneworks_source']==prep['sceneworks_source'] and job['inference']==prep['inference'] and job['accelerator_execution_requested'] is True,'blocked job was not the exact pre-execution ownership rejection')
+    return old,prep,rows,parity
+
+
+def check_ownership_prior_claims(root,base):
+    """Check both earlier global claims without replacing either one."""
+    from evaluate import read,file_hash
+    from ownership import physical
+    for archived in (root,root/'run'/DIRECTORY):
+        old=read(archived/'protocol.lock.json');binding=old['calibration_carry_forward']['claim']
+        protocol=read(archived/'run'/DIRECTORY/'protocol.lock.json')['sha256']
+        path=Path(binding['path']);physical(path)
+        need(path==base/'calibration-repairs'/(protocol+'.json') and file_hash(path)==binding['sha256']==file_hash(archived/'run'/DIRECTORY/'repair-claim.json'),'prior one-time ownership repair chain changed')
+
+
+def carried_ownership_repair(manifest,run,value):
+    from evaluate import read,unseal,file_hash,cells
+    root=Path(run)/DIRECTORY;old,prep,rows,parity=ownership_source_records(root,value['source'])
+    proof=value['compatibility']
+    need(proof['new_runtime']==manifest['runtime'] and proof['new_hardware']==manifest['hardware'] and proof['new_prepared']==manifest['preparation'] and proof['new_configs']==ownership_config_binding(manifest),'ownership repair runtime/model/prepared compatibility changed')
+    need(proof['old_guard_sha256']==OWNERSHIP_V7_SHA256 and proof['new_guard_sha256']==OWNERSHIP_V8_SHA256,'ownership repair policy bridge changed')
+    current_guard=manifest['preparation']['path'].replace('\\','/').rsplit('/',1)[0]+'/harness/ownership.py'
+    for config in manifest['configs']:
+        guards=[f['sha256'] for f in config['files'] if f['path'].replace('\\','/')==current_guard]
+        need(guards==[OWNERSHIP_V8_SHA256],'current configuration does not bind reviewed ownership policy')
+    claim=unseal(read(root/'repair-claim.json'))
+    need(file_hash(root/'repair-claim.json')==value['claim']['sha256'] and claim['source_protocol_sha256']==value['source']['protocol_sha256'] and claim['prior_claim']==value['source']['prior_claim'] and claim['destination_campaign']=='sc-26322-reference-v8' and claim['destination_prepared_sha256']==manifest['preparation']['sha256'] and claim['authorization_id']==value['source']['authorization']['id'] and claim['guard_transition']==[OWNERSHIP_V7_SHA256,OWNERSHIP_V8_SHA256],'v7 to v8 append-only ownership claim changed')
+    need(value['failed_attempt']==read(root/'run'/DIRECTORY/'bundle.json')['failed_attempt'],'original excluded failed Klein evidence changed')
+    current={c['id']:c for c in cells(manifest,'calibration')}
+    need(all(row['cell']==current[key] for key,row in rows.items()),'ownership repair carried calibration cell changed')
+    need(all(not (Path(run)/'parity'/(key+'.json')).exists() for key in parity),'duplicate carried parity fixture forbidden')
+    return rows,parity
+
+
+def install_ownership_repair(root,manifest,request):
+    """One explicit v7 -> v8 bridge before any current run output or claim."""
+    from evaluate import read,write,seal,file_hash,unseal,canonical
+    from ownership import physical
+    import bootstrap
+    ownership_request(request)
+    need(root.name=='sc-26322-reference-v8','ownership repair destination must be fresh v8')
+    source=root.parent/'sc-26322-reference-v7';physical(source)
+    need(not (root/'run').exists(),'ownership repair must precede all current run artifacts')
+    need(file_hash(source/'prepared.json')==request['prepared_sha256'],'v7 preparation changed')
+    prep=bootstrap.prepared(source);current=bootstrap.prepared(root);old=unseal(read(source/'protocol.lock.json'))
+    auth=request['authorization']
+    need(set(auth)=={'id','coordinator','reason','new_harness_sha256','remaining_calibration_images','repair'} and auth['id'] and auth['reason'] and auth['coordinator']==manifest['ownership']['responsible_chat'] and type(auth['remaining_calibration_images']) is int and auth['remaining_calibration_images']==2 and auth['repair']=='windows_system_zero_epoch_and_verified_idle_subset','explicit fixed ownership policy repair authority required')
+    need(auth['new_harness_sha256']==hashlib.sha256(canonical(current['harness'])).hexdigest(),'authorized ownership repair harness changed')
+    need(current['binary_sha256']==prep['binary_sha256'] and current['native_build']==prep['native_build'],'ownership repair cannot rebuild or change native runtime identity')
+    need(current['reuse']['source_prepared_sha256']==prep['reuse']['source_prepared_sha256'],'original immutable acquisition source changed')
+    reused=read(root/'reuse.json')['native']
+    need(reused['mode']=='exact_v7_binary_copy_no_build' and reused['source_prepared_sha256']==request['prepared_sha256'] and reused['binary']['method']=='copy' and reused['binary']['sha256']==prep['binary_sha256'],'ownership repair requires independent exact v7 binary copy, no rebuild')
+    compatible(old,manifest,prep,current,source/'harness',root/'harness',source,root,ownership_repair=True)
+    need(normalized(ownership_config_binding(old),source)==normalized(ownership_config_binding(manifest),root),'ownership repair changes a generation configuration')
+    for key in prep['staged']:
+        a,b=prep['staged'][key],current['staged'][key]
+        need(all(a[k]==b[k] for k in ('repo','revision','metadata_sha256')),'ownership repair changes model metadata')
+        need(normalized(a['files'],source)==normalized(b['files'],root),'ownership repair changes staged model bytes')
+    need(qwen_config(old,source)==qwen_config(manifest,root) and file_hash(source/'harness/native.py')==file_hash(root/'harness/native.py') and file_hash(source/'harness/native_services.py')==file_hash(root/'harness/native_services.py'),'ownership repair changes native generation or service semantics')
+    need({p.name for p in source.glob('job-*-calibration.json')}=={'job-'+j+'-calibration.json' for j in OWNERSHIP_BLOCKED_JOBS},'unreviewed extra v7 calibration jobs cannot be transferred')
+    archive=root/'run'/DIRECTORY;archive.mkdir(parents=True)
+    def copy(src,name):
+        physical(src);dest=archive/name;physical(dest);dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(src,dest);need(file_hash(src)==file_hash(dest),'ownership archive copy changed bytes')
+    for name in ('protocol.lock.json','prepared.json'):copy(source/name,name)
+    copy(source/('job-'+request['prepare_job']+'-prepare.json'),'source-prepare-job.json')
+    for job in OWNERSHIP_BLOCKED_JOBS:copy(source/('job-'+job+'-calibration.json'),'blocked-jobs/'+job+'.json')
+    for name,p in archive_files(source/'run').items():copy(p,'run/'+name)
+    for name in prep['harness']:copy(source/'harness'/name,'harness/'+name)
+    old,prep,rows,parity=ownership_source_records(archive,request)
+    check_ownership_prior_claims(archive,root.parent)
+    claim=root.parent/'calibration-repairs'/(request['protocol_sha256']+'.json');physical(claim)
+    bootstrap.write(claim,seal(dict(source_protocol_sha256=request['protocol_sha256'],prior_claim=request['prior_claim'],destination_campaign=root.name,destination_prepared_sha256=manifest['preparation']['sha256'],authorization_id=auth['id'],responsible_chat=auth['coordinator'],guard_transition=[OWNERSHIP_V7_SHA256,OWNERSHIP_V8_SHA256])))
+    copy(claim,'repair-claim.json');binding=dict(path=str(claim.resolve()),sha256=file_hash(claim))
+    proof=dict(new_runtime=manifest['runtime'],new_hardware=manifest['hardware'],new_prepared=manifest['preparation'],new_configs=ownership_config_binding(manifest),old_guard_sha256=OWNERSHIP_V7_SHA256,new_guard_sha256=OWNERSHIP_V8_SHA256)
+    value=seal(dict(kind='ownership_policy_v7',source=request,files={n:file_hash(p) for n,p in archive_files(archive).items()},claim=binding,compatibility=proof,failed_attempt=read(archive/'run'/DIRECTORY/'bundle.json')['failed_attempt'],limitations='Two exact v7 jobs failed before runtime allocation; no new outputs/receipts/invalidations. Four original v5/v6 successes and parity16 remain unchanged. Only Klein/Z calibration pending.'))
+    write(archive/'bundle.json',value);manifest['calibration_carry_forward']=dict(path=DIRECTORY+'/bundle.json',sha256=file_hash(archive/'bundle.json'),claim=binding)
+    carried_ownership_repair(manifest,root/'run',value)
+    return archive

@@ -110,7 +110,7 @@ def config_binding(manifest):
     return values
 
 
-def compatible(old,new,old_prep,new_prep,old_harness,new_harness,old_root,new_root):
+def compatible(old,new,old_prep,new_prep,old_harness,new_harness,old_root,new_root,*,ownership_repair=False):
     from evaluate import file_hash
     for key in ('corpus','dmd_parity_fixtures','runtime','hardware','thresholds','scoring_protocol','visual_rubric','condition'):
         need(old[key]==new[key],f'carried MOSS {key} changed')
@@ -131,6 +131,10 @@ def compatible(old,new,old_prep,new_prep,old_harness,new_harness,old_root,new_ro
         need(inputs(a,old_root) and inputs(a,old_root)==inputs(b,new_root),f'carried MOSS model bytes changed: {key}')
     need(file_hash(old_harness/'reference.py')==file_hash(new_harness/'reference.py'),'carried MOSS sampler/adapter source changed')
     for name in ('run.py','ownership.py'):
+        if name=='ownership.py' and ownership_repair:
+            from calibration_repair import ownership_policy_bridge
+            ownership_policy_bridge(old_harness/name,new_harness/name)
+            continue
         need(execution_source(old_harness/name)==execution_source(new_harness/name),f'carried MOSS worker/measurement/live guard execution changed: {name}')
     need(evaluation_source(old_harness/'evaluate.py')==evaluation_source(new_harness/'evaluate.py'),'carried MOSS evaluation execution/dependencies changed')
 
@@ -156,14 +160,18 @@ def check_carry_closure(manifest,run,*,execution=False):
         claim=Path(binding['claim']['path']);physical(claim)
         need(claim==Path(run).parent.parent/'calibration-repairs'/(value['source']['protocol_sha256']+'.json'),'calibration repair claim escaped owned authority')
         need(file_hash(claim)==binding['claim']['sha256'],'one-time calibration repair claim changed')
-        if value.get('kind')=='klein_metrics_v6':
+        if value.get('kind')=='ownership_policy_v7':
+            from calibration_repair import check_ownership_prior_claims
+            check_ownership_prior_claims(root,Path(run).parent.parent)
+        elif value.get('kind')=='klein_metrics_v6':
             prior=value['source']['prior_claim'];path=Path(prior['path']);physical(path)
             original=read(root/'run'/DIRECTORY/'protocol.lock.json')['sha256']
             need(path==Path(run).parent.parent/'calibration-repairs'/(original+'.json') and file_hash(path)==prior['sha256'],'original v5 claim changed or escaped owned authority')
-    carried_ids=(*MOSS,'qwen_image_2_1') if value.get('kind')=='klein_metrics_v6' else MOSS
+    repaired=value.get('kind') in ('klein_metrics_v6','ownership_policy_v7')
+    carried_ids=(*MOSS,'qwen_image_2_1') if repaired else MOSS
     baseline={c['id']+'.png' for c in cells(manifest,'calibration') if c['config_id'] not in carried_ids}
     current={p.name for p in (Path(run)/'outputs').glob('calibration.*.png')}
-    need(current<=baseline and len(current)<=len(baseline),'remaining calibration budget permits only pending native images' if value.get('kind')=='klein_metrics_v6' else 'remaining calibration budget permits only three native images')
+    need(current<=baseline and len(current)<=len(baseline),'remaining calibration budget permits only pending native images' if repaired else 'remaining calibration budget permits only three native images')
     need(all(not (Path(run)/'receipts'/(c['id']+'.json')).exists() for c in cells(manifest,'calibration') if c['config_id'] in carried_ids),'new carried calibration receipt forbidden')
     return value
 
@@ -174,6 +182,9 @@ def carried(manifest,run):
     if value is None:return {},{}
     root=source_root(run)
     for name,sha in value['files'].items():need(file_hash(root/name)==sha,'carried original artifact changed')
+    if value.get('kind')=='ownership_policy_v7':
+        from calibration_repair import carried_ownership_repair
+        return carried_ownership_repair(manifest,run,value)
     if value.get('kind')=='klein_metrics_v6':
         from calibration_repair import carried_repair
         return carried_repair(manifest,run,value)
@@ -216,6 +227,11 @@ def read_kind(manifest,run):
 
 
 def calibration_record_root(manifest,run,config_id):
+    if manifest.get('calibration_carry_forward') and read_kind(manifest,run)=='ownership_policy_v7' and config_id in (*MOSS,'qwen_image_2_1'):
+        from evaluate import read,unseal
+        carried(manifest,run)
+        root=source_root(run)
+        return calibration_record_root(unseal(read(root/'protocol.lock.json')),root/'run',config_id)
     if manifest.get('calibration_carry_forward') and config_id in MOSS:
         carried(manifest,run)
         if read_kind(manifest,run)=='klein_metrics_v6':return source_root(run)/'run'/DIRECTORY/'run'
@@ -231,6 +247,9 @@ def install(root,manifest,request):
     from evaluate import read,write,seal,file_hash,unseal,receipts,canonical,artifact
     from ownership import physical,reject_run_invalidated
     import bootstrap
+    if request.get('kind')=='ownership_policy_v7':
+        from calibration_repair import install_ownership_repair
+        return install_ownership_repair(root,manifest,request)
     if request.get('kind')=='klein_metrics_v6':
         from calibration_repair import install as repair
         return repair(root,manifest,request)

@@ -451,3 +451,76 @@ must report q4/4, and its actual resolved q4 event and completed Candle event
 must exist. The request alone never authorizes either exception. Runtime tensor
 component dtypes remain unexposed; packed storage is not a claim about resident
 or compute precision. The actual Z load is still pending.
+
+### Fixed v7 ownership-policy repair into v8
+
+This is one explicit repair route, not general retry or arbitrary carry chaining.
+The two exact v7 calibration transport jobs `39032307669-1` and `39032793002-1`
+failed before the runtime loop. Their original job receipts, v7 lock/preparation,
+executed harness and complete nested v5/v6 archive are retained unchanged. v7 must
+contain no new output, receipt, parity, invalidation or other current-run artifact.
+Any additional calibration job or different failure is rejected.
+
+Prepare a fresh `sc-26322-reference-v8` with the original v1 immutable acquisition
+reuse. Its `reuse.native_copy` has exactly `kind: ownership_policy_v7`,
+`campaign: sc-26322-reference-v7`, `prepared_sha256`, `job` (the completed v7
+prepare job), `job_receipt_sha256`, and `binary_sha256`. Only the fixed v7→v8
+copy is permitted. It verifies the source preparation, exact executable, original
+source/pin/build inputs and current tool/DLL candidates, then independently copies
+that binary; no Cargo build or executable launch occurs. The runtime remains
+SceneWorks `ba2954f47bfd75a3186002e3cef859c4e4e1d37d`, inference
+`91ffb4a819aa2990c652db2d881ba0b9b10126ce`, binary
+`5c663e187b52d75a9859353f0eac8290ed6d23d04ce0173bc3bc3101a8f3e678`.
+DLL candidates remain indirect evidence, not proof of loaded libraries.
+
+Freeze's `calibration_carry_forward` requires exactly:
+
+```json
+{
+  "kind": "ownership_policy_v7",
+  "campaign": "sc-26322-reference-v7",
+  "protocol_sha256": "EXACT_ORIGINAL_V7_CANONICAL_LOCK_SHA256",
+  "prepared_sha256": "EXACT_ORIGINAL_V7_RAW_PREPARED_SHA256",
+  "prepare_job": "39027726001-1",
+  "prepare_job_receipt_sha256": "EXACT_ORIGINAL_RAW_PREPARE_JOB_SHA256",
+  "failed_jobs": {
+    "39032307669-1": "EXACT_RAW_FAILED_JOB_SHA256",
+    "39032793002-1": "EXACT_RAW_FAILED_JOB_SHA256"
+  },
+  "prior_claim": {"path": "EXACT_EXISTING_V6_TO_V7_CLAIM_PATH", "sha256": "EXACT_RAW_CLAIM_SHA256"},
+  "authorization": {
+    "id": "EXPLICIT_COORDINATOR_REPAIR_AUTHORITY",
+    "coordinator": "EXACT_RESPONSIBLE_CHAT",
+    "reason": "Reviewed Windows ownership-policy correction",
+    "new_harness_sha256": "REVIEWED_V8_HARNESS_CLOSURE_SHA256",
+    "remaining_calibration_images": 2,
+    "repair": "windows_system_zero_epoch_and_verified_idle_subset"
+  }
+}
+```
+
+The bridge permits only ownership.py's reviewed raw hash transition
+`54ddc476a1e4e924f0b6f7c25be1c6713ab9791c2e11a31c6f5ae2a9d1ccaf92`
+→ `db699fd2f69d693e169485c05486e98294986aed9bb53621ec4bd9bc1f4e231e`.
+All six model/config contracts and staged bytes, runtime/hardware, sampler,
+measurement, native adapter and service sources remain compatible. No broader
+source projection or caller-selected policy hash is accepted.
+
+Freeze appends a new claim keyed by the original v7 protocol, naming v8's exact
+preparation and authority. It never overwrites the v5→v6 or v6→v7 claims. All four
+successful images/receipts/costs and first parity fixture retain their original
+v5/v6 identities. The failed Klein asset and both scoped v6 invalidations remain
+in the nested archive, with missing wrapper/host measurements explicit.
+
+Only Klein and Z may create two new calibration images; carried configurations
+cannot render new calibration images, but each still requires all 48 scored
+images. Accepted calibration cap stays six, separately retaining one excluded
+failed generated asset, four historical failed native attempts and two pre-GPU
+blocked transport jobs. Initial parity16 is reused; remaining64 forwards and all
+288 scored outputs/432 judgments remain pending.
+
+After CPU preparation/freeze acceptance, explicitly freeze a NEW review-v8
+protocol against an EMPTY persistent Mac review root before GPU execution.
+Existing three isolated role contexts may be retained only through an explicit
+new evaluator specification; never reuse the v7 review protocol under a new lock.
+Fresh GPU1 ownership, lease deadlines and execution authorization remain required.

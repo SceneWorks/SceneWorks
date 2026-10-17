@@ -1431,3 +1431,164 @@ def test_native_projection_rejects_ordinary_dict_expression_and_guard_changes(tm
     try:projected=cr.native_source(path)
     except ValueError:return
     assert projected!=cr.native_source(ROOT/'native.py')
+
+
+def fixture_write(path,value):
+    # Deliberate setup/mutation of synthetic fixtures, never campaign evidence.
+    Path(path).write_text(json.dumps(value))
+
+
+@pytest.fixture
+def ownership_v7_fixture(repaired_v6_fixture,monkeypatch):
+    """Synthetic fixed ownership transition, not actual host/model evidence."""
+    import shutil
+    import bootstrap as b
+    import calibration_source as cs
+    import calibration_repair as cr
+    f=repaired_v6_fixture;source=f['root'];old=f['manifest']
+    oldprep=ev.read(source/'prepared.json');fixture_write(source/'reuse.json',{'source_prepared_sha256':'a'*64})
+    oldprep['reuse']=dict(path=str(source/'reuse.json'),sha256=ev.file_hash(source/'reuse.json'),source_prepared_sha256='a'*64)
+    fixture_write(source/'prepared.json',oldprep);old['preparation']['sha256']=ev.file_hash(source/'prepared.json')
+    cs.install(source,old,f['request']);fixture_write(source/'protocol.lock.json',ev.seal(old))
+    prepjob=source/'job-900-1-prepare.json';fixture_write(prepjob,dict(mode='prepare',status='completed',job='900-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,transport_sha256=oldprep['harness']['bootstrap.py'],accelerator_execution_requested=False))
+    for jid,error in cr.OWNERSHIP_BLOCKED_JOBS.items():
+        fixture_write(source/('job-'+jid+'-calibration.json'),dict(mode='calibration',status='failed',job=jid,root=str(source),error=error,sceneworks_source=b.SOURCE,inference=b.INFERENCE,transport_sha256=oldprep['harness']['bootstrap.py'],accelerator_execution_requested=True))
+    root=source.parent/'sc-26322-reference-v8'
+    shutil.copytree(source,root,ignore=shutil.ignore_patterns('run','job-*','protocol.lock.json'))
+    def relocate(value):
+        if isinstance(value,str):return value.replace(str(source)+'/',str(root)+'/')
+        if isinstance(value,list):return [relocate(v) for v in value]
+        if isinstance(value,dict):return {k:relocate(v) for k,v in value.items()}
+        return value
+    current=relocate(oldprep);m=relocate(deepcopy(old));m.pop('calibration_carry_forward')
+    m['ownership']['lease']='CPU v8 lease';m['ownership']['job']='CPU v8 job'
+    # Only this fixture pins its two synthetic guard byte strings. Production
+    # constants remain the literal reviewed old/new source hashes.
+    oldguard=source/'harness/ownership.py';guard=root/'harness/ownership.py';guard.write_bytes(oldguard.read_bytes()+b'\n# CPU fixture exact policy transition\n')
+    monkeypatch.setattr(cr,'OWNERSHIP_V7_SHA256',ev.file_hash(oldguard));monkeypatch.setattr(cr,'OWNERSHIP_V8_SHA256',ev.file_hash(guard))
+    current['harness']['ownership.py']=ev.file_hash(guard)
+    for c in m['configs']:
+        for file in c['files']:
+            if file['path']==str(guard):file.update(sha256=ev.file_hash(guard),bytes=guard.stat().st_size)
+    fixture_write(root/'reuse.json',dict(source_prepared_sha256='a'*64,native=dict(mode='exact_v7_binary_copy_no_build',source_prepared_sha256=ev.file_hash(source/'prepared.json'),binary=dict(method='copy',sha256=current['binary_sha256']))))
+    current['reuse']=dict(path=str(root/'reuse.json'),sha256=ev.file_hash(root/'reuse.json'),source_prepared_sha256='a'*64)
+    fixture_write(root/'prepared.json',current);m['preparation']['sha256']=ev.file_hash(root/'prepared.json')
+    request=dict(kind='ownership_policy_v7',campaign=source.name,protocol_sha256=ev.read(source/'protocol.lock.json')['sha256'],prepared_sha256=ev.file_hash(source/'prepared.json'),prepare_job='900-1',prepare_job_receipt_sha256=ev.file_hash(prepjob),failed_jobs={j:ev.file_hash(source/('job-'+j+'-calibration.json')) for j in cr.OWNERSHIP_BLOCKED_JOBS},prior_claim=old['calibration_carry_forward']['claim'],authorization=dict(id='CPU explicit ownership repair',coordinator=m['ownership']['responsible_chat'],reason='CPU fixture only',new_harness_sha256=ev.digest(current['harness']),remaining_calibration_images=2,repair='windows_system_zero_epoch_and_verified_idle_subset'))
+    return dict(source=source,root=root,old=old,manifest=m,request=request,metrics=f['metrics'])
+
+
+def test_v7_ownership_repair_preserves_all_claims_four_successes_and_scored_surface(ownership_v7_fixture,monkeypatch):
+    import calibration_source as cs
+    import calibration_repair as cr
+    import ownership as o
+    import run
+    f=ownership_v7_fixture;source=f['source'];root=f['root'];m=f['manifest']
+    originals={p:p.read_bytes() for p in source.rglob('*') if p.is_file()};claims={p:p.read_bytes() for p in (source.parent/'calibration-repairs').glob('*')}
+    cs.install(root,m,f['request']);fixture_write(root/'protocol.lock.json',ev.seal(m))
+    cs.check_carry_closure(m,root/'run',execution=True);rows,parity=cs.carried(m,root/'run')
+    assert len(rows)==4 and len(parity)==1 and len({r['lock_sha256'] for r in rows.values()})==2
+    assert all(p.read_bytes()==body for p,body in {**originals,**claims}.items())
+    assert len(ev.receipts(root/'protocol.lock.json',root/'run','calibration',False)[1])==4
+    for cfg in cr.CARRIED:
+        assert run.existing_successes(m,'v8',root/'run',cfg,'calibration')==[]
+        assert len(run.existing_successes(m,'v8',root/'run',cfg,'scored'))==48
+    assert all(len(run.existing_successes(m,'v8',root/'run',c,'calibration'))==1 for c in ev.CONFIG_IDS[4:])
+    archive=root/'run'/cs.DIRECTORY
+    assert cs.calibration_record_root(m,root/'run',cr.QWEN)==archive/'run'/cs.DIRECTORY/'run'
+    assert cs.calibration_record_root(m,root/'run','moss_dmd')==archive/'run'/cs.DIRECTORY/'run'/cs.DIRECTORY/'run'
+    assert len(list(ev.cells(m)))==288 and len(ev.parity_cells(m))*16==80
+    class Guard:
+        unavailable_configs={}
+        def __init__(self,*a,**kw):self.prepared_root=root
+        def check(self,*a,**kw):cs.check_carry_closure(m,root/'run',execution=True)
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**kw:None)
+    monkeypatch.setattr(run,'launch',lambda *a,**kw:pytest.fail('carried calibration may not spawn'))
+    for cfg in cr.CARRIED:assert run.execute(root/'protocol.lock.json',root/'run',cfg,'calibration')==0
+    with pytest.raises(ValueError):cs.install(root,m,f['request'])
+
+
+@pytest.mark.parametrize('change',['new_output','new_receipt','new_invalidation','scored','extra_job','job_success','wrong_error','job_digest','old_claim','new_guard','other_guard_constant','reference','native','run','driver','model','binary','authority','extra_remaining','rebuild','prepare_path'])
+def test_v7_ownership_repair_refuses_broader_retry_or_policy_input_change(ownership_v7_fixture,change):
+    import calibration_source as cs
+    import calibration_repair as cr
+    f=ownership_v7_fixture;root=f['root'];source=f['source'];m=f['manifest'];request=f['request']
+    if change in ('new_output','new_receipt','new_invalidation','scored'):
+        p=source/'run'/('outputs' if change in ('new_output','scored') else 'receipts' if change=='new_receipt' else 'invalidations');p.mkdir();(p/('scored.orphan.png' if change=='scored' else 'orphan')).write_text('CPU fixture forbidden new execution')
+    elif change=='extra_job':fixture_write(source/'job-999-1-calibration.json',{})
+    elif change in ('job_success','wrong_error','job_digest'):
+        jid=next(iter(cr.OWNERSHIP_BLOCKED_JOBS));p=source/('job-'+jid+'-calibration.json');row=ev.read(p)
+        row['status' if change=='job_success' else 'error']='completed' if change=='job_success' else 'ValueError: different failure';fixture_write(p,row)
+        if change!='job_digest':request['failed_jobs'][jid]=ev.file_hash(p)
+    elif change=='old_claim':Path(request['prior_claim']['path']).write_text('changed original claim')
+    elif change in ('new_guard','other_guard_constant','reference','native','run'):
+        name={'new_guard':'ownership','other_guard_constant':'ownership'}.get(change,change)+'.py';p=root/'harness'/name
+        p.write_text(p.read_text()+('\nUNREVIEWED_EXECUTION_LIMIT=0\n' if change in ('other_guard_constant','run') else '\n# unreviewed source change\n'))
+        prep=ev.read(root/'prepared.json');prep['harness'][name]=ev.file_hash(p);fixture_write(root/'prepared.json',prep);m['preparation']['sha256']=ev.file_hash(root/'prepared.json');request['authorization']['new_harness_sha256']=ev.digest(prep['harness'])
+        for c in m['configs']:
+            for file in c['files']:
+                if file['path']==str(p):file.update(sha256=ev.file_hash(p),bytes=p.stat().st_size)
+    elif change=='driver':m['runtime']['driver']='changed'
+    elif change=='model':next(f for c in m['configs'] if c['id']=='moss_base' for f in c['files'] if '/hub/' in f['path'])['sha256']='0'*64
+    elif change=='binary':Path(ev.read(root/'prepared.json')['binary']).write_bytes(b'changed')
+    elif change=='authority':request['authorization']['coordinator']='different'
+    elif change=='extra_remaining':request['authorization']['remaining_calibration_images']=3
+    elif change=='prepare_path':request['prepare_job']='../outside'
+    elif change=='rebuild':
+        reuse=ev.read(root/'reuse.json');reuse['native']['mode']='controlled_rebuild';fixture_write(root/'reuse.json',reuse);prep=ev.read(root/'prepared.json');prep['reuse']['sha256']=ev.file_hash(root/'reuse.json');fixture_write(root/'prepared.json',prep);m['preparation']['sha256']=ev.file_hash(root/'prepared.json')
+    with pytest.raises((ValueError,KeyError)):cs.install(root,m,request)
+
+
+@pytest.mark.parametrize('change',['archive','new_claim','old_claim','extra_parity','carried_image','current_guard','bundle_policy'])
+def test_v8_owned_archive_live_guards_and_offline_receipts_remain_strict(ownership_v7_fixture,change):
+    import calibration_source as cs
+    import calibration_repair as cr
+    f=ownership_v7_fixture;root=f['root'];m=f['manifest'];cs.install(root,m,f['request']);fixture_write(root/'protocol.lock.json',ev.seal(m));archive=root/'run'/cs.DIRECTORY
+    if change=='archive':(archive/'blocked-jobs'/((next(iter(cr.OWNERSHIP_BLOCKED_JOBS)))+'.json')).write_text('changed')
+    elif change=='new_claim':Path(m['calibration_carry_forward']['claim']['path']).write_text('changed')
+    elif change=='old_claim':Path(f['request']['prior_claim']['path']).write_text('changed')
+    elif change=='extra_parity':p=root/'run/parity';p.mkdir();fixture_write(p/(ev.parity_cells(m)[0]['id']+'.json'),{})
+    elif change=='carried_image':p=root/'run/outputs';p.mkdir();(p/(next(c for c in ev.cells(m,'calibration') if c['config_id']=='moss_base')['id']+'.png')).write_bytes(png(1024,1024))
+    elif change=='current_guard':
+        for c in m['configs']:
+            next(f for f in c['files'] if f['path']==str(root/'harness/ownership.py'))['sha256']='0'*64
+    elif change=='bundle_policy':
+        bundle=ev.unseal(ev.read(archive/'bundle.json'));bundle['compatibility']['new_guard_sha256']='0'*64;fixture_write(archive/'bundle.json',ev.seal(bundle));m['calibration_carry_forward']['sha256']=ev.file_hash(archive/'bundle.json')
+    with pytest.raises(ValueError):
+        cs.check_carry_closure(m,root/'run',execution=True);cs.carried(m,root/'run')
+
+
+@pytest.mark.parametrize('failed',[False,True])
+def test_v8_transport_only_two_new_cells_and_immutable_accounting(ownership_v7_fixture,monkeypatch,failed):
+    # Exercise the same real transport/runner path with the additional fixed
+    # archive layer; all workers remain synthetic CPU fixtures.
+    test_fixed_v6_transport_finishes_exact_two_pending_cells_and_reports_origins(ownership_v7_fixture,monkeypatch,failed)
+    root=ownership_v7_fixture['root'];estimate=ev.read(root/'calibration-estimate.json')
+    assert estimate['pre_execution_blocked_jobs']==2
+    assert estimate['carried_calibration_outputs']==4 and estimate['current_calibration_output_cap']==2
+    saved={p:p.read_bytes() for p in (root/'run/receipts').glob('*.json')}
+    import run
+    for cfg in ev.CONFIG_IDS:
+        assert run.existing_successes(ownership_v7_fixture['manifest'],ev.read(root/'protocol.lock.json')['sha256'],root/'run',cfg,'calibration')==[]
+    assert all(p.read_bytes()==body for p,body in saved.items())
+
+
+def test_v8_scored_parity_retains_first_and_executes_only_remaining_four(ownership_v7_fixture,monkeypatch):
+    import calibration_source as cs
+    import run
+    from types import SimpleNamespace
+    f=ownership_v7_fixture;root=f['root'];m=f['manifest'];cs.install(root,m,f['request']);ev.write(root/'protocol.lock.json',ev.seal(m))
+    calls=[]
+    class Guard:
+        def check(self,*a,**kw):cs.check_carry_closure(m,root/'run',execution=True)
+    class Requests:
+        def put(self,item):
+            if item is not None:calls.append(item[0]['case_id'])
+    def replies():
+        yield ('ready',.01)
+        while True:yield ('result',parity_evidence())
+    monkeypatch.setattr(run,'launch',lambda *a,**kw:(SimpleNamespace(),Requests(),replies()))
+    monkeypatch.setattr(run,'receive',lambda p,q,*a:(next(q),0));monkeypatch.setattr(run,'finish',lambda *a:None)
+    rows=run.ensure_parity(m,ev.read(root/'protocol.lock.json')['sha256'],root/'run','scored',Guard(),'CPU v8 parity')
+    assert len(rows)==5 and len(calls)==4 and 'english_signage-1' not in calls
+    assert sum(x['evidence']['forward_count'] for x in rows)==80
+    assert len(list((root/'run/parity').glob('*.json')))==4

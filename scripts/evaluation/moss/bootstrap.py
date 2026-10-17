@@ -95,7 +95,9 @@ def control(mode, raw, base=BASE):
             require(reuse['native_rebuild'] is True,'native_rebuild must explicitly authorize a controlled new native build')
         if 'native_copy' in reuse:
             n=reuse['native_copy']
-            require(set(n)=={'campaign','prepared_sha256','job','job_receipt_sha256','binary_sha256'} and n['campaign']=='sc-26322-reference-v6' and re.fullmatch(r'[0-9]+-[0-9]+',n['job']) and all(re.fullmatch(r'[0-9a-f]{64}',n[k]) for k in ('prepared_sha256','job_receipt_sha256','binary_sha256')),'exact v6 native-copy receipt bindings required')
+            fields={'campaign','prepared_sha256','job','job_receipt_sha256','binary_sha256'}
+            v7=set(n)==fields|{'kind'} and n.get('kind')=='ownership_policy_v7' and n['campaign']=='sc-26322-reference-v7' and value['campaign']=='sc-26322-reference-v8'
+            require((v7 or (set(n)==fields and n['campaign']=='sc-26322-reference-v6')) and re.fullmatch(r'[0-9]+-[0-9]+',n['job']) and all(re.fullmatch(r'[0-9a-f]{64}',n[k]) for k in ('prepared_sha256','job_receipt_sha256','binary_sha256')),'exact v6 or explicit v7 ownership-repair native-copy bindings required')
         require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',reuse['campaign']) and reuse['campaign']!=value['campaign'],'reuse must name a different owned sibling campaign')
         require(re.fullmatch(r'[0-9]+-[0-9]+',reuse['job']),'exact completed source job/attempt required')
         require(all(re.fullmatch(r'[0-9a-f]{64}',reuse[k]) for k in ('prepared_sha256','job_receipt_sha256')),'exact source receipt digests required')
@@ -468,6 +470,8 @@ def extract_repair_evidence(root,data):
 def copy_v6_native(root,record):
     """Retain the exact evaluated binary; never rebuild or execute it."""
     request=record['native_copy'];source=root.parent/request['campaign'];physical(source)
+    ownership_repair=request.get('kind')=='ownership_policy_v7'
+    require((ownership_repair and source.name=='sc-26322-reference-v7' and root.name=='sc-26322-reference-v8') or (not ownership_repair and source.name=='sc-26322-reference-v6'),'native copy is outside the fixed repair route')
     receipt=source/('job-'+request['job']+'-prepare.json');physical(receipt)
     require(digest(source/'prepared.json')==request['prepared_sha256'] and digest(receipt)==request['job_receipt_sha256'],'v6 native source receipt drift')
     job=read(receipt);prep=prepared(source)
@@ -493,7 +497,7 @@ def copy_v6_native(root,record):
         physical(directory)
     physical(target)
     require(not any(p.suffix.casefold()=='.dll' for p in target.parent.iterdir()),'new native copy directory has unexpected adjacent DLLs')
-    record['native']=dict(mode='exact_v6_binary_copy_no_build',source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
+    record['native']=dict(mode='exact_v7_binary_copy_no_build' if ownership_repair else 'exact_v6_binary_copy_no_build',source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
     return target,prep['native_build']
 
 
@@ -852,8 +856,10 @@ def execute_phase(root, value, phase):
                 estimate['calibration_carry_forward']=manifest['calibration_carry_forward']
                 estimate['limitations']+=' Carried measurements retain their original protocol/desktop/process conditions; only newly executed native measurements belong to this campaign.'
                 from calibration_source import check_carry_closure
-                repaired=check_carry_closure(manifest,campaign).get('kind')=='klein_metrics_v6'
+                repair_kind=check_carry_closure(manifest,campaign).get('kind')
+                repaired=repair_kind in ('klein_metrics_v6','ownership_policy_v7')
                 estimate.update(calibration_attempts=10 if repaired else 9,effective_calibration_rows=6,historical_failed_native_attempts=4 if repaired else 3,carried_calibration_outputs=4 if repaired else 3,current_calibration_output_cap=2 if repaired else 3,accepted_calibration_outputs=sum(r['status']=='ok' for r in results.values()),known_generated_calibration_outputs=estimate['calibration_outputs']+(1 if repaired else 0),excluded_failed_generated_outputs=1 if repaired else 0)
+                if repair_kind=='ownership_policy_v7':estimate['pre_execution_blocked_jobs']=2
                 for key,condition in estimate['conditions'].items():
                     row=next(r for r in results.values() if r['cell']['config_id']==key)
                     condition.update(measurement_protocol_sha256=row['lock_sha256'],measurement_origin='current_campaign' if row['lock_sha256']==protocol['sha256'] else 'carried_original')

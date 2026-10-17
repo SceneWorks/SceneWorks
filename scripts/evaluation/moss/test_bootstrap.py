@@ -99,6 +99,28 @@ class BootstrapContracts(unittest.TestCase):
             binary.write_bytes(b'drift')
             with self.assertRaisesRegex(ValueError,'identity changed'):b.copy_v6_native(root,record)
 
+    def test_v7_ownership_repair_copy_is_explicit_fixed_and_never_builds(self):
+        copy=dict(kind='ownership_policy_v7',campaign='sc-26322-reference-v7',prepared_sha256='a'*64,job='123-1',job_receipt_sha256='b'*64,binary_sha256='c'*64)
+        reuse=dict(campaign='sc-26322-reference-v1',prepared_sha256='d'*64,job='122-1',job_receipt_sha256='e'*64,native_copy=copy)
+        raw=json.dumps(dict(campaign='sc-26322-reference-v8',deadline_utc=self.deadline,reuse=reuse))
+        b.control('prepare',raw,self.root)
+        for change in ({'kind':'generic_retry'},{'campaign':'sc-26322-reference-v8'},{'path':'arbitrary'}):
+            with self.assertRaises(ValueError):b.control('prepare',json.dumps(dict(campaign='sc-26322-reference-v8',deadline_utc=self.deadline,reuse={**reuse,'native_copy':{**copy,**change}})),self.root)
+        with self.assertRaises(ValueError):b.control('prepare',self.request(reuse=reuse),self.root)
+        source=self.root/'sc-26322-reference-v7';source.mkdir();binary=source/'target/release/sceneworks-rust-api.exe';binary.parent.mkdir(parents=True);binary.write_bytes(b'exact prior binary CPU fixture')
+        native=self.root/'sc-26322-reference-v1/native-source';native.mkdir(parents=True);(native/'Cargo.lock').write_bytes(b'frozen fixture lock')
+        identity=dict(required_adjacent_dlls=[],adjacent_dll_files=[],fixture='same actual candidates')
+        prep=dict(binary=str(binary),binary_sha256=b.digest(binary),native_build={**identity,'build':dict(cwd=str(native),input_sha256={'Cargo.lock':b.digest(native/'Cargo.lock')})})
+        b.write(source/'prepared.json',prep);job=source/'job-123-1-prepare.json';b.write(job,dict(status='completed',mode='prepare',job='123-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,accelerator_execution_requested=False))
+        copy.update(prepared_sha256=b.digest(source/'prepared.json'),job_receipt_sha256=b.digest(job),binary_sha256=prep['binary_sha256'])
+        root=self.root/'sc-26322-reference-v8';record={'native_copy':copy}
+        with patch.object(b,'prepared',return_value=prep),patch.object(b,'verify_native_source'),patch.object(b,'native_identity',return_value=identity),patch.object(b,'run',side_effect=AssertionError('no build/executable')):
+            target,actual=b.copy_v6_native(root,record)
+            self.assertEqual(actual,prep['native_build']);self.assertEqual(record['native']['mode'],'exact_v7_binary_copy_no_build')
+            self.assertFalse(os.path.samefile(target,binary));self.assertEqual(target.read_bytes(),binary.read_bytes())
+            binary.write_bytes(b'changed prior executable')
+            with self.assertRaises(ValueError):b.copy_v6_native(root,record)
+
     def test_diagnostic_zip_exact_allowlist_size_hash_paths_and_duplicates(self):
         def make(entries):
             stream=io.BytesIO()
