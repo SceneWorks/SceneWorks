@@ -4243,7 +4243,7 @@ export function ImageStudio() {
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"
-                  title="Have FLUX.2-dev's native prompt enhancer rewrite your prompt before generating. If enhancement safely falls back, the saved recipe records that the original prompt ran. Distinct from Refine; off by default."
+                  title="Have the model's native prompt enhancer rewrite your prompt before generating. FLUX 3 uses its separately installed optional upsampler. The saved recipe records the original and effective prompts, including any safe fallback. Distinct from Refine; off by default."
                 >
                   <input
                     checked={enhancePrompt}

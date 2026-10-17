@@ -181,6 +181,31 @@ test("a catalog model with zero evidence of any kind is classified, not refused"
   assert.ok(row.reason.trim().length > 0, "the classification states why it is analytic-only");
 });
 
+test("an unmeasured FLUX 3 Candle coordinate is advisory, never a fabricated anchor or bound", async () => {
+  // Synthetic identity keeps this a missing-evidence test even after terminal real-weight evidence
+  // is retained for the real flux3_klein route. No frozen zero-anchor population or currency gate.
+  const model = {
+    id: "sc26235_unmeasured_flux3_fixture",
+    backends: ["candle"],
+    axes: { candle: { tiers: ["default"] } },
+    family: "flux3",
+    familyGroup: 26233,
+    resolvedRoute: null,
+    resolvedRoutes: { candle: "sc26235_unmeasured_flux3_route" },
+    modality: "image",
+  };
+  const built = await buildAnchorStore({ matrix: { models: [model] } });
+  assert.deepEqual(built.anchors, []);
+  assert.equal(built.analyticOnly.length, 1);
+  const [entry] = built.analyticOnly;
+  assert.equal(entry.modelId, model.id);
+  assert.equal(entry.backend, "candle");
+  assert.equal(entry.basis, "no_retained_evidence");
+  assert.equal(entry.evidence, null);
+  assert.ok(Object.values(entry).every((value) => typeof value !== "number"), "absence cannot invent a numeric bound");
+  assert.ok(!Object.keys(entry).some((key) => /bytes|peak|currency|current/i.test(key)), "an advisory coordinate carries no admission/currentness claim");
+});
+
 test("the checked-in store is what the extractor produces", async () => {
   const committed = await readFile(path.join(ROOT, STORE_PATH), "utf8");
   assert.equal(

@@ -1,19 +1,19 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:8d495e5a42bc2dcdc8f6c5056e9b7bb0c5bbff948a495544323702041d4ac7a9",
+    "sceneWorksRevision": "source-tree:ec2d4d2edd7dd9e81dfa58c2048b17d4870f5c9e7d50b8f9d13f2ef5cec9976f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "9e8f25cc0437b63643d7a916c863a56b6ab8da28c10ccc8c49f7a77b217f324f"
+        "sha256": "7d305e14baf42e6165be99d6ceaf8949c4ebb2dc4b23ff37011fc8ed4915d443"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "5f9d25421cb6d81bebd86b923c4bccf905fac0291c74f25eac94770e5bddef48"
+        "sha256": "3e043c70de812101329cc02fb127a88ae9edbadfce6c7682e40ae559233e1521"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "78bc6e5e64951b99dc77a8bc1bd7bc07759310f6cdc8a613cc8f9c9686d3d31e"
+        "sha256": "a5a8dff569edc65a0c1591d7abbcdaf2c1a5bbeea3d6f124f52daaf11ee109d5"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -25,11 +25,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "dbd1ce0393436eeeafc996987eee79d9bcbdcd428929caec4b9347770ef5efc4"
+        "sha256": "9811a47ceffa859ead1739d8c5b7a5969585684fd6adc6e2fba6563b55444a63"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "183e98324c9be9288a40916c39a38249159e5343f3553691bca9af19799f07b7"
+        "sha256": "850b7b57cdbe4c5abddcc1b47ef720099920afc3082f797970fdef2fe2e0fe37"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "8549f3dc9f0d25d2e9e57c22cb5c1a17552449b6b1c3c3e886d12eb943cf16e7"
+        "sha256": "539ffa2f2ad7b7c4f4ebec7ca147ad93c4154eb2a91630251b8ccb26520014ec"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "254debb9ea45edad1442bed061f49d8c4f25df92311a1dfe81d9e16fa7595dfc"
+        "sha256": "bd4f5ca394d5f018ba6659cd253dd0833b64eeb6e0e61c374b9f65007df6ffa1"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 56,
       "video": 11
     },
-    "cells": 9595,
+    "cells": 9600,
     "publishedCells": 3878,
-    "elidedCells": 5717,
+    "elidedCells": 5722,
     "elidedByState": {
-      "Implemented": 1234,
-      "Missing": 4483
+      "Implemented": 1235,
+      "Missing": 4487
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 50,
@@ -175,7 +175,7 @@
       }
     ],
     "anchors": 252,
-    "analyticOnlyCells": 100,
+    "analyticOnlyCells": 101,
     "anchoredCells": 3878,
     "staleAnchors": 252,
     "attestedAnchors": 0,
@@ -1393,20 +1393,42 @@
       "family": "flux3",
       "resolvedRoute": "flux3_klein",
       "resolvedRoutes": {
-        "mlx": "flux3_klein"
+        "mlx": "flux3_klein",
+        "candle": "flux3_klein"
       },
       "routeKind": "registry",
       "backends": [
-        "mlx"
+        "mlx",
+        "candle"
       ],
       "owningFamilyStories": {
-        "mlx": 26233
+        "mlx": 26233,
+        "candle": 26241
       },
       "owningModelStories": {
-        "mlx": 26234
+        "mlx": 26234,
+        "candle": 26235
       },
       "axes": {
         "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
           "tiers": [
             "default"
           ],
@@ -12524,6 +12546,66 @@
           "lora": 0,
           "none": 12
         }
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
       }
     },
     {

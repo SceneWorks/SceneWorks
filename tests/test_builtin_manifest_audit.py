@@ -4512,6 +4512,27 @@ def _qwen_image_2_1_entry() -> dict:
     )
 
 
+def test_flux3_prompt_upsampler_is_a_pinned_optional_whole_repository_component():
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    image = models["flux3_klein"]
+    utility = models["flux3_image_klein_pup"]
+    assert image["ui"]["promptEnhance"] is True
+    assert utility["type"] == "utility" and utility["componentOnly"] is True
+    assert utility["capabilities"] == [] and utility["ui"]["recommendedFor"] == []
+    assert utility["gated"] is False and utility["license"] == "Apache-2.0"
+    optional = [row for row in image["downloads"] if row.get("componentId") == "prompt_upsampler"]
+    assert len(optional) == 1
+    row = optional[0]
+    assert row["coRequisite"] is True and row["required"] == "soft"
+    assert not row.get("default", False)
+    for download in [row, utility["downloads"][0]]:
+        assert download["repo"] == "black-forest-labs/flux-3-image-klein-pup"
+        assert download["revision"] == "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed"
+        assert download["files"] == []
+        assert download["estimatedSizeBytes"] == 18_839_746_673
+    assert any(download.get("default") and not download.get("coRequisite") for download in image["downloads"])
+
+
 def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
     models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
     for model_id in ("minimax_h3", "minimax_h3_ref"):

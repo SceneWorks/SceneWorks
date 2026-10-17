@@ -142,7 +142,7 @@ export const MODEL_STORIES = {
   // FLUX 3 Image Klein (epic 26233): the distilled text-to-image route ported to MLX by sc-26234
   // (S1). The Candle/CUDA key lands WITH that backend (sc-26235, S2), never ahead of it — the
   // entry is MLX-only until then, so a Candle cell cannot be attributed to a Metal-scoped story.
-  flux3_klein: { mlx: 26234 },
+  flux3_klein: { mlx: 26234, candle: 26235 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -220,11 +220,10 @@ export const FAMILY_STORIES = {
   // exists for either lane (the epic-end campaign owns anchors), so the cells stay
   // Implemented/Missing by implementation, never Anchored.
   25678: { mlx: 25678, candle: 25684 },
-  // FLUX 3 Image Klein: the MLX family is owned by its epic (sc-26233) — the model story sc-26234
-  // already owns the flux3_klein MLX cells, and one id may own only one thing. The Candle family
-  // twin lands with the Candle lane (sc-26235, S2); until then there is no Candle key, and no
-  // memory anchor exists for the lane (the epic-end campaign owns anchors).
-  26233: { mlx: 26233 },
+  // FLUX 3 Image Klein: the MLX family remains owned by its epic (sc-26233). The native Candle
+  // model cells belong to sc-26235, so the distinct Candle resource-family owner is sc-26241
+  // (S8). One id may own only one thing; neither mapping claims a measured memory anchor.
+  26233: { mlx: 26233, candle: 26241 },
 };
 
 /**

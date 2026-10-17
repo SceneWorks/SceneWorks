@@ -5885,8 +5885,8 @@
       // map: NO classifier-free guidance and NO negative prompt — the engine refuses a guidance
       // other than 1.0 and any negative prompt by name (`supportsGuidance` /
       // `supportsNegativePrompt` false, the z_image_turbo shape). References / boxes (sc-26236/7),
-      // prompt upsampling (sc-26238), the base checkpoint + LoRA (sc-26239) and quantized tiers
-      // (sc-26241) are later stories.
+      // the base checkpoint + LoRA (sc-26239) and quantized tiers (sc-26241) are later stories.
+      // Prompt upsampling uses the separate optional component below (sc-26238).
       "id": "flux3_klein",
       "image": {
         "supportsGuidance": false,
@@ -5899,7 +5899,8 @@
       "family": "flux3",
       "type": "image",
       "adapter": "mlx_flux3",
-      "macOnly": true,
+      // The same request and pinned package run on MLX (sc-26234) and Candle/CUDA (sc-26235).
+      "macOnly": false,
       "capabilities": ["text_to_image"],
       "downloads": [
         // The upstream package, pulled directly from Black Forest Labs (GATED under the FLUX
@@ -5914,6 +5915,18 @@
           "files": [],
           "estimatedSizeBytes": 43317649602,
           "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26238: OPTIONAL separate VLM. Never required for bypass/plain generation and never
+          // folded into the image model's encoder bytes. Install via the utility entry below.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-pup",
+          "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "prompt_upsampler",
+          "files": [],
+          "estimatedSizeBytes": 18839746673
         }
       ],
       "paths": {
@@ -5948,9 +5961,16 @@
         // activations. Replaced by measured evidence at the epic-end campaign (sc-26243).
         "minMemoryGb": 32
       },
+      "candle": {
+        // Declared conservative resident floor, not measured: dense bf16 transformer and encoder,
+        // f32 autoencoder, activation scratch and allocator reserve. Terminal sc-26243 owns fitting.
+        "measured": false,
+        "minMemoryGb": 32
+      },
       "ui": {
+        "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
-        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); needs ~32 GB unified memory at 1024\u00b2.",
+        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
@@ -5961,6 +5981,37 @@
             { "label": "FLUX 3 Image Klein announcement", "url": "https://bfl.ai/blog/flux-3-image-klein" }
           ]
         }
+      }
+    },
+    {
+      // sc-26238: the independent, ungated Apache-2.0 Qwen3.5-9B prompt upsampler. The 12-file
+      // pinned Hub tree totals 18,839,746,673 bytes; 18,819,722,392 of those are model weights.
+      // Whole-repository install, no Python runtime. The native image provider accounts for this
+      // optional resident VLM separately; these are download bytes, not a measured memory peak.
+      "id": "flux3_image_klein_pup",
+      "name": "FLUX 3 Prompt Upsampler",
+      "family": "flux3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/flux-3-image-klein-pup/tree/8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+      "downloads": [{
+        "provider": "huggingface",
+        "repo": "black-forest-labs/flux-3-image-klein-pup",
+        "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+        "files": [],
+        "estimatedSizeBytes": 18839746673
+      }],
+      "paths": { "model": "${HF_CACHE}/black-forest-labs/flux-3-image-klein-pup" },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": { "families": [], "types": [] },
+      "ui": {
+        "label": "FLUX 3 Prompt Upsampler",
+        "description": "Optional native Qwen3.5-9B prompt upsampler for FLUX 3 Image Klein. Install separately to enable Enhance prompt; bypass needs no upsampler. Four upstream text/editing and locked-box modes are implemented natively. Apache-2.0; separate ~18.84 GB download and separate memory admission, not part of the image encoder.",
+        "recommendedFor": []
       }
     },
     {
