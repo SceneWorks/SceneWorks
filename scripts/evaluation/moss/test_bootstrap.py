@@ -57,6 +57,69 @@ class BootstrapContracts(unittest.TestCase):
             with self.assertRaises(ValueError):
                 b.control('prepare',self.request(reuse={**reuse,**update}),self.root)
 
+    def test_exact_v6_native_copy_control_and_independent_no_build(self):
+        copy=dict(campaign='sc-26322-reference-v6',prepared_sha256='a'*64,job='123-1',job_receipt_sha256='b'*64,binary_sha256='c'*64)
+        reuse=dict(campaign='sc-26322-reference-v1',prepared_sha256='d'*64,job='122-1',job_receipt_sha256='e'*64,native_copy=copy)
+        b.control('prepare',self.request(reuse=reuse),self.root)
+        for update in ({'campaign':'../escape'},{'binary_sha256':'HEAD'},{'path':'arbitrary'}):
+            with self.assertRaises(ValueError):b.control('prepare',self.request(reuse={**reuse,'native_copy':{**copy,**update}}),self.root)
+        source=self.root/'sc-26322-reference-v6';source.mkdir();binary=source/'target/release/sceneworks-rust-api.exe';binary.parent.mkdir(parents=True);binary.write_bytes(b'actual frozen evaluated fixture')
+        native=self.root/'sc-26322-reference-v1/native-source';native.mkdir(parents=True);(native/'Cargo.lock').write_text('fixture lock')
+        identity=dict(required_adjacent_dlls=[],adjacent_dll_files=[],fixture='actual candidate identity')
+        prep=dict(binary=str(binary),binary_sha256=b.digest(binary),native_build={**identity,'build':dict(cwd=str(native),input_sha256={'Cargo.lock':b.digest(native/'Cargo.lock')})})
+        b.write(source/'prepared.json',prep);job=source/'job-123-1-prepare.json';b.write(job,dict(status='completed',mode='prepare',job='123-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,accelerator_execution_requested=False))
+        copy.update(prepared_sha256=b.digest(source/'prepared.json'),job_receipt_sha256=b.digest(job),binary_sha256=prep['binary_sha256'])
+        root=self.root/'sc-26322-reference-v7';record={'native_copy':copy}
+        with patch.object(b,'prepared',return_value=prep),patch.object(b,'verify_native_source') as verify,patch.object(b,'native_identity',return_value=identity),patch.object(b,'run',side_effect=AssertionError('no build or executable allowed')):
+            target,actual=b.copy_v6_native(root,record)
+            self.assertEqual(actual,prep['native_build']);self.assertEqual(b.digest(target),prep['binary_sha256']);self.assertFalse(os.path.samefile(target,binary));verify.assert_called_once_with(native)
+            binary.write_bytes(b'drift')
+            with self.assertRaisesRegex(ValueError,'identity changed'):b.copy_v6_native(root,record)
+
+    def test_diagnostic_zip_exact_allowlist_size_hash_paths_and_duplicates(self):
+        def make(entries):
+            stream=io.BytesIO()
+            with zipfile.ZipFile(stream,'w') as z:
+                for name,data in entries:z.writestr(name,data)
+            return stream.getvalue()
+        entries=[('klein-state/'+name,b'CPU fixture '+name.encode()) for name in ('selected-state.json','original.png')]
+        def identity(data):return dict(zip_bytes=len(data),zip_sha256=hashlib.sha256(data).hexdigest(),selected_files=[dict(path=n,bytes=len(v),sha256=hashlib.sha256(v).hexdigest()) for n,v in entries])
+        data=make(entries)
+        with patch.object(b,'REPAIR_ARTIFACT',identity(data)):
+            result=b.extract_repair_evidence(self.root,data)
+            self.assertEqual(set(result),{'selected-state.json','original.png'})
+            with self.assertRaisesRegex(ValueError,'identity'):b.extract_repair_evidence(self.root,data+b'bad')
+        for extra in ('../escape','C:/absolute','bad\\path','klein-state/selected-state.json'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore',UserWarning);data=make(entries+[(extra,b'bad')])
+            with patch.object(b,'REPAIR_ARTIFACT',identity(data)):
+                with self.assertRaises(ValueError):b.extract_repair_evidence(self.root,data)
+        data=make(entries);bad=identity(data);bad['selected_files'][0]['sha256']='0'*64
+        with patch.object(b,'REPAIR_ARTIFACT',bad):
+            with self.assertRaisesRegex(ValueError,'hash'):b.extract_repair_evidence(self.root,data)
+
+    def test_fixed_artifact_redirect_strips_auth_and_refuses_untrusted_destinations(self):
+        identity=b.REPAIR_ARTIFACT
+        metadata=dict(id=identity['artifact_id'],name=identity['name'],workflow_run=dict(id=identity['run'],head_sha=identity['head'],repository_id=identity['repository_id']),size_in_bytes=identity['zip_bytes'],expired=False,digest='sha256:'+identity['zip_sha256'])
+        class Reply(io.BytesIO):
+            def __enter__(self):return self
+            def __exit__(self,*args):self.close()
+        class Opener:
+            def open(self,request,**kwargs):
+                self_test.assertTrue(request.has_header('Authorization'))
+                moved=handler.redirect_request(request,None,302,'Found',{},'https://productionfixture.blob.core.windows.net/path?private=signed')
+                self_test.assertFalse(moved.has_header('Authorization'))
+                for url in ('http://productionfixture.blob.core.windows.net/x','https://arbitrary.example/x','https://user@productionfixture.blob.core.windows.net/x'):
+                    with self_test.assertRaises(ValueError):handler.redirect_request(request,None,302,'Found',{},url)
+                raise OSError('sensitive signed URL must not be logged')
+        self_test=self
+        def build(value):
+            nonlocal handler
+            handler=value;return Opener()
+        handler=None
+        with patch.dict(os.environ,{'GH_TOKEN':'CPU_SECRET_FIXTURE'}),patch.object(b.urllib.request,'urlopen',return_value=Reply(json.dumps(metadata).encode())),patch.object(b.urllib.request,'build_opener',side_effect=build):
+            with self.assertRaisesRegex(ValueError,'^fixed diagnostic artifact download failed: OSError$'):b.repair_evidence(self.root)
+
     def test_seed_verified_bytes_copy_only_binary_and_tamper_refusal(self):
         source=self.root/'immutable';source.write_bytes(b'owned fixture');sha=b.digest(source)
         target=self.root/'new'/'blob'

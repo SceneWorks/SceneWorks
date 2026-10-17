@@ -156,10 +156,15 @@ def check_carry_closure(manifest,run,*,execution=False):
         claim=Path(binding['claim']['path']);physical(claim)
         need(claim==Path(run).parent.parent/'calibration-repairs'/(value['source']['protocol_sha256']+'.json'),'calibration repair claim escaped owned authority')
         need(file_hash(claim)==binding['claim']['sha256'],'one-time calibration repair claim changed')
-    baseline={c['id']+'.png' for c in cells(manifest,'calibration') if c['config_id'] not in MOSS}
+        if value.get('kind')=='klein_metrics_v6':
+            prior=value['source']['prior_claim'];path=Path(prior['path']);physical(path)
+            original=read(root/'run'/DIRECTORY/'protocol.lock.json')['sha256']
+            need(path==Path(run).parent.parent/'calibration-repairs'/(original+'.json') and file_hash(path)==prior['sha256'],'original v5 claim changed or escaped owned authority')
+    carried_ids=(*MOSS,'qwen_image_2_1') if value.get('kind')=='klein_metrics_v6' else MOSS
+    baseline={c['id']+'.png' for c in cells(manifest,'calibration') if c['config_id'] not in carried_ids}
     current={p.name for p in (Path(run)/'outputs').glob('calibration.*.png')}
-    need(current<=baseline and len(current)<=3,'remaining calibration budget permits only three native images')
-    need(all(not (Path(run)/'receipts'/(c['id']+'.json')).exists() for c in cells(manifest,'calibration') if c['config_id'] in MOSS),'new MOSS calibration receipt forbidden')
+    need(current<=baseline and len(current)<=len(baseline),'remaining calibration budget permits only pending native images' if value.get('kind')=='klein_metrics_v6' else 'remaining calibration budget permits only three native images')
+    need(all(not (Path(run)/'receipts'/(c['id']+'.json')).exists() for c in cells(manifest,'calibration') if c['config_id'] in carried_ids),'new carried calibration receipt forbidden')
     return value
 
 
@@ -169,6 +174,9 @@ def carried(manifest,run):
     if value is None:return {},{}
     root=source_root(run)
     for name,sha in value['files'].items():need(file_hash(root/name)==sha,'carried original artifact changed')
+    if value.get('kind')=='klein_metrics_v6':
+        from calibration_repair import carried_repair
+        return carried_repair(manifest,run,value)
     old=unseal(read(root/'protocol.lock.json'));prep=read(root/'prepared.json')
     need(not old.get('calibration_carry_forward'),'chained calibration carry-forward forbidden')
     need(read(root/'protocol.lock.json')['sha256']==value['source']['protocol_sha256'],'carried original protocol changed')
@@ -202,8 +210,17 @@ def carried(manifest,run):
     return original,parity
 
 
+def read_kind(manifest,run):
+    from evaluate import read
+    return read(source_root(run)/'bundle.json').get('kind')
+
+
 def calibration_record_root(manifest,run,config_id):
     if manifest.get('calibration_carry_forward') and config_id in MOSS:
+        carried(manifest,run)
+        if read_kind(manifest,run)=='klein_metrics_v6':return source_root(run)/'run'/DIRECTORY/'run'
+        return source_root(run)/'run'
+    if manifest.get('calibration_carry_forward') and read_kind(manifest,run)=='klein_metrics_v6' and config_id=='qwen_image_2_1':
         carried(manifest,run)
         return source_root(run)/'run'
     return Path(run)
@@ -214,6 +231,9 @@ def install(root,manifest,request):
     from evaluate import read,write,seal,file_hash,unseal,receipts,canonical,artifact
     from ownership import physical,reject_run_invalidated
     import bootstrap
+    if request.get('kind')=='klein_metrics_v6':
+        from calibration_repair import install as repair
+        return repair(root,manifest,request)
     required={'campaign','protocol_sha256','prepared_sha256','job','job_receipt_sha256','calibration_sha256','authorization'}
     need(set(request)==required,'exact original calibration source bindings required')
     need(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',request['campaign']) and request['campaign']!=root.name,'different owned calibration source campaign required')

@@ -1186,3 +1186,207 @@ def test_interrupted_stopped_config_history_finishes_only_later_censored_rows_wi
     # A missing earlier receipt is a damaged ledger, not permission to regenerate it.
     (root/'receipts'/(before['id']+'.json')).unlink();out.unlink()
     with pytest.raises(ValueError,match='missing receipt before actual runtime failure'):run.execute(lock,root,'moss_base','scored')
+
+
+@pytest.fixture
+def repaired_v6_fixture(carry_fixture):
+    """Two synthetic source locks, one failed proof asset; no actual model run."""
+    import calibration_source as cs
+    import calibration_repair as cr
+    import bootstrap as b
+    f=carry_fixture;source,old,prep=f['make_campaign'](cr.V6)
+    root,m,current=f['make_campaign']('sc-26322-reference-v7')
+    for campaign,manifest,prepared in ((source,old,prep),(root,m,current)):
+        c=next(c for c in manifest['configs'] if c['id']==cr.KLEIN)
+        c['settings']['runtime_versions']=dict(sceneworks_source=b.SOURCE,inference=b.INFERENCE)
+        snap=Path(c['snapshot']);entry=prepared['staged'][cr.KLEIN]
+        for part in ('transformer','text_encoder'):
+            p=snap/'q4'/part/'config.json';p.parent.mkdir(parents=True);p.write_bytes((Path(__file__).parent/'fixtures/moss-klein'/(part+'-config.json')).read_bytes())
+            row=dict(path=str(p),sha256=ev.file_hash(p),bytes=p.stat().st_size);entry['files'].append(row);c['files'].append(row)
+        prepared['native_build']={'fixture':'no real native build'}
+        (campaign/'prepared.json').write_text(json.dumps(prepared));manifest['preparation']['sha256']=ev.file_hash(campaign/'prepared.json')
+    first=deepcopy(f['request']);first['authorization']['new_harness_sha256']=ev.digest(prep['harness'])
+    cs.install(source,old,first);ev.write(source/'protocol.lock.json',ev.seal(old));sha=ev.read(source/'protocol.lock.json')['sha256']
+    run=source/'run';(run/'receipts').mkdir();(run/'outputs').mkdir();(run/'logs').mkdir()
+    cell=next(c for c in ev.cells(old,'calibration') if c['config_id']==cr.QWEN)
+    out=run/'outputs'/(cell['id']+'.png');out.write_bytes(png(cell['width'],cell['height']));log=run/'logs'/'qwen.log';log.write_text('CPU fixture successful Qwen')
+    row=dict(lock_sha256=sha,cell=cell,ownership=dict(old['ownership'],revision=sha),elapsed_seconds=.1,status='ok',attempted=True,output=dict(path='outputs/'+out.name,sha256=ev.file_hash(out)),log=dict(path='logs/qwen.log',sha256=ev.file_hash(log)),metrics=deepcopy(f['metrics']))
+    receipt=run/'receipts'/(cell['id']+'.json');ev.write(receipt,ev.seal(row))
+    klein=next(c for c in ev.cells(old,'calibration') if c['config_id']==cr.KLEIN)
+    for name,reason in [('inner','ValueError: native actual worker/model/tier/settings mismatch'),('outer','outer owned-runtime watchdog stopped attempt: calibration process failed; inspect fixture.log')]:
+        ev.write(run/'invalidations'/(name+'.json'),ev.seal(dict(lock_sha256=sha,cell_ids=[klein['id']],parity_cell_ids=[],reason=reason,attempt='CPU fixture')))
+    job=source/'job-456-1-calibration.json';ev.write(job,dict(mode='calibration',status='failed',job='456-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,transport_sha256=prep['harness']['bootstrap.py'],accelerator_execution_requested=True))
+    diagnostic=root/'repair-evidence';diagnostic.mkdir();jid='job_cpu_fixture'
+    recipe=dict(model=cr.KLEIN,rawAdapterSettings=dict(mlxQuantize=4,realModelInference=True,numInferenceSteps=4))
+    asset=dict(id='asset_fixture',recipe=recipe,lineage=dict(jobId=jid))
+    state=dict(job=dict(id=jid,type='image_generate',status='completed',worker_id='sc26322-'+cr.KLEIN,payload_json=json.dumps(dict(model=cr.KLEIN,seed=klein['seed'],width=klein['width'],height=klein['height'],count=1,prompt=klein['prompt'],advanced=dict(mlxQuantize=4,mlxQuantizeExplicit=True))),result_json=json.dumps(dict(assets=[asset]))),metrics=dict(job_id=jid,model=cr.KLEIN,quant_label='bf16',quant_bits=None,steps=4,seed=klein['seed'],width=klein['width'],height=klein['height'],image_count=1,backend='cuda'))
+    ev.write(diagnostic/'selected-state.json',state);ev.write(diagnostic/'asset.recipe.json',recipe);ev.write(diagnostic/'asset.sceneworks.json',asset);ev.write(diagnostic/'snapshot-index.json',dict(fixture=True))
+    (diagnostic/'original.png').write_bytes(png(klein['width'],klein['height']))
+    ev.write(diagnostic/'selected-index.json',dict(status='complete',job_id=jid,selected_state_sha256=ev.file_hash(diagnostic/'selected-state.json'),files=[dict(artifact='original.png',sha256=ev.file_hash(diagnostic/'original.png'))]))
+    events=[dict(event='image_memory_strategy_selected',job_id=jid,model=cr.KLEIN,route=cr.KLEIN,actual_tier='q4'),dict(event='image_inference_complete',jobId=jid,backend='candle')]
+    (diagnostic/'worker.log').write_text('\n'.join(json.dumps(e) for e in events))
+    request=dict(kind='klein_metrics_v6',campaign=cr.V6,protocol_sha256=sha,prepared_sha256=ev.file_hash(source/'prepared.json'),job='456-1',job_receipt_sha256=ev.file_hash(job),qwen_receipt_sha256=ev.file_hash(receipt),invalidations={p.name:ev.file_hash(p) for p in (run/'invalidations').glob('*.json')},diagnostic_files={p.name:ev.file_hash(p) for p in diagnostic.iterdir()},failed_native_job=jid,binary_sha256=prep['binary_sha256'],prior_claim=old['calibration_carry_forward']['claim'],authorization=dict(id='CPU exact diagnosed repair',coordinator=m['ownership']['responsible_chat'],reason='CPU fixture reporting-only defect',new_harness_sha256=ev.digest(current['harness']),remaining_calibration_images=2,failed_attempt_classification='diagnosed_harness_tier_reporting_proof_failure'))
+    return dict(source=source,old=old,root=root,manifest=m,request=request,make_campaign=f['make_campaign'],metrics=f['metrics'])
+
+
+def test_fixed_v6_repair_preserves_four_and_only_two_calibration_slots(repaired_v6_fixture,monkeypatch):
+    import calibration_source as cs
+    import calibration_repair as cr
+    import ownership as o
+    import run
+    f=repaired_v6_fixture;root=f['root'];m=f['manifest'];source=f['source']
+    originals={p:p.read_bytes() for p in source.rglob('*') if p.is_file()}
+    previous_claim=Path(f['request']['prior_claim']['path']);claim_bytes=previous_claim.read_bytes()
+    cs.install(root,m,f['request']);ev.write(root/'protocol.lock.json',ev.seal(m))
+    rows,parity=cs.carried(m,root/'run')
+    assert len(rows)==4 and len(parity)==1 and len({r['lock_sha256'] for r in rows.values()})==2
+    assert all(p.read_bytes()==data for p,data in originals.items()) and previous_claim.read_bytes()==claim_bytes
+    assert len(ev.receipts(root/'protocol.lock.json',root/'run','calibration',complete=False)[1])==4
+    for config in cr.CARRIED:
+        assert run.existing_successes(m,'current',root/'run',config,'calibration')==[]
+        assert len(run.existing_successes(m,'current',root/'run',config,'scored'))==48
+    for config in (cr.KLEIN,'z_image_turbo'):assert len(run.existing_successes(m,'current',root/'run',config,'calibration'))==1
+    assert cs.calibration_record_root(m,root/'run',cr.QWEN)==root/'run'/cs.DIRECTORY/'run'
+    assert cs.calibration_record_root(m,root/'run','moss_dmd')==root/'run'/cs.DIRECTORY/'run'/cs.DIRECTORY/'run'
+    class Guard:
+        def __init__(self,*a,**kw):self.prepared_root=root;self.unavailable_configs={}
+        def check(self,*a,**kw):cs.check_carry_closure(m,root/'run',execution=True)
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**kw:None)
+    monkeypatch.setattr(run,'launch',lambda *a,**kw:pytest.fail('carried calibration spawned'))
+    for config in cr.CARRIED:assert run.execute(root/'protocol.lock.json',root/'run',config,'calibration')==0
+    assert len(list(ev.cells(m,'scored')))==288
+    with pytest.raises(ValueError):cs.install(root,m,f['request'])
+
+
+@pytest.mark.parametrize('change',['extra_invalidation','different_fault','qwen_tamper','binary','driver','prior_claim','native_dependency','native_helper','scored','budget','unsealed_claim','new_carried_image','new_carried_receipt','diagnostic_tier','diagnostic_event','diagnostic_png'])
+def test_fixed_v6_repair_rejects_mutations(repaired_v6_fixture,change):
+    import calibration_source as cs
+    f=repaired_v6_fixture;root=f['root'];m=f['manifest'];s=f['source'];r=f['request']
+    if change=='extra_invalidation':ev.write(s/'run/invalidations'/'extra.json',ev.seal(dict(lock_sha256=r['protocol_sha256'],cell_ids=[],parity_cell_ids=[],reason='lease expiry')))
+    elif change=='different_fault':
+        p=s/'run/invalidations/inner.json';d=ev.unseal(ev.read(p));d['reason']='ValueError: foreign owner';p.write_text(json.dumps(ev.seal(d)));r['invalidations'][p.name]=ev.file_hash(p)
+    elif change=='qwen_tamper':next((s/'run/outputs').glob('*.png')).write_bytes(b'wrong')
+    elif change=='binary':m['configs'][3]['settings']['binary_sha256']='0'*64
+    elif change=='driver':m['runtime']['driver']='changed'
+    elif change=='prior_claim':r['prior_claim']['sha256']='0'*64
+    elif change in ('native_dependency','native_helper'):
+        p=root/'harness/native.py';text=p.read_text().replace('timeout=30','timeout=31') if change=='native_dependency' else p.read_text().replace("'Klein defect proof requires exact frozen source/pin/q4'","'altered proof helper'")
+        p.write_text(text);prepared=ev.read(root/'prepared.json');prepared['harness']['native.py']=ev.file_hash(p);(root/'prepared.json').write_text(json.dumps(prepared));m['preparation']['sha256']=ev.file_hash(root/'prepared.json');r['authorization']['new_harness_sha256']=ev.digest(prepared['harness'])
+    elif change=='scored':(s/'run/outputs/scored.fake.png').write_bytes(b'forbidden')
+    elif change=='budget':r['authorization']['remaining_calibration_images']=3
+    elif change.startswith('diagnostic_'):
+        p=root/'repair-evidence'/('selected-state.json' if change=='diagnostic_tier' else 'worker.log' if change=='diagnostic_event' else 'original.png')
+        if change=='diagnostic_tier':d=ev.read(p);d['metrics']['quant_label']='q8';p.write_text(json.dumps(d))
+        elif change=='diagnostic_event':p.write_text(p.read_text().replace('q4','q8'))
+        else:p.write_bytes(b'not a PNG')
+        r['diagnostic_files'][p.name]=ev.file_hash(p)
+    else:
+        cs.install(root,m,r)
+        if change=='unsealed_claim':
+            path=root/'run/calibration-source/repair-claim.json';d=ev.unseal(ev.read(path));path.write_text(json.dumps(d))
+            # Even a rebuilt bundle/hash cannot bless an unsealed new authority.
+            bundle=root/'run/calibration-source/bundle.json';v=ev.unseal(ev.read(bundle));v['files']['repair-claim.json']=ev.file_hash(path);v['claim']['sha256']=ev.file_hash(path);bundle.write_text(json.dumps(ev.seal(v)));m['calibration_carry_forward']['sha256']=ev.file_hash(bundle);m['calibration_carry_forward']['claim']['sha256']=ev.file_hash(path)
+        else:
+            cell=next(c for c in ev.cells(m,'calibration') if c['config_id']=='qwen_image_2_1');p=root/'run'/('outputs' if change=='new_carried_image' else 'receipts')/(cell['id']+('.png' if change=='new_carried_image' else '.json'));p.parent.mkdir();p.write_bytes(b'forbidden')
+        with pytest.raises(ValueError):cs.carried(m,root/'run')
+        return
+    with pytest.raises(ValueError):cs.install(root,m,r)
+
+
+@pytest.mark.parametrize('change',[None,'request_only','wrong_job','wrong_backend','config_hash','dense_te','binary','raw_tier','reported_signature','conflicting_job_fields'])
+def test_klein_metric_defect_requires_actual_closed_resolved_proof(repaired_v6_fixture,change):
+    from native import klein_tier_proof
+    import calibration_repair as cr
+    f=repaired_v6_fixture;c=deepcopy(next(c for c in f['old']['configs'] if c['id']==cr.KLEIN))
+    c['settings']['runtime_versions']=dict(sceneworks_source=__import__('bootstrap').SOURCE,inference=__import__('bootstrap').INFERENCE)
+    c['files'].append(dict(path=c['settings']['binary'],sha256=c['settings']['binary_sha256']))
+    e=f['root']/'repair-evidence';metrics=dict(quantLabel='bf16',quantBits=None);recipe=ev.read(e/'asset.recipe.json');log=e/'actual-worker.log'
+    log.write_bytes((Path(__file__).parent/'fixtures/moss-klein/v6-worker.log').read_bytes());job_id='job_1676d4441a51fbf3a368846cbb8de482'
+    if change=='request_only':log.write_text('requested q4, no actual event')
+    elif change=='wrong_job':log.write_text(log.read_text().replace(job_id,'job_other'))
+    elif change=='wrong_backend':log.write_text(log.read_text().replace('candle','mlx'))
+    elif change in ('config_hash','dense_te'):
+        part='transformer' if change=='config_hash' else 'text_encoder';p=Path(c['snapshot'])/'q4'/part/'config.json';p.write_text('{}')
+    elif change=='binary':c['settings']['binary_sha256']='0'*64
+    elif change=='raw_tier':recipe['rawAdapterSettings']['mlxQuantize']=8
+    elif change=='reported_signature':metrics['quantLabel']='q8'
+    elif change=='conflicting_job_fields':
+        lines=log.read_text().splitlines();i=next(i for i,line in enumerate(lines) if 'actual_tier' in line);row=json.loads(lines[i]);row['jobId']='other';lines[i]=json.dumps(row);log.write_text('\n'.join(lines))
+    if change:
+        with pytest.raises(ValueError):klein_tier_proof(c,job_id,metrics,recipe,log)
+    else:
+        proof=klein_tier_proof(c,job_id,metrics,recipe,log)
+        assert proof['resolved_tier']=='q4' and proof['reported_quant_label']=='bf16' and proof['reported_quant_bits'] is None
+        assert metrics==dict(quantLabel='bf16',quantBits=None)
+
+
+@pytest.mark.parametrize('change',[None,'route','backend','raw_bits','component','binary','revision'])
+def test_z_null_recipe_requires_packed_artifact_and_completed_exact_route(tmp_path,change):
+    import native
+    c=deepcopy(next(c for c in ev.template()['configs'] if c['id']=='z_image_turbo'));snap=tmp_path/'snapshot';snap.mkdir();c['snapshot']=str(snap)
+    binary=tmp_path/'app.exe';binary.write_bytes(b'CPU fixture only')
+    c['settings']=dict(binary=str(binary),binary_sha256=ev.file_hash(binary),runtime_versions=dict(sceneworks_source=native.FROZEN_SOURCE,inference=native.FROZEN_INFERENCE))
+    c['files']=[dict(path=str(binary),sha256=ev.file_hash(binary))]
+    for part in ('transformer','text_encoder'):
+        p=snap/'q4'/part/'config.json';p.parent.mkdir(parents=True);p.write_bytes((Path(__file__).parent/'fixtures/moss-klein'/('z-'+part+'-config.json')).read_bytes());c['files'].append(dict(path=str(p),sha256=ev.file_hash(p)))
+    events=[dict(event='image_memory_strategy_selected',job_id='exact_job',model='z_image_turbo',route='z_image_turbo',actual_tier='q4'),dict(event='image_inference_complete',jobId='exact_job',backend='candle')]
+    metrics=dict(quantLabel='q4',quantBits=4);recipe=dict(model='z_image_turbo',rawAdapterSettings=dict(mlxQuantize=None,realModelInference=True))
+    if change=='route':events[0]['job_id']='unrelated'
+    elif change=='backend':events[1]['backend']='mlx'
+    elif change=='raw_bits':recipe['rawAdapterSettings']['mlxQuantize']=4
+    elif change=='component':(snap/'q4/text_encoder/config.json').write_text('{}')
+    elif change=='binary':binary.write_bytes(b'drift')
+    elif change=='revision':c['revision']='0'*40
+    log=tmp_path/'worker.log';log.write_text('\n'.join(json.dumps(e) for e in events))
+    if change:
+        with pytest.raises(ValueError):native.z_tier_proof(c,'exact_job',metrics,recipe,log)
+    else:
+        proof=native.z_tier_proof(c,'exact_job',metrics,recipe,log)
+        assert proof['resolved_tier']=='q4' and proof['reported_raw_mlx_quantize'] is None and recipe['rawAdapterSettings']['mlxQuantize'] is None
+
+
+@pytest.mark.parametrize('failed',[False,True])
+def test_fixed_v6_transport_finishes_exact_two_pending_cells_and_reports_origins(repaired_v6_fixture,monkeypatch,failed):
+    import bootstrap as b
+    import ownership as o
+    import calibration_source as cs
+    import run
+    from types import SimpleNamespace
+    f=repaired_v6_fixture;root=f['root'];m=f['manifest'];cs.install(root,m,f['request']);ev.write(root/'protocol.lock.json',ev.seal(m))
+    calls=[]
+    class Guard:
+        def __init__(self,*a,**kw):self.prepared_root=root;self.unavailable_configs={}
+        def check(self,*a,**kw):cs.check_carry_closure(m,root/'run',execution=True);return {'CPU_fixture':True}
+    monkeypatch.setattr(b,'ExecutionGuard',Guard);monkeypatch.setattr(o,'ExecutionGuard',Guard)
+    monkeypatch.setattr(ev,'validate_manifest',lambda manifest,**kw:manifest);monkeypatch.setattr(run,'validate_manifest',lambda *a,**kw:None)
+    class Requests:
+        pending=None
+        def put(self,item):self.pending=item
+    def launch(config,*a,**kw):
+        assert config['id'] in ('flux2_klein_9b','z_image_turbo');request=Requests()
+        def replies():
+            yield ('ready',.01)
+            if failed and config['id']=='z_image_turbo':
+                yield ('error','RuntimeError: CPU deliberate native failure');return
+            cell,path=request.pending;Path(path).write_bytes(png(cell['width'],cell['height']))
+            yield ('result',dict(f['metrics'],load_seconds=.01))
+        return SimpleNamespace(),request,replies()
+    monkeypatch.setattr(run,'launch',launch);monkeypatch.setattr(run,'receive',lambda p,q,*a:(next(q),42));monkeypatch.setattr(run,'finish',lambda *a:None);monkeypatch.setattr(run,'stop',lambda *a:None)
+    class Process:
+        returncode=0
+        def __init__(self,args,**kw):
+            config=args[args.index('--config')+1];calls.append(config);run.execute(root/'protocol.lock.json',root/'run',config,'calibration')
+        def poll(self):return 0
+    monkeypatch.setattr(b.subprocess,'Popen',Process);monkeypatch.setattr(b,'kill_owned',lambda *a:None)
+    deadline='2030-01-01T00:00:00+00:00'
+    lease=dict(id=m['ownership']['lease'],owner=m['ownership']['responsible_chat'],host=m['hardware']['host'],gpu_uuid=o.RUNNER_GPU_UUID,expires_utc=deadline,external_owners_reconciled=True,desktop_baseline=[],baseline_max_memory_mib=1000,baseline_max_utilization_percent=2)
+    b.execute_phase(root,dict(protocol_sha256=ev.read(root/'protocol.lock.json')['sha256'],deadline_utc=deadline,lease=lease),'calibration')
+    assert calls==list(ev.CONFIG_IDS[4:]) and len(list((root/'run'/'outputs').glob('*.png')))==2-int(failed)
+    _,rows=ev.receipts(root/'protocol.lock.json',root/'run','calibration');assert len(rows)==6 and sum(r['status']=='ok' for r in rows.values())==6-int(failed)
+    assert len({r['lock_sha256'] for r in rows.values()})==3
+    estimate=ev.read(root/'calibration-estimate.json')
+    assert estimate['calibration_outputs']==6-int(failed) and estimate['calibration_attempts']==10 and estimate['historical_failed_native_attempts']==4
+    assert all(estimate['conditions'][key]['measurement_origin']=='carried_original' for key in (*cs.MOSS,'qwen_image_2_1'))
+    assert all(estimate['conditions'][key]['measurement_origin']=='current_campaign' for key in ev.CONFIG_IDS[4:])
+    assert estimate['accepted_calibration_outputs']==6-int(failed) and estimate['known_generated_calibration_outputs']==7-int(failed) and estimate['excluded_failed_generated_outputs']==1
+    assert estimate['carried_calibration_outputs']==4 and estimate['current_calibration_output_cap']==2

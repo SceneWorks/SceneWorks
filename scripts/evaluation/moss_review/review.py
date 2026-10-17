@@ -15,7 +15,7 @@ import sys
 import zlib
 
 HARNESS = Path(__file__).resolve().parents[1] / 'moss' / 'evaluate.py'
-DEPENDENCIES = ('calibration_source.py', 'ownership.py')
+DEPENDENCIES = ('calibration_source.py', 'calibration_repair.py', 'native.py', 'ownership.py')
 # The offline reader also resolves the separately bound calibration archive.
 sys.path.insert(0, str(HARNESS.parent))
 _spec = importlib.util.spec_from_file_location('frozen_moss_evaluate', HARNESS)

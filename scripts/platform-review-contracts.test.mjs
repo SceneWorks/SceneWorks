@@ -5489,3 +5489,14 @@ test("Klein diagnostic reads one fixed owned terminal job without execution or b
   assert.match(step, /selected-index\.json/);
   assert.doesNotMatch(step, /actions\/checkout|setup-python|pip |torch|diffusers|subprocess|urlopen|Start-Process|Stop-Process|taskkill|Remove-Item|\$\{\{\s*inputs\./);
 });
+
+
+test("MOSS fixed repair artifact authentication is read-only and prepare-only", async () => {
+  const workflow = await readFile(new URL("../.github/workflows/windows-candle.yml", import.meta.url), "utf8");
+  const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison-execution:\n"));
+  assert.match(job, /permissions:\n      contents: read\n      actions: read/);
+  const step = job.slice(job.indexOf("      - name: Prepare pinned MOSS"), job.indexOf("      - name: Freeze reviewed preparation"));
+  assert.match(step, /GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(step, /inputs.moss_image_comparison_mode == 'prepare'/);
+  assert.equal((job.match(/GH_TOKEN:/g) || []).length, 1);
+});

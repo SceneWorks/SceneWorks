@@ -2165,6 +2165,9 @@ jobs:
   # Uses this registered workflow path at the story ref; a new workflow is not dispatchable yet.
   moss-image-comparison-execution:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'prepare' || inputs.moss_image_comparison_mode == 'freeze' || inputs.moss_image_comparison_mode == 'calibration' || inputs.moss_image_comparison_mode == 'scored') }}
+    permissions:
+      contents: read
+      actions: read
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -2204,6 +2207,8 @@ jobs:
       - uses: ./.github/actions/prepare-rust-runner
         if: ${{ inputs.moss_image_comparison_mode == 'prepare' }}
       - name: Prepare pinned MOSS and native reference inputs without GPU allocation
+        env:
+          GH_TOKEN: ${{ github.token }}
         if: ${{ inputs.moss_image_comparison_mode == 'prepare' }}
         shell: cmd
         run: |

@@ -29,6 +29,7 @@ from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundl
 
 SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'
 INFERENCE = '91ffb4a819aa2990c652db2d881ba0b9b10126ce'
+REPAIR_ARTIFACT = {'repository': 'SceneWorks/SceneWorks', 'repository_id': 1241052736, 'run': 38997959770, 'attempt': 1, 'head': '6fd3fc163700040cbde9852554cec5e484f4e674', 'artifact_id': 12088066041, 'name': 'moss-telemetry-38997959770-1', 'zip_sha256': 'd4effd17dfb7024054026d82bc9c6ce7262613e1979452543dad5cffe2bc12ef', 'zip_bytes': 1903683, 'api_digest_verified': True, 'selected_files': [{'path': 'klein-state/asset.recipe.json', 'bytes': 920, 'sha256': 'f4b2bd893aa14b0a7fa25b21f97aa381a2b716261964f9aabb97b11a07c4f985'}, {'path': 'klein-state/asset.sceneworks.json', 'bytes': 1875, 'sha256': '3e02bfb1aabfdabd15b6ce4fbc461accdf2007ff12ccb0eaf498d0c432415c78'}, {'path': 'klein-state/original.png', 'bytes': 1887022, 'sha256': 'c5c2262b83b515b70501907736ea1163d68ab8b3b18b654807772849e9c25204'}, {'path': 'klein-state/selected-index.json', 'bytes': 2360, 'sha256': '5cc83360e6f3a99f1982be171dc45b4b9dc32ad23e28e5de1f640f04f2ec2b06'}, {'path': 'klein-state/selected-state.json', 'bytes': 21346, 'sha256': '84ac4716e1f4953212723a4030329d22f1761ac4e09d5ff9a41c6eb3b57fa397'}, {'path': 'klein-state/snapshot-index.json', 'bytes': 1746, 'sha256': '065265da3b85c0360b0ccbdd6fddba36600745435caed573fe297e92d5a3aea2'}, {'path': 'native-service-logs/sc-26322-reference-v6/owned-142376/worker.log', 'bytes': 4496, 'sha256': '3409f69bd8ec70db99cecefca48da0a607bfbcf107db380ea1742d9c1ad42e53'}], 'status': 'coordinator verified immutable retrieval identity; no GPU/retry authority'}
 PIPELINE = '1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31'
 BASE = Path(r'E:\sceneworks-evaluation\moss')
 PACKAGES = ('torch==2.9.1+cu128', 'diffusers==0.38.0', 'transformers==5.3.0',
@@ -88,9 +89,13 @@ def control(mode, raw, base=BASE):
     if mode=='prepare' and 'reuse' in value:
         reuse=value['reuse']
         require(set(reuse) in ({'campaign','prepared_sha256','job','job_receipt_sha256'},
-                              {'campaign','prepared_sha256','job','job_receipt_sha256','native_rebuild'}),'reuse requires exact source campaign/receipt/job bindings')
+                              {'campaign','prepared_sha256','job','job_receipt_sha256','native_rebuild'},
+                              {'campaign','prepared_sha256','job','job_receipt_sha256','native_copy'}),'reuse requires exact source campaign/receipt/job bindings')
         if 'native_rebuild' in reuse:
             require(reuse['native_rebuild'] is True,'native_rebuild must explicitly authorize a controlled new native build')
+        if 'native_copy' in reuse:
+            n=reuse['native_copy']
+            require(set(n)=={'campaign','prepared_sha256','job','job_receipt_sha256','binary_sha256'} and n['campaign']=='sc-26322-reference-v6' and re.fullmatch(r'[0-9]+-[0-9]+',n['job']) and all(re.fullmatch(r'[0-9a-f]{64}',n[k]) for k in ('prepared_sha256','job_receipt_sha256','binary_sha256')),'exact v6 native-copy receipt bindings required')
         require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',reuse['campaign']) and reuse['campaign']!=value['campaign'],'reuse must name a different owned sibling campaign')
         require(re.fullmatch(r'[0-9]+-[0-9]+',reuse['job']),'exact completed source job/attempt required')
         require(all(re.fullmatch(r'[0-9a-f]{64}',reuse[k]) for k in ('prepared_sha256','job_receipt_sha256')),'exact source receipt digests required')
@@ -383,7 +388,7 @@ def reuse_inputs(root,value):
     # but cannot waive verification of any immutable preparation input.
     prep=read(source/'prepared.json')
     verify_prepared_inputs(source,prep)
-    if not reuse.get('native_rebuild'):
+    if not reuse.get('native_rebuild') and not reuse.get('native_copy'):
         require(digest(prep['binary'])==prep['binary_sha256'],'native binary drift')
     # Source preparation has ended before any old build/cache path is used.
     require(Path(prep['binary']).resolve()==(source/'target'/'release'/'sceneworks-rust-api.exe').resolve(),'source binary outside owned build')
@@ -404,10 +409,87 @@ def reuse_inputs(root,value):
             relative=Path(file['path']).relative_to(source)
             seeds.append(seed_file(Path(file['path']),root/relative,file['sha256']))
     record=dict(source_campaign=reuse['campaign'],source_root=str(source.resolve()),source_prepared_sha256=reuse['prepared_sha256'],source_job_receipt_sha256=reuse['job_receipt_sha256'],source_job=reuse['job'],seeds=seeds,downloaded_seed_bytes=0,native_rebuild=reuse.get('native_rebuild',False))
+    if reuse.get('native_copy'):record['native_copy']=reuse['native_copy']
     return source,prep,record
 
 
+
+def repair_evidence(root):
+    """Acquire only the already reviewed immutable diagnostic artifact."""
+    import io
+    identity=REPAIR_ARTIFACT
+    base='https://api.github.com/repos/SceneWorks/SceneWorks/actions/artifacts/'+str(identity['artifact_id'])
+    headers={'Accept':'application/vnd.github+json','Authorization':'Bearer '+os.environ['GH_TOKEN']}
+    with urllib.request.urlopen(urllib.request.Request(base,headers=headers),timeout=30) as response:meta=json.loads(response.read(65537))
+    require(meta['id']==identity['artifact_id'] and meta['name']==identity['name'] and meta['workflow_run']['id']==identity['run'] and meta['workflow_run']['repository_id']==identity['repository_id'] and meta['size_in_bytes']==identity['zip_bytes'] and meta['workflow_run']['head_sha']==identity['head'] and not meta['expired'] and meta['digest']=='sha256:'+identity['zip_sha256'],'diagnostic artifact authority mismatch')
+    class NoTokenRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self,req,fp,code,msg,redirect_headers,newurl):
+            parsed=urlparse(newurl)
+            require(parsed.scheme=='https' and not parsed.username and not parsed.password and parsed.port in (None,443) and (parsed.hostname=='api.github.com' or parsed.hostname.endswith('.blob.core.windows.net') or parsed.hostname.endswith('.actions.githubusercontent.com')),'untrusted diagnostic redirect refused')
+            redirected=super().redirect_request(req,fp,code,msg,redirect_headers,newurl)
+            redirected.remove_header('Authorization')
+            return redirected
+    opener=urllib.request.build_opener(NoTokenRedirect())
+    try:
+        with opener.open(urllib.request.Request(base+'/zip',headers=headers),timeout=60) as response:data=response.read(identity['zip_bytes']+1)
+    except Exception as error:
+        raise ValueError('fixed diagnostic artifact download failed: '+type(error).__name__) from None
+    require(len(data)==identity['zip_bytes'] and hashlib.sha256(data).hexdigest()==identity['zip_sha256'],'diagnostic ZIP size/hash mismatch')
+    return extract_repair_evidence(root,data)
+
+
+def extract_repair_evidence(root,data):
+    import io
+    require(len(data)==REPAIR_ARTIFACT['zip_bytes'] and hashlib.sha256(data).hexdigest()==REPAIR_ARTIFACT['zip_sha256'],'diagnostic ZIP identity mismatch')
+    target=root/'repair-evidence';physical(target);target.mkdir(exist_ok=True)
+    expected={f['path']:f for f in REPAIR_ARTIFACT['selected_files']}
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos=archive.infolist();names=[i.filename for i in infos]
+        require(len(infos)<=128 and len(names)==len(set(names)) and sum(i.file_size for i in infos)<=32*1024**2,'diagnostic ZIP duplicate/count/byte cap')
+        for info in infos:
+            path=PurePosixPath(info.filename)
+            require(not path.is_absolute() and '\\' not in info.filename and ':' not in info.filename and all(p not in ('','..','.') for p in info.filename.rstrip('/').split('/')) and ((info.external_attr>>16)&0o170000)!=0o120000,'unsafe diagnostic ZIP entry')
+        require(set(expected)<=set(names),'diagnostic ZIP missing selected evidence')
+        outputs={}
+        for name,item in expected.items():
+            info=archive.getinfo(name)
+            require(not info.is_dir() and info.file_size==item['bytes'] and info.file_size<=2*1024**2,'diagnostic selected entry size cap')
+            with archive.open(info) as stream:payload=stream.read(item['bytes']+1)
+            require(len(payload)==item['bytes'] and hashlib.sha256(payload).hexdigest()==item['sha256'],'diagnostic selected file hash mismatch')
+            destination=target/Path(name).name;physical(destination)
+            if destination.exists():require(digest(destination)==item['sha256'],'retained diagnostic file changed')
+            else:
+                with destination.open('xb') as stream:stream.write(payload)
+            outputs[destination.name]=item['sha256']
+        require({p.name for p in target.iterdir()}==set(outputs),'unexpected diagnostic staging file')
+    return outputs
+
+
+def copy_v6_native(root,record):
+    """Retain the exact evaluated binary; never rebuild or execute it."""
+    request=record['native_copy'];source=root.parent/request['campaign'];physical(source)
+    receipt=source/('job-'+request['job']+'-prepare.json');physical(receipt)
+    require(digest(source/'prepared.json')==request['prepared_sha256'] and digest(receipt)==request['job_receipt_sha256'],'v6 native source receipt drift')
+    job=read(receipt);prep=prepared(source)
+    require(job['status']=='completed' and job['mode']=='prepare' and job['job']==request['job'] and Path(job['root']).resolve()==source.resolve() and job['sceneworks_source']==SOURCE and job['inference']==INFERENCE and job['accelerator_execution_requested'] is False,'v6 native copy requires completed exact CPU prepare')
+    binary=source/'target'/'release'/'sceneworks-rust-api.exe';physical(binary)
+    require(Path(prep['binary']).resolve()==binary.resolve() and digest(binary)==request['binary_sha256']==prep['binary_sha256'],'v6 evaluated native binary identity changed')
+    build=prep['native_build']['build'];cwd=Path(build['cwd']);physical(cwd)
+    require(cwd==root.parent/'sc-26322-reference-v1'/'native-source','native source verification escaped original owned build')
+    verify_native_source(cwd)
+    require(all(digest(cwd/name)==sha for name,sha in build['input_sha256'].items()),'v6 native source/build inputs changed')
+    identity=native_identity(binary)
+    require({k:v for k,v in identity.items() if k!='dependency_report_sha256'}=={k:v for k,v in prep['native_build'].items() if k not in ('build','dependency_report_sha256')},'v6 native tool/DLL candidate identity changed')
+    require(not identity['required_adjacent_dlls'] and not identity['adjacent_dll_files'],'v6 native adjacent DLL closure not supported')
+    target=root/'target'/'release'/'sceneworks-rust-api.exe'
+    target.parent.mkdir(parents=True,exist_ok=True)
+    require(not any(p.suffix.casefold()=='.dll' for p in target.parent.iterdir()),'new native copy directory has unexpected adjacent DLLs')
+    record['native']=dict(mode='exact_v6_binary_copy_no_build',source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
+    return target,prep['native_build']
+
+
 def reuse_native(root,source,prep,record):
+    if record.get('native_copy'):return copy_v6_native(root,record)
     native_source=source/'native-source'
     for path in (native_source,source/'cargo-home',source/'target',Path(prep['binary'])):physical(path)
     verify_native_source(native_source)
@@ -475,6 +557,7 @@ def prepare(root, value):
                 shutil.copyfile(source, destination)
     if reuse:
         binary,native_build=reuse_native(root,*reuse)
+        evidence=repair_evidence(root) if reuse[2].get('native_copy') else None
         write(root/'reuse.json',reuse[2])
     else:
         native_source = root / 'native-source'
@@ -499,6 +582,7 @@ def prepare(root, value):
     write(root / 'prepared.json', dict(staged=staged, runtime=runtime, installed=packages,
          requirements_sha256=digest(root / 'requirements.lock'), binary=str(binary), binary_sha256=digest(binary),
          sceneworks_source=SOURCE, inference=INFERENCE,native_build=native_build,
+         repair_evidence=evidence if reuse else None,
          reuse=(dict(path=str(root/'reuse.json'),sha256=digest(root/'reuse.json'),source_prepared_sha256=reuse[2]['source_prepared_sha256']) if reuse else None),
          harness={p.name: digest(p) for p in harness.iterdir() if p.is_file()}, accelerator_allocation=False))
     print(f'Prepared {root}; next: review artifact/dependency receipts then freeze with ownership/device UUID.', flush=True)
@@ -511,6 +595,9 @@ def verify_prepared_inputs(root,value):
     if value.get('reuse'):
         receipt=root/'reuse.json';physical(receipt)
         require(Path(value['reuse']['path']).resolve()==receipt.resolve() and digest(receipt)==value['reuse']['sha256'],'reuse provenance drift')
+    if value.get('repair_evidence'):
+        require({p.name:digest(p) for p in (root/'repair-evidence').iterdir() if p.is_file()}==value['repair_evidence'],'prepared diagnostic evidence closure drift')
+        for p in (root/'repair-evidence').rglob('*'):physical(p)
     verify_staged(root, value['staged'])
     for name, sha in value['harness'].items():
         require(digest(root / 'harness' / name) == sha, 'harness drift')
@@ -744,7 +831,7 @@ def execute_phase(root, value, phase):
             parity_records = []
             parity_paths=list((campaign / 'parity').glob('*.json'))
             if manifest.get('calibration_carry_forward'):
-                parity_paths.extend((campaign/'calibration-source'/'run'/'parity').glob('*.json'))
+                parity_paths.extend(p for p in (campaign/'calibration-source').rglob('*.json') if p.parent.name=='parity')
             for path in sorted(parity_paths):
                 record = read(path)
                 evidence = record['evidence']
@@ -754,11 +841,13 @@ def execute_phase(root, value, phase):
             estimate = calibration_estimate(manifest, results, parity_records)
             if manifest.get('calibration_carry_forward'):
                 estimate['calibration_carry_forward']=manifest['calibration_carry_forward']
-                estimate['limitations']+=' MOSS calibration metrics are unchanged original-source measurements; native metrics belong to this repaired campaign.'
-                estimate.update(calibration_attempts=9,effective_calibration_rows=6,historical_failed_native_attempts=3,carried_calibration_outputs=3,current_calibration_output_cap=3)
+                estimate['limitations']+=' Carried measurements retain their original protocol/desktop/process conditions; only newly executed native measurements belong to this campaign.'
+                from calibration_source import check_carry_closure
+                repaired=check_carry_closure(manifest,campaign).get('kind')=='klein_metrics_v6'
+                estimate.update(calibration_attempts=10 if repaired else 9,effective_calibration_rows=6,historical_failed_native_attempts=4 if repaired else 3,carried_calibration_outputs=4 if repaired else 3,current_calibration_output_cap=2 if repaired else 3,accepted_calibration_outputs=sum(r['status']=='ok' for r in results.values()),known_generated_calibration_outputs=estimate['calibration_outputs']+(1 if repaired else 0),excluded_failed_generated_outputs=1 if repaired else 0)
                 for key,condition in estimate['conditions'].items():
                     row=next(r for r in results.values() if r['cell']['config_id']==key)
-                    condition.update(measurement_protocol_sha256=row['lock_sha256'],measurement_origin='carried_original' if key.startswith('moss_') else 'current_campaign')
+                    condition.update(measurement_protocol_sha256=row['lock_sha256'],measurement_origin='current_campaign' if row['lock_sha256']==protocol['sha256'] else 'carried_original')
             path = root / 'calibration-estimate.json'
             if path.exists():
                 require(read(path) == estimate, 'calibration estimate changed')

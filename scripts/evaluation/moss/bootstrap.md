@@ -343,3 +343,111 @@ the runner recovers the existing validated actual runtime failure before launch
 and emits only missing later censored records. Missing earlier receipts are not
 rerendered or retroactively censored. A censored record cannot claim a PNG,
 metrics, or a cause later than itself in the frozen configuration order.
+
+The fixed v6 reporting-defect recovery uses a new v7 campaign. It is separate
+from the original stdin repair and accepts only that exact two-source shape:
+three original v5 MOSS successes plus the successful v6 Qwen receipt. The old
+v5 claim remains bound to v6; a new append-only, sealed claim keyed by the v6
+protocol references it. Original receipts, logs, PNGs, protocols, first parity
+proof, and both scoped Klein invalidations are copied byte-for-byte into the
+new exact archive. No old receipt is resealed under the new protocol.
+
+First run CPU `prepare` with the ordinary immutable v1 wheel/model reuse bindings
+and **replace** `native_rebuild` with this additional `reuse` member:
+
+```json
+"native_copy": {
+  "campaign": "sc-26322-reference-v6",
+  "prepared_sha256": "<raw v6 prepared.json SHA256>",
+  "job": "38994418367-1",
+  "job_receipt_sha256": "<raw v6 completed prepare job SHA256>",
+  "binary_sha256": "5c663e187b52d75a9859353f0eac8290ed6d23d04ce0173bc3bc3101a8f3e678"
+}
+```
+
+This copies the hash-verified v6 executable independently, performs **no Cargo
+build**, and preserves the original `native_build` receipt after checking the
+clean pinned source/build inputs and actual compiler/DLL candidate identities.
+Both executable directories must have no adjacent DLLs. The existing native
+service PATH inheritance is unchanged. DLL candidates remain source/search-path
+evidence, not loaded-module proof; new Klein/Z startup must still succeed.
+Preparation also acquires only diagnostic artifact12088066041 from fixed run
+38997959770/attempt1, exact ZIP SHA256
+`d4effd17dfb7024054026d82bc9c6ce7262613e1979452543dad5cffe2bc12ef`.
+The read-only workflow token authenticates GitHub API requests and is stripped
+on redirects; only seven capped, hash-pinned SQL/PNG/recipe/index/worker-log
+entries are retained under `repair-evidence`. No arbitrary artifact/URL/path
+input is accepted. Exact43 wheel URLs/hashes, offline import validation, closed
+model caches, source pins and physical GPU1 requirements remain in force.
+
+After inspecting that completed CPU preparation, use `freeze` with the normal
+ownership fields unchanged from v6 (new lease/job/resume labels are allowed),
+plus `calibration_carry_forward` of this exact shape:
+
+```json
+{
+  "kind": "klein_metrics_v6",
+  "campaign": "sc-26322-reference-v6",
+  "protocol_sha256": "<v6 protocol seal>",
+  "prepared_sha256": "<v6 prepared.json file SHA256>",
+  "job": "38996284075-1",
+  "job_receipt_sha256": "<failed v6 calibration job file SHA256>",
+  "qwen_receipt_sha256": "<original successful Qwen receipt file SHA256>",
+  "invalidations": {"<exact inner filename>": "<file SHA256>", "<exact outer filename>": "<file SHA256>"},
+  "diagnostic_files": {"selected-state.json":"<SHA256>","selected-index.json":"<SHA256>","snapshot-index.json":"<SHA256>","original.png":"<SHA256>","asset.recipe.json":"<SHA256>","asset.sceneworks.json":"<SHA256>","worker.log":"<SHA256>"},
+  "failed_native_job": "job_1676d4441a51fbf3a368846cbb8de482",
+  "binary_sha256": "5c663e187b52d75a9859353f0eac8290ed6d23d04ce0173bc3bc3101a8f3e678",
+  "prior_claim": {"path":"<unchanged original v5 global claim path>","sha256":"<original claim SHA256>"},
+  "authorization": {
+    "id":"<explicit coordinator repair ID>","coordinator":"<responsible chat>",
+    "reason":"Repair confirmed frozen Windows Klein tier metrics reporting defect; preserve failed attempt",
+    "new_harness_sha256":"<canonical JSON digest of new prepared.harness>",
+    "remaining_calibration_images":2,
+    "failed_attempt_classification":"diagnosed_harness_tier_reporting_proof_failure"
+  }
+}
+```
+
+Compute file hashes over raw downloaded bytes, the protocol identity from its
+`sha256`, and the new harness closure with
+`hashlib.sha256(json.dumps(prepared['harness'],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()`.
+Inspect the fixed artifact's seven entries against `bootstrap.REPAIR_ARTIFACT`.
+Retain the original v6 source job and both exact invalidation files; no other
+source invalidation can be authorized by this route. A successful Qwen cell,
+unchanged MOSS execution/guard/sampler semantics, identical installed packages,
+hardware/driver, model bytes, native source/inference/binary and Qwen execution
+path are mandatory. Changes to helper validation/dependencies are rejected.
+
+Run the ordinary guarded `calibration` dispatch only after reviewing the new
+freeze. It attempts only Klein and Z; direct CLI uses the same archive/lease
+policy. The four carried calibration cells cannot create new receipts/PNGs or
+spawn a runtime. All48 **scored** cells per configuration still execute later;
+the original16 parity forwards are reused and the remaining64 remain required.
+The combined estimate identifies each measurement's original protocol. After
+two new successes, accounting is six accepted calibration outputs, seven known
+actual generated calibration images including one excluded failed Klein asset,
+ten attempted calibration cells (including the three old native startup
+failures). The failed Klein image is preserved with missing wrapper timing and
+host peak RSS; it is neither a successful measurement nor runtime-unavailability
+evidence. Missing new cells stay pending/failed; accounting is not acceptance.
+
+For local blind review, freeze the separate review protocol on the persistent
+**empty** Mac run root before copying any current run/archive files there. Keep
+these prior source archives outside that root until the review freeze is sealed;
+then copy the complete untouched current run including its nested source archive
+into that same root. Do not relocate a frozen review root. Generation protocol
+and review protocol remain separate. Scored dispatch still requires explicit
+acceptance of the complete six-cell combined calibration/estimate and all the
+ordinary source/cache/device/lease checks.
+
+The story also fixes the live product reporting defects in Rust without changing
+the evaluated ba295 binary. For that frozen binary only, the comparison adapter
+accepts Klein's reported bf16/null label only with independently verified q4 DiT
+config, dense TE config, exact pinned loader/binary and exact-job resolved q4
+strategy plus completed Candle inference, while retaining those raw fields.
+The same strict source/bytes/job proof covers Z's source-confirmed null raw
+recipe bits: both its transformer and encoder configs are packed4, its metrics
+must report q4/4, and its actual resolved q4 event and completed Candle event
+must exist. The request alone never authorizes either exception. Runtime tensor
+component dtypes remain unexposed; packed storage is not a claim about resident
+or compute precision. The actual Z load is still pending.
