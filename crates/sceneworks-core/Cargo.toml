@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Explicit per-data-directory cache roots for CPU integration fixtures only.
+test-support = []
+
 [dependencies]
 directories = "5"
 fs2 = "0.4"
