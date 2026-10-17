@@ -2786,17 +2786,35 @@ fn flux3_plain_metadata(meta: &serde_json::Value) -> Result<(f64, Vec<usize>), S
     let peft = meta
         .get("lora_adapter_metadata")
         .map(|raw| {
-            let text = raw.as_str().ok_or_else(|| {
-                flux3_metadata_error("lora_adapter_metadata must be a JSON string")
-            })?;
+            let text = raw
+                .as_str()
+                .ok_or_else(|| flux3_metadata_error("lora_adapter_metadata must be a JSON string"))?;
             let value: serde_json::Value = serde_json::from_str(text)
                 .map_err(|e| flux3_metadata_error(format!("invalid lora_adapter_metadata: {e}")))?;
-            if !value.is_object() {
-                return Err(flux3_metadata_error(
-                    "lora_adapter_metadata must contain an object",
-                ));
+            let object = value
+                .as_object()
+                .ok_or_else(|| flux3_metadata_error("lora_adapter_metadata must contain an object"))?;
+            // Pinned diffusers 7ecb1e1 `_save_lora_weights` packs the transformer's PEFT config
+            // with `_pack_dict_with_prefix(metadata, "transformer")` (lora_base.py:327,1105) and
+            // its loader strips exactly that prefix (peft.py:212). Normalize ONLY that prefix;
+            // another component's keys (text_encoder.* etc.) cannot describe this DiT adapter.
+            let mut normalized = serde_json::Map::new();
+            for (key, field) in object {
+                let bare = key.strip_prefix("transformer.").unwrap_or(key);
+                if bare.contains('.') || bare.is_empty() {
+                    return Err(flux3_metadata_error(format!(
+                        "lora_adapter_metadata key {key:?} is not a transformer PEFT field; only the diffusers `transformer.` prefix is supported"
+                    )));
+                }
+                if let Some(previous) = normalized.insert(bare.to_owned(), field.clone()) {
+                    if &previous != field {
+                        return Err(flux3_metadata_error(format!(
+                            "lora_adapter_metadata declares {bare:?} twice with different values"
+                        )));
+                    }
+                }
             }
-            Ok(value)
+            Ok(serde_json::Value::Object(normalized))
         })
         .transpose()?;
     let mut alpha: Option<f64> = None;
@@ -7482,6 +7500,75 @@ mod tests {
         // Passed directly as a file path, a sidecar is still not a safetensors file.
         assert_eq!(first_safetensors_path(&sidecar), None);
     }
+    /// The header pinned diffusers 7ecb1e1 `save_lora_weights` writes: `transformer.`-packed
+    /// tensors AND `transformer.`-packed PEFT `lora_adapter_metadata` (lora_base.py:327,1105).
+    #[test]
+    fn flux3_diffusers_prefixed_peft_metadata_is_normalized_and_guarded() {
+        let model = json!({"id":"flux3_klein_base","family":"flux3"});
+        let entry = json!({});
+        let header = |patch: &dyn Fn(&mut Map<String, Value>)| {
+            let mut peft =
+                json!({"peft_type":"LORA","r":2,"lora_alpha":6,"use_rslora":false,"use_dora":false,
+                "fan_in_fan_out":false,"alpha_pattern":{},"rank_pattern":{},"bias":"none",
+                "target_modules":["to_q","to_k","to_v","to_out.0","linear_in","linear_out"]})
+                .as_object()
+                .unwrap()
+                .clone();
+            patch(&mut peft);
+            let packed: Map<String, Value> = peft
+                .into_iter()
+                .map(|(k, v)| (format!("transformer.{k}"), v))
+                .collect();
+            json!({
+                "__metadata__": {"format":"pt","base_model":"black-forest-labs/flux-3-image-klein-base",
+                    "base_revision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+                    "lora_adapter_metadata": serde_json::to_string_pretty(&packed).unwrap()},
+                "transformer.mode_blocks.image.1.attn.to_q.lora_A.weight": {"shape":[2,3072],"dtype":"F32"},
+                "transformer.mode_blocks.image.1.attn.to_q.lora_B.weight": {"shape":[3072,2],"dtype":"F32"}
+            })
+        };
+        let refusal =
+            |h: &Value| flux3_adapter_refusal(&model, "flux3_klein_base", "x", &entry, Some(h));
+        assert_eq!(
+            refusal(&header(&|_| {})),
+            None,
+            "diffusers-saved plain LoRA admits"
+        );
+        for (field, value) in [
+            ("use_rslora", json!(true)),
+            ("use_dora", json!(true)),
+            ("alpha_pattern", json!({"to_q":12})),
+            ("rank_pattern", json!({"to_q":8})),
+            ("r", json!(4)),
+        ] {
+            let h = header(&|p| {
+                p.insert(field.into(), value.clone());
+            });
+            assert!(refusal(&h).is_some(), "prefixed {field} must be refused");
+        }
+        let mut contradiction = header(&|_| {});
+        contradiction["__metadata__"]["lora_alpha"] = "12".into();
+        assert!(
+            refusal(&contradiction).is_some(),
+            "top-level alpha contradicts prefixed alpha"
+        );
+        let mut foreign = header(&|_| {});
+        let mut blob: Map<String, Value> = serde_json::from_str(
+            foreign["__metadata__"]["lora_adapter_metadata"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        // Benign, otherwise consistent value: only the component prefix is wrong.
+        blob.insert("text_encoder.r".into(), json!(2));
+        foreign["__metadata__"]["lora_adapter_metadata"] =
+            serde_json::to_string(&blob).unwrap().into();
+        assert!(
+            refusal(&foreign).unwrap().contains("transformer"),
+            "another component's prefix"
+        );
+    }
+
     #[test]
     fn flux3_adapter_identity_projection_and_file_header_refusals() {
         let header = json!({

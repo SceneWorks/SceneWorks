@@ -1360,12 +1360,22 @@ pub(crate) fn flux3_conditioning_forward_batch(engine_id: &str) -> u64 {
     }
 }
 
-/// Conservative source-derived retained conditioning/DiT allowances, not measurements. The source
-/// clamps text at4096, stacks8x2560 encoder channels, uses3072-wide blocks and128-channel packed
-/// latents. Reserve64 hidden-width buffers per active block for input/modulation, QKV+contiguous
-/// copies, f32 norm/RoPE intermediates, attention output, SwiGLU gate/up, projections and residuals.
-/// Count at f32 width even onbf16. Backend attention scratch/allocator reserve remains in the
-/// existing generic headroom; this adds no weights, decoder, job count or optional PUP copies.
+/// Live hidden-width (3072) activation buffers of ONE FLUX3 `Block::forward` (pinned BFL
+/// `dit.py` / native `dit.rs`), per token, counted from the tensors alive at its widest point
+/// with NO intra-block reuse assumed: x 1, modulated x_mod 1, q/k/v projections 3, their
+/// contiguous head-split copies 3, f32 RMSNorm+RoPE q/k 2, attention output 1, mlp_in
+/// (2 x mlp_ratio 3) 6, silu(gate) 3, silu(gate)*up 3, mlp_out 1, attn_out 1, delta 1,
+/// gate*delta 1, residual 1 = 28. Blocks run sequentially, so only one block's set is live.
+pub(crate) const FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS: u64 = 28;
+
+/// Source-derived retained conditioning/DiT allowances, NOT measurements. The source clamps text
+/// at 4096, stacks 8 x 2560 encoder channels, uses 3072-wide blocks and 128-channel packed
+/// latents. Each active row carries [`FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS`] at f32 width even though
+/// most are bf16 — a deliberate PROVISIONAL over-estimate (no buffer reuse, f32 everywhere) until
+/// the epic-end measured anchor (sc-26243) replaces it; it is bounded by the source live set, not
+/// a guessed multiplier, so it does not refuse renders the live set could fit. Attention scratch
+/// and allocator reserve remain in the existing generic headroom; no weights, decoder, job count
+/// or optional PUP copies are added here.
 pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
     if !matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
         return (0, 0);
@@ -1375,7 +1385,7 @@ pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) 
     let conditioning = rows.saturating_mul(4096 * 20480 * 4);
     let projections = image
         .saturating_add(4096)
-        .saturating_mul(3072 * 4 * 64)
+        .saturating_mul(3072 * 4 * FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS)
         .saturating_mul(rows);
     let cfg_merge = if rows == 2 {
         image.saturating_mul(128 * 4 * 5)
@@ -6587,6 +6597,13 @@ mod tests {
         assert_eq!(flux3_conditioning_forward_batch("flux3_klein"), 1);
         let geometry = request_geometry(&request_inputs(1024, 768, 1));
         let full_base = flux3_source_workspaces("flux3_klein_base", 1024, 768);
+        // 1024x768 -> 64x48 = 3072 image tokens + 4096 text tokens, two CFG rows.
+        let tokens = 3072u64 + 4096;
+        assert_eq!(full_base.0, 2 * 4096 * 20480 * 4);
+        assert_eq!(
+            full_base.1,
+            tokens * 3072 * 4 * 28 * 2 + full_base.0 + 3072 * 128 * 4 * 5
+        );
         let full_distilled = flux3_source_workspaces("flux3_klein", 1024, 768);
         assert_eq!(full_base.0, full_distilled.0 * 2);
         assert!(full_base.1 > full_distilled.1 * 2); // CFG merge buffers, not another weight copy.
