@@ -1863,7 +1863,7 @@ jobs:
             Assert-MossIdentityPhysical $path
           }
           if (Test-Path -LiteralPath (Join-Path $out 'psutil-process-identities.json')) { throw 'Process identity sidecar already exists; no overwrite' }
-          $diagnostic = @'
+          $psutilIdentityDiagnostic = @'
           import csv, datetime, json, sys
           from pathlib import Path
           import psutil
@@ -1892,7 +1892,7 @@ jobs:
           (out / 'psutil-process-identities.json').write_text(json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
 
           '@
-          & $python -I -B -c $diagnostic $out
+          & $python -I -B -c $psutilIdentityDiagnostic $out
           if ($LASTEXITCODE -ne 0) { throw 'Prepared v7 psutil process identity capture failed' }
       - name: Capture bounded owned MOSS snapshot and run file metadata
         shell: powershell
