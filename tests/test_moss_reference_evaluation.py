@@ -1301,7 +1301,7 @@ def test_klein_metric_defect_requires_actual_closed_resolved_proof(repaired_v6_f
     c['settings']['runtime_versions']=dict(sceneworks_source=__import__('bootstrap').SOURCE,inference=__import__('bootstrap').INFERENCE)
     c['files'].append(dict(path=c['settings']['binary'],sha256=c['settings']['binary_sha256']))
     e=f['root']/'repair-evidence';metrics=dict(quantLabel='bf16',quantBits=None);recipe=ev.read(e/'asset.recipe.json');log=e/'actual-worker.log'
-    log.write_bytes((Path(__file__).parent/'fixtures/moss-klein/v6-worker.log').read_bytes());job_id='job_1676d4441a51fbf3a368846cbb8de482'
+    log.write_bytes((Path(__file__).parent/'fixtures/moss-klein/v6-worker.txt').read_bytes());job_id='job_1676d4441a51fbf3a368846cbb8de482'
     if change=='request_only':log.write_text('requested q4, no actual event')
     elif change=='wrong_job':log.write_text(log.read_text().replace(job_id,'job_other'))
     elif change=='wrong_backend':log.write_text(log.read_text().replace('candle','mlx'))
