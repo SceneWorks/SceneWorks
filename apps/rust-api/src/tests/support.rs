@@ -95,12 +95,10 @@ impl Drop for HfCacheEnvGuard {
     }
 }
 
-/// Pin `HF_HUB_CACHE` to a REAL hub dir (not a tempdir) under [`HF_ENV_LOCK`] — the inverse of
-/// [`isolate_hf_cache`]. For `#[ignore]` real-weights tests that resolve the developer's actual
-/// installed turnkeys through `huggingface_repo_cache_path`. Clears the lower-priority `HUGGINGFACE_HUB_CACHE`
-/// / `HF_HOME` so `hub` wins unambiguously; restores all three on drop. macOS-only: its sole caller is the
-/// macOS Wan real-weights test, so gating it here keeps it from reading as dead code on the candle OSes.
-#[cfg(target_os = "macos")]
+/// Pin `HF_HUB_CACHE` under [`HF_ENV_LOCK`] — the inverse of [`isolate_hf_cache`]. Used by
+/// ignored real-weights tests and CPU fixtures that need an explicitly conflicting ambient cache.
+/// Clears the lower-priority `HUGGINGFACE_HUB_CACHE` / `HF_HOME` so `hub` wins unambiguously;
+/// restores all three on drop. Available on every API-test platform.
 pub(crate) fn pin_hf_hub_cache(hub: &std::path::Path) -> HfCacheEnvGuard {
     let guard = HF_ENV_LOCK
         .lock()
