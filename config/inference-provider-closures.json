@@ -890,6 +890,33 @@
       "sharedContractFileCount": 139,
       "lockedPackageCount": 245
     },
+    "candle:qwen_image_2_1_turbo": {
+      "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
+      "digest": "7ccb7d23be6d75af6903e1bb1662e28bdbcb86f360a95e64ea0436fda73db705",
+      "sharedContractDigest": "259fa4c83cd0bb266dc88113587873eca75c0e8d16c7f4d0e539f93564b5a6d4",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/kernels/candle-quant-kernels",
+        "crates/llm/candle-llm",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-body",
+        "crates/media/candle-gen/candle-gen-depth",
+        "crates/media/candle-gen/candle-gen-face",
+        "crates/media/candle-gen/candle-gen-perceptual",
+        "crates/media/candle-gen/candle-gen-qwen-image-2-1",
+        "crates/media/candle-gen/vendor/candle-core",
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 339,
+      "sharedContractFileCount": 139,
+      "lockedPackageCount": 245
+    },
     "candle:qwen_image_edit": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
       "digest": "6845a7b7ac73a6c2b2ad724650b1aefb02afa6c60e41ddcfd98a67d514873e68",
@@ -2106,6 +2133,31 @@
     "mlx:qwen_image_2_1": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
       "digest": "0fd5ecb6b830f8e0bba6bad5150a6f62776e332c0ddcf37713723c37d25e9770",
+      "sharedContractDigest": "259fa4c83cd0bb266dc88113587873eca75c0e8d16c7f4d0e539f93564b5a6d4",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/llm/mlx-llm",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-body",
+        "crates/media/mlx-gen/mlx-gen-depth",
+        "crates/media/mlx-gen/mlx-gen-face",
+        "crates/media/mlx-gen/mlx-gen-perceptual",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 253,
+      "sharedContractFileCount": 139,
+      "lockedPackageCount": 193
+    },
+    "mlx:qwen_image_2_1_turbo": {
+      "crate": "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
+      "digest": "3c6c477cb17bd3b24e295ef64e744b0afa274338eb1c2f15485cc571cee1843a",
       "sharedContractDigest": "259fa4c83cd0bb266dc88113587873eca75c0e8d16c7f4d0e539f93564b5a6d4",
       "closureCrates": [
         "crates/contracts/core-llm",
