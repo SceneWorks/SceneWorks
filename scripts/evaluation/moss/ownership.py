@@ -7,6 +7,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
@@ -68,13 +69,18 @@ def desktop_identities(lease):
     for item in lease['desktop_baseline']:
         # Permission denied, missing or reused PID is unresolved ownership, never an allow.
         process = psutil.Process(item['pid'])
-        require(process.name().lower() == item['name'].lower() and abs(process.create_time() - item['created_epoch']) < .01,
+        name, created = process.name(), process.create_time()
+        # Windows psutil reports the kernel System process at epoch zero. Its
+        # reviewed identity must still match exactly; never substitute CIM time.
+        system = item['pid'] == 4 and item['name'] == 'System'
+        require((name == 'System' and created == item['created_epoch'] if system else
+                 name.lower() == item['name'].lower() and abs(created - item['created_epoch']) < .01),
                 f'desktop baseline identity changed for PID{item["pid"]}')
     return {p['pid'] for p in lease['desktop_baseline']}
 
 def idle_device(lease):
     baseline = desktop_identities(lease)
-    require(compute_pids(lease['gpu_uuid']) == baseline, 'device owners differ from reviewed desktop baseline')
+    require(compute_pids(lease['gpu_uuid']) <= baseline, 'device owners differ from reviewed desktop baseline')
     matches = [g for g in gpu_rows() if g['uuid'] == lease['gpu_uuid']]
     require(len(matches) == 1, 'leased device absent')
     gpu = matches[0]
@@ -121,7 +127,10 @@ def validate_baseline(lease):
     for item in baseline:
         require(set(item) == {'pid', 'name', 'created_epoch'} and type(item['pid']) is int and item['pid'] > 0
                 and isinstance(item['name'], str) and item['name'] and '[' not in item['name']
-                and type(item['created_epoch']) in (float, int) and item['created_epoch'] > 0, 'complete known process identity required')
+                and type(item['created_epoch']) in (float, int) and math.isfinite(item['created_epoch'])
+                and (item['created_epoch'] > 0 or
+                     item['created_epoch'] == 0 and item['pid'] == 4 and item['name'] == 'System'),
+                'complete known process identity required')
     require(len({p['pid'] for p in baseline}) == len(baseline), 'duplicate desktop process identity')
     require(type(lease['baseline_max_memory_mib']) in (float, int) and 0 <= lease['baseline_max_memory_mib'] <= 4096,
             'reviewed desktop memory ceiling must be between0 and4096MiB')
