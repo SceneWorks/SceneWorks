@@ -14668,6 +14668,22 @@ fn image_settings_metrics(
     }
 }
 
+/// Candle's dense-TE load quant is deliberately None; it is not the packed
+/// transformer's artifact tier. Report only an exact resolved standard-tier dir.
+/// Missing/opaque paths carry no tier claim rather than a fabricated bf16 label.
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(test, target_os = "macos")
+))]
+fn dense_te_candle_metrics(tier_dir: Option<&Path>) -> (Option<String>, Option<i64>) {
+    match tier_dir.and_then(|dir| dir.file_name()?.to_str()) {
+        Some("q4") => (Some("q4".to_owned()), Some(4)),
+        Some("q8") => (Some("q8".to_owned()), Some(8)),
+        Some("bf16") => (Some("bf16".to_owned()), None),
+        _ => (None, None),
+    }
+}
+
 /// The effective quant label + bit count for a request (epic 10402): the Krea
 /// INT8-ConvRot tier, then dense-TE turnkey tiers (which `resolve_quant` reports
 /// as bf16 to keep the dense TE full-precision), else `resolve_quant`.
@@ -14727,6 +14743,10 @@ fn effective_quant_label_gated(
             Some(4) => (Some("q4".to_owned()), Some(4)),
             _ => (Some("bf16".to_owned()), None),
         };
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if is_dense_te_tier(request) {
+        return dense_te_candle_metrics(tier_dir);
     }
     // FLUX.1's generic Candle route accepts only an exact packed q4/q8 directory. Its omitted
     // selection defaults to q4 (rather than the shared resolver's q8 default), so derive the
@@ -16668,6 +16688,44 @@ mod standard_tier_tests {
                 ),
                 (Some("int8-convrot".to_owned()), None)
             );
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn dense_te_candle_effective_metrics_follow_resolved_tier_and_keep_load_quant_none() {
+        for model in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
+            for requested in [0, 4, 8] {
+                let request = ImageRequest::from_payload(
+                    json!({"model": model, "advanced": {"mlxQuantize": requested},
+                        "modelManifestEntry": {"mlx": {"denseTextEncoderTier": true}}})
+                    .as_object()
+                    .unwrap(),
+                );
+                for (dir, expected) in [
+                    (
+                        Some(Path::new("/models/klein/q4")),
+                        (Some("q4".to_owned()), Some(4)),
+                    ),
+                    (
+                        Some(Path::new("/models/klein/q8")),
+                        (Some("q8".to_owned()), Some(8)),
+                    ),
+                    (
+                        Some(Path::new("/models/klein/bf16")),
+                        (Some("bf16".to_owned()), None),
+                    ),
+                    (None, (None, None)),
+                    (Some(Path::new("/models/klein/opaque")), (None, None)),
+                ] {
+                    assert_eq!(
+                        resolve_quant_gated(&request, false, dir),
+                        (None, None),
+                        "the TE load instruction must remain dense"
+                    );
+                    assert_eq!(effective_quant_label_gated(&request, false, dir), expected, "metrics must report the resolved artifact even when its tier differs from the request");
+                }
+            }
         }
     }
 
@@ -18772,5 +18830,51 @@ mod declared_sequential_resident_tests {
             crate::WorkerError::InvalidPayload("too big".to_owned()),
         );
         assert!(!admission_needs_no_staging(&rejected));
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod dense_te_candle_metrics_tests {
+    use super::dense_te_candle_metrics;
+    use std::path::Path;
+
+    #[test]
+    fn resolved_q4_is_q4_not_dense_te_bf16() {
+        assert_eq!(
+            dense_te_candle_metrics(Some(Path::new("/models/klein/q4"))),
+            (Some("q4".to_owned()), Some(4))
+        );
+    }
+
+    #[test]
+    fn resolved_q8_is_q8() {
+        assert_eq!(
+            dense_te_candle_metrics(Some(Path::new("/models/klein/q8"))),
+            (Some("q8".to_owned()), Some(8))
+        );
+    }
+
+    #[test]
+    fn resolved_bf16_is_dense() {
+        assert_eq!(
+            dense_te_candle_metrics(Some(Path::new("/models/klein/bf16"))),
+            (Some("bf16".to_owned()), None)
+        );
+    }
+
+    #[test]
+    fn missing_resolved_tier_is_unknown() {
+        assert_eq!(dense_te_candle_metrics(None), (None, None));
+    }
+
+    #[test]
+    fn opaque_or_other_family_tier_is_unknown() {
+        for dir in [
+            "/models/klein/opaque",
+            "/models/klein/base",
+            "/models/klein/nvfp4",
+        ] {
+            assert_eq!(dense_te_candle_metrics(Some(Path::new(dir))), (None, None));
+        }
     }
 }
