@@ -7,7 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "04033dd5ed49d61625d6096bb4ae7e6fcadd4553"
+      "inferenceRevision": "db354e0ff57b58cd1a7cb7b7016b628c229f5f0c"
     },
     "mlx": {
       "inferenceRevision": "04033dd5ed49d61625d6096bb4ae7e6fcadd4553"
@@ -77,6 +77,7 @@
       "mlx": true
     },
     "flux3_klein": {
+      "candle": false,
       "mlx": false
     },
     "flux_dev": {
