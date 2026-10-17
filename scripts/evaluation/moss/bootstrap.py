@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlparse
 import zipfile
 
 from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle, calibration_results, availability_decisions, reject_run_invalidated, terminal_scored,
-    physical, gpu_rows, compute_pids, desktop_identities, idle_device, verify_staged, validate_baseline)
+    physical, device_identity, verify_device, gpu_rows, compute_pids, desktop_identities, idle_device, verify_staged, validate_baseline)
 
 SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'
 INFERENCE = '91ffb4a819aa2990c652db2d881ba0b9b10126ce'
@@ -81,11 +81,17 @@ def control(mode, raw, base=BASE):
     allowed = required | ({'ownership', 'gpu_uuid'} if mode == 'freeze' else
                           ({'protocol_sha256', 'lease', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization'} if mode == 'scored' else {'protocol_sha256', 'lease'}) if mode in ('calibration', 'scored') else set())
     if mode=='prepare' and 'reuse' in value:allowed.add('reuse')
+    if mode=='prepare' and 'device_recovery' in value:allowed.add('device_recovery')
+    if mode=='freeze' and 'physical_gpu_index' in value:allowed.add('physical_gpu_index')
     if mode=='freeze' and 'calibration_carry_forward' in value:allowed.add('calibration_carry_forward')
     if mode=='scored' and 'unavailable_configs' in value:allowed.add('unavailable_configs')
     require(set(value) == allowed, f'{mode} control fields must be exactly {sorted(allowed)}')
     require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}', value['campaign']), 'invalid campaign id')
     require(utc() < timestamp(value['deadline_utc']) <= utc() + dt.timedelta(hours=6), 'deadline must be in next six hours')
+    if value['campaign']=='sc-26322-reference-v9' and mode=='prepare':require('device_recovery' in value,'v9 requires explicit failed-candidate recovery authority')
+    if mode=='prepare' and 'device_recovery' in value:
+        from device_recovery import validate_control
+        validate_control(value)
     if mode=='prepare' and 'reuse' in value:
         reuse=value['reuse']
         require(set(reuse) in ({'campaign','prepared_sha256','job','job_receipt_sha256'},
@@ -97,7 +103,8 @@ def control(mode, raw, base=BASE):
             n=reuse['native_copy']
             fields={'campaign','prepared_sha256','job','job_receipt_sha256','binary_sha256'}
             v7=set(n)==fields|{'kind'} and n.get('kind')=='ownership_policy_v7' and n['campaign']=='sc-26322-reference-v7' and value['campaign']=='sc-26322-reference-v8'
-            require((v7 or (set(n)==fields and n['campaign']=='sc-26322-reference-v6')) and re.fullmatch(r'[0-9]+-[0-9]+',n['job']) and all(re.fullmatch(r'[0-9a-f]{64}',n[k]) for k in ('prepared_sha256','job_receipt_sha256','binary_sha256')),'exact v6 or explicit v7 ownership-repair native-copy bindings required')
+            v9=set(n)==fields|{'kind'} and n.get('kind')=='fresh_gpu0_v8' and n['campaign']=='sc-26322-reference-v8' and value['campaign']=='sc-26322-reference-v9' and 'device_recovery' in value
+            require((v9 or v7 or (set(n)==fields and n['campaign']=='sc-26322-reference-v6')) and re.fullmatch(r'[0-9]+-[0-9]+',n['job']) and all(re.fullmatch(r'[0-9a-f]{64}',n[k]) for k in ('prepared_sha256','job_receipt_sha256','binary_sha256')),'exact v6 or explicit v7 ownership-repair native-copy bindings required')
         require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',reuse['campaign']) and reuse['campaign']!=value['campaign'],'reuse must name a different owned sibling campaign')
         require(re.fullmatch(r'[0-9]+-[0-9]+',reuse['job']),'exact completed source job/attempt required')
         require(all(re.fullmatch(r'[0-9a-f]{64}',reuse[k]) for k in ('prepared_sha256','job_receipt_sha256')),'exact source receipt digests required')
@@ -105,7 +112,9 @@ def control(mode, raw, base=BASE):
     # Refuse reparse points (including Windows directory junctions) before writes.
     physical(root)
     if mode == 'freeze':
-        require(value['gpu_uuid'] == RUNNER_GPU_UUID, 'runner evaluation is restricted to the verified physical GPU1 UUID')
+        device_identity(value)
+        if value['campaign']=='sc-26322-reference-v9':
+            require(value.get('physical_gpu_index')==0 and not value.get('calibration_carry_forward'),'v9 requires explicit GPU0 and fresh calibration')
         expected = {'responsible_chat', 'lease', 'job', 'timeout_seconds', 'resume', 'next_action'}
         own = value['ownership']
         require(set(own) == expected and all(own.values()), 'complete ownership required')
@@ -113,10 +122,12 @@ def control(mode, raw, base=BASE):
     if mode in ('calibration', 'scored'):
         require(re.fullmatch(r'[0-9a-f]{64}', value['protocol_sha256']), 'reviewed frozen protocol SHA256 required')
         lease = value['lease']
-        require(set(lease) == {'id', 'owner', 'host', 'gpu_uuid', 'expires_utc', 'external_owners_reconciled', 'desktop_baseline', 'baseline_max_memory_mib', 'baseline_max_utilization_percent'}, 'complete device lease required')
+        fields={'id', 'owner', 'host', 'gpu_uuid', 'expires_utc', 'external_owners_reconciled', 'desktop_baseline', 'baseline_max_memory_mib', 'baseline_max_utilization_percent'}
+        require(set(lease) in (fields,fields|{'physical_gpu_index'}), 'complete device lease required')
         require(all(lease[k] for k in ('id', 'owner', 'host', 'gpu_uuid', 'expires_utc')) and lease['external_owners_reconciled'] is True, 'coordinator must reconcile ALL physical host owners')
         validate_baseline(lease)
-        require(lease['gpu_uuid'] == RUNNER_GPU_UUID, 'runner evaluation is restricted to the verified physical GPU1 UUID')
+        device_identity(lease)
+        if value['campaign']=='sc-26322-reference-v9':require(lease.get('physical_gpu_index')==0,'v9 execution requires physical GPU0')
         require(timestamp(lease['expires_utc']) >= timestamp(value['deadline_utc']), 'lease must cover whole deadline')
     if mode == 'scored':
         for key in ('calibration_receipts_sha256', 'calibration_estimate_sha256'):
@@ -471,7 +482,8 @@ def copy_v6_native(root,record):
     """Retain the exact evaluated binary; never rebuild or execute it."""
     request=record['native_copy'];source=root.parent/request['campaign'];physical(source)
     ownership_repair=request.get('kind')=='ownership_policy_v7'
-    require((ownership_repair and source.name=='sc-26322-reference-v7' and root.name=='sc-26322-reference-v8') or (not ownership_repair and source.name=='sc-26322-reference-v6'),'native copy is outside the fixed repair route')
+    fresh_device=request.get('kind')=='fresh_gpu0_v8'
+    require((fresh_device and source.name=='sc-26322-reference-v8' and root.name=='sc-26322-reference-v9') or (ownership_repair and source.name=='sc-26322-reference-v7' and root.name=='sc-26322-reference-v8') or (not ownership_repair and source.name=='sc-26322-reference-v6'),'native copy is outside the fixed repair route')
     receipt=source/('job-'+request['job']+'-prepare.json');physical(receipt)
     require(digest(source/'prepared.json')==request['prepared_sha256'] and digest(receipt)==request['job_receipt_sha256'],'v6 native source receipt drift')
     job=read(receipt);prep=prepared(source)
@@ -497,7 +509,7 @@ def copy_v6_native(root,record):
         physical(directory)
     physical(target)
     require(not any(p.suffix.casefold()=='.dll' for p in target.parent.iterdir()),'new native copy directory has unexpected adjacent DLLs')
-    record['native']=dict(mode='exact_v7_binary_copy_no_build' if ownership_repair else 'exact_v6_binary_copy_no_build',source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
+    record['native']=dict(mode='exact_v8_binary_copy_no_build' if fresh_device else ('exact_v7_binary_copy_no_build' if ownership_repair else 'exact_v6_binary_copy_no_build'),source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
     return target,prep['native_build']
 
 
@@ -562,7 +574,7 @@ def prepare(root, value):
     harness = root / 'harness'
     harness.mkdir(exist_ok=True)
     for source in Path(__file__).parent.iterdir():
-        if source.suffix == '.py' or source.name in ('corpus.json', 'dependency-resolution.json'):
+        if source.suffix == '.py' or source.name in ('corpus.json', 'dependency-resolution.json', 'prior-v8-failed-artifact.manifest.json'):
             destination = harness / source.name
             if destination.exists():
                 require(digest(destination) == digest(source), 'harness changed during preparation; fresh campaign required')
@@ -592,10 +604,14 @@ def prepare(root, value):
         binary = root / 'target' / 'release' / 'sceneworks-rust-api.exe'
         require(binary.is_file(), 'native build produced no binary')
         native_build=native_identity(binary)
+    recovery=None
+    if value.get('device_recovery'):
+        from device_recovery import install
+        recovery=install(root,value['device_recovery'])
     write(root / 'prepared.json', dict(staged=staged, runtime=runtime, installed=packages,
          requirements_sha256=digest(root / 'requirements.lock'), binary=str(binary), binary_sha256=digest(binary),
          sceneworks_source=SOURCE, inference=INFERENCE,native_build=native_build,
-         repair_evidence=evidence if reuse else None,
+         repair_evidence=evidence if reuse else None, device_recovery=recovery,
          reuse=(dict(path=str(root/'reuse.json'),sha256=digest(root/'reuse.json'),source_prepared_sha256=reuse[2]['source_prepared_sha256']) if reuse else None),
          harness={p.name: digest(p) for p in harness.iterdir() if p.is_file()}, accelerator_allocation=False))
     print(f'Prepared {root}; next: review artifact/dependency receipts then freeze with ownership/device UUID.', flush=True)
@@ -608,6 +624,9 @@ def verify_prepared_inputs(root,value):
     if value.get('reuse'):
         receipt=root/'reuse.json';physical(receipt)
         require(Path(value['reuse']['path']).resolve()==receipt.resolve() and digest(receipt)==value['reuse']['sha256'],'reuse provenance drift')
+    if value.get('device_recovery'):
+        from device_recovery import verify
+        verify(root,value['device_recovery'])
     if value.get('repair_evidence'):
         require({p.name:digest(p) for p in (root/'repair-evidence').iterdir() if p.is_file()}==value['repair_evidence'],'prepared diagnostic evidence closure drift')
         for p in (root/'repair-evidence').rglob('*'):physical(p)
@@ -629,14 +648,17 @@ def freeze(root, value):
     evaluation = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(evaluation)
     manifest = evaluation.template()
-    matches = [g for g in gpu_rows() if g['uuid'] == value['gpu_uuid']]
-    require(len(matches) == 1, 'device UUID not present')
-    gpu = matches[0]
-    require(gpu['index'] == '1' and gpu['uuid'] == RUNNER_GPU_UUID, 'physical GPU1 identity changed; review ownership before proceeding')
+    gpu=verify_device(value)
+    if root.name=='sc-26322-reference-v9':require(prep.get('device_recovery'),'fresh device preparation provenance missing')
+    if prep.get('device_recovery'):
+        require(value.get('physical_gpu_index')==0 and not value.get('calibration_carry_forward'),'fresh GPU0 recovery cannot inherit calibration/parity')
+        require(not (root/'run').exists(),'fresh device candidate must start with no run evidence')
+        manifest['device_recovery']=prep['device_recovery']
     import psutil
     manifest['runtime'] = dict(prep['runtime'], driver=gpu['driver'])
     manifest['hardware'] = dict(host=socket.gethostname(), gpu_uuid=gpu['uuid'], gpu_name=gpu['name'],
         gpu_memory_bytes=int(float(gpu['memory_mib']) * 1024**2), host_memory_bytes=psutil.virtual_memory().total)
+    if 'physical_gpu_index' in value:manifest['hardware']['physical_gpu_index']=value['physical_gpu_index']
     manifest['ownership'] = value['ownership']
     manifest['preparation'] = dict(path=str((root / 'prepared.json').resolve()), sha256=digest(root / 'prepared.json'))
     shared = prep['staged']['moss_sft']['snapshot']
@@ -653,6 +675,8 @@ def freeze(root, value):
                 hub_cache=str(root / 'hub'), state_root=str(root / 'native-state'), port=17931 + index - 3,
                 worker_id='sc26322-' + config['id'], device_id=gpu['uuid'], job_timeout_seconds=manifest['ownership']['timeout_seconds'],
                 runtime_versions=dict(sceneworks_source=SOURCE, inference=INFERENCE,native_build=prep.get('native_build',{'status':'not captured'})))
+        if 'physical_gpu_index' in value:config['settings']['physical_gpu_index']=value['physical_gpu_index']
+        if prep.get('device_recovery'):config['settings']['prior_failed_attempt_root']=str(root/'prior-failed-attempt')
         config['files'] = evaluation.inventory(config)
     if value.get('calibration_carry_forward'):
         from calibration_source import install
@@ -788,6 +812,7 @@ def execute_phase(root, value, phase):
     expected_images = {cell['id'] + '.png' for mode in ('calibration', 'scored') for cell in cells(manifest, mode)}
     require(not (campaign / 'outputs').exists() or all(path.name in expected_images for path in (campaign / 'outputs').iterdir()), 'unexpected output outside fixed294-image plan')
     authority = accepted_scored_authorization(root, value,manifest) if phase == 'scored' else None
+    require(device_identity(lease)==device_identity(manifest['hardware']),'lease physical device differs from freeze')
     lock_record = dict(lease_id=lease['id'], host=lease['host'], gpu_uuid=lease['gpu_uuid'], phase=phase,
         protocol_sha256=protocol['sha256'], deadline_epoch=timestamp(value['deadline_utc']).timestamp(),
         lease_expires_epoch=timestamp(lease['expires_utc']).timestamp(), owner_pid=os.getpid(), responsible_chat=lease['owner'],
@@ -797,6 +822,7 @@ def execute_phase(root, value, phase):
         baseline_max_utilization_percent=lease['baseline_max_utilization_percent'],
         job=os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'),
         scored_authorization=authority)
+    if 'physical_gpu_index' in manifest['hardware']:lock_record['physical_gpu_index']=manifest['hardware']['physical_gpu_index']
     with device_lock(root.parent, lease['gpu_uuid'], lock_record) as held_lock:
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=lease['gpu_uuid'], HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', MOSS_DEVICE_LOCK=str(held_lock.resolve()), MOSS_LEASE_ID=lease['id'], MOSS_PROTOCOL_SHA256=protocol['sha256'])
         guard = ExecutionGuard(manifest, protocol['sha256'], phase=phase, allow_owner=True, environ=env)

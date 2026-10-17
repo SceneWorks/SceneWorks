@@ -3,7 +3,7 @@
 
 Normally owned by the guarded per-configuration runtime. Dynamic PID and logs
 are attempt evidence rather than freeze inputs. The frozen settings identify
-the source/binary/cache and exclusive physical GPU1; services end on cleanup.
+the source/binary/cache and exclusive frozen physical GPU; services end on cleanup.
 """
 import argparse
 from contextlib import contextmanager
@@ -45,10 +45,10 @@ def services(settings):
     state=Path(a.state).resolve();binary=Path(a.binary).resolve();hub=Path(a.hub).resolve()
     if state.exists() or not binary.is_file() or not hub.is_dir():raise ValueError('fresh state, existing binary and prepared hub required')
     if file_hash(binary)!=settings['binary_sha256']:raise ValueError('native binary hash mismatch')
-    from ownership import RUNNER_GPU_UUID
-    if a.gpu!=RUNNER_GPU_UUID:raise ValueError('native runner execution requires frozen physical GPU1 UUID')
+    from ownership import device_identity
+    expected_index,_=device_identity(dict(gpu_uuid=a.gpu,**({'physical_gpu_index':settings['physical_gpu_index']} if 'physical_gpu_index' in settings else {})))
     gpu_index=physical_index(a.gpu)
-    if gpu_index!='1':raise ValueError('native runner execution requires physical GPU1 index')
+    if gpu_index!=str(expected_index):raise ValueError('native frozen physical GPU index/UUID mismatch')
     state.mkdir(parents=True);env={k:v for k,v in os.environ.items() if not k.startswith('SCENEWORKS_') and not any(word in k.upper() for word in ('TOKEN','SECRET','PASSWORD','CREDENTIAL','API_KEY'))}
     url=f'http://127.0.0.1:{a.port}'
     env.update(SCENEWORKS_DATA_DIR=str(state/'data'),SCENEWORKS_CONFIG_DIR=str(state/'config'),SCENEWORKS_JOBS_DB_PATH=str(state/'data'/'cache'/'jobs.db'),SCENEWORKS_CREDENTIALS_DIR=str(state/'credentials'),SCENEWORKS_API_HOST='127.0.0.1',SCENEWORKS_API_PORT=str(a.port),SCENEWORKS_API_URL=url,SCENEWORKS_WORKER_ID=a.worker_id,SCENEWORKS_WORKER_CHILD='1',SCENEWORKS_GPU_ID=gpu_index,SCENEWORKS_POLL_SECONDS='1',SCENEWORKS_HEARTBEAT_SECONDS='2',SCENEWORKS_BACKEND_MLX_ENABLED='false',SCENEWORKS_BACKEND_CANDLE_ENABLED='true',SCENEWORKS_CANDLE_REQUIRED='1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE='enforce',SCENEWORKS_TRUST_LOOPBACK='true',SCENEWORKS_UTILITY_JOBS='0',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=a.gpu,NVIDIA_VISIBLE_DEVICES=gpu_index,HF_HOME=str(hub.parent),HF_HUB_CACHE=str(hub),HUGGINGFACE_HUB_CACHE=str(hub),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')

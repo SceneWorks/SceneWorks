@@ -59,7 +59,7 @@ Use absolute paths for all run state, outside the repository. The bootstrap
 transport supplies the concrete host paths, approved byte budget and exclusive
 device lease. Rendering also requires its live ancestor-held device lock and
 MOSS_DEVICE_LOCK/MOSS_LEASE_ID/MOSS_PROTOCOL_SHA256 environment.
-The direct CLI imports the same ExecutionGuard as bootstrap: physical GPU1 UUID
+The direct CLI imports the same ExecutionGuard as bootstrap: frozen physical GPU index/UUID
 GPU-e4b79931-7be6-f216-460a-f5405cfafffe, live ancestor-held lease, reconciled
 background ownership, continuous foreign-process checks and deadline enforcement.
 Native resolver authority includes exact refs/main, the complete snapshot set and
@@ -67,7 +67,7 @@ isolated cache closure; changed refs or an added alternate snapshot fail before
 requests. Full input hashes run at configuration boundaries; inexpensive resolver
 identity and file fingerprints run during cells. Scored execution additionally
 requires accepted calibration receipts/estimate and explicit coordinator
-authorization bound to the same protocol. GPU0 is never an execution option. Direct run.py
+authorization bound to the same protocol. The explicitly authorized fresh v9 replacement uses GPU0 with its own frozen index/UUID; original GPU1 evidence stays historical. Direct run.py
 commands below execute only inside that coordinator-owned lease. An expired,
 wrong-device, wrong-freeze, or missing coordinator process fails before spawning. Standalone preparation follows this sequence:
 

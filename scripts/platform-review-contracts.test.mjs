@@ -5500,3 +5500,13 @@ test("MOSS fixed repair artifact authentication is read-only and prepare-only", 
   assert.match(step, /inputs.moss_image_comparison_mode == 'prepare'/);
   assert.equal((job.match(/GH_TOKEN:/g) || []).length, 1);
 });
+
+test("MOSS GPU0 replacement preserves prior failure archive and prepare-only artifact permission", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison-execution:\n"));
+  assert.match(job, /group: windows-candle-gpu-real-weights\n      cancel-in-progress: false/);
+  assert.ok(job.includes("${{ env.MOSS_RECEIPTS }}/prior-failed-attempt/**"));
+  assert.equal((job.match(/GH_TOKEN:/g) || []).length, 1);
+  assert.ok(workflow.includes("$python = 'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9\\venv\\Scripts\\python.exe'"));
+  assert.match(job, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]/);
+});

@@ -187,7 +187,7 @@ class Reference:
         return dict(phases, generation_seconds=time.monotonic()-start,noise_sha256=noise_hash,pixels_finite=True,
             peak_gpu_allocated_bytes=allocated,peak_gpu_reserved_bytes=reserved,
             component_dtypes=dict(transformer=str(pipe.transformer.dtype),encoder=str(pipe.text_encoder.dtype),vae=str(pipe.vae.dtype),transformer_parameter_numel_by_dtype=dict(Counter({str(dtype):sum(p.numel() for p in pipe.transformer.parameters() if p.dtype==dtype) for dtype in {p.dtype for p in pipe.transformer.parameters()}}))),sampler=sampler,
-            device=dict(visible_uuid=os.environ['CUDA_VISIBLE_DEVICES'],name=torch.cuda.get_device_name(0),logical_index=torch.cuda.current_device(),allow_tf32_matmul=torch.backends.cuda.matmul.allow_tf32,allow_tf32_cudnn=torch.backends.cudnn.allow_tf32,float32_matmul_precision=torch.get_float32_matmul_precision()),
+            device=dict(physical_gpu_index=int(os.environ['MOSS_PHYSICAL_GPU_INDEX']),visible_uuid=os.environ['CUDA_VISIBLE_DEVICES'],name=torch.cuda.get_device_name(0),logical_index=torch.cuda.current_device(),allow_tf32_matmul=torch.backends.cuda.matmul.allow_tf32,allow_tf32_cudnn=torch.backends.cudnn.allow_tf32,float32_matmul_precision=torch.get_float32_matmul_precision()),
             runtime_versions={name:importlib.metadata.version(name) for name in ('torch','transformers','diffusers','safetensors','accelerate','Pillow')})
 
 
@@ -210,4 +210,4 @@ class Reference:
                 return candidate
             dmd_loop(z,lambda x:torch.einsum('oc,bchw->bohw',self.q,x),self.codes,predict,8)
         self.sync()
-        return dict(steps=steps,forward_count=16,noise_sha256=tensor_hash(z),Q_sha256=tensor_hash(self.q),step_codes=self.codes.cpu().tolist(),context_sha256=tensor_hash(embeds),mask_sha256=tensor_hash(mask),candidate_arm='sft_bf16_unmerged_fp32_adapter',oracle_arm='published_full_fp32_transformer',oracle_autocast=False,generated_images=0,elapsed_seconds=time.monotonic()-start)
+        return dict(device=dict(physical_gpu_index=int(os.environ['MOSS_PHYSICAL_GPU_INDEX']),visible_uuid=os.environ['CUDA_VISIBLE_DEVICES'],logical_index=torch.cuda.current_device()),steps=steps,forward_count=16,noise_sha256=tensor_hash(z),Q_sha256=tensor_hash(self.q),step_codes=self.codes.cpu().tolist(),context_sha256=tensor_hash(embeds),mask_sha256=tensor_hash(mask),candidate_arm='sft_bf16_unmerged_fp32_adapter',oracle_arm='published_full_fp32_transformer',oracle_autocast=False,generated_images=0,elapsed_seconds=time.monotonic()-start)

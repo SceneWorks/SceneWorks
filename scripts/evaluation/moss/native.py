@@ -184,7 +184,7 @@ class Native:
         image=Image.open(io.BytesIO(data));image.load()
         if image.format!='PNG' or image.size!=(cell['width'],cell['height']):raise ValueError('native invalid PNG/canvas')
         output.write_bytes(data)
-        return dict(generation_seconds=time.monotonic()-start,load_seconds=metrics['loadMs']/1000,
+        return dict(device=dict(physical_gpu_index=int(self.context['physical_gpu_index']),visible_uuid=self.context['gpu_uuid']),generation_seconds=time.monotonic()-start,load_seconds=metrics['loadMs']/1000,
             encode_seconds=None,denoise_seconds=metrics['sampleMs']/1000,decode_seconds=metrics['decodeMs']/1000,
             peak_gpu_bytes=metrics['peakMemoryBytes'],gpu_memory_method='worker nvidia-smi sampled device memory, 1s cadence; not allocator peak',
             component_dtypes={'native_tier':metrics['quantLabel'],'component_dtypes':'not exposed by native metrics'},

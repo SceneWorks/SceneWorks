@@ -1,9 +1,11 @@
+> Current v9 device authority: use the **Fresh GPU0 replacement candidate v9** section below. Historical GPU1 recovery sections preserve original provenance and do not authorize reuse of their measurements.
+
 SC-26322 uses the existing `windows-candle.yml` workflow at the reviewed story ref. Its `off` mode keeps the ordinary worker jobs; `telemetry` keeps the separate read-only job. `prepare`, `freeze`, `calibration`, and `scored` use the dedicated execution job. Scored execution requires explicit coordinator acceptance of the measured calibration. Nothing is dispatched by the scripts themselves.
 
 The dedicated execution job requires the `cuda-windows-2` listener label on
 `MICHAEL-TRX50`, where the successful Python3.12 preparation ran. Read-only
 telemetry can use either listener. Execution retains the shared real-weights
-concurrency group and all lease/physical GPU1 UUID checks; listener selection does
+concurrency group and all lease/frozen physical index+UUID checks; listener selection does
 not grant separate GPU capacity. An OS installer prompt on another listener
 requires coordinator intervention, not a permission bypass by this workflow.
 
@@ -524,3 +526,64 @@ protocol against an EMPTY persistent Mac review root before GPU execution.
 Existing three isolated role contexts may be retained only through an explicit
 new evaluator specification; never reuse the v7 review protocol under a new lock.
 Fresh GPU1 ownership, lease deadlines and execution authorization remain required.
+
+## Fresh GPU0 replacement candidate v9
+
+The user's explicit GPU0 directive supersedes the original GPU1 constraint for
+this new candidate. Freeze `physical_gpu_index: 0` and the coordinator's freshly
+verified `gpu_uuid` (currently reported GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0).
+Fresh telemetry and ownership review remain required before allocation. Both
+fields also belong in every calibration/scored lease. The UUID selects Python's
+logical CUDA0; native `SCENEWORKS_GPU_ID` and sampled device memory use verified
+physical index0. A remapped/mismatched index/UUID, unreviewed selected-device
+owner, stale/reused PID, cache mutation or lease expiry still aborts. Activity on
+physical GPU1 is outside the selected-device lease; neither card's processes
+are terminated by these checks. Legacy GPU1 locks/receipts remain unchanged and
+are read under their original identity.
+
+Prepare only `sc-26322-reference-v9` using the ordinary prepare workflow and
+`reuse` of the exact v1 immutable model/wheel receipts. Its `native_copy` must
+name v8, `kind: "fresh_gpu0_v8"`, actual v8 prepare job/receipt/prepared hashes,
+and exact existing evaluated binary hash. No Cargo rebuild occurs: independent
+binary copy rechecks pinned native source/build input and actual DLL-candidate
+identities, including the unchanged no-adjacent-DLL condition. DLL candidates
+are not proof of loaded DLLs. Add this exact explicit prepare authority:
+
+```json
+"device_recovery": {
+  "kind": "fresh_gpu0_v8",
+  "manifest_sha256": "ba0c75efe4ff8082004813d63a98f522c7bdd121f315dc76c74f0d2e2bd2a403",
+  "authority": "<coordinator record of user's GPU0 replacement directive>",
+  "responsible_chat": "<same responsible chat as new freeze>"
+}
+```
+
+Preparation fetches only the fixed original GitHub artifact12106733806 from
+run39047172756 attempt1/headfd852, verifies ZIP68,878,671bytes/SHA47c65abb01765c803bf21ac9806358f74a785f920e45c91498a52b6ccbb36a24,
+and checks/copies exactly the frozen270 old Windows files against those original
+ZIP hashes. `GH_TOKEN` is supplied by the existing prepare step with actions:read;
+authorization is removed on cross-origin redirects and never logged. The copied
+subset and original ZIP remain under `prior-failed-attempt/`, outside current
+`run/`. Unlisted remote model files/DLLs are governed by their separate prepared
+inputs, not claimed to be in that artifact. All old raw locks, claims, logs,
+receipts, PNGs, parity and invalidations retain their bytes and status. No old
+claim target is rewritten. The fixed manifest and archive are bound in new
+prepared/protocol/config file inventories and checked before execution.
+
+There is no calibration carry-forward for this route: freeze refuses an existing
+`run/` or `calibration_carry_forward`. All six calibration outputs, all288 scored
+cells, and all five parity fixtures (80 forwards, no parity images) execute on
+the new frozen device. Scored phase reuses only its own new calibration parity
+fixture (16 forwards), then performs the remaining64. Fresh empty local review
+root/protocol must be frozen before scored output; existing blind contexts need
+explicit provenance confirmation and no exposure to producer mappings.
+
+Accounting remains transparent: prior six calibration successes and51 scored
+ok-labeled rows remain historical (three scored rows individually invalidated),
+plus one failed calibration PNG. They are never relabeled to hide counts and
+zero are accepted as current-device evidence. The user-authorized replacement
+candidate cap is6+288+24=318 successful outputs, at most375 lifetime ok-labeled
+PNGs/376 including that failed PNG. The optional24 native probes still wait for
+comparison completion. Failed attempts remain logged. GPU1 timing does not enter
+the new GPU0 calibration estimate. No implicit retry, scored authorization,
+packet export or quality verdict follows preparation/freeze.

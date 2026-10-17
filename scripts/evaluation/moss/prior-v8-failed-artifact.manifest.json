@@ -1,0 +1,1374 @@
+{
+  "schema_version": 1,
+  "created_utc": "2026-10-17T16:58:59.486913+00:00",
+  "purpose": "append-only prior-failed-candidate provenance; zero current evaluation rows may be imported",
+  "original_run": 39047172756,
+  "attempt": 1,
+  "head": "fd85298f64a4f55c77915d189117b49208cf2873",
+  "artifact_id": 12106733806,
+  "original_zip_bytes": 68878671,
+  "original_zip_sha256": "47c65abb01765c803bf21ac9806358f74a785f920e45c91498a52b6ccbb36a24",
+  "source_root": "/Users/michael/.codex/epic-runs/sc-26321/scored-v8-failed",
+  "remote_source_root": "E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v8",
+  "prior_protocol_sha256": "25f104687782605d6aed3f85f6c525af28c1d3028da9d2906f8a6fd8836cb4c4",
+  "original_job_raw_sha256": "ca94cee4e1123af2a80b6be9df49027b85761fd8047b09b124a12d481951c994",
+  "original_control_raw_sha256": "01e95e2bb195ae87820037543c161ec562d67bf6d16ff61556e44bd18fde6d59",
+  "files": [
+    {
+      "path": "calibration-estimate.json",
+      "bytes": 6278,
+      "sha256": "8328010227ba5b6470643d4629b61ef5a56dbd669a4b7d711dc2b4ef6ef2ae32"
+    },
+    {
+      "path": "job-39040243741-1-prepare.json",
+      "bytes": 1093,
+      "sha256": "db8fd4b6bf6abd9a4d18bde43fbda72c23f59ee4d054d7b8353cec93d4a57bbe"
+    },
+    {
+      "path": "job-39040243741-1-prepare.log",
+      "bytes": 14237,
+      "sha256": "53868806679541469191bf2e315f70dc8eb487397aabd7d898f564e00d8b6878"
+    },
+    {
+      "path": "job-39041698530-1-freeze.json",
+      "bytes": 1075,
+      "sha256": "75b905322b4a85b3bd13ddb57b710502cdbb5368f75323b55072f048b545b3e4"
+    },
+    {
+      "path": "job-39046326032-1-calibration.json",
+      "bytes": 1089,
+      "sha256": "cad9f42c30c86d225710ebb882536959bee6709e7981396b4d4454fc005ec7f8"
+    },
+    {
+      "path": "job-39047172756-1-scored.json",
+      "bytes": 1165,
+      "sha256": "ca94cee4e1123af2a80b6be9df49027b85761fd8047b09b124a12d481951c994"
+    },
+    {
+      "path": "prepared.json",
+      "bytes": 66814,
+      "sha256": "ec62be7febf69037e107077ed0398bb71d7045ed1a722e336857300667c8c2fa"
+    },
+    {
+      "path": "protocol.lock.json",
+      "bytes": 527574,
+      "sha256": "266cf97505d4a377ec830d4998a105c492794cb63a757efc808ca6e070013bae"
+    },
+    {
+      "path": "requirements.lock",
+      "bytes": 4162,
+      "sha256": "20e9af18d446e1c1f5be44a37dd1659ad64249e453c6da46d82152d65ccf7869"
+    },
+    {
+      "path": "reuse.json",
+      "bytes": 100423,
+      "sha256": "f08cf670080e17689ea0ba1c4188334f664e2c26aa7ad933b9ff998fddf08193"
+    },
+    {
+      "path": "run/calibration-background-39046326032-1.json",
+      "bytes": 3507,
+      "sha256": "d73b967ca0743c80965964eeec0a88a8bf6a666fb7f9c7ef80abbc213b6ead03"
+    },
+    {
+      "path": "run/calibration-source/blocked-jobs/39032307669-1.json",
+      "bytes": 1162,
+      "sha256": "fdc6285d1705c06760da728eeeef09cacac2dfd9858ce342a2b4edd5b8941280"
+    },
+    {
+      "path": "run/calibration-source/blocked-jobs/39032793002-1.json",
+      "bytes": 1156,
+      "sha256": "6b3b9cf341e46cc6d27c1137c3836f57be9cc4ad745406a3d39a9907ccbcdcda"
+    },
+    {
+      "path": "run/calibration-source/bundle.json",
+      "bytes": 258442,
+      "sha256": "302aa120e232e8c9140f1e354ef862c15d58ec9409b03f5a1433ec80b422492b"
+    },
+    {
+      "path": "run/calibration-source/harness/bootstrap.py",
+      "bytes": 63456,
+      "sha256": "0e8334e3ec0cf1d5dc2a5e7754a9bd7d01822f3c511537fbed0fe37b1bcb8e48"
+    },
+    {
+      "path": "run/calibration-source/harness/calibration_repair.py",
+      "bytes": 27682,
+      "sha256": "2c7c0f3f0cd91e3924f4881a412016a4f98c2977d76634710b4b24cca1a71f70"
+    },
+    {
+      "path": "run/calibration-source/harness/calibration_source.py",
+      "bytes": 22508,
+      "sha256": "ceffa297a673c38a59d6e844e477be8432497fd25d90f81e37f0f1a10b04b61f"
+    },
+    {
+      "path": "run/calibration-source/harness/corpus.json",
+      "bytes": 47806,
+      "sha256": "753f432a23abfd4f78e2b511e56889cec3b91dff8aad0cf501ddebaaae7b5a40"
+    },
+    {
+      "path": "run/calibration-source/harness/dependency-resolution.json",
+      "bytes": 18785,
+      "sha256": "382330441663c5ef7c4684bca0d9e1be64156a77a5b562086675d637bd1fb92c"
+    },
+    {
+      "path": "run/calibration-source/harness/evaluate.py",
+      "bytes": 36924,
+      "sha256": "f81e0833ff38bf13e79cba2c3b8644c46442c45d8302a1bc0d04e074680d87b5"
+    },
+    {
+      "path": "run/calibration-source/harness/native.py",
+      "bytes": 14558,
+      "sha256": "1c8342ccfd7f9592590b525daebc3453604ea9de93bb8b8e201848527ccb067b"
+    },
+    {
+      "path": "run/calibration-source/harness/native_services.py",
+      "bytes": 6012,
+      "sha256": "8d9e039bf02c9333afe93ad2ef2587dc5252dd6c7c857f6ce6e731691a8464c4"
+    },
+    {
+      "path": "run/calibration-source/harness/ownership.py",
+      "bytes": 20894,
+      "sha256": "54ddc476a1e4e924f0b6f7c25be1c6713ab9791c2e11a31c6f5ae2a9d1ccaf92"
+    },
+    {
+      "path": "run/calibration-source/harness/reference.py",
+      "bytes": 13929,
+      "sha256": "9d9ec34db923dbfa1ba50d512337b8d091bd4143a62c8bb9d7517884dbc46b2c"
+    },
+    {
+      "path": "run/calibration-source/harness/run.py",
+      "bytes": 16303,
+      "sha256": "d875aca4fcc87a990925f4f48b3d7bd67633390c5f88799791697590a248f4e5"
+    },
+    {
+      "path": "run/calibration-source/harness/test_bootstrap.py",
+      "bytes": 55405,
+      "sha256": "b263038d1d5c83591162fec26e7ce95c8b7a25a191ee0362b9a5b5df3bfb5d05"
+    },
+    {
+      "path": "run/calibration-source/harness/test_corpus.py",
+      "bytes": 2517,
+      "sha256": "4b0f57ce8ff79e260de0cc0958aa2cfe9029dbcd53b3810b60935fe9e2efccb1"
+    },
+    {
+      "path": "run/calibration-source/prepared.json",
+      "bytes": 66814,
+      "sha256": "f4de60c7f57b4e1e05411f07bbed487f3f8d2b054683963fc1a1f4c8ae12f3af"
+    },
+    {
+      "path": "run/calibration-source/protocol.lock.json",
+      "bytes": 485306,
+      "sha256": "03da58ed49422313097f8e807b23d078318e5826eed83ce0fee41e3560726c95"
+    },
+    {
+      "path": "run/calibration-source/repair-claim.json",
+      "bytes": 901,
+      "sha256": "ed354d5079547966a7c32c5b33f4ac759be2c429869f3682d7497afb4dcabddf"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/bundle.json",
+      "bytes": 198209,
+      "sha256": "c15f70c65b16b55490bf306087352b9c8e957531a5b2fed3d3585314d7022670"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/asset.recipe.json",
+      "bytes": 920,
+      "sha256": "f4b2bd893aa14b0a7fa25b21f97aa381a2b716261964f9aabb97b11a07c4f985"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/asset.sceneworks.json",
+      "bytes": 1875,
+      "sha256": "3e02bfb1aabfdabd15b6ce4fbc461accdf2007ff12ccb0eaf498d0c432415c78"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/original.png",
+      "bytes": 1887022,
+      "sha256": "c5c2262b83b515b70501907736ea1163d68ab8b3b18b654807772849e9c25204"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/selected-index.json",
+      "bytes": 2360,
+      "sha256": "5cc83360e6f3a99f1982be171dc45b4b9dc32ad23e28e5de1f640f04f2ec2b06"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/selected-state.json",
+      "bytes": 21346,
+      "sha256": "84ac4716e1f4953212723a4030329d22f1761ac4e09d5ff9a41c6eb3b57fa397"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/snapshot-index.json",
+      "bytes": 1746,
+      "sha256": "065265da3b85c0360b0ccbdd6fddba36600745435caed573fe297e92d5a3aea2"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/diagnostic/worker.log",
+      "bytes": 4496,
+      "sha256": "3409f69bd8ec70db99cecefca48da0a607bfbcf107db380ea1742d9c1ad42e53"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/bootstrap.py",
+      "bytes": 53153,
+      "sha256": "805074e4ade3c8f6dcc91816f0bfb9ee9a02c72cfa06cf303b270f0aa8361f6f"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/calibration_source.py",
+      "bytes": 21156,
+      "sha256": "b82b9e9eb6e0d02ac480b6b16a0dc56cc3f1f62948e0309378546a1f69b48308"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/corpus.json",
+      "bytes": 47806,
+      "sha256": "753f432a23abfd4f78e2b511e56889cec3b91dff8aad0cf501ddebaaae7b5a40"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/dependency-resolution.json",
+      "bytes": 18785,
+      "sha256": "382330441663c5ef7c4684bca0d9e1be64156a77a5b562086675d637bd1fb92c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/evaluate.py",
+      "bytes": 36924,
+      "sha256": "f81e0833ff38bf13e79cba2c3b8644c46442c45d8302a1bc0d04e074680d87b5"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/native.py",
+      "bytes": 7315,
+      "sha256": "9b54f9fbda3bd80bc03117bfa03a45a0c0bdf41636a2883921fc86c453e07e2d"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/native_services.py",
+      "bytes": 6012,
+      "sha256": "8d9e039bf02c9333afe93ad2ef2587dc5252dd6c7c857f6ce6e731691a8464c4"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/ownership.py",
+      "bytes": 20894,
+      "sha256": "54ddc476a1e4e924f0b6f7c25be1c6713ab9791c2e11a31c6f5ae2a9d1ccaf92"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/reference.py",
+      "bytes": 13929,
+      "sha256": "9d9ec34db923dbfa1ba50d512337b8d091bd4143a62c8bb9d7517884dbc46b2c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/run.py",
+      "bytes": 16303,
+      "sha256": "d875aca4fcc87a990925f4f48b3d7bd67633390c5f88799791697590a248f4e5"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/test_bootstrap.py",
+      "bytes": 48017,
+      "sha256": "a80fc8648e67d10d7e534472279b5463306384efc04bda4084a5a7597217c468"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/harness/test_corpus.py",
+      "bytes": 2517,
+      "sha256": "4b0f57ce8ff79e260de0cc0958aa2cfe9029dbcd53b3810b60935fe9e2efccb1"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/prepared.json",
+      "bytes": 66031,
+      "sha256": "092fcbf9716986621fe4e0e1c0e8edd991645bc4059530699f45843a37fc9d45"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/protocol.lock.json",
+      "bytes": 421309,
+      "sha256": "327d9ca56982b7a3c4e2e26312388cd330d2f89861ce35b32eb89ccf236b08c4"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/repair-claim.json",
+      "bytes": 728,
+      "sha256": "6890fb3828c23655e5b3408824129540627303b8493279cf87c5ee13c6d26a72"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-background-38996284075-1.json",
+      "bytes": 3294,
+      "sha256": "6de5f18dcac31407d86c798ba045eb9950da2d7346b1e9d07138a92a6b22bfee"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-flux2_klein_9b-a3aeb2871a3e4bc481741ffede85d75c.log",
+      "bytes": 670,
+      "sha256": "7ba10c5adceaee0c5e7550541ec2eb76f0a1e90432d56b754d2a0cf0d0328bb4"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-qwen_image_2_1-0a32f87a1f45439d98ca5184e0270424.log",
+      "bytes": 166,
+      "sha256": "0ccac9a95c0700cb6777558bc227807ba6dd58cdf985e50731e67484869dd4ae"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/bundle.json",
+      "bytes": 143570,
+      "sha256": "6cf2920e6592787c2b83db43a05a4c3157c7af5d73e096e588fde2c5dc15b2fe"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/calibration-estimate.json",
+      "bytes": 5046,
+      "sha256": "cab6cf3f3db608da0427c5e45a0ab6816b2060f77b8c652aacc984b1129b60d8"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/bootstrap.py",
+      "bytes": 51671,
+      "sha256": "784610e236f385c42192b7f3a62cdf1a5a7b8462e3562bf0139a46d67817188e"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/corpus.json",
+      "bytes": 47806,
+      "sha256": "753f432a23abfd4f78e2b511e56889cec3b91dff8aad0cf501ddebaaae7b5a40"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/dependency-resolution.json",
+      "bytes": 18785,
+      "sha256": "382330441663c5ef7c4684bca0d9e1be64156a77a5b562086675d637bd1fb92c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/evaluate.py",
+      "bytes": 35995,
+      "sha256": "95a24aa7dacf0ee01292eedb427bd4628a5fc374a628e9761574ddf711a1fe7c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/native.py",
+      "bytes": 7315,
+      "sha256": "9b54f9fbda3bd80bc03117bfa03a45a0c0bdf41636a2883921fc86c453e07e2d"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/native_services.py",
+      "bytes": 4918,
+      "sha256": "84fdedf5a72d652d85fe1207f2f93ac072ec88347c04f238eb1a62d5629ade11"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/ownership.py",
+      "bytes": 20479,
+      "sha256": "4572e881c1b144dfa55339b6c6fe214d8d1ec18bd5ae25c7943ccbf67afc8ca0"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/reference.py",
+      "bytes": 13929,
+      "sha256": "9d9ec34db923dbfa1ba50d512337b8d091bd4143a62c8bb9d7517884dbc46b2c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/run.py",
+      "bytes": 16008,
+      "sha256": "5e1335663216edd31f44bc833c55091759d779ce3ef9e9d6532b8f303b53b45a"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/test_bootstrap.py",
+      "bytes": 48003,
+      "sha256": "dda9ef7dd07f550fa47487ef6f8a91936f5ca5ebffb08a2b67624eedadc7f91c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/harness/test_corpus.py",
+      "bytes": 2517,
+      "sha256": "4b0f57ce8ff79e260de0cc0958aa2cfe9029dbcd53b3810b60935fe9e2efccb1"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/prepared.json",
+      "bytes": 65933,
+      "sha256": "a74bf9ab76c744789260370b01af2c3b73536636b0d2bcfc2c1fb4271aa40e2c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/protocol.lock.json",
+      "bytes": 353457,
+      "sha256": "a364b98b5718c993f1ef4a2aaae61bcbbce1041b0c241e92d13f6dd948a34423"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/repair-claim.json",
+      "bytes": 486,
+      "sha256": "012e9e04d107ef43009e9fce9573b8ab03ac94937479e582ae81e47dc2d6cbad"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/reuse.json",
+      "bytes": 88716,
+      "sha256": "2b73ccc5698644515725e31f488954f504082877c5e46b924e675fb035af0356"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/calibration-background-38990087847-1.json",
+      "bytes": 3294,
+      "sha256": "6de5f18dcac31407d86c798ba045eb9950da2d7346b1e9d07138a92a6b22bfee"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/outputs/calibration.moss_base.english_signage-1.173.png",
+      "bytes": 1123605,
+      "sha256": "12a4235ca7dc8c5cd7c9d34cf7b577dad96b4048df5306fd23d54e36657094bc"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/outputs/calibration.moss_dmd.english_signage-1.173.png",
+      "bytes": 985874,
+      "sha256": "d7453b84d7cae9588dce9838d3e078b84b158b81637991e301124a08bdba74f8"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/outputs/calibration.moss_sft.english_signage-1.173.png",
+      "bytes": 1461086,
+      "sha256": "f2257d828f82c68bc82da06b25fc98b06cbb10cfe1d845144a3d67cc3e6c12fa"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/parity/calibration-moss_dmd-bc399f4372ed459caa05ade341db1dee.log",
+      "bytes": 1362,
+      "sha256": "bcf8bd6183d7c541ba6a0b5c903bbb987f80995f4a959bc1929733fabcb574e2"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/parity/scored.moss_dmd.english_signage-1.173.calibration-moss_dmd-bc399f4372ed459caa05ade341db1dee.log",
+      "bytes": 1360,
+      "sha256": "16e562ef15fc073730d4d7c225d273a18bf3ac0c43dfec074121d3d515f2d74e"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/parity/scored.moss_dmd.english_signage-1.173.json",
+      "bytes": 6876,
+      "sha256": "7892b05ce489d809ee9ebb8da35add9b49d6138f8350f115f2aaaaf99001844d"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.flux2_klein_9b.english_signage-1.173.calibration-flux2_klein_9b-ff7f474269db4f52874f33034f8f19b8.log",
+      "bytes": 1149,
+      "sha256": "0fd192ec40451e406940054d11e980048cb9ea8e51d883723130a354e3561175"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.flux2_klein_9b.english_signage-1.173.json",
+      "bytes": 2463,
+      "sha256": "15a1395f70357532e712393635252fc84f58d52972bff54ebc8846e9c2f8bcdd"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_base.english_signage-1.173.calibration-moss_base-a997691c66654911a0bd7a18f41d3efc.log",
+      "bytes": 4327,
+      "sha256": "e11015c6d14e5dc128b0ea5f40e324a052f17a5ea0631763c13666e1cd141844"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_base.english_signage-1.173.json",
+      "bytes": 6465,
+      "sha256": "926d2387a72b233276b8a26d8daca94f6c6bd8f9165119edab73cca394182cf2"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_dmd.english_signage-1.173.calibration-moss_dmd-bc399f4372ed459caa05ade341db1dee.log",
+      "bytes": 1285,
+      "sha256": "b9bf9566cc3af9efe721cee93fc9de5416c2285cc69cdd8cc9b29069ef4d01a1"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_dmd.english_signage-1.173.json",
+      "bytes": 4678,
+      "sha256": "72ac6a08709cd2c1fb7d10ea3afe6e97403e1f234c5f09ee7db6b44a757d92bc"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_sft.english_signage-1.173.calibration-moss_sft-46e6da11d88e457c9ec424558d3693db.log",
+      "bytes": 4326,
+      "sha256": "8c77c7a8105d10beddc0278378c0ed1c2d6a292ec71714c84e418ebc7b63bc8d"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.moss_sft.english_signage-1.173.json",
+      "bytes": 6490,
+      "sha256": "65fc82a665f0aa7c6a59cda80a2db340f891147281140a8d6d5cf8921b060cc5"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.qwen_image_2_1.english_signage-1.173.calibration-qwen_image_2_1-b782e8949e084b2a92db5c0561f74685.log",
+      "bytes": 1149,
+      "sha256": "d1221f809f0415d770f9433dddbd4d4aebf92cb2767ad1aa7fdd5c81ed18c0d5"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.qwen_image_2_1.english_signage-1.173.json",
+      "bytes": 2464,
+      "sha256": "4173d64775b3b75696f5d1ce997dd4a61522b5f70c873ad5b5ba863aecb7743f"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.z_image_turbo.english_signage-1.173.calibration-z_image_turbo-5af4acbd3a2649d79de2fc5a6c0f351a.log",
+      "bytes": 1147,
+      "sha256": "ee6d1e2cdcb3433af7b363cde3155bb9f976905c9c168d9bd7f7265e345c658f"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/run/receipts/calibration.z_image_turbo.english_signage-1.173.json",
+      "bytes": 2444,
+      "sha256": "3e19e58dc82d0d8702631e5f1fff87b9667de36cf1c108d826d4036e55e5ac5b"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-source/source-job.json",
+      "bytes": 1084,
+      "sha256": "97f4972821b25a7cdd17b1c83a8a0e4467601f26a4b06153c13c461241244a00"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-transport-flux2_klein_9b-38996284075-1.log",
+      "bytes": 77,
+      "sha256": "1b4cbb44e9509e3c4518a2c027e08bc87394eef17a1214cc61d54e97d488d421"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/calibration-transport-qwen_image_2_1-38996284075-1.log",
+      "bytes": 54,
+      "sha256": "c6c40a7e5955fb2940c4876089c89bb9140116b1e275c74e747a3c45bf45482f"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/invalidations/calibration-flux2_klein_9b-38996284075-1-transport.json",
+      "bytes": 522,
+      "sha256": "276b3bc9b370d798a4211299c266ef7d4be37628eb40a519b6a124c30227972c"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/invalidations/calibration-flux2_klein_9b-a3aeb2871a3e4bc481741ffede85d75c.json",
+      "bytes": 466,
+      "sha256": "5676476352c3c60944dceb1b3fd484bf296e95246bcdd6a3cb542e129c691e3a"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/outputs/calibration.qwen_image_2_1.english_signage-1.173.png",
+      "bytes": 1737858,
+      "sha256": "43c049c5f1494d6c6cd2548b33d7a1cb912b1f37c460cc434b41125bd2b98776"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/receipts/calibration.qwen_image_2_1.english_signage-1.173.calibration-qwen_image_2_1-0a32f87a1f45439d98ca5184e0270424.log",
+      "bytes": 166,
+      "sha256": "0ccac9a95c0700cb6777558bc227807ba6dd58cdf985e50731e67484869dd4ae"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/run/receipts/calibration.qwen_image_2_1.english_signage-1.173.json",
+      "bytes": 77376,
+      "sha256": "23ca4152d69c7d74c947ef009e7c58ef20cad5cc08c4aaac75547ab0bac87f68"
+    },
+    {
+      "path": "run/calibration-source/run/calibration-source/source-job.json",
+      "bytes": 1260,
+      "sha256": "0cfe43201d6fbdb47d62f06d6e976e21e15101f69b2485ba6b24a5d8b5a0f1f0"
+    },
+    {
+      "path": "run/calibration-source/source-prepare-job.json",
+      "bytes": 1088,
+      "sha256": "2caf1326a10605c8852838365fcce98bb7ec343f09475b5ea9e3c295e420171b"
+    },
+    {
+      "path": "run/calibration-transport-flux2_klein_9b-39046326032-1.log",
+      "bytes": 54,
+      "sha256": "e5803021edcdb7f85ab683a2bf78b4d5dc80413f8af34dabdb625a1ad7021c9d"
+    },
+    {
+      "path": "run/calibration-transport-z_image_turbo-39046326032-1.log",
+      "bytes": 53,
+      "sha256": "5afb80927fc090448e1926aa9544f3f40c31b93e1850b8f2ab44f5806a2740c0"
+    },
+    {
+      "path": "run/invalidations/scored-moss_sft-39047172756-1-transport.json",
+      "bytes": 2460,
+      "sha256": "9bb743272e12c16f2ed70de5f5204b085ac7b49feea9360979338b6220fac39c"
+    },
+    {
+      "path": "run/invalidations/scored-moss_sft-431b2e3b4d284bd7a9402b636f3ef74c.json",
+      "bytes": 563,
+      "sha256": "2d2e589e66c9ddddd5769475955129be319ea19dc9a989008c2871cf76732a12"
+    },
+    {
+      "path": "run/outputs/calibration.flux2_klein_9b.english_signage-1.173.png",
+      "bytes": 1887022,
+      "sha256": "c5c2262b83b515b70501907736ea1163d68ab8b3b18b654807772849e9c25204"
+    },
+    {
+      "path": "run/outputs/calibration.z_image_turbo.english_signage-1.173.png",
+      "bytes": 1418886,
+      "sha256": "94350671850f5c92aeb849f10c45c750919ec2aec068cb2cc2ec417f54ab9b7b"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.chinese_mixed-1.173.png",
+      "bytes": 839843,
+      "sha256": "6c8ead8e02a0e1f330801f4107134116d9283e188ed8571e05d8a45709be47d2"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.chinese_mixed-1.991.png",
+      "bytes": 948088,
+      "sha256": "9d3694d3fe964f80f4940e4f13dd268acd97a76c9cbf9af2c34673c3fc1f3a3f"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.chinese_mixed-2.173.png",
+      "bytes": 308057,
+      "sha256": "e7e91d5d0b051ea6bd848668f38d6167d1ece3fed605fcd6ebdc4dbda685c91a"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.chinese_mixed-2.991.png",
+      "bytes": 272989,
+      "sha256": "1c346446266ab6c0c5c55b84ce9cbfe1fad7edeb8aaf53a41a20a82bd9825f76"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.dense_whiteboard-1.173.png",
+      "bytes": 344453,
+      "sha256": "4f42fb6554c842ad98da52d1fc5a26d8ce24396e7745300da15f5da53b202f97"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.dense_whiteboard-1.991.png",
+      "bytes": 530685,
+      "sha256": "3e35f3e00dd60cb6900ffe76b4c426f2eab10d234dc162114a45b9550a98f470"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.dense_whiteboard-2.173.png",
+      "bytes": 1048437,
+      "sha256": "dda4be6ec38c62ce338570008df83b99edfbbef3dbf4c3907d1854f0fc943274"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.dense_whiteboard-2.991.png",
+      "bytes": 1232181,
+      "sha256": "0e5c970c3040ff41825d2c93ba0c4d59b6e11526329c9b17d6fe5f2e0e462204"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.english_signage-1.173.png",
+      "bytes": 1123605,
+      "sha256": "12a4235ca7dc8c5cd7c9d34cf7b577dad96b4048df5306fd23d54e36657094bc"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.english_signage-1.991.png",
+      "bytes": 1470809,
+      "sha256": "dbc1bdbb6442af4b5bcdba66b3a03164488a2394dde70f78349f8b24b4db8acb"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.english_signage-2.173.png",
+      "bytes": 1029268,
+      "sha256": "a4dd08b7a89efb77f5560b44a529dc73e17e13f80cb9434d3f7c34ed71a1c74c"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.english_signage-2.991.png",
+      "bytes": 1534940,
+      "sha256": "3651e43b71b49c4d2749183b8997bbee844693c95820901ca984719e88dc9b7b"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.infographics-1.173.png",
+      "bytes": 269485,
+      "sha256": "5a19928f875e677df3a7c5826743fdd26462852744ee632ab7b97d62b261c77c"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.infographics-1.991.png",
+      "bytes": 159967,
+      "sha256": "6914f7ebe403ad71eb37f148e1dc58be7bc15338fa7581f4bb48de5bdc17deda"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.infographics-2.173.png",
+      "bytes": 291000,
+      "sha256": "f559c4e5e60648480e70b8a1ff2daf9d5b579df95ed1e6284b34430b2db1ba07"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.infographics-2.991.png",
+      "bytes": 317940,
+      "sha256": "1bdf4ea3d0ff95153c41d617fdbb149a7b6b73784a7abc932b85c55cf9434007"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_objects-1.173.png",
+      "bytes": 139767,
+      "sha256": "902990bfdd817171ac63fcf9d9e671e5f0cd7f254225f8cdb0f436f7a54c2e1b"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_objects-1.991.png",
+      "bytes": 147642,
+      "sha256": "7b49e8414fc7cddbc73eea7c239b53329ca42ad01e7feb2820c2e82409cadf5b"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_objects-2.173.png",
+      "bytes": 194133,
+      "sha256": "7d008e469dbd821835036f6e727e2c9e2759a9ba8625a3184c24734c9e9b504d"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_objects-2.991.png",
+      "bytes": 193425,
+      "sha256": "ab27f6c792803bfefb11be6c37bdbe0327feba616407a9c425941e58e60026d1"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_text-1.173.png",
+      "bytes": 249761,
+      "sha256": "56b604e0790b0de8d27416af791776d966a313cb0ce53a424884cdd0dd603a19"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_text-1.991.png",
+      "bytes": 147012,
+      "sha256": "41a1402af249519bd8778cfdad3b037105c2626d3c9fe078773c025dc2172987"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_text-2.173.png",
+      "bytes": 195873,
+      "sha256": "f4515454f69c0ced04fb23449f58de8aa0528349cff20eedcae01d204f1571b4"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.json_text-2.991.png",
+      "bytes": 145597,
+      "sha256": "e4758879c954f37b3738aa45d6c206e57cfb6372c830340e8462c4cedd4a3991"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.layout_revision-1.173.png",
+      "bytes": 782833,
+      "sha256": "8490da2c2def39bc4d0c9fcc76cdec3ee07fb7e21d3d0d8af47550993f38c324"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.layout_revision-1.991.png",
+      "bytes": 1245796,
+      "sha256": "512d55b4c1ec70f20fde4408e49470393f065cee418548477cd776fbef657a26"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.layout_revision-2.173.png",
+      "bytes": 205684,
+      "sha256": "7a871c164a771e1301217ad66e0547b5525b39b253027e76cfd58fb73dddfa84"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.layout_revision-2.991.png",
+      "bytes": 170419,
+      "sha256": "f6ab18fea52fda4a1e22e379421755df9b2f6f7a5bb16239f25e863358816e9c"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.long_detail-1.173.png",
+      "bytes": 2033577,
+      "sha256": "19b86e8c2a2153a8456b10e6988496107eba9bb69c8ae94c09cfe644dde58996"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.long_detail-1.991.png",
+      "bytes": 2374444,
+      "sha256": "0ae6cb2232e15cbcb5a207420c684998b13ccbcf7c21510f242d77a20605368c"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.long_detail-2.173.png",
+      "bytes": 2004612,
+      "sha256": "765aeee0d29fd9eb289fb1a7d209edc916b3ba64ec2a62ad569e04ea1602cbe7"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.long_detail-2.991.png",
+      "bytes": 2446803,
+      "sha256": "85a335e60a3e7c55b3f844808cf9822fdc73ea2162f666567206cdc7153dfbbd"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.photo_portrait-1.173.png",
+      "bytes": 1924975,
+      "sha256": "21d198312515e38f15d89398f9f98c9507b14063825c31564b3a4a5e4cd4e448"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.photo_portrait-1.991.png",
+      "bytes": 2123631,
+      "sha256": "be57609e3cf59af5e1c259964564148e4dfb6d6d025d871edd08c5775ec05367"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.photo_portrait-2.173.png",
+      "bytes": 2105200,
+      "sha256": "a644237bf128651b11e352574bb40e9353db99c80e92599c5b237f387319c0c3"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.photo_portrait-2.991.png",
+      "bytes": 2353870,
+      "sha256": "8d59675901f9cbab78e067fdbeed04cc852ebf9048024de6ce2c6128b5d2db03"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.posters-1.173.png",
+      "bytes": 1313030,
+      "sha256": "bead909baef8ff31d133af751cedf6ac19f38ecaaa6a3582fe744374e08c31bb"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.posters-1.991.png",
+      "bytes": 2113000,
+      "sha256": "ba8202f270121738f208f87549919afaf572f05250263c7c5ac85732e0598ff1"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.posters-2.173.png",
+      "bytes": 1526028,
+      "sha256": "fe4aff2bf837419a8b87713c668bdae0de79f844d4b51c59795d1395897e08a6"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.posters-2.991.png",
+      "bytes": 1946088,
+      "sha256": "70469137e1137137dba2592374f065050f98d40abe5fffa6ca88276bdc2e727e"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.product_aspect-1.173.png",
+      "bytes": 1441089,
+      "sha256": "42a61d268048ecb0f2d42eea5b916ad92e9988e036dd58c0e7aa14638c7fc576"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.product_aspect-1.991.png",
+      "bytes": 1422494,
+      "sha256": "afe53a3812f7ba946a7ea56360b577aaf4cd5c394acebfa96a159d35528d9f75"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.product_aspect-2.173.png",
+      "bytes": 1097002,
+      "sha256": "d24f638bc10bdf08cea74e64740fb7b75ea6346738623f40eced63e2d53d1af2"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.product_aspect-2.991.png",
+      "bytes": 1357121,
+      "sha256": "0faba9c173f3a3f66584d0ddd19d66ab267fbffb596760bab31bf14f6ca79498"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.tags_anime-1.173.png",
+      "bytes": 1226677,
+      "sha256": "524d384393f73bf65042ee85b6ef6c13aaeca0d957d400a68fe9bed855bd3b9b"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.tags_anime-1.991.png",
+      "bytes": 1180265,
+      "sha256": "efc7789e7dc100211025a3125fbd0be346627181f5fb16d0e4c16dfa7c8e6cdb"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.tags_anime-2.173.png",
+      "bytes": 2674617,
+      "sha256": "49084c68a11a12c641815a9932182cc84f21da69f0269bf39847346215702736"
+    },
+    {
+      "path": "run/outputs/scored.moss_base.tags_anime-2.991.png",
+      "bytes": 2896323,
+      "sha256": "211e64790c6f50fe03b913b959ceb291f3a83a8b6bb13362fc98ef05ae148ff0"
+    },
+    {
+      "path": "run/outputs/scored.moss_sft.english_signage-1.173.png",
+      "bytes": 1461086,
+      "sha256": "f2257d828f82c68bc82da06b25fc98b06cbb10cfe1d845144a3d67cc3e6c12fa"
+    },
+    {
+      "path": "run/outputs/scored.moss_sft.english_signage-1.991.png",
+      "bytes": 1560666,
+      "sha256": "4c18c1a66898070abfcdeb2762a9b3f141dadff461e936fad6f68af89fb47c47"
+    },
+    {
+      "path": "run/outputs/scored.moss_sft.english_signage-2.173.png",
+      "bytes": 1229358,
+      "sha256": "2f7404c9930e9edfb995497077ba8690efc9d02fa439d3fe81194a88c88bb839"
+    },
+    {
+      "path": "run/receipts/calibration.flux2_klein_9b.english_signage-1.173.calibration-flux2_klein_9b-57c36dff67ab4b1fbb6c2a0312f56b79.log",
+      "bytes": 166,
+      "sha256": "1808de3a665eedf21c4c5debef4b4f715f186776b55ee2ce33aa2ccb00e7ea88"
+    },
+    {
+      "path": "run/receipts/calibration.flux2_klein_9b.english_signage-1.173.json",
+      "bytes": 89409,
+      "sha256": "9aac75d8c9cc1b5b7ca73edd320f55f0899b55a22b422c5ac343aa9b6e62dd5c"
+    },
+    {
+      "path": "run/receipts/calibration.z_image_turbo.english_signage-1.173.calibration-z_image_turbo-59108e39b4724f3da52fe63644ec6096.log",
+      "bytes": 164,
+      "sha256": "864abf0f92a9a8ea6467c334cea4f459ce1a2c332f72d05ffb23e5f2d4e35edb"
+    },
+    {
+      "path": "run/receipts/calibration.z_image_turbo.english_signage-1.173.json",
+      "bytes": 85485,
+      "sha256": "5d3f17b2d036a9c2082226eb53cc46a8327c24809737f8f85e70cfc95e0c3231"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-1.173.json",
+      "bytes": 6458,
+      "sha256": "708b49fd4e8dbd5747d79111a75a131d0701c92430cb131933654906363247c0"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 16618,
+      "sha256": "4d9d9b781c40813e7aec2b53a1ff291212891ac074de172a5897d3a37f33790e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-1.991.json",
+      "bytes": 6471,
+      "sha256": "8fa89dea0d6994ce0d5e01c37a10bb2d4c084b6fe9771e070ee6a4aaf2fe56fd"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 19711,
+      "sha256": "f34a081859ee6c63d8b606985d0b3e15de869732ad541a4fb98ab30d735a98f5"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-2.173.json",
+      "bytes": 6452,
+      "sha256": "6c890be83e4f17749fad6bf3d686a54a6889d1eb5bde3dfd44cdb5c87bd8de9f"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 22804,
+      "sha256": "fda005299306fd46430b226c14b141b7b281b0a42e39fa41c8d44a2dc6db746f"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-2.991.json",
+      "bytes": 6452,
+      "sha256": "21232791ef0d0f4db021b6e279c6a9ec873c5c081a41a6f1d4616ecbb1ba2092"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.chinese_mixed-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 25897,
+      "sha256": "630eef29920b9714c7348200967d3b98522af961bab47ef1480e9d08bd48af6c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-1.173.json",
+      "bytes": 6548,
+      "sha256": "c61b0ee042b1a14af3067282b5ea6b01ace5201e24b4810a8975d0d19f92175f"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 28993,
+      "sha256": "5780fb3ad6326b8f4501c71f584085a3bc217112295058288bb061362ce3c538"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-1.991.json",
+      "bytes": 6545,
+      "sha256": "0a12dc92b165c417fd91f40f367b7d682e7c0ff9ec6f3aaa020c406c3cafa79c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 32089,
+      "sha256": "c1b9257896b5dd8f02a8baddd028db2009b2dc7fd95a4cf21e1e744ccf089a4e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-2.173.json",
+      "bytes": 6511,
+      "sha256": "6bbf774f04aa85e01a5fbecc3d780801ae1c31d523f210b6c8b8cc3e66b259cb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 35185,
+      "sha256": "2d6179ff6741d86e7941a699c8e935f004f490152aa8b30848fb424f225161fd"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-2.991.json",
+      "bytes": 6498,
+      "sha256": "4f94868a0bbf2f40f73fe4c772179439802f21f2fae26f2cf79138e3103968e4"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.dense_whiteboard-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 38281,
+      "sha256": "30d2bb9f75ad28d4e6a6e6ee3a8dcee9ff534d36f0079e1faebaba19ffe8667d"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-1.173.json",
+      "bytes": 6467,
+      "sha256": "a03f8c9d13fa6fa00e380694f4eb8a54328ad497d8b4ce3fa1f46c57ef2684f5"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 4240,
+      "sha256": "e0fb434fc963a9e98b3a90f22176b9e4d541a7875c8b7b80a3b87797bcd8aa64"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-1.991.json",
+      "bytes": 6460,
+      "sha256": "a8c115e6a8a2d61939dc221dbbb426a236f92efce989d7a16c25bb0fe652dbdf"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 7335,
+      "sha256": "96d9d3366a659c45c5938c457409dac62936bf7ef5d01e786bcff056a853387e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-2.173.json",
+      "bytes": 6417,
+      "sha256": "8bbd4d8d564ce7383366128b48302e43d943cc4bc7dcdebd034eaf94c8afade3"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 10430,
+      "sha256": "7497b39de83682eb477f8853ea83ddc11827f988a5c3c7476a7a6b0b45af1c6e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-2.991.json",
+      "bytes": 6430,
+      "sha256": "243d7b915a96a3371aa89aaa8d173bfe60195a64e659abd3f1ce1dac20b58ff5"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.english_signage-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 13525,
+      "sha256": "fa58f0802dd819003ea59ef4154de29de6073f203e1197c41399b1dc0c2ffd4f"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-1.173.json",
+      "bytes": 6489,
+      "sha256": "395dcad4af80fdf19d148997dca3ee310766fe18298b332ad23e03f339764fe7"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 53721,
+      "sha256": "c26dce59e4d6c78430b3fbe14596d6b891759a15c4a549dcffc34ad3a4f8abf8"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-1.991.json",
+      "bytes": 6476,
+      "sha256": "ea0178f8e61455d3812665497e0532ac2b355c58a606191608691cecc30864aa"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 56813,
+      "sha256": "c185aa14e9a3e9dd5167b813320a05ba830209a133e987c6df441ee67ad5f3dd"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-2.173.json",
+      "bytes": 6472,
+      "sha256": "25eafb26b57cd33994b077151ed6a4e54596d4b00d6cf5b91b5f727399ef1ccb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 59905,
+      "sha256": "4fd315d1d300be47708fe9a701669608b16c58d72863416e34f14d7f59f73747"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-2.991.json",
+      "bytes": 6474,
+      "sha256": "7bf853339df4b19958aa23957cd90854b497aa8b0e808034ac1014f23d0e2d28"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.infographics-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 62997,
+      "sha256": "6d1ca3dd7449be6e5dcd1fc11faef1a838801282d237f8345d506cfe3c17f71b"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-1.173.json",
+      "bytes": 6822,
+      "sha256": "cd1980b627e178ed1dd389e7788a02dde0ea23665e3712b8a9048a3b089fe65e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 78445,
+      "sha256": "a0974f866770147cc42cfcd81e9e96d9fdebd7ced8c6291ad8aed82b7d85c2c2"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-1.991.json",
+      "bytes": 6827,
+      "sha256": "73499e9c726f47c50a5ac6c16321ce1f1580efb3e3c75dfc3a7e07228637584e"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 81537,
+      "sha256": "8d89bb6860dc3976cb950a75579239f31aef7d835f2d7aabae14541cc7c58cd8"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-2.173.json",
+      "bytes": 6793,
+      "sha256": "c46373ab07f982fabf5da79db900790532619525c6545dcea2cf99d8a85ef94d"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 84629,
+      "sha256": "b6f744fb3378ae682df50e696a43ff0688af2138daebfda81ea556dafda698d7"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-2.991.json",
+      "bytes": 6846,
+      "sha256": "ce256bb5b7d5b03cb5369db7303f519145d9e2274954065a676e038c98b5477a"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_objects-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 87721,
+      "sha256": "9ac727d9c77d3d053bf1b3a5689d43716629c8a18364f8d361eaf424492d764a"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-1.173.json",
+      "bytes": 6832,
+      "sha256": "11887f50c172f8ec925c71e70315c4f44514d4e542c520ce40ea57e0077c1be6"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 66086,
+      "sha256": "76b6e212a9ae9c3ac7f7d6262d88d7daf8aa4a1eabca9ea0a143f4167889f583"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-1.991.json",
+      "bytes": 6832,
+      "sha256": "29810d35019470d61545ab3ed5fb5adb9cf476339658e29ddec943b3fc019abc"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 69175,
+      "sha256": "0a0258d39f549a7bde91608860ae4b36c15845eac7b75c42ae320d0ee1b29c77"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-2.173.json",
+      "bytes": 6841,
+      "sha256": "ed07df121143239b9d62d7bbf89230995e21b9036da04fde6c26be761d180d3c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 72264,
+      "sha256": "b9ab05b469e93ef89b0062b6f2c71eed2022fee379b8ad3c0dc49c23e0eb5316"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-2.991.json",
+      "bytes": 6841,
+      "sha256": "2927d13893193aaee523030a79423547e33497e0749da52eb6def2e3f2c63bfc"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.json_text-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 75353,
+      "sha256": "2ee90947e396fafe656e97fc828d2d20e8b2dae8b67676faf26e5fb5432e1db8"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-1.173.json",
+      "bytes": 6987,
+      "sha256": "db09dcc570888fcdcc7946a3d447f90b5569bcaa7dda23590052df956a7dedb6"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 90816,
+      "sha256": "0c73b993eec9e983d6ed1afa7bbf961a842afd239e0b06b2e9f3df7e13bc70ac"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-1.991.json",
+      "bytes": 6987,
+      "sha256": "f15a18f9a162ba65cb9a827a1df10127461a162331413cdd611618a2140e3d31"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 93911,
+      "sha256": "2e9aa277e2645e5518adaf7209c88fa97ffb1d6ae0a534cb80dc4acd681cc989"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-2.173.json",
+      "bytes": 6969,
+      "sha256": "9d168dba3d2fd39e43c2ebaedefa75bd2645e888e222d8a7a91a43430f2c4ddc"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 97006,
+      "sha256": "6129d5f399ce8f5709c673bd68a980b5dd207bf11ded77ae811c4afb08a84ce7"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-2.991.json",
+      "bytes": 7004,
+      "sha256": "ea371cf34ce0148a80f8ec79708102dd0e2597a92014a2f1f5e9dff3ce60fa51"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.layout_revision-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 100101,
+      "sha256": "704dfe8ebf9274934ae831b4adf6328a71379663fa9822dafe88d2ec57084a05"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-1.173.json",
+      "bytes": 6871,
+      "sha256": "954edfd9d72cc319f5b50f4ae6863939960150c6b23639ef5381abfc0e06a52b"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 103192,
+      "sha256": "14f323a1e61036a47d6ec0a6977d7c293c32d137d1040bfa332dfc3085ecd1b7"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-1.991.json",
+      "bytes": 6885,
+      "sha256": "654cd8ecfae20164c23e6356120aa244568339b6f160e5a9c65642f14320cd69"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 106283,
+      "sha256": "2a1588fabe8a23b3b3d52cfb40a7af9d90c924abc86383444279a83def291f50"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-2.173.json",
+      "bytes": 6846,
+      "sha256": "d7c8ebf0bc0dc5ff0271df5c0b584af96bda106b3a5359b4cb3445f454aed6d2"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 109374,
+      "sha256": "eb3a1b631f35d40359e0ff72bd4d7150b5f34dcc593abb3a11191388ca526ccb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-2.991.json",
+      "bytes": 6858,
+      "sha256": "0d3429ad314926ea4e148a27545833c2e38150cc14fea72074afbe3b7a034078"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.long_detail-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 112465,
+      "sha256": "7aa40fc3a2a67acc080b5d52fc43924a7692c50ca71fe86c851a50d1f72fbbd1"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-1.173.json",
+      "bytes": 6516,
+      "sha256": "7fc22d31e86429744c7f98f3e4f6cd6ef32a0003f6d93deeff188e2bc88b08b1"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 127919,
+      "sha256": "7b13bbcc2ed39bc0aaf6cd578e7d5f80b354b215ce72435aaf91ae34ed4d0fdb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-1.991.json",
+      "bytes": 6504,
+      "sha256": "8c3132602f2cba8d26c7c5b373c76364e666989864238f019bb5034936a532b5"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 131013,
+      "sha256": "4729fc12c3865a7529bef6b2de0b700e9a4d64e736bd30dcb4024eeb12d85f04"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-2.173.json",
+      "bytes": 6530,
+      "sha256": "3b34a7ae2af8025cd760a6cef1146788c322a5e475e9471d37aa7cf1cd283999"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 134107,
+      "sha256": "4ab7b5c580bd831b0d897b32dfce4c81dbf90f59ca6cd3a5c816cff60c1021fe"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-2.991.json",
+      "bytes": 6516,
+      "sha256": "d34ebc03cbe24ebe353a6c9d0369c94bd3de401cac5f1e911e1b8f8f0d6d101b"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.photo_portrait-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 137201,
+      "sha256": "88b40bf92a6151749ce7e983895ae4c0fccdba3cb9077bbef4c10481935c4386"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-1.173.json",
+      "bytes": 6410,
+      "sha256": "3675dbc0ac4e2c27f9cfcae5a7c0d1752005008d9f6a658538052a9ebffbe62c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 41368,
+      "sha256": "e3b0f78cf3392af02789aa5fb688e49fec404be533e02009828b628bca0c56d3"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-1.991.json",
+      "bytes": 6420,
+      "sha256": "91f64f7cdfbc3fc518da4bf701a919d2900bb4333927a8573ba692db0ac07197"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 44455,
+      "sha256": "1f0931ebfdf43fd149d602bab1887504d9a7058ccd5a7952d49085bd8679d23a"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-2.173.json",
+      "bytes": 6422,
+      "sha256": "aa683fa0d5b00a7b27beb3304be2ce039d4e24363a84265edc76d40a44db0321"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 47542,
+      "sha256": "1bafe0ad125d0e3569a2d7272938e08a3e38fe325809aa473c74757b696a2abb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-2.991.json",
+      "bytes": 6369,
+      "sha256": "cc7cc61ab92104ed4eba7cf671e58e8b6edcdc9154bb09921d41b98c7e44db2c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.posters-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 50629,
+      "sha256": "aec550a267a66b20f278f5e2ac58d1c1d9bdd7fe6bdb992022cf9a8696178bb6"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-1.173.json",
+      "bytes": 6553,
+      "sha256": "192fef8dc40eea094ea737abbf0d31599c928a92757ad1ca35642c9999b209bb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 140295,
+      "sha256": "b0ab9240ebd96109ca88d69ac9a234134df95c75b391fb29dc67e442a6f6abec"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-1.991.json",
+      "bytes": 6552,
+      "sha256": "bd205a4f07ff3851b7eaa436edb92dcb6364f14c686e8a4eee365b7df448b136"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 143389,
+      "sha256": "83e03ad0be5d31157d1a22b7eb71628c222e32930adb93efe55c5c9a1b16b930"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-2.173.json",
+      "bytes": 6523,
+      "sha256": "4a9366e0d69d6b56fb669e05e729b3e1c36b162474da646ffa1f8fbec8385c45"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 146483,
+      "sha256": "7ca1d6e561ccab7f91c667001372a883162a96a6a36b452b7ff9746dfaf6c2d0"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-2.991.json",
+      "bytes": 6522,
+      "sha256": "cb01da58b92a9dcb77347ea7d7bc70775d3dafdb5e8986e0af5507508d45a1ce"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.product_aspect-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 149577,
+      "sha256": "43c5f6a57b6bf6cd8ea5b6317a30a28b1b8f7a7613c1c6feddce851978e040c6"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-1.173.json",
+      "bytes": 6442,
+      "sha256": "96bda30836ba79c0432fb2ce985224820c4c2dc7016be06b8913c7814942f056"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-1.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 115555,
+      "sha256": "937df665258ff1931975d947a56fcbc25151de516103bf5c2553cf14e72c3a4c"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-1.991.json",
+      "bytes": 6431,
+      "sha256": "185f986f035344864d0ff90ab75515a4becc66b91c996fa079940fdcb07a64eb"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-1.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 118645,
+      "sha256": "44461a1701f21857d20bf79a2fbe3ac53344fe7afa452d0c707b209b586acf68"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-2.173.json",
+      "bytes": 6428,
+      "sha256": "4a15ae320855c5e748d33690e3e4998819e4557dfd3ad440c61f9bc19a5451b1"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-2.173.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 121735,
+      "sha256": "3473b5addce40a6a6d2e48ea6270d42c69f0a027d87c5df175a8f1df44a6a852"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-2.991.json",
+      "bytes": 6444,
+      "sha256": "8dfef0f3c817be1c3d4c85788aa963d92d92e1b0d1dce9aeb43a2f3e4dadda9f"
+    },
+    {
+      "path": "run/receipts/scored.moss_base.tags_anime-2.991.scored-moss_base-7cb76cfc281946efb30656b37875af69.log",
+      "bytes": 124825,
+      "sha256": "a80f8241457cc28d5c0155987b32b4857c4a4981b025c53f70b13304fb8e2507"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-1.173.json",
+      "bytes": 6465,
+      "sha256": "bb1a35085366c89cdadf60ba7e026b4e67e4757bec2b4b564502c3901e06f9f9"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-1.173.scored-moss_sft-431b2e3b4d284bd7a9402b636f3ef74c.log",
+      "bytes": 4237,
+      "sha256": "bb3d0b1ca8213ed4f79216f692614fb181be8543aab5dd8852daf4586d5f3ad9"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-1.991.json",
+      "bytes": 6415,
+      "sha256": "24e86e9a3a2555b57133e244fa3c378435d91243b470b6f4babf6103d2373962"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-1.991.scored-moss_sft-431b2e3b4d284bd7a9402b636f3ef74c.log",
+      "bytes": 7331,
+      "sha256": "69ec3753b30dfdc72f74fd605592e8bd79817c27cf04fd0b6334462c92409e34"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-2.173.json",
+      "bytes": 6425,
+      "sha256": "0bdd64916b2a8abd75e1ea7d0c5e74ae5eb0589eb4e2ca720b5b9c4e655d0031"
+    },
+    {
+      "path": "run/receipts/scored.moss_sft.english_signage-2.173.scored-moss_sft-431b2e3b4d284bd7a9402b636f3ef74c.log",
+      "bytes": 10425,
+      "sha256": "4e6655a9ec66ac10a087ec8211eb61bdb734370231dfd3df5ebaff73d033bd6e"
+    },
+    {
+      "path": "run/scored-background-39047172756-1.json",
+      "bytes": 3507,
+      "sha256": "f03fec122ec64311f182631fbd78b50c758e6986898e78ae7f8ee74e4b6337f7"
+    },
+    {
+      "path": "run/scored-transport-moss_base-39047172756-1.log",
+      "bytes": 1984,
+      "sha256": "9a1053b9122391684f88a0684bfbc3f5ebb22bcb4892c7bd48cc3474ce5e7b6b"
+    },
+    {
+      "path": "run/scored-transport-moss_sft-39047172756-1.log",
+      "bytes": 129,
+      "sha256": "b43c9a2fdab47284fb415fdff8438dbf8a415abc3c92fab0fb83f5b491b31a87"
+    },
+    {
+      "path": "scored-authorization.json",
+      "bytes": 552,
+      "sha256": "c3a6f11ae97e7baa1e27bd4ccc20d5a5a61e2aafbb4f22c23ce6fa6472df5720"
+    },
+    {
+      "path": "wheels.json",
+      "bytes": 6891,
+      "sha256": "c855a735306ccae0bafa57888b2e4de9926530405cfae684289678a21ee23c4c"
+    }
+  ],
+  "scored_ok_label_inventory_only": {
+    "moss_base": 48,
+    "moss_sft": 3
+  },
+  "individually_invalidated_ok_label_rows": 3,
+  "current_rows_import_permitted": 0
+}

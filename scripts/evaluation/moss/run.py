@@ -39,6 +39,9 @@ def worker(config, requests, replies, log, gpu_uuid, mode='candidate'):
     # Verified pipeline source lives inside the immutable snapshot closure.
     # importlib must not create a .pyc there, including direct CLI spawned workers.
     sys.dont_write_bytecode=True
+    from ownership import device_identity
+    index,_=device_identity(dict(gpu_uuid=gpu_uuid,**({'physical_gpu_index':config['settings']['physical_gpu_index']} if 'physical_gpu_index' in config['settings'] else {})))
+    os.environ['MOSS_PHYSICAL_GPU_INDEX']=str(index)
     os.environ.update(PYTHONDONTWRITEBYTECODE='1',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=gpu_uuid)
     with open(log,'a',encoding='utf-8') as stream,contextlib.redirect_stdout(stream),contextlib.redirect_stderr(stream):
         runtime=None
@@ -186,7 +189,7 @@ def existing_successes(manifest,lock_hash,run,config_id,phase,approved=None):
 def execute(lock,run,config_id,phase):
     require(config_id in CONFIG_IDS,'unknown configuration')
     manifest=load_lock(lock);lock_hash=read(lock)['sha256'];run=Path(run).resolve()
-    # Direct CLI shares the complete cache, physical GPU1, owner and scored-authorization policy.
+    # Direct CLI shares the complete cache, frozen physical GPU, owner and scored-authorization policy.
     from ownership import ExecutionGuard
     guard=ExecutionGuard(manifest,lock_hash,phase=phase)
     guard.check()

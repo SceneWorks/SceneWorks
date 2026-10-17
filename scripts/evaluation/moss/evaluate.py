@@ -123,6 +123,13 @@ def validate_manifest(manifest,config_id=None):
     if manifest.get('calibration_carry_forward'):
         from calibration_source import carried
         carried(manifest,Path(manifest['preparation']['path']).parent/'run')
+    if 'physical_gpu_index' in manifest['hardware']:
+        from ownership import device_identity
+        device_identity(manifest['hardware'])
+        require(all(type(c['settings'].get('physical_gpu_index')) is int and c['settings']['physical_gpu_index']==manifest['hardware']['physical_gpu_index'] for c in manifest['configs']),'runtime physical device differs from freeze')
+    if manifest.get('device_recovery'):
+        from device_recovery import verify_manifest
+        verify_manifest(manifest)
     require(manifest['corpus'] == corpus(), 'corpus changed: new freeze required')
     require(manifest['dmd_parity_fixtures']==template()['dmd_parity_fixtures'],'controlled parity fixture plan changed')
     require(tuple(c['id'] for c in manifest['configs']) == CONFIG_IDS, 'six ordered configuration identities required')
@@ -189,6 +196,8 @@ def inventory(config):
         require({p.name for p in (repo_root/'snapshots').iterdir()}=={config['revision']},'alternative native resolver snapshot present')
         # Include refs and all resolver metadata, not merely weight files in one snapshot.
         roots=[repo_root]
+    if settings.get('prior_failed_attempt_root'):
+        roots.append(settings['prior_failed_attempt_root'])
     if settings.get('calibration_source_root'):
         roots.append(settings['calibration_source_root'])
     for root in roots:
@@ -348,6 +357,13 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
     require(image_dimensions(path) == (cell['width'],cell['height']), 'wrong canvas')
     artifact(root, r['log'])
     metrics = r['metrics']
+    if manifest and 'physical_gpu_index' in manifest['hardware']:
+        device=metrics.get('device',{})
+        require(type(device.get('physical_gpu_index')) is int and device.get('visible_uuid')==manifest['hardware']['gpu_uuid'] and device.get('physical_gpu_index')==manifest['hardware']['physical_gpu_index'],'measurement physical GPU proof differs from freeze')
+        if cell['config_id'].startswith('moss_'):require(device.get('logical_index')==0,'Python CUDA mapping differs from logical0')
+        else:
+            context=metrics['native_proof']['runtime_context']
+            require(context['gpu_uuid']==device['visible_uuid'] and str(context['physical_gpu_index'])==str(device['physical_gpu_index']),'native telemetry device differs from freeze')
     for field in ('generation_seconds','peak_gpu_bytes','peak_host_rss_bytes','download_bytes'):
         require(type(metrics.get(field)) in (int,float) and math.isfinite(metrics[field]) and metrics[field] >= 0, f'missing metric {field}')
     condition=metrics.get('latency_condition')
@@ -370,6 +386,9 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
         require({r['cell']['id'] for r in actual.values()}==expected_ids,'DMD representative fixture coverage changed')
         for row in actual.values():
             proof=row['evidence']
+            if manifest and 'physical_gpu_index' in manifest['hardware']:
+                device=proof.get('device',{})
+                require(type(device.get('physical_gpu_index')) is int and device.get('visible_uuid')==manifest['hardware']['gpu_uuid'] and device.get('physical_gpu_index')==manifest['hardware']['physical_gpu_index'] and device.get('logical_index')==0,'parity physical GPU proof differs from freeze')
             require(metrics['sampler']['Q_sha256']==proof['Q_sha256'] and metrics['sampler']['step_codes']==proof['step_codes'],'DMD sampler differs from validated dataspace')
             if row['cell']['case_id']==cell['case_id'] and row['cell']['seed']==cell['seed']:
                 require(metrics['noise_sha256']==proof['noise_sha256'],'DMD measured input differs from controlled fixture')

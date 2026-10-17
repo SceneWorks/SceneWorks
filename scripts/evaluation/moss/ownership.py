@@ -1,4 +1,4 @@
-"""Shared physical GPU1, lease, cache and scored-authorization policy.
+"""Shared frozen physical GPU, lease, cache and scored-authorization policy.
 
 Used by the workflow transport and direct runner. Queries are read-only. This
 module never terminates a process; callers own cleanup of their spawned trees.
@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -37,6 +38,24 @@ def run(argv):
                           text=True, timeout=15).stdout
 
 RUNNER_GPU_UUID = 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe'
+
+
+def device_identity(value):
+    """Explicit new device binding; only sealed legacy GPU1 records omit index."""
+    uuid=value.get('gpu_uuid')
+    index=value.get('physical_gpu_index')
+    if index is None:
+        require(uuid==RUNNER_GPU_UUID,'explicit physical_gpu_index required; legacy GPU1 UUID only')
+        index=1
+    require(type(index) is int and index in (0,1) and isinstance(uuid,str) and re.fullmatch(r'GPU-[0-9a-fA-F-]{16,64}',uuid),'invalid frozen physical GPU index/UUID')
+    return index,uuid
+
+
+def verify_device(value,rows=None):
+    index,uuid=device_identity(value)
+    matches=[g for g in (gpu_rows() if rows is None else rows) if g['uuid']==uuid]
+    require(len(matches)==1 and matches[0]['index']==str(index),f'physical GPU{index} index/UUID identity changed; leased device absent or remapped')
+    return matches[0]
 
 REPOS = {
  'moss_base': ('OpenMOSS-Team/MOSS-Image-Base', '1ceede80badddd6a7812069619edaa5633587192'),
@@ -81,10 +100,7 @@ def desktop_identities(lease):
 def idle_device(lease):
     baseline = desktop_identities(lease)
     require(compute_pids(lease['gpu_uuid']) <= baseline, 'device owners differ from reviewed desktop baseline')
-    matches = [g for g in gpu_rows() if g['uuid'] == lease['gpu_uuid']]
-    require(len(matches) == 1, 'leased device absent')
-    gpu = matches[0]
-    require(gpu['index'] == '1' and gpu['uuid'] == RUNNER_GPU_UUID, 'physical GPU1 identity changed; review ownership before proceeding')
+    gpu = verify_device(lease)
     require(float(gpu['used_mib']) <= lease['baseline_max_memory_mib'] and
             float(gpu['utilization_percent']) <= lease['baseline_max_utilization_percent'],
             'desktop device exceeds reviewed idle memory/utilization ceiling')
@@ -233,8 +249,8 @@ class ExecutionGuard:
         require(required <= set(lease), 'incomplete held device lease')
         validate_baseline(lease)
         require(lease['external_owners_reconciled'] is True, 'shared host ownership is not reconciled')
-        require(manifest['hardware']['gpu_uuid'] == lease['gpu_uuid'] == RUNNER_GPU_UUID,
-                'execution is restricted to physical GPU1 UUID')
+        require(device_identity(manifest['hardware']) == device_identity(lease), 'frozen physical device differs from lease')
+        self.gpu_index,self.gpu_uuid=device_identity(lease)
         require(lease['lease_id'] == manifest['ownership']['lease'] == self.environ.get('MOSS_LEASE_ID'), 'device lease identity mismatch')
         require(lease['protocol_sha256'] == protocol_sha256 == self.environ.get('MOSS_PROTOCOL_SHA256'), 'device lease freeze mismatch')
         require(lease['host'].casefold() == manifest['hardware']['host'].casefold() == socket.gethostname().casefold(), 'device lease host mismatch')
@@ -253,7 +269,7 @@ class ExecutionGuard:
         self.prepared_path = self.prepared_root / 'prepared.json'
         require(self.prepared_root.is_absolute() and str(self.prepared_path) == preparation['path'], 'prepared campaign identity mismatch')
         require(lease['prepared_sha'] == preparation['sha256'] == digest(self.prepared_path), 'prepared receipt changed')
-        require(self.path == self.prepared_root.parent / 'device-locks' / (RUNNER_GPU_UUID + '.lock'), 'lease file is outside physical device lock authority')
+        require(self.path == self.prepared_root.parent / 'device-locks' / (self.gpu_uuid + '.lock'), 'lease file is outside physical device lock authority')
         self.preparation = read(self.prepared_path)
         for config in manifest['configs']:
             item = self.preparation['staged'][config['id']]
@@ -315,13 +331,12 @@ class ExecutionGuard:
         verify_staged(self.prepared_root, self.preparation['staged'], hash_weights=False)
         require(all(self.fingerprint(Path(path)) == before for path, before in self.input_fingerprints.items()),
                 'frozen input metadata changed during execution; evidence must be invalidated')
-        matches = [g for g in gpu_rows() if g['uuid'] == RUNNER_GPU_UUID]
-        require(len(matches) == 1 and matches[0]['index'] == '1', 'physical GPU1 index/UUID identity changed')
+        verify_device(self.record)
         baseline = desktop_identities(self.record)
         if allowed_pids is None:
             allowed_pids = {self.owner_pid} | {p.pid for p in psutil.Process(self.owner_pid).children(recursive=True)}
-        require(compute_pids(RUNNER_GPU_UUID) <= set(allowed_pids) | baseline,
-                'foreign process appeared on leased physical GPU1')
+        require(compute_pids(self.gpu_uuid) <= set(allowed_pids) | baseline,
+                f'foreign process appeared on leased physical GPU{self.gpu_index}')
         require(all(self.fingerprint(Path(p))==before for p,before in self.availability_fingerprints.items()),'availability calibration evidence changed during execution')
         if self.authorization:
             require(digest(self.authorization[0]) == self.authorization[1], 'scored authorization changed during execution')

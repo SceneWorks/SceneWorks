@@ -244,7 +244,7 @@ def test_worker_pipeline_import_keeps_snapshot_bytecode_free(tmp_path,monkeypatc
             assert reference.import_pipeline(source).FIXTURE_VALUE==123
     monkeypatch.setattr(reference,'Reference',FixtureReference)
     requests=queue.Queue();requests.put(None);replies=queue.Queue()
-    run.worker({'id':'moss_base'},requests,replies,str(tmp_path/'worker.log'),'CPU-FIXTURE')
+    run.worker({'id':'moss_base','settings':{'physical_gpu_index':0}},requests,replies,str(tmp_path/'worker.log'),'GPU-00000000-0000-0000-0000-000000000000')
     assert replies.get_nowait()[0]=='ready'
     assert sorted(p.relative_to(source.parent).as_posix() for p in source.parent.rglob('*'))==[source.name]
 
