@@ -50,6 +50,18 @@ def execution_source(path):
 
 def evaluation_source(path):
     """Compare all evaluation dependencies, excluding only archive plumbing."""
+    # Independent reviewed contract: do not derive this from the candidate module.
+    # Only this exact helper may be removed when comparing against the old source.
+    approved_helper=ast.parse("""def parity_evidence(manifest,root,lock_hash):
+    from calibration_source import carried
+    _,prior=carried(manifest,root)
+    result={digest(row):row for row in prior.values()}
+    for path in (Path(root)/'parity').glob('*.json'):
+        doc=read(path);row=validate_parity(root,lock_hash,doc['cell'],doc)
+        require(row['cell']['id'] not in {r['cell']['id'] for r in result.values()},'duplicate controlled parity fixture')
+        result[doc['sha256']]=row
+    return result
+""").body[0]
     omitted=["""if manifest.get('calibration_carry_forward'):
  from calibration_source import carried
  carried(manifest,Path(manifest['preparation']['path']).parent/'run')""",
@@ -76,11 +88,17 @@ for cell in parity_cells(manifest):
     remove={ast.dump(ast.parse(text).body[0]) for text in omitted}
     class Project(ast.NodeTransformer):
         def visit(self,n):
-            if isinstance(n,ast.FunctionDef) and n.name=='parity_evidence':return None
+            if isinstance(n,ast.FunctionDef) and n.name=='parity_evidence':
+                need(ast.dump(n)==ast.dump(approved_helper),'carried MOSS parity evidence helper changed')
+                return None
             if ast.dump(n) in remove:return None
             if ast.dump(n) in replacements:return replacements[ast.dump(n)]
             return super().visit(n)
-    return ast.dump(Project().visit(ast.parse(Path(path).read_text(encoding='utf-8'))))
+    tree=ast.parse(Path(path).read_text(encoding='utf-8'))
+    helpers=[n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='parity_evidence']
+    referenced=any(isinstance(n,ast.Name) and n.id=='parity_evidence' for n in ast.walk(tree))
+    need((len(helpers)==1 and helpers[0] in tree.body) if referenced else not helpers,'carried MOSS parity evidence helper missing or duplicated')
+    return ast.dump(Project().visit(tree))
 
 
 def config_binding(manifest):

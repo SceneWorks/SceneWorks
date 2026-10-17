@@ -466,6 +466,27 @@ def test_calibration_carry_rejects_incompatible_or_forged_source(carry_fixture,c
     with pytest.raises(ValueError):cs.install(root,m,request)
 
 
+@pytest.mark.parametrize('change',['validation','duplicate','hash','missing','duplicate_helper'])
+def test_calibration_carry_rejects_parity_helper_validation_mutations(carry_fixture,change):
+    import calibration_source as cs
+    f=carry_fixture;root=f['root'];m=f['manifest'];request=f['request'];path=root/'harness'/'evaluate.py'
+    text=path.read_text()
+    mutations={
+        'validation':("row=validate_parity(root,lock_hash,doc['cell'],doc)","row=unseal(doc)"),
+        'duplicate':("require(row['cell']['id'] not in {r['cell']['id'] for r in result.values()},'duplicate controlled parity fixture')","pass"),
+        'hash':("result[doc['sha256']]=row","result['0'*64]=row"),
+    }
+    if change in mutations:
+        before,after=mutations[change];assert before in text;text=text.replace(before,after)
+    else:
+        start=text.index('def parity_evidence(');end=text.index('def receipts(',start);helper=text[start:end]
+        text=text[:start]+('' if change=='missing' else helper+helper)+text[end:]
+    path.write_text(text)
+    prep=ev.read(root/'prepared.json');prep['harness']['evaluate.py']=ev.file_hash(path);(root/'prepared.json').write_text(json.dumps(prep))
+    m['preparation']['sha256']=ev.file_hash(root/'prepared.json');request['authorization']['new_harness_sha256']=ev.digest(prep['harness'])
+    with pytest.raises(ValueError,match='parity evidence helper (changed|missing or duplicated)'):cs.install(root,m,request)
+
+
 @pytest.mark.parametrize('change',['original_bytes','extra_file','new_moss_image','new_moss_receipt','claim'])
 def test_carried_archive_and_new_image_budget_remain_strict(carry_fixture,change):
     import calibration_source as cs
