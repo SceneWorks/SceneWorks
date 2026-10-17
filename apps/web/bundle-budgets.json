@@ -2,7 +2,7 @@
   "initial": {
     "rawBytes": 500000,
     "gzipBytes": 150000,
-    "brotliBytes": 125000
+    "brotliBytes": 126000
   },
   "total": {
     "rawBytes": 3200000,

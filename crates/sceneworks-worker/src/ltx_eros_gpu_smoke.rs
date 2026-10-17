@@ -225,6 +225,9 @@ fn ltx_eros_candle_gpu_smoke() {
                 println!("[sc-18902] decoding");
             }
             Progress::Loading(phase) => println!("[sc-18902] loading {phase:?}"),
+            Progress::Upsampling { tokens, max_tokens } => {
+                println!("[sc-18902] enhancing prompt {tokens}/{max_tokens}");
+            }
         })
         .unwrap_or_else(|error| panic!("Candle LTX Eros render: {error}"));
     let render_seconds = render_started.elapsed().as_secs_f64();

@@ -5797,3 +5797,52 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
         None
     );
 }
+
+/// sc-26235: one public request contract, two native lanes. Removing either the Candle catalog
+/// row or its family-specific refusal must fail this test.
+#[test]
+fn flux3_candle_routes_the_same_plain_request_and_refuses_unsupported_carriers() {
+    assert!(CANDLE_ROUTED_MODELS.contains(&"flux3_klein"));
+    let request = object(json!({
+        "model": "flux3_klein", "mode": "text_to_image", "prompt": "a red lighthouse",
+        "width": 768, "height": 512, "steps": 7, "seed": 123,
+        "sourceAssetId": null, "referenceAssetId": null, "maskAssetId": null
+    }));
+    assert!(image_request_candle_eligible("flux3_klein", &request));
+    assert!(image_request_mlx_eligible("flux3_klein", &request));
+    for extra in [
+        json!({"mode": "edit_image", "sourceAssetId": "source"}),
+        json!({"referenceAssetIds": ["one", "two"]}),
+        json!({"controls": [{}]}),
+        json!({"loras": [{"id": "adapter", "weight": 0.8}]}),
+        json!({"advanced": {"mlxQuantize": 4}}),
+        json!({"advanced": {"quantTier": "nvfp4"}}),
+        json!({"hiresFix": {"enabled": true}}),
+    ] {
+        let mut payload = request.clone();
+        payload.extend(object(extra.clone()));
+        assert!(
+            !image_request_candle_eligible("flux3_klein", &payload),
+            "{extra}"
+        );
+        assert!(
+            !image_request_mlx_eligible("flux3_klein", &payload),
+            "{extra}"
+        );
+        let reason = classify_candle_image_gap(&payload);
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{reason:?}"
+        );
+    }
+    let controls = object(json!({"model": "flux3_klein", "controls": [{}]}));
+    assert_eq!(
+        candle_image_first_refusal("flux3_klein", &controls),
+        Some(CandleImageRefusal::Flux3Surface)
+    );
+    let reason = classify_candle_image_gap(&controls);
+    assert!(
+        reason.detail.contains("pinned distilled checkpoint"),
+        "{reason:?}"
+    );
+}

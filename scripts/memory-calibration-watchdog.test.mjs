@@ -4,10 +4,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { assertFixtureChildSucceeded, externalFixtureSkip, platformFixtureSkip } from "./test-platform-capabilities.mjs";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { validateWatchdogEventChain } from "./run-ltx-safety-canary.mjs";
+
+// Only real POSIX process/socket fixtures need this contract. Parser/injected
+// telemetry tests below remain ordinary tests on Windows; Linux is NOT excluded.
+const posixProcessFixture = { skip: platformFixtureSkip("posix-processes") };
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -248,7 +253,7 @@ raise SystemExit(module.guard(module.parse_args()))
     { timeout: harnessTimeoutMs, env: withVirtualClock(environment) });
 }
 
-test("physical-footprint hard stop terminates the responsive owned group with no residue", async () => {
+test("physical-footprint hard stop terminates the responsive owned group with no residue", posixProcessFixture, async () => {
   const result = await run("high", 100);
   assert.equal(result.status, 97);
   assert.ok(result.events.some((event) =>
@@ -262,7 +267,7 @@ test("physical-footprint hard stop terminates the responsive owned group with no
   result.pids.forEach(assertGone);
 });
 
-test("loss of telemetry fails closed and terminates the owned group", async () => {
+test("loss of telemetry fails closed and terminates the owned group", posixProcessFixture, async () => {
   const result = await run("lost", 100);
   assert.equal(result.status, 97);
   assert.ok(result.events.some((event) =>
@@ -270,7 +275,7 @@ test("loss of telemetry fails closed and terminates the owned group", async () =
   result.pids.forEach(assertGone);
 });
 
-test("the ceiling comparison is mutation-sensitive at the exact boundary", async () => {
+test("the ceiling comparison is mutation-sensitive at the exact boundary", posixProcessFixture, async () => {
   const below = await run("complete", 100, 99);
   assert.equal(below.status, 0);
   const at = await run("high", 99, 98);
@@ -279,7 +284,7 @@ test("the ceiling comparison is mutation-sensitive at the exact boundary", async
   at.pids.forEach(assertGone);
 });
 
-test("a wall-time ceiling fails closed and removes the owned group", async () => {
+test("a wall-time ceiling fails closed and removes the owned group", posixProcessFixture, async () => {
   const result = await run("hold", 100, 1, 0.2, "2");
   assert.equal(result.status, 97);
   const started = result.events.find((event) => event.event === "started");
@@ -292,7 +297,7 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   result.pids.forEach(assertGone);
 });
 
-test("a probe stopped by its wall-clock budget takes the ceiling stop's exact path, and says so in the runner's spelling", async () => {
+test("a probe stopped by its wall-clock budget takes the ceiling stop's exact path, and says so in the runner's spelling", posixProcessFixture, async () => {
   // sc-22738: this is the trigger `scripts/measure-memory-catalog.mjs` now arms on every guarded
   // probe (`--max-runtime-seconds`, from `--probe-budget-minutes`). Two properties are asserted
   // together because the runner depends on both:
@@ -324,7 +329,7 @@ test("a probe stopped by its wall-clock budget takes the ceiling stop's exact pa
   }
 });
 
-test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", async () => {
+test("cleanup crossing the deadline cannot relabel an earlier telemetry failure", posixProcessFixture, async () => {
   const files = await fixture();
   const launcher = `${files.program}.predeadline-failure.py`;
   // The cleanup that crosses the deadline is charged to the guard's OWN clock, not to a real
@@ -381,7 +386,7 @@ raise SystemExit(module.guard(module.parse_args()))
   pids.forEach(assertGone);
 });
 
-test("host memory and swap floors are enforced inside the owned-group watchdog", async () => {
+test("host memory and swap floors are enforced inside the owned-group watchdog", posixProcessFixture, async () => {
   const files = await fixture();
   const pressure = `${files.pids}.pressure`;
   await writeFile(files.telemetry, "1\n");
@@ -414,7 +419,7 @@ test("host memory and swap floors are enforced inside the owned-group watchdog",
   );
 });
 
-test("the monitor samples before child release and requires ACK before allocation release", async () => {
+test("the monitor samples before child release and requires ACK before allocation release", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.attest.py`;
   const launched = `${files.pids}.launched`;
@@ -455,7 +460,7 @@ while True:
     "swap telemetry remains present without imposing an arbitrary free-capacity floor");
 });
 
-test("authenticated provider phases are exact, monotonic and bound to terminal evidence", async () => {
+test("authenticated provider phases are exact, monotonic and bound to terminal evidence", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.phases.py`;
   const phases = [
@@ -527,7 +532,7 @@ while True:
   validateWatchdogEventChain(events);
 });
 
-test("bounded carrier profile advertises and acknowledges exactly five phases", async () => {
+test("bounded carrier profile advertises and acknowledges exactly five phases", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.bounded-phases.py`;
   const phases = [
@@ -574,7 +579,7 @@ while True:
   );
 });
 
-test("bounded campaign entry profile advertises and acknowledges exactly five phases", async () => {
+test("bounded campaign entry profile advertises and acknowledges exactly five phases", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.bounded-campaign-phases.py`;
   const phases = [
@@ -623,7 +628,7 @@ while True:
   validateWatchdogEventChain(events);
 });
 
-test("bounded campaign entry phase omissions and reordering hard-stop before completion", async () => {
+test("bounded campaign entry phase omissions and reordering hard-stop before completion", posixProcessFixture, async () => {
   const phases = [
     "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
   ];
@@ -688,7 +693,7 @@ test("an unknown provider phase profile is rejected before the guarded command s
   assert.equal(await readFile(files.events, "utf8").catch(() => ""), "");
 });
 
-test("reordered or foreign provider phases hard-stop the owned group", async () => {
+test("reordered or foreign provider phases hard-stop the owned group", posixProcessFixture, async () => {
   for (const [statement, expectedReason] of [
     ['sock.sendall(f"PHASE {nonce} 2 primary_conditioning\\n".encode())', /reordered_provider_phase/],
     ['sock.sendall(b"PHASE foreign 1 common_load\\n")', /foreign_provider_phase_nonce/],
@@ -764,7 +769,7 @@ while True:
   assert.equal(socketPath.startsWith(longTmp), false);
 });
 
-test("a cold child gets a separately bounded startup window while strict telemetry continues", async () => {
+test("a cold child gets a separately bounded startup window while strict telemetry continues", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.delayed-attest.py`;
   const telemetryTimeoutSeconds = 0.5;
@@ -814,7 +819,7 @@ while True:
   assert.equal(events.some((event) => event.event === "hard_stop"), false);
 });
 
-test("child startup never weakens the strict pre-allocation pressure floor", async () => {
+test("child startup never weakens the strict pre-allocation pressure floor", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.pressured-delayed-attest.py`;
   await writeFile(attester, String.raw`import os, socket, time
@@ -840,7 +845,7 @@ time.sleep(60)
   assert.equal(events.some((event) => event.event === "child_attested"), false);
 });
 
-test("a child that cannot attest is terminated with no owned residue", async () => {
+test("a child that cannot attest is terminated with no owned residue", posixProcessFixture, async () => {
   const files = await fixture();
   // A round multiple of the sample interval, so "the startup window, and not one tick past it"
   // is an exact tick count rather than a rounding.
@@ -869,7 +874,7 @@ test("a child that cannot attest is terminated with no owned residue", async () 
   pids.forEach(assertGone);
 });
 
-test("a connected child that stalls before ACK remains monitored until the hard startup deadline", async () => {
+test("a connected child that stalls before ACK remains monitored until the hard startup deadline", posixProcessFixture, async () => {
   const files = await fixture();
   const staller = `${files.program}.stall-before-ack.py`;
   await writeFile(staller, String.raw`import os, signal, socket, sys, time
@@ -906,7 +911,7 @@ time.sleep(60)
   assertGone(Number((await readFile(files.pids, "utf8")).trim()));
 });
 
-test("telemetry loss during child startup preserves its exact forensic category", async () => {
+test("telemetry loss during child startup preserves its exact forensic category", posixProcessFixture, async () => {
   const files = await fixture();
   const delayed = `${files.program}.telemetry-loss-startup.py`;
   await writeFile(delayed, "import time; time.sleep(60)\n");
@@ -926,7 +931,7 @@ test("telemetry loss during child startup preserves its exact forensic category"
     "child_attestation_telemetry_lost:RuntimeError:injected startup pressure failure")));
 });
 
-test("sentinel loss during child startup preserves the launch-sentinel category", async () => {
+test("sentinel loss during child startup preserves the launch-sentinel category", posixProcessFixture, async () => {
   const files = await fixture();
   const killer = `${files.program}.kill-sentinel-during-startup.py`;
   await writeFile(killer, String.raw`import os, signal, sys, time
@@ -950,7 +955,7 @@ time.sleep(60)
   assertGone(Number((await readFile(files.pids, "utf8")).trim()));
 });
 
-test("loss of the held attestation lease after GO hard-stops the owned group", async () => {
+test("loss of the held attestation lease after GO hard-stops the owned group", posixProcessFixture, async () => {
   const files = await fixture();
   const disconnect = `${files.program}.disconnect.py`;
   await writeFile(disconnect, String.raw`import json, os, signal, socket, sys, time
@@ -1001,7 +1006,7 @@ test("child attestation categorically rejects every synthetic telemetry surface"
   assert.equal(await readFile(files.pids, "utf8").catch(() => ""), "");
 });
 
-test("child attestation binds actual RAM and the two-boundary initial release floor", async () => {
+test("child attestation binds actual RAM and the two-boundary initial release floor", posixProcessFixture, async () => {
   const mismatch = await fixture();
   await assert.rejects(
     () => runWithMockedProductionTelemetry(mismatch, [
@@ -1028,7 +1033,7 @@ test("child attestation binds actual RAM and the two-boundary initial release fl
   assert.equal(await readFile(pressured.pids, "utf8").catch(() => ""), "");
 });
 
-test("the second pre-allocation sample cannot fall back to the runtime-only floor", async () => {
+test("the second pre-allocation sample cannot fall back to the runtime-only floor", posixProcessFixture, async () => {
   const files = await fixture();
   const attester = `${files.program}.second-sample.py`;
   const allocated = `${files.pids}.allocated`;
@@ -1081,7 +1086,7 @@ print("host pressure parsers fail closed")
   assert.match(probe.stdout, /host pressure parsers fail closed/);
 });
 
-test("every telemetry probe gets its own full budget under an aggregate staleness deadline", async () => {
+test("every telemetry probe gets its own full budget under an aggregate staleness deadline", posixProcessFixture, async () => {
   // sc-22738, measured 2026-09-06: the census, the footprint sample and the host-pressure sample
   // drew from ONE `--telemetry-timeout`, so a slow census handed `/usr/bin/footprint` an arbitrary
   // residue of it — 0.31 s of a 1 s budget on a 38 GB process — and starved the host-pressure
@@ -1130,7 +1135,7 @@ print("independent probe budgets under one staleness deadline")
   assert.match(probe.stdout, /independent probe budgets under one staleness deadline/);
 });
 
-test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned group", async () => {
+test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned group", posixProcessFixture, async () => {
   for (const [signalName, expected] of [["SIGINT", 130], ["SIGTERM", 143]]) {
     const result = await controlled("hold", async (watchdog) => watchdog.kill(signalName));
     assert.equal(result.status, expected, signalName);
@@ -1138,7 +1143,7 @@ test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned gr
   }
 });
 
-test("a signal delivered in the blocked spawn window is cleaned after the sentinel is anchored", async () => {
+test("a signal delivered in the blocked spawn window is cleaned after the sentinel is anchored", posixProcessFixture, async () => {
   const files = await fixture();
   const launchReady = `${files.pids}.launch-ready`;
   await writeFile(files.telemetry, "1\n");
@@ -1158,13 +1163,13 @@ test("a signal delivered in the blocked spawn window is cleaned after the sentin
   assert.equal((pgrep.stdout ?? "").trim(), "", `spawn-window signal leaked: ${pgrep.stdout}`);
 });
 
-test("an early-exiting command root cannot leak its TERM-resistant descendant", async () => {
+test("an early-exiting command root cannot leak its TERM-resistant descendant", posixProcessFixture, async () => {
   const result = await run("root-exit", 100);
   assert.equal(result.status, 7);
   result.pids.forEach(assertGone);
 });
 
-test("loss of the stable launch sentinel fails closed and removes retained descendants", async () => {
+test("loss of the stable launch sentinel fails closed and removes retained descendants", posixProcessFixture, async () => {
   const result = await controlled("hold", async (_watchdog, started) => {
     process.kill(started.pid, "SIGKILL");
   });
@@ -1173,7 +1178,7 @@ test("loss of the stable launch sentinel fails closed and removes retained desce
   result.pids.forEach(assertGone);
 });
 
-test("immediate sentinel loss cannot hide a descendant spawned after the last census", async () => {
+test("immediate sentinel loss cannot hide a descendant spawned after the last census", posixProcessFixture, async () => {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
   const watchdog = spawn("python3", [
@@ -1199,7 +1204,7 @@ test("immediate sentinel loss cannot hide a descendant spawned after the last ce
   pids.forEach(assertGone);
 });
 
-test("event-log failure is a monitor failure and still leaves no owned residue", async () => {
+test("event-log failure is a monitor failure and still leaves no owned residue", posixProcessFixture, async () => {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
   let status = 0;
@@ -1219,7 +1224,7 @@ test("event-log failure is a monitor failure and still leaves no owned residue",
   pids.forEach(assertGone);
 });
 
-test("stale start identity is never treated as the live PID", async () => {
+test("stale start identity is never treated as the live PID", posixProcessFixture, async () => {
   const probe = await execFileAsync("python3", ["-c", String.raw`
 import importlib.util, os, sys
 spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
@@ -1396,7 +1401,7 @@ const sampleAt = (k) => ticks(k - 2);
 const runtimeSampleCount = (maxRuntimeSeconds) =>
   Math.round(Number(maxRuntimeSeconds) / SAMPLE_INTERVAL);
 
-test("a footprint timeout followed by a good sample is never telemetry loss", async () => {
+test("a footprint timeout followed by a good sample is never telemetry loss", posixProcessFixture, async () => {
   // sc-22738, measured 2026-09-06: `bernini:q4:mlx` rendered 56.8 minutes at a steady 38 GB
   // against a 94.8 GB ceiling and was SIGKILLed by a `/usr/bin/footprint` timeout. One failed
   // probe is not a reading, and a false process-group SIGKILL through a live Metal command buffer
@@ -1424,7 +1429,7 @@ def outcome(n):
   assert.ok(runtimeSamples.at(-1).eventSequence > result.faults[0].eventSequence);
 });
 
-test("heterogeneous sampler faults in one run share the window; none escalates on its own", async () => {
+test("heterogeneous sampler faults in one run share the window; none escalates on its own", posixProcessFixture, async () => {
   // The measured escalation: ONE `/usr/bin/footprint` timeout plus the SEPARATE aggregate
   // host-pressure deadline inside the same fault run exhausted a three-TICK tolerance in 1.2 s.
   // Five alternating faults well inside the window must all be tolerated, whatever their kind.
@@ -1453,7 +1458,7 @@ def outcome(n):
   assert.ok(result.faults.every((event) => event.faultElapsedSeconds < event.faultWindowSeconds));
 });
 
-test("a transient sampling fault is re-enumerated; one past the wall-clock window is telemetry loss", async () => {
+test("a transient sampling fault is re-enumerated; one past the wall-clock window is telemetry loss", posixProcessFixture, async () => {
   const files = await fixture();
   // A short run then a recovery that resets the window, followed by a permanent failure: the
   // guard rides out the first run and stops only once a run occupies the whole window.
@@ -1485,7 +1490,7 @@ def outcome(n):
   pids.forEach(assertGone);
 });
 
-test("a good sample re-anchors the window, so a later fault gets the whole window again", async () => {
+test("a good sample re-anchors the window, so a later fault gets the whole window again", posixProcessFixture, async () => {
   // The window is measured from the first fault of the CURRENT run, never from an ancient one: a
   // capture that sampled cleanly for minutes must not be one unlucky probe away from a SIGKILL.
   const files = await fixture();
@@ -1519,7 +1524,7 @@ def outcome(n):
   runtimeSampleCount(maxRuntimeSeconds) - result.faults.length);
 });
 
-test("the pre-release observation takes the same tolerance as every other sampler path", async () => {
+test("the pre-release observation takes the same tolerance as every other sampler path", posixProcessFixture, async () => {
   const files = await fixture();
   const tolerated = await runWithScriptedFootprint(files, "initial-fault-tolerated", String.raw`
 def outcome(n):
@@ -1630,7 +1635,7 @@ print("production cadence and budgets asserted")
   assert.match(probe.stdout, /production cadence and budgets asserted/);
 });
 
-test("losing the guarded root stops immediately, even inside a tolerated fault run", async () => {
+test("losing the guarded root stops immediately, even inside a tolerated fault run", posixProcessFixture, async () => {
   const files = await fixture();
   const result = await runWithScriptedFootprint(files, "root-loss-mid-run", String.raw`
 def outcome(n):
@@ -1713,7 +1718,7 @@ raise SystemExit(module.guard(module.parse_args()))
   };
 }
 
-test("a census timeout during the runtime tick is a tolerated telemetry fault", async () => {
+test("a census timeout during the runtime tick is a tolerated telemetry fault", posixProcessFixture, async () => {
   // sc-22738, measured 2026-09-06: `bernini:q8:mlx` rendered 85 minutes at a steady 52 GB against a
   // 94.8 GB ceiling and was SIGKILLed by `monitor_failure:TimeoutExpired` from the whole-system
   // `/bin/ps` census on a hard-coded 1 s budget. `ps` is a telemetry SOURCE like `/usr/bin/
@@ -1745,7 +1750,7 @@ def census_outcome(n, state):
   pids.forEach(assertGone);
 });
 
-test("a census timeout raised from the post-tick refresh paths is tolerated", async () => {
+test("a census timeout raised from the post-tick refresh paths is tolerated", posixProcessFixture, async () => {
   // The census inside `observe_group` was already covered by the tolerance; the `refresh()` calls
   // around it were not — and the one inside the sampler-fault handler raised THROUGH that handler
   // straight to `monitor_failure`. Fail the census only while a footprint fault is being handled,
@@ -1776,7 +1781,7 @@ def footprint_outcome(n, state):
   assert.match(result.faults[1].reason, /^TimeoutExpired:.*footprint/);
 });
 
-test("a census outage during termination still removes the whole owned group, anchor included", async () => {
+test("a census outage during termination still removes the whole owned group, anchor included", posixProcessFixture, async () => {
   // The hard stop runs under the same load that slows `/bin/ps`. `terminate` used to open with a
   // census, so one timed-out `ps` raised out of it before any SIGKILL: the guarded tree kept
   // running and the TERM-immune `--anchor`, which nothing else ever kills, was orphaned for good.
@@ -1802,7 +1807,7 @@ def census_outcome(n, state):
   pids.forEach(assertGone);
 });
 
-test("a successful census that lacks the root stops at once, after tolerated census faults", async () => {
+test("a successful census that lacks the root stops at once, after tolerated census faults", posixProcessFixture, async () => {
   // Root-loss detection must survive the tolerance: a census that FAILS is unknown, but the first
   // SUCCESSFUL one that no longer enumerates the group ends the guard immediately with the child's
   // own status rather than riding the wall-time ceiling out.
@@ -1818,7 +1823,7 @@ def census_outcome(n, state):
   assert.equal(result.faults.length, 2, "the census faults were tolerated, not escalated");
 });
 
-test("a census outage across the sentinel's exit defers instead of declaring a live group", async () => {
+test("a census outage across the sentinel's exit defers instead of declaring a live group", posixProcessFixture, async () => {
   // The other half of "a failed census is unknown": once the sentinel reports a status, the guard
   // re-censuses to tell normal cleanup from a failure. Reading a FAILED census there as the
   // previous view would call the group live and hard-stop a run that simply finished — so the
@@ -1855,7 +1860,7 @@ def census_outcome(n, state):
   assert.ok(result.faults.length > 0, "the census outage was never recorded");
 });
 
-test("an exception that is not a telemetry source stays a monitor failure", async () => {
+test("an exception that is not a telemetry source stays a monitor failure", posixProcessFixture, async () => {
   // The tolerance absorbs telemetry SOURCES, enumerated in TELEMETRY_SOURCE_ERRORS. A bug in the
   // monitor itself must still fail closed as `monitor_failure`, never be ridden out as a fault.
   const files = await fixture();
@@ -1940,7 +1945,7 @@ print("probe wait floored")
   assert.match(probe.stdout, /probe wait floored/);
 });
 
-test("a guard run adopts its --telemetry-timeout as the census budget", async () => {
+test("a guard run adopts its --telemetry-timeout as the census budget", posixProcessFixture, async () => {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
   const probe = await execFileAsync("python3", ["-c", String.raw`
@@ -1963,7 +1968,7 @@ print("census budget adopted from the run")
   assert.match(probe.stdout, /census budget adopted from the run/);
 });
 
-test("the ceiling still stops on the first good sample that breaches it after tolerated faults", async () => {
+test("the ceiling still stops on the first good sample that breaches it after tolerated faults", posixProcessFixture, async () => {
   const files = await fixture();
   const result = await runWithScriptedFootprint(files, "breach-after-faults", String.raw`
 def outcome(n):
@@ -2106,7 +2111,7 @@ raise SystemExit(m.guard(m.parse_args()))
 }
 
 for (const status of [0, 1, 7]) {
-  test(`completion handshake preserves sentinel status ${status} after measured release`, async () => {
+  test(`completion handshake preserves sentinel status ${status} after measured release`, posixProcessFixture, async () => {
     const result = await completionRun("good", status);
     assert.equal(result.status, status, JSON.stringify(result.events));
     const requested = result.events.findIndex((event) => event.event === "child_completion_requested");
@@ -2119,7 +2124,7 @@ for (const status of [0, 1, 7]) {
   });
 }
 for (const scenario of ["bad_nonce", "premature", "duplicate", "wrong_owner", "no_done", "final_fault", "final_host_fault", "final_omit_alive", "final_exit", "final_high", "final_host_low", "pre_done_exit_race", "pre_done_omit_alive"]) {
-  test(`completion fails closed for ${scenario}`, async () => {
+  test(`completion fails closed for ${scenario}`, posixProcessFixture, async () => {
     const { status, events } = await completionRun(scenario);
     assert.equal(status, 97, JSON.stringify(events));
     assert.ok(events.some((event) => event.event === "hard_stop"));
@@ -2129,7 +2134,7 @@ for (const scenario of ["bad_nonce", "premature", "duplicate", "wrong_owner", "n
   });
 }
 for (const scenario of ["descendant_clean", "descendant_high"]) {
-  test(`completion continues descendant monitoring: ${scenario}`, async () => {
+  test(`completion continues descendant monitoring: ${scenario}`, posixProcessFixture, async () => {
     const { status, events } = await completionRun(scenario, 1);
     assert.equal(status, scenario === "descendant_high" ? 97 : 1, JSON.stringify(events));
     assert.ok(events.some((event) => event.event === "child_completed"));
@@ -2155,7 +2160,7 @@ chain.emit({"event": "sample", "physicalFootprintBytes": 1})
   assert.equal(events[0].nested.x[1], 0.5, "fractional values are untouched");
 });
 
-test("a transient final-sample fault is retried and the measured release keeps the root's status", async () => {
+test("a transient final-sample fault is retried and the measured release keeps the root's status", posixProcessFixture, async () => {
   // sc-26257: one slow probe at the final pre-release sample used to be an immediate
   // completion_telemetry_lost stop. The root is still blocked on BYE, so the next tick retries it.
   const { status, events, marker } = await completionRun("final_fault_once", 7);
@@ -2170,8 +2175,36 @@ test("a transient final-sample fault is retried and the measured release keeps t
   validateWatchdogEventChain(events);
 });
 
-test("acknowledged root exit between census and footprint preserves actual status", async () => {
+test("acknowledged root exit between census and footprint preserves actual status", posixProcessFixture, async () => {
   const { status, events } = await completionRun("ack_exit_race", 7);
   assert.equal(status, 7, JSON.stringify(events));
   assert.ok(events.some((e) => e.event === "acknowledged_root_exit_during_probe"));
+});
+
+test("POSIX fixture exclusions never exclude Linux or macOS", () => {
+  for (const capability of ["posix-processes", "posix-process-identity", "posix-permissions"]) {
+    for (const platform of ["linux", "darwin"]) assert.equal(platformFixtureSkip(capability, platform), false);
+    assert.match(platformFixtureSkip(capability, "win32"), /Windows.*POSIX/);
+  }
+  assert.throws(() => platformFixtureSkip("typo", "win32"), /unknown fixture capability/);
+});
+
+test("optional external fixture is skipped only when unconfigured and absent", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "external-fixture-capability-"));
+  try {
+    assert.equal(externalFixtureSkip(undefined, root), false);
+    assert.equal(externalFixtureSkip(root, "unused"), false);
+    const missing = path.join(root, "absent");
+    assert.match(externalFixtureSkip(undefined, missing), /integration not judged.*absent/);
+    assert.throws(() => externalFixtureSkip(missing, root), /configured.*absent/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("fixture child status cannot masquerade as a missing receipt", () => {
+  assert.doesNotThrow(() => assertFixtureChildSucceeded({ error: undefined, signal: null, status: 0, stderr: "" }));
+  for (const result of [
+    { error: new Error("spawn failed"), signal: null, status: null },
+    { signal: "SIGTERM", status: null },
+    { signal: null, status: 7, stderr: "record rejected" },
+  ]) assert.throws(() => assertFixtureChildSucceeded(result), assert.AssertionError);
 });

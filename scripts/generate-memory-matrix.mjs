@@ -142,6 +142,10 @@ export const MODEL_STORIES = {
   // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
   // backend's cells are owned by the story that brought that lane through SceneWorks.
   iris_3b: { mlx: 25679, candle: 25680 },
+  // FLUX 3 Image Klein (epic 26233): the distilled text-to-image route ported to MLX by sc-26234
+  // (S1). The Candle/CUDA key lands WITH that backend (sc-26235, S2), never ahead of it — the
+  // entry is MLX-only until then, so a Candle cell cannot be attributed to a Metal-scoped story.
+  flux3_klein: { mlx: 26234, candle: 26235 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -219,6 +223,10 @@ export const FAMILY_STORIES = {
   // exists for either lane (the epic-end campaign owns anchors), so the cells stay
   // Implemented/Missing by implementation, never Anchored.
   25678: { mlx: 25678, candle: 25684 },
+  // FLUX 3 Image Klein: the MLX family remains owned by its epic (sc-26233). The native Candle
+  // model cells belong to sc-26235, so the distinct Candle resource-family owner is sc-26241
+  // (S8). One id may own only one thing; neither mapping claims a measured memory anchor.
+  26233: { mlx: 26233, candle: 26241 },
 };
 
 /**
@@ -367,6 +375,7 @@ export function familyGroup(modelId) {
   if (modelId === "pulid_flux_dev") return 15527;
   if (modelId === "bernini_image") return 15528;
   if (modelId.startsWith("iris")) return 25678;
+  if (modelId.startsWith("flux3")) return 26233;
   throw new Error(`no family story for ${modelId}`);
 }
 

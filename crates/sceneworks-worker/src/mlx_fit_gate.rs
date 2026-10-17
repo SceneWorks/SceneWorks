@@ -20049,6 +20049,8 @@ mod tests {
             "sdxl",
             // Iris-3B (sc-25679): `supports_sequential_offload` — encoder, drop, then backbone.
             "iris_3b",
+            // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
+            "flux3_klein",
             "z_image",
             "z_image_control",
             "z_image_turbo",

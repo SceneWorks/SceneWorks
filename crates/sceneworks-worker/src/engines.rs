@@ -226,6 +226,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.0,
         adapter_label: "mlx_iris",
     },
+    // FLUX 3 Image Klein, distilled (sc-26234, epic sc-26233) — `mlx-gen-flux3` registers
+    // `flux3_klein`. The whole package (DiT + autoencoder + the bundled Qwen3-VL text encoder) is
+    // the one pinned upstream repository root, read by `gen_core::flux3::GenerationResources`; no
+    // co-requisite component. A flow map: 16 steps, no guidance (`gen_core::flux3::DEFAULT_STEPS`).
+    ModelRow {
+        sceneworks_id: "flux3_klein",
+        engine_id: "flux3_klein",
+        default_repo: "black-forest-labs/flux-3-image-klein",
+        default_steps: 16,
+        default_guidance: 0.0,
+        adapter_label: "mlx_flux3",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1776,6 +1788,7 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "flux3_klein",
         "iris_3b",
         "mage_flow_base",
         "mage_flow",
@@ -1911,6 +1924,9 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // FLUX 3 Image Klein (sc-26234): the pinned contract publishes its packed-token grid.
+            // The provider envelope test reads `size_floor` live on the lane that links it.
+            "flux3_klein" => gen_core::flux3::DOWNSAMPLING_RATIO,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1959,6 +1975,10 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
+            // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
+            // which replaces it with that provider's constant.
+            "flux3_klein" => 16,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2223,6 +2243,7 @@ mod tests {
             ("qwen_image_2_1", 32),
             ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
+            ("flux3_klein", 16),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

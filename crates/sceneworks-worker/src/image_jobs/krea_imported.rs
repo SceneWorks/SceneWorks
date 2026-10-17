@@ -1676,6 +1676,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let (base_width, base_height, base_pixels) = krea_imported_generate_pass(
         generator,
@@ -1716,6 +1717,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     krea_imported_generate_pass(
         generator,
