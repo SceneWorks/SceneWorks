@@ -1982,6 +1982,177 @@ jobs:
             }
           }
           @{ base = $base; base_safe = $baseSafe; max_files = $maxFiles; max_bytes_per_file = $maxBytes; truncated = $truncated; skipped_paths = @($skipped.ToArray()); logs = @($logs.ToArray()) } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $out 'native-service-log-index.json')
+      - name: Retrieve exact completed Klein diagnostic state
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identity = "$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $out = Join-Path (Join-Path $env:RUNNER_TEMP "moss-telemetry-$identity") 'klein-state'
+          $private = Join-Path $env:RUNNER_TEMP "moss-klein-private-$identity"
+          $state = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v6\native-state\owned-142376'
+          $python = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v6\venv\Scripts\python.exe'
+          $maxFileBytes = 33554432
+          $maxTotalBytes = 67108864
+          $entries = New-Object 'System.Collections.Generic.List[object]'
+          $held = New-Object 'System.Collections.Generic.List[object]'
+          $createdOut = $false
+          $index = @{ status = 'failed'; state = $state; max_files = 3; max_file_bytes = $maxFileBytes; max_total_bytes = $maxTotalBytes; files = $entries; coherence = 'Terminal-state clone: all existing DB/sidecar handles held without write sharing before copying. SQLite reads only the private copy; no source SQLite connection or online backup.' }
+          function Assert-KleinPhysical($path) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            for ($probe = $item; $null -ne $probe; $probe = $(if ($probe.PSIsContainer) { $probe.Parent } else { $probe.Directory })) {
+              if (($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Klein diagnostic refuses reparse path: $path" }
+            }
+            return $item
+          }
+          try {
+            [void](Assert-KleinPhysical $env:RUNNER_TEMP)
+            if ((Test-Path -LiteralPath $out) -or (Test-Path -LiteralPath $private)) { throw 'Klein diagnostic destination already exists; no overwrite' }
+            [void](Assert-KleinPhysical (Split-Path -Parent $out))
+            New-Item -ItemType Directory -Path $out | Out-Null
+            $createdOut = $true
+            New-Item -ItemType Directory -Path $private | Out-Null
+            [void](Assert-KleinPhysical $python)
+            $total = 0
+            foreach ($name in @('jobs.db', 'jobs.db-wal', 'jobs.db-shm')) {
+              $source = Join-Path (Join-Path $state 'data\cache') $name
+              if (-not (Test-Path -LiteralPath $source)) {
+                if ($name -eq 'jobs.db') { throw 'Fixed Klein jobs.db is missing' }
+                $entries.Add(@{ source = $source; present = $false }); continue
+              }
+              $item = Assert-KleinPhysical $source
+              if ($item.PSIsContainer -or $item.Length -gt $maxFileBytes) { throw "Klein DB file byte cap exceeded: $source" }
+              $stream = [IO.File]::Open($source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+              $held.Add(@{ name = $name; source = $source; stream = $stream; length = $stream.Length })
+              $total += $stream.Length
+              if ($stream.Length -gt $maxFileBytes -or $total -gt $maxTotalBytes) { throw 'Klein DB actual byte cap exceeded' }
+            }
+            foreach ($file in $held) {
+              if ($file.stream.Length -ne $file.length -or $file.length -gt $maxFileBytes) { throw 'Klein DB changed or exceeded cap' }
+              $destination = Join-Path $private $file.name
+              $target = [IO.File]::Open($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+              try { $file.stream.CopyTo($target) } finally { $target.Dispose() }
+              $file.stream.Position = 0
+              $hasher = [Security.Cryptography.SHA256]::Create()
+              try { $hash = [BitConverter]::ToString($hasher.ComputeHash($file.stream)).Replace('-', '').ToLowerInvariant() } finally { $hasher.Dispose() }
+              if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw 'Klein private copy hash mismatch' }
+              $entries.Add(@{ source = $file.source; present = $true; bytes = $file.length; sha256 = $hash; private_snapshot_only = $true })
+            }
+            $index.status = 'snapshot_complete'
+          } catch {
+            $index.error = $_.Exception.Message
+            throw
+          } finally {
+            foreach ($file in $held) { $file.stream.Dispose() }
+            if ($createdOut) { $index | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $out 'snapshot-index.json') }
+          }
+          # No setup or site-packages: use the already prepared interpreter, stdlib only.
+          $diagnostic = @'
+          import hashlib, json, os, re, sqlite3, stat, struct, time
+          from pathlib import Path, PurePosixPath, PureWindowsPath
+
+          JOB = 'job_1676d4441a51fbf3a368846cbb8de482'
+          STATE = Path(r'E:\sceneworks-evaluation\moss\sc-26322-reference-v6\native-state\owned-142376')
+          identity = os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+          TEMP = Path(os.environ['RUNNER_TEMP'])
+          CLONE = TEMP / ('moss-klein-private-' + identity)
+          OUT = TEMP / ('moss-telemetry-' + identity) / 'klein-state'
+          MAX_JSON = 2 * 1024**2
+          MAX_PNG = 16 * 1024**2
+          MAX_FILES = 5
+
+          def need(ok, message):
+              if not ok: raise ValueError(message)
+
+          def physical(path):
+              for p in (path, *path.parents):
+                  info = p.lstat()
+                  need(not stat.S_ISLNK(info.st_mode) and not getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400), 'reparse path refused: ' + str(p))
+
+          def bounded(path, cap, index, artifact=None):
+              physical(path)
+              before = path.stat()
+              need(path.is_file() and before.st_size <= cap, 'file byte cap exceeded: ' + str(path))
+              with path.open('rb') as stream: data = stream.read(cap + 1)
+              after = path.stat()
+              need(len(data) == before.st_size <= cap and (before.st_size,before.st_mtime_ns,before.st_ctime_ns,before.st_ino)==(after.st_size,after.st_mtime_ns,after.st_ctime_ns,after.st_ino), 'source changed or byte cap exceeded: ' + str(path))
+              need(len(index) < MAX_FILES, 'selected file count cap exceeded')
+              index.append(dict(source=str(path),bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),artifact=artifact))
+              if artifact:
+                  target = OUT / artifact
+                  with target.open('xb') as stream: stream.write(data)
+              return data
+
+          def select_state():
+              physical(CLONE / 'jobs.db')
+              for name in ('jobs.db-wal','jobs.db-shm'):
+                  companion=CLONE/name
+                  if companion.exists() or companion.is_symlink(): physical(companion)
+              conn = sqlite3.connect((CLONE / 'jobs.db').as_uri() + '?mode=ro',uri=True,timeout=5)
+              conn.row_factory = sqlite3.Row
+              deadline = time.monotonic() + 20
+              conn.set_progress_handler(lambda: int(time.monotonic() > deadline),10000)
+              try:
+                  conn.execute('PRAGMA query_only=ON')
+                  conn.execute('BEGIN')
+                  job = conn.execute('SELECT * FROM jobs WHERE id = ?', (JOB,)).fetchall()
+                  metrics = conn.execute('SELECT * FROM generation_metrics WHERE job_id = ?', (JOB,)).fetchall()
+                  need(len(job) == len(metrics) == 1, 'exact target job/metrics row missing or duplicated')
+                  return dict(job=dict(job[0]),metrics=dict(metrics[0]))
+              finally: conn.close()
+
+          def collect(report=None):
+              report={} if report is None else report
+              index=report.setdefault('files',[])
+              selected = select_state()
+              data=json.dumps(selected,ensure_ascii=False,allow_nan=False,indent=2).encode('utf-8')
+              need(len(data) <= MAX_JSON, 'selected SQL result byte cap exceeded')
+              with (OUT / 'selected-state.json').open('xb') as stream: stream.write(data)
+              report['selected_state_sha256']=hashlib.sha256(data).hexdigest()
+              job=selected['job'];result=json.loads(job['result_json'])
+              need(job['id']==JOB and job['status']=='completed', 'target is not completed; retain selected SQL evidence')
+              assets=result['assets'];need(len(assets)==1, 'target asset count is not exactly one')
+              asset=assets[0];project_id=job['project_id']
+              need(asset['projectId']==project_id and asset['lineage']['jobId']==JOB, 'unrelated asset lineage refused')
+              registry=json.loads(bounded(STATE/'data'/'recent-projects.json',MAX_JSON,index))
+              need(isinstance(registry,list) and len(registry)<=16, 'registry count cap exceeded')
+              matches=[r for r in registry if r.get('id')==project_id]
+              need(len(matches)==1, 'exact target project registry entry missing or duplicated')
+              projects=STATE/'data'/'projects';physical(projects)
+              project=Path(matches[0]['path'])
+              need(project.is_absolute() and project.parent==projects and project.suffix=='.sceneworks', 'project escaped fixed owned projects root')
+              physical(project)
+              project_json=json.loads(bounded(project/'project.json',MAX_JSON,index))
+              need(project_json['id']==project_id, 'project identity mismatch')
+              relative=asset['file']['path'];parts=PurePosixPath(relative)
+              need(relative and not parts.is_absolute() and not PureWindowsPath(relative).drive and '\\' not in relative and ':' not in relative and all(p not in ('..','.') for p in relative.split('/')), 'unsafe target asset path')
+              image=project.joinpath(*parts.parts)
+              need(image.suffix.lower()=='.png' and asset['file']['mimeType']=='image/png', 'target asset is not PNG')
+              sidecar_bytes=bounded(image.with_suffix('.sceneworks.json'),MAX_JSON,index)
+              sidecar=json.loads(sidecar_bytes)
+              need(sidecar['id']==asset['id'] and sidecar['projectId']==project_id and sidecar['lineage']['jobId']==JOB and sidecar['file']==asset['file'], 'unrelated sidecar refused')
+              with (OUT/'asset.sceneworks.json').open('xb') as stream: stream.write(sidecar_bytes)
+              index[-1]['artifact']='asset.sceneworks.json'
+              need(re.fullmatch(r'[A-Za-z0-9_-]{1,128}',asset['id']) is not None, 'unsafe asset id')
+              recipe=bounded(project/'recipes'/(asset['id']+'.recipe.json'),MAX_JSON,index)
+              need(json.loads(recipe)==asset['recipe']==sidecar['recipe'], 'recipe copies disagree')
+              with (OUT/'asset.recipe.json').open('xb') as stream: stream.write(recipe)
+              index[-1]['artifact']='asset.recipe.json'
+              image_bytes=bounded(image,MAX_PNG,index,'original.png')
+              need(image_bytes[:8]==b'\x89PNG\r\n\x1a\n' and len(image_bytes)>=24, 'invalid target PNG header')
+              return dict(job_id=JOB,selected_state_sha256=hashlib.sha256(data).hexdigest(),files=index,png_dimensions=list(struct.unpack('>II',image_bytes[16:24])),classification='diagnostic only; no acceptance, retry or availability decision')
+
+          if __name__ == '__main__':
+              index=dict(job_id=JOB,status='failed',max_selected_files=MAX_FILES,max_json_bytes=MAX_JSON,max_png_bytes=MAX_PNG)
+              try:
+                  index.update(collect(index));index['status']='complete'
+              except BaseException as error:
+                  index['error']=type(error).__name__+': '+str(error)
+                  raise
+              finally:
+                  (OUT/'selected-index.json').write_text(json.dumps(index,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          '@
+          & $python -I -S -B -c $diagnostic
+          if ($LASTEXITCODE -ne 0) { throw 'Fixed Klein state extraction failed; inspect uploaded diagnostic indexes' }
       - name: Upload MOSS telemetry
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

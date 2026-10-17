@@ -5458,3 +5458,34 @@ test("MOSS execution uses existing registered path, fixed script, and pre-checko
   assert.match(job, /completed receipts persist, failed cells never retry/);
   assert.match(job, /persist-credentials: false/);
 });
+
+
+test("Klein diagnostic reads one fixed owned terminal job without execution or broad uploads", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const step = workflow.split("- name: Retrieve exact completed Klein diagnostic state")[1]?.split("- name: Upload MOSS telemetry")[0];
+  assert.ok(step);
+  assert.ok(step.includes("sc-26322-reference-v6\\native-state\\owned-142376"));
+  assert.ok(step.includes("job_1676d4441a51fbf3a368846cbb8de482"));
+  assert.match(step, /@\('jobs\.db', 'jobs\.db-wal', 'jobs\.db-shm'\)/);
+  assert.match(step, /maxFileBytes = 33554432/);
+  assert.match(step, /maxTotalBytes = 67108864/);
+  assert.match(step, /total \+= \$stream\.Length/);
+  assert.match(step, /FileAccess\]::Read, \[IO\.FileShare\]::Read\)/);
+  assert.match(step, /FileAttributes\]::ReparsePoint/);
+  assert.match(step, /\$probe\.Directory/);
+  assert.match(step, /CreateNew/);
+  assert.match(step, /ComputeHash/);
+  assert.match(step, /-I -S -B -c \$diagnostic/);
+  assert.match(step, /SELECT \* FROM jobs WHERE id = \?/);
+  assert.match(step, /SELECT \* FROM generation_metrics WHERE job_id = \?/);
+  assert.match(step, /PRAGMA query_only=ON/);
+  assert.match(step, /conn\.execute\('BEGIN'\)/);
+  assert.match(step, /mode=ro/);
+  assert.match(step, /MAX_FILES = 5/);
+  assert.match(step, /MAX_PNG = 16 \* 1024\*\*2/);
+  assert.match(step, /asset\['lineage'\]\['jobId'\]==JOB/);
+  assert.match(step, /project\.parent==projects/);
+  assert.match(step, /snapshot-index\.json/);
+  assert.match(step, /selected-index\.json/);
+  assert.doesNotMatch(step, /actions\/checkout|setup-python|pip |torch|diffusers|subprocess|urlopen|Start-Process|Stop-Process|taskkill|Remove-Item|\$\{\{\s*inputs\./);
+});
