@@ -7060,6 +7060,348 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-26234 (epic sc-26233): FLUX 3 Image Klein is ONE package — the DiT, the autoencoder AND
+    /// the Qwen3-VL text encoder all live under the one pinned `black-forest-labs/flux-3-image-klein`
+    /// root (`gen_core::flux3::GenerationResources` reads them from there), so the entry has exactly
+    /// one download and NO co-requisite component (the inverse of Iris-3B, whose encoder is a
+    /// separate `text_encoder` component). Install state therefore gates on the bundled
+    /// `text_encoder/` files of the SAME snapshot: the DiT + autoencoder alone is a repairable
+    /// partial install, never an installed generator.
+    fn seed_flux3_runtime_bundle(snapshot: &FsPath) {
+        for file in [
+            "config.json",
+            "model.safetensors",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+        std::fs::write(snapshot.join("text_encoder/model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
+    }
+
+    fn assert_flux3_primary_and_optional_pup(model: &Value) -> &Value {
+        let downloads = model["downloads"].as_array().unwrap();
+        let primary: Vec<_> = downloads
+            .iter()
+            .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .collect();
+        assert_eq!(
+            primary.len(),
+            1,
+            "one whole primary package, no required component split"
+        );
+        let primary = primary[0];
+        assert_eq!(primary["provider"], "huggingface");
+        assert_eq!(primary["repo"], "black-forest-labs/flux-3-image-klein");
+        assert_eq!(
+            primary["revision"],
+            "8454017f9ebaada30c998fccd9f67a80c7580f68"
+        );
+        assert_eq!(primary["default"], true);
+        assert_eq!(
+            primary["files"],
+            json!([]),
+            "whole primary repository required"
+        );
+        assert!(primary
+            .get("required")
+            .is_none_or(|value| value.as_bool() == Some(true)));
+        let optional = model_co_requisite_downloads(model);
+        assert!(
+            optional.len() <= 1,
+            "only the exact soft PUP may accompany the primary"
+        );
+        assert_eq!(
+            downloads.len(),
+            1 + optional.len(),
+            "no unrecognized extra downloads"
+        );
+        for row in optional {
+            assert_eq!(row["provider"], "huggingface");
+            assert_eq!(row["repo"], "black-forest-labs/flux-3-image-klein-pup");
+            assert_eq!(row["revision"], "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed");
+            assert_eq!(row["componentId"], "prompt_upsampler");
+            assert_eq!(row["required"], "soft", "no required external components");
+            assert_eq!(row["files"], json!([]));
+            assert_ne!(row.get("default").and_then(Value::as_bool), Some(true));
+        }
+        primary
+    }
+
+    #[test]
+    fn flux3_package_fixture_rejects_required_or_wrong_optional_components() {
+        let model = builtin_models_entry("flux3_klein");
+        let index = model["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["coRequisite"] == true)
+            .expect("combined catalog exposes the soft PUP");
+        for (field, value) in [
+            ("required", json!(true)),
+            ("repo", json!("not-the-pinned-source")),
+            ("revision", json!("0".repeat(40))),
+            ("componentId", json!("text_encoder")),
+            ("files", json!(["model.safetensors"])),
+            ("coRequisite", json!(false)),
+        ] {
+            let mut invalid = model.clone();
+            invalid["downloads"][index][field] = value;
+            assert!(
+                std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&invalid))
+                    .is_err(),
+                "{field} must not weaken the exact primary/soft-PUP fixture"
+            );
+        }
+        let mut duplicate = model.clone();
+        duplicate["downloads"]
+            .as_array_mut()
+            .unwrap()
+            .push(model["downloads"][index].clone());
+        assert!(
+            std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&duplicate)).is_err()
+        );
+    }
+
+    #[test]
+    fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_required_split() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("flux3-install-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let data_dir = temp.path();
+        let model = builtin_models_entry("flux3_klein");
+        let primary = assert_flux3_primary_and_optional_pup(&model);
+        assert!(model.get("component").is_none());
+        let revision = primary["revision"].as_str().unwrap();
+        assert_eq!(revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
+        let context = model_download_context(&model).unwrap().unwrap();
+        assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein");
+        assert!(
+            context.files.is_empty(),
+            "download ALL files, not this runtime fixture's minimum set"
+        );
+        assert_eq!(context.fallback_size_bytes, Some(43_317_649_602));
+        let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        for file in ["config.json", "model.safetensors", "ae.safetensors"] {
+            std::fs::write(snapshot.join(file), b"weights").unwrap();
+        }
+        let partial = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !partial.installed,
+            "DiT + AE with the ENTIRE bundled encoder absent is not ready"
+        );
+        assert!(
+            partial.cache_incomplete,
+            "whole-repo download policy must not weaken runtime completeness"
+        );
+        assert!(!model_variant_states(&model, data_dir)[0].installed);
+        seed_flux3_runtime_bundle(&snapshot);
+        for required in [
+            "model.safetensors",
+            "ae.safetensors",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            let path = snapshot.join(required);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            let torn = install_state_for(Some(context.clone()), &model, data_dir);
+            assert!(
+                !torn.installed && torn.cache_incomplete,
+                "missing {required}: {:?}",
+                torn.missing_required_files
+            );
+            assert!(!model_variant_states(&model, data_dir)[0].installed);
+            std::fs::write(&path, bytes).unwrap();
+        }
+        let index = snapshot.join("text_encoder/model.safetensors.index.json");
+        let valid_index = std::fs::read(&index).unwrap();
+        std::fs::write(
+            &index,
+            serde_json::to_vec(&json!({"weight_map":{"w":"../model.safetensors"}})).unwrap(),
+        )
+        .unwrap();
+        let escaped = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !escaped.installed && escaped.cache_incomplete,
+            "index traversal must refuse"
+        );
+        std::fs::write(&index, valid_index).unwrap();
+        let installed = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            installed.installed && !installed.cache_incomplete,
+            "{:?}",
+            installed.missing_required_files
+        );
+        assert!(installed.missing_required_files.is_empty());
+        assert_eq!(
+            std::fs::canonicalize(installed.installed_path.as_deref().unwrap()).unwrap(),
+            std::fs::canonicalize(&snapshot).unwrap(),
+            "the typed resolver must identify this exact selected snapshot (including Windows extended-path form)"
+        );
+        assert!(model_variant_states(&model, data_dir)[0].installed);
+        let managed = data_dir
+            .join("models")
+            .join(safe_download_dir(&context.repo));
+        assert!(
+            !managed.join(".sceneworks-download-complete.json").exists(),
+            "usable runtime files must not mint whole-repo download completion"
+        );
+    }
+
+    #[test]
+    fn flux3_klein_runtime_bundle_requires_the_selected_revision_and_managed_receipt_identity() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("flux3-authority-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let model = builtin_models_entry("flux3_klein");
+        let context = model_download_context(&model).unwrap().unwrap();
+        let revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+        let old_revision = "b".repeat(40);
+        let repo_root = huggingface_repo_cache_path(temp.path(), &context.repo).unwrap();
+        seed_flux3_runtime_bundle(&repo_root.join("snapshots").join(&old_revision));
+        assert!(
+            !install_state_for(Some(context.clone()), &model, temp.path()).installed,
+            "an unrelated complete snapshot cannot certify the selected revision"
+        );
+        let managed = temp
+            .path()
+            .join("models")
+            .join(safe_download_dir(&context.repo));
+        seed_flux3_runtime_bundle(&managed);
+        let receipt_path = managed.join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":context.repo,"modelId":"flux3_klein","snapshotRevision":revision,"resolvedFiles":["model.safetensors"]});
+        for (key, wrong) in [
+            ("snapshotRevision", old_revision.as_str()),
+            ("repo", "unrelated/repository"),
+            ("modelId", "unrelated_model"),
+        ] {
+            let mut invalid = receipt.clone();
+            invalid[key] = json!(wrong);
+            std::fs::write(&receipt_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(
+                !install_state_for(Some(context.clone()), &model, temp.path()).installed,
+                "wrong {key} receipt must not rescue readiness"
+            );
+            assert!(!model_variant_states(&model, temp.path())[0].installed);
+        }
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        let current = install_state_for(Some(context.clone()), &model, temp.path());
+        assert!(
+            current.installed,
+            "an exact managed receipt plus the complete canonical runtime bundle is usable"
+        );
+        assert_eq!(
+            current.installed_path.as_deref(),
+            Some(managed.to_string_lossy().as_ref())
+        );
+        assert!(model_variant_states(&model, temp.path())[0].installed);
+        std::fs::remove_file(managed.join("text_encoder/model-00002-of-00002.safetensors"))
+            .unwrap();
+        assert!(
+            !install_state_for(Some(context.clone()), &model, temp.path()).installed,
+            "an exact receipt cannot hide a torn runtime bundle"
+        );
+        assert!(!model_variant_states(&model, temp.path())[0].installed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flux3_klein_runtime_bundle_accepts_its_own_hf_blob_symlinks() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::Builder::new()
+            .prefix(&format!("flux3-blobs-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let model = builtin_models_entry("flux3_klein");
+        let context = model_download_context(&model).unwrap().unwrap();
+        let repo_root = huggingface_repo_cache_path(temp.path(), &context.repo).unwrap();
+        let snapshot = repo_root.join("snapshots/8454017f9ebaada30c998fccd9f67a80c7580f68");
+        seed_flux3_runtime_bundle(&snapshot);
+        std::fs::create_dir_all(repo_root.join("blobs")).unwrap();
+        let shard = snapshot.join("text_encoder/model-00001-of-00002.safetensors");
+        let blob = repo_root.join("blobs/fixture-shard");
+        std::fs::rename(&shard, &blob).unwrap();
+        std::os::unix::fs::symlink(&blob, &shard).unwrap();
+        assert!(
+            install_state_for(Some(context), &model, temp.path()).installed,
+            "authorized same-repository blob links are not path traversal"
+        );
+    }
+
+    /// sc-26234: the package is GATED upstream (FLUX Kommunity License), pulled directly from Black
+    /// Forest Labs with no SceneWorks re-host, so the catalog projection must carry `gated: true`
+    /// and the `huggingface.co` credential host the Models screen keys its "add a Hugging Face
+    /// token" / "request access" affordances on — and the stored-HF-token download path with it.
+    #[test]
+    fn flux3_klein_is_gated_behind_a_huggingface_credential() {
+        let model = builtin_models_entry("flux3_klein");
+        let mut object = model.as_object().unwrap().clone();
+        apply_gating_fields(&mut object);
+        assert_eq!(object.get("gated").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            object.get("credentialHost").and_then(Value::as_str),
+            Some("huggingface.co")
+        );
+        assert!(
+            !model_requires_license_acknowledgment(&model),
+            "a gated repo is refused upstream without a token; it needs no acknowledgment gate"
+        );
+        assert_eq!(
+            derive_credential_host(&object).as_deref(),
+            Some("huggingface.co"),
+            "the download itself resolves to the same Hugging Face credential"
+        );
+    }
+
+    /// sc-26235: the same pinned package serves native MLX and Candle/CUDA. Platform projection
+    /// must not hide the image entry or replace its upstream download on Windows or Linux.
+    #[test]
+    fn flux3_klein_keeps_its_native_candle_availability_and_package_on_each_platform() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("flux3_klein");
+        assert_eq!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(false),
+            "flux3_klein has native providers on both platforms"
+        );
+        for os in ["windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut projected = vec![base.clone()];
+            retain_models_for_os(&mut projected, os, temp.path()).unwrap();
+            assert_eq!(projected.len(), 1, "{os}: an image entry is not withdrawn");
+            let mut model = projected.remove(0);
+            assert_eq!(
+                model.get("macOnly").and_then(Value::as_bool),
+                Some(false),
+                "{os}: the native Candle model remains selectable"
+            );
+            assert!(
+                !video_model_withdrawn_on_platform("flux3_klein", &model, os),
+                "{os}"
+            );
+            retain_downloads_for_os(&mut model, os);
+            assert_flux3_primary_and_optional_pup(&model);
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein", "{os}");
+        }
+    }
+
     /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
     /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
     /// only when all three are present. Same on every platform (both lanes serve it).
@@ -7552,12 +7894,101 @@ mod download_receipt_tests {
 // downloadable model checks the HF cache + the SceneWorks-managed dir; a non-download
 // model (a local manifest entry) checks its declared installed path; otherwise it's
 // simply absent.
+fn flux3_selected_revision<'a>(download: Option<&'a Value>, repo: &str) -> Option<&'a str> {
+    let download = download?;
+    if download.get("repo").and_then(Value::as_str) != Some(repo) {
+        return None;
+    }
+    let revision = download.get("revision")?.as_str()?;
+    sceneworks_core::model_artifacts::validate_immutable_revision(revision)
+        .is_ok()
+        .then_some(revision)
+}
+
+fn flux3_selected_snapshot(
+    data_dir: &FsPath,
+    repo_root: &FsPath,
+    repo: &str,
+    download: Option<&Value>,
+) -> Option<PathBuf> {
+    let revision = flux3_selected_revision(download, repo)?;
+    // Use the same typed source-library boundary as other exact-revision API consumers; do not
+    // synthesize a model root or authorize a repository outside this selected source library.
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .snapshots_root_from_repository_root(repo_root)
+        .ok()
+        .map(|snapshots| snapshots.join(revision))
+}
+
+// Runtime readiness is separate from whole-repository download completion. A readable DiT is
+// not a usable FLUX 3 bundle when its bundled encoder or an indexed shard is absent. Other
+// families retain their existing cache policy; this card selects only its exact repo/revision.
+fn model_cache_health_for_download(
+    model_id: &str,
+    repo: &str,
+    download: Option<&Value>,
+    cache_path: Option<&FsPath>,
+    files: &[String],
+    data_dir: &FsPath,
+) -> Option<HuggingFaceCacheHealth> {
+    let root = cache_path?;
+    if model_id != "flux3_klein" {
+        return Some(huggingface_cache_health(root, files));
+    }
+    let Some(revision) = flux3_selected_revision(download, repo) else {
+        return Some(HuggingFaceCacheHealth::missing(vec![
+            "FLUX 3 requires its selected immutable repository revision".to_owned(),
+        ]));
+    };
+    let Some(snapshot) = flux3_selected_snapshot(data_dir, root, repo, download) else {
+        return Some(HuggingFaceCacheHealth::missing(vec![
+            "FLUX 3 repository is outside its selected source library".to_owned(),
+        ]));
+    };
+    if !snapshot.is_dir() {
+        return Some(HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: vec![format!("snapshots/{revision}")],
+        });
+    }
+    Some(
+        match sceneworks_worker::flux3_runtime_bundle_check(&snapshot, model_id) {
+            Ok(()) => HuggingFaceCacheHealth::installed(),
+            Err(error) => HuggingFaceCacheHealth::missing(vec![error]),
+        },
+    )
+}
+
+fn flux3_managed_bundle_is_current(
+    managed_path: &FsPath,
+    model_id: &str,
+    repo: &str,
+    download: Option<&Value>,
+) -> bool {
+    let Some(revision) = flux3_selected_revision(download, repo) else {
+        return false;
+    };
+    let identity_matches = receipt_entries(managed_path).iter().any(|entry| {
+        entry.get("repo").and_then(Value::as_str) == Some(repo)
+            && entry.get("snapshotRevision").and_then(Value::as_str) == Some(revision)
+            && entry
+                .get("modelId")
+                .and_then(Value::as_str)
+                .is_none_or(|id| id == model_id)
+    });
+    identity_matches
+        && sceneworks_worker::flux3_runtime_bundle_check(managed_path, model_id).is_ok()
+}
+
 fn install_state_for(
     download_context: Option<DownloadContext>,
     model: &Value,
     data_dir: &FsPath,
 ) -> ModelCatalogEntryState {
     if let Some(download_context) = download_context {
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let selected_download = model_download(model);
         let managed_path = data_dir
             .join("models")
             .join(safe_download_dir(&download_context.repo));
@@ -7596,9 +8027,14 @@ fn install_state_for(
                     .unwrap_or_default();
                 (any_installed, incomplete, missing)
             } else {
-                let cache_health = cache_path
-                    .as_ref()
-                    .map(|path| huggingface_cache_health(path, &download_context.files));
+                let cache_health = model_cache_health_for_download(
+                    model_id,
+                    &download_context.repo,
+                    selected_download.as_ref(),
+                    cache_path.as_deref(),
+                    &download_context.files,
+                    data_dir,
+                );
                 let installed = cache_health.as_ref().is_some_and(|health| health.installed);
                 let incomplete = cache_health
                     .as_ref()
@@ -7646,13 +8082,25 @@ fn install_state_for(
             &download_context.repo,
             model.get("id").and_then(Value::as_str),
         );
-        let managed_installed = !model_has_variant_matrix(model)
-            && receipt_file_sets.is_empty()
-            && model_is_installed(&managed_path);
-        if cache_installed {
+        let managed_installed = if model_id == "flux3_klein" {
+            flux3_managed_bundle_is_current(
+                &managed_path,
+                model_id,
+                &download_context.repo,
+                selected_download.as_ref(),
+            )
+        } else {
+            !model_has_variant_matrix(model)
+                && receipt_file_sets.is_empty()
+                && model_is_installed(&managed_path)
+        };
+        // Usable native FLUX 3 components do not prove every extra whole-repo file downloaded.
+        // Only the actual downloader may publish that completion receipt for this source.
+        if cache_installed && model_id != "flux3_klein" {
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
-        let stale_files_present = !cache_installed
+        let stale_files_present = model_id != "flux3_klein"
+            && !cache_installed
             && receipt_file_sets.iter().any(|receipt| {
                 receipt_files_present(
                     data_dir,
@@ -7685,7 +8133,22 @@ fn install_state_for(
         // may still use its complete older receipt.
         let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
-        let installed_path = if cache_installed || cache_incomplete || usable_stale {
+        let installed_path = if model_id == "flux3_klein" {
+            if cache_installed || (cache_incomplete && !managed_installed) {
+                cache_path.as_ref().and_then(|root| {
+                    flux3_selected_snapshot(
+                        data_dir,
+                        root,
+                        &download_context.repo,
+                        selected_download.as_ref(),
+                    )
+                })
+            } else if managed_installed {
+                Some(managed_path.clone())
+            } else {
+                None
+            }
+        } else if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
         } else {
             Some(managed_path)
@@ -8219,9 +8682,14 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             let cache_path = huggingface_repo_cache_path(data_dir, &repo);
             let cache_health = superseded_revision_tier_cache_health(data_dir, entry, &files)
                 .or_else(|| {
-                    cache_path
-                        .as_ref()
-                        .map(|path| huggingface_cache_health(path, &files))
+                    model_cache_health_for_download(
+                        model_id,
+                        &repo,
+                        Some(entry),
+                        cache_path.as_deref(),
+                        &files,
+                        data_dir,
+                    )
                 });
             let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
             let mut cache_incomplete = cache_health
@@ -8238,7 +8706,11 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // installed after any single tier's download (sc-9909). Require the tier's own files to
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = managed_tier_installed(&managed_path, &files);
+            let managed_installed = if model_id == "flux3_klein" {
+                flux3_managed_bundle_is_current(&managed_path, model_id, &repo, Some(entry))
+            } else {
+                managed_tier_installed(&managed_path, &files)
+            };
             let mut installed = cache_installed || managed_installed;
 
             // sc-13513: the coarse `<tier>/*` glob (and the managed presence check) is satisfied by ANY
@@ -8347,7 +8819,17 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
-            let installed_path = if cache_installed || cache_incomplete {
+            let installed_path = if model_id == "flux3_klein" {
+                if cache_installed || (cache_incomplete && !managed_installed) {
+                    cache_path.as_ref().and_then(|root| {
+                        flux3_selected_snapshot(data_dir, root, &repo, Some(entry))
+                    })
+                } else if managed_installed {
+                    Some(managed_path.clone())
+                } else {
+                    None
+                }
+            } else if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
                 Some(managed_path)

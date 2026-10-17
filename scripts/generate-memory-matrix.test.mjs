@@ -347,6 +347,31 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   // by its own throw-mutation cases below.
 });
 
+test("FLUX 3 Candle model and resource family have distinct existing owners", () => {
+  assert.equal(modelStory("flux3_klein", "mlx"), 26234);
+  assert.equal(modelStory("flux3_klein", "candle"), 26235);
+  assert.equal(familyStory("flux3_klein", "mlx"), 26233);
+  assert.equal(familyStory("flux3_klein", "candle"), 26241);
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(scope.get(26235), { backend: "candle", role: "model story", owner: "flux3_klein" });
+  assert.deepEqual(scope.get(26241), { backend: "candle", role: "family story", owner: "family SC-26233" });
+
+  // A missing family twin must fail closed, even when the per-model Candle owner is present.
+  const family = FAMILY_STORIES[26233];
+  const candleOwner = family.candle;
+  try {
+    delete family.candle;
+    assert.throws(() => familyStory("flux3_klein", "candle"), /owns no candle story/);
+  } finally {
+    family.candle = candleOwner;
+  }
+  // Reusing the model owner as the family owner is not an acceptable substitute for the twin.
+  assert.throws(() => buildStoryBackendScope(MODEL_STORIES, {
+    ...FAMILY_STORIES,
+    26233: { ...FAMILY_STORIES[26233], candle: 26235 },
+  }), /exactly one owner and one backend/);
+});
+
 test("the ownership tables scope every story to exactly one backend", () => {
   // One scope entry per (story, backend) across both tables, all distinct.
   //

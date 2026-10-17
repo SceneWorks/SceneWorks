@@ -192,7 +192,8 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // predictor (Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview): 144 keys. Epic 25899's
 // terminal story (sc-25909) re-records base Qwen Image 2.1's re-host at its NOTICE revision
 // (ef03535e…) and adds the published Turbo re-host (SceneWorks/qwen-image-2-1-turbo-mlx
-// @9095dfbb…): 145 keys.
+// @9095dfbb…): 145 keys. sc-26234's whole-repository FLUX 3 download (files: []) adds no
+// selective census row; preserve main's honest Qwen re-record and its pinned digest.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
 const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "58aae9b38ad00e1bb1411e222cd5fe8d3e053b428c301f03d206679936e889d5";
@@ -828,7 +829,8 @@ export function expectedArtifactFilesFromEvidence(profile, evidence) {
     object(row, "download-pattern evidence row");
     const key = claimKey(row.repo, row.revision);
     if (row.key !== key || rows.has(key) || row.resolvedSha !== row.revision
-      || row.servedRepo !== row.repo || row.gated !== false || !SHA40.test(row.revision)
+      || row.servedRepo !== row.repo || ![false, "auto", "manual"].includes(row.gated)
+      || !SHA40.test(row.revision)
       || !Array.isArray(row.files) || row.files.length === 0
       || row.files.some((file) => typeof file !== "string" || !file
         || path.isAbsolute(file) || file.split(/[\\/]/).includes(".."))
@@ -843,6 +845,9 @@ export function expectedArtifactFilesFromEvidence(profile, evidence) {
     const key = claimKey(artifact.repository, artifact.revision);
     const row = rows.get(key);
     if (!row) fail(`download-pattern evidence is missing exact authority ${key}`);
+    // This frozen campaign uses ungated authorities. New gated catalog entries outside its
+    // selected profile are valid census evidence, not permission to gate a campaign download.
+    if (row.gated !== false) fail(`download-pattern selected authority must be ungated: ${key}`);
     const matches = new Set();
     for (const pattern of artifact.allowPatterns) {
       const regexp = patternToRegExp(pattern);

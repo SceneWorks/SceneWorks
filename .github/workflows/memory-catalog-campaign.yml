@@ -66,12 +66,13 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "Catalog by default; Qwen app lifecycle runs only the reusable app proof, with no catalog walk or publication."
+        description: "Catalog by default; Qwen/FLUX3 app lifecycle profiles run only their reusable app proof, with no catalog walk or publication."
         required: false
         type: choice
         options:
           - catalog
           - qwen-image-2-1-app-lifecycle
+          - flux3-image-klein-app-lifecycle
           - iris-mlx-real-weights
         default: catalog
       inference_sha:
@@ -87,6 +88,14 @@ on:
           - primary
           - secondary
         default: primary
+      flux3_app_runner_target:
+        description: "FLUX3 app smoke only: secondary=rw-mage; primary=rw-starvector. Reserve an idle physical Mac before dispatch."
+        required: false
+        type: choice
+        options:
+          - secondary
+          - primary
+        default: secondary
       iris_smoke_filter:
         description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
         required: false
@@ -237,6 +246,17 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
+  flux3-app-lifecycle:
+    if: ${{ inputs.profile == 'flux3-image-klein-app-lifecycle' }}
+    permissions:
+      contents: read
+    # One ordinary installed-model/API/worker/saved-asset smoke. No catalog jobs,
+    # measurements, pin edits, branch publication or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-app-lifecycle.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      runner_target: ${{ inputs.flux3_app_runner_target }}
   qwen-app-lifecycle:
     if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     permissions:

@@ -202,6 +202,31 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+#[test]
+fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availability() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = false;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let req = request(
+            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true,"enhanceMaxTokens":3584}}),
+        );
+        let result = validate_prompt_enhancement_request(&req, &settings);
+        #[cfg(target_os = "macos")]
+        assert!(result.is_ok(), "{result:?}");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+        #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -7638,6 +7663,7 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
     let off = PromptEnhance::from_advanced(
+        "flux2_dev",
         &request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
@@ -7650,7 +7676,7 @@ fn prompt_enhance_reads_advanced_settings() {
 
     // The dev Image-Studio toggle sets `enhancePrompt`; optional temperature / max-tokens follow
     // (same keys as the LTX-2.3 video path).
-    let on = PromptEnhance::from_advanced(&request(json!({
+    let on = PromptEnhance::from_advanced("flux2_dev", &request(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
@@ -7688,10 +7714,12 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error =
-            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
-                .expect_err("invalid settings reject")
-                .to_string();
+        let error = parse_prompt_enhancement_fields(
+            "flux2_dev",
+            &request(json!({ "advanced": advanced })).advanced,
+        )
+        .expect_err("invalid settings reject")
+        .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
@@ -22297,6 +22325,7 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::Upsampling { .. } => "Upsampling",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",

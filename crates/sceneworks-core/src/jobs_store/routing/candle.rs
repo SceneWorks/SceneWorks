@@ -11,7 +11,7 @@ use crate::jobs_store::routing::catalog::{
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
+    flux3_mlx_eligible, instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
     qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
@@ -405,6 +405,8 @@ pub(crate) enum CandleImageRefusal {
     /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
     /// exactly the same list.
     IrisSurface,
+    /// Distilled FLUX 3 has the same text-to-image-only surface on both native backends.
+    Flux3Surface,
 }
 
 impl CandleImageRefusal {
@@ -424,6 +426,9 @@ impl CandleImageRefusal {
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
             Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
+            Self::Flux3Surface => {
+                "a carrier outside distilled FLUX 3's plain text-to-image surface"
+            }
         }
     }
 }
@@ -463,6 +468,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
     (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
+    (
+        CandleImageRefusal::Flux3Surface,
+        candle_refuses_flux3_surface,
+    ),
 ];
 
 /// Iris-3B (sc-25680) serves ONE request shape on both lanes: text-to-image with no source,
@@ -473,6 +482,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
 /// table so a carrier the generic checks name is reported by them.
 fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> bool {
     model == "iris_3b" && !iris_mlx_eligible(payload)
+}
+
+fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "flux3_klein" && !flux3_mlx_eligible(payload)
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the

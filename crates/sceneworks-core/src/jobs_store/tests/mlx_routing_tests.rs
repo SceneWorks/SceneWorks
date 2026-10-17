@@ -2178,6 +2178,41 @@ fn iris_routes_plain_text_to_image_only() {
     assert!(!support.features.edit && !support.features.reference && !support.features.pose);
 }
 
+/// sc-26234: the distilled FLUX 3 Image Klein route is plain text-to-image in S1 — every carrier
+/// the `flux3_klein` engine has no input for yet (source/reference/mask/control/pose, adapters, a
+/// quant tier, hires fix) keeps the job off the lane instead of reaching an engine that refuses it
+/// by name.
+#[test]
+fn flux3_routes_plain_text_to_image_only() {
+    assert!(MLX_ROUTED_MODELS.contains(&"flux3_klein"));
+    let eligible = |payload: Value| image_request_mlx_eligible("flux3_klein", &object(payload));
+    assert!(eligible(
+        json!({ "model": "flux3_klein", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "flux3_klein",
+        "advanced": { "steps": 16, "resolution": "1024x1024", "sampler": "euler" }
+    })));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
+        // sc-26239 owns adapters: a LoRA stack stays off the lane until then.
+        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
+    ] {
+        assert!(!eligible(refused.clone()), "{refused}");
+    }
+    let support = model_mac_support("flux3_klein", "image", Some("flux3"));
+    assert!(support.supported);
+    assert!(!support.features.edit && !support.features.reference && !support.features.pose);
+}
+
 /// sc-2126: `dataset_subject_mask` has no capability of its own — it requires the SAM3
 /// `image_segment` capability smart-select already advertises, so it routes exactly where SAM3
 /// lives, and (GPU-required) never to a CPU worker even if one claimed that capability.

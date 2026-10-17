@@ -1053,7 +1053,7 @@ test("a Lightning cell whose distill snapshot lacks the pinned LoRA file is weig
   const refused = await classifyAnchor("qwen_image_edit_2511_lightning:q4:mlx", planned, context(holed));
   assert.equal(refused.status, "weights_missing", refused.reason);
   assert.match(refused.reason, new RegExp(lora.file.replaceAll(".", "\\.")), "the reason names the file the arm opens");
-  assert.match(refused.reason, new RegExp(snapshotPath(holed, lora.repo, lora.revision)), "and the root it looked in");
+  assert.ok(refused.reason.includes(snapshotPath(holed, lora.repo, lora.revision)), "and the literal root it looked in");
   // The base id shares the tier root and attaches no LoRA, so it is untouched by the refusal.
   assert.equal((await classifyAnchor("qwen_image_edit_2511:q4:mlx", planned, context(holed))).status, "runnable");
   // And with the pinned file staged, the same cell is runnable — the probe is the file, not the name.

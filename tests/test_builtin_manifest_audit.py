@@ -3536,6 +3536,7 @@ IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
         "anima_turbo",
         "mage_flow_turbo",
         "mage_flow_edit_turbo",
+        "flux3_klein",  # flow map: no CFG at all (sc-26234)
     }
 )
 
@@ -4570,6 +4571,26 @@ def _qwen_image_2_1_entry() -> dict:
     )
 
 
+def test_flux3_prompt_upsampler_is_a_pinned_optional_whole_repository_component():
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    image = models["flux3_klein"]
+    utility = models["flux3_image_klein_pup"]
+    assert image["ui"]["promptEnhance"] is True
+    assert utility["type"] == "utility" and utility["componentOnly"] is True
+    assert utility["capabilities"] == [] and utility["ui"]["recommendedFor"] == []
+    assert utility["gated"] is False and utility["license"] == "Apache-2.0"
+    optional = [row for row in image["downloads"] if row.get("componentId") == "prompt_upsampler"]
+    assert len(optional) == 1
+    row = optional[0]
+    assert row["coRequisite"] is True and row["required"] == "soft"
+    assert not row.get("default", False)
+    for download in [row, utility["downloads"][0]]:
+        assert download["repo"] == "black-forest-labs/flux-3-image-klein-pup"
+        assert download["revision"] == "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed"
+        assert download["files"] == []
+        assert download["estimatedSizeBytes"] == 18_839_746_673
+    assert any(download.get("default") and not download.get("coRequisite") for download in image["downloads"])
+
 # ── Qwen-Image 2.1 Turbo (sc-25907, epic 25899) ────────────────────────────────────────────────
 
 
@@ -4862,7 +4883,7 @@ def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
 
 
 def test_managed_file_schema_rejects_partial_or_unpinned_identity():
-    schema = json.loads(SCHEMA_PATH.read_text())
+    schema = _load_schema(SCHEMA_PATH)
     manifest = _load_builtin_models_manifest()
     model = next(model for model in manifest["models"] if model["id"] == "minimax_h3")
     index = next(index for index, row in enumerate(model["downloads"]) if row.get("componentId") == "veda_predictor")
@@ -4874,3 +4895,21 @@ def test_managed_file_schema_rejects_partial_or_unpinned_identity():
         invalid = copy.deepcopy(manifest)
         del next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key]
         assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key
+
+
+def test_managed_file_schema_reader_is_utf8_under_a_windows_default(tmp_path, monkeypatch):
+    schema = _load_schema(SCHEMA_PATH)
+    schema["title"] = "许可"
+    fixture = tmp_path / "non-ascii-schema.json"
+    fixture.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setitem(globals(), "SCHEMA_PATH", fixture)
+    native_read_text = Path.read_text
+
+    def windows_default(path, *args, **kwargs):
+        if path == fixture and not args and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "cp1252"
+        return native_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_default)
+    # Execute the real identity audit, not only the already-correct generic loader.
+    test_managed_file_schema_rejects_partial_or_unpinned_identity()

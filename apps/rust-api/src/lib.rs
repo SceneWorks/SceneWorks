@@ -4925,14 +4925,17 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
 
 /// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
 /// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
 /// LLM sampler and must never inherit the old truthy/coercing behavior.
-fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+fn validate_prompt_enhancement_fields(
+    model_id: &str,
+    advanced: &JsonObject,
+) -> Result<bool, ApiError> {
+    let max_tokens = sceneworks_worker::prompt_enhancement_max_tokens(model_id);
     if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
         return Err(ApiError::bad_request(format!(
             "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
@@ -4969,9 +4972,9 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
         let tokens = value
             .as_u64()
             .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
-        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+        if !(1..=max_tokens).contains(&tokens) {
             return Err(ApiError::bad_request(format!(
-                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                "advanced.enhanceMaxTokens must be between 1 and {max_tokens}"
             )));
         }
         if !enabled {
@@ -4983,10 +4986,6 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
     Ok(enabled)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
     payload
         .get(key)
@@ -4994,10 +4993,6 @@ fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
     prompt_enhancement_payload_string(payload, "referenceAssetId")
         || payload
@@ -5011,14 +5006,29 @@ fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
 }
 
 fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
     let mode = payload
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("text_to_image");
+    // The API may be a CPU-only Docker service serving a native worker. Its own compiled
+    // inference backends are not evidence of that worker's capabilities. FLUX 3 validates shape
+    // here; the selected worker independently requires an enabled native backend and installed PUP.
+    if matches!(
+        payload.get("model").and_then(Value::as_str),
+        Some("flux3_klein" | "flux3_klein_base")
+    ) {
+        if mode != "text_to_image" {
+            return Err(ApiError::bad_request(
+                "FLUX 3 prompt enhancement currently requires the native text_to_image route",
+            ));
+        }
+        if prompt_enhancement_payload_references(payload)
+            || prompt_enhancement_payload_string(payload, "sourceAssetId")
+        {
+            return Err(ApiError::bad_request("advanced.enhancePrompt text_to_image cannot include source or reference image assets"));
+        }
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
     if !matches!(
@@ -5077,8 +5087,9 @@ fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiErro
 
 /// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
 /// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
-/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
-/// strict control, backendless builds,
+/// while Candle owns only base and its bespoke `edit_image` lane. FLUX 3 Image Klein adds native
+/// text_to_image with its separate optional upsampler; FLUX.2-Klein remains unsupported. Neither
+/// grants enhancement to strict control or backendless builds,
 /// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
 /// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
 fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
@@ -5087,16 +5098,16 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
         .get("advanced")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    if !validate_prompt_enhancement_fields(advanced)? {
-        return Ok(());
-    }
     let model = payload
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if model != "flux2_dev" {
+    if !validate_prompt_enhancement_fields(model, advanced)? {
+        return Ok(());
+    }
+    if !matches!(model, "flux2_dev" | "flux3_klein" | "flux3_klein_base") {
         return Err(ApiError::bad_request(
-            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
+            "advanced.enhancePrompt is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it",
         ));
     }
     let strict_control = advanced
@@ -5108,7 +5119,7 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
         || advanced.contains_key("controlMode");
     if strict_control {
         return Err(ApiError::bad_request(
-            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
+            "advanced.enhancePrompt cannot be combined with strict control",
         ));
     }
     validate_prompt_enhancement_route(payload)
@@ -5172,7 +5183,7 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
-    validate_prompt_enhancement_fields(&payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(
