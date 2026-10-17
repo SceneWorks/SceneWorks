@@ -6837,12 +6837,13 @@ pub fn fixture_plate_png_sized(
         *pixel = image::Rgb(color);
     }
     let mut bytes = Vec::new();
-    // Fast selects png's FdeflateUltraFast path, not flate2. These checked-in plates
-    // must be byte-identical under both miniz and zlib-rs workspace feature unions.
+    // Fast selects png's FdeflateUltraFast path, not flate2. A fixed Sub filter keeps
+    // flat plates compact (NoFilter stores nearly raw pixels and exceeds the planner
+    // fixture's upload budget), while remaining byte-identical across backend unions.
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
         &mut bytes,
         image::codecs::png::CompressionType::Fast,
-        image::codecs::png::FilterType::NoFilter,
+        image::codecs::png::FilterType::Sub,
     );
     image::ImageEncoder::write_image(
         encoder,
