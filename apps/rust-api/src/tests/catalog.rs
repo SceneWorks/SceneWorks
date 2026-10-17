@@ -8304,6 +8304,7 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
 /// Stage a superseded Qwen-Image 2.1 re-host tier the way a v0.9.0 download left it: every carried
 /// file at its exact declared size (sparse) under `snapshots/<legacy>/`, plus the install receipt
 /// that download wrote. Returns the legacy snapshot.
+#[cfg(unix)]
 fn stage_superseded_qwen_image_2_1_tier(
     data_dir: &std::path::Path,
     supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
