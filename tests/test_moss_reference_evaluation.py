@@ -1390,3 +1390,19 @@ def test_fixed_v6_transport_finishes_exact_two_pending_cells_and_reports_origins
     assert all(estimate['conditions'][key]['measurement_origin']=='current_campaign' for key in ev.CONFIG_IDS[4:])
     assert estimate['accepted_calibration_outputs']==6-int(failed) and estimate['known_generated_calibration_outputs']==7-int(failed) and estimate['excluded_failed_generated_outputs']==1
     assert estimate['carried_calibration_outputs']==4 and estimate['current_calibration_output_cap']==2
+
+
+@pytest.mark.parametrize('change',['misplaced_branch','missing_helper','duplicate_branch','unrelated_method','global','nested_constant'])
+def test_native_compatibility_projection_cannot_mask_misplaced_code(tmp_path,change):
+    import calibration_repair as cr
+    path=tmp_path/'native.py';text=(ROOT/'native.py').read_text()
+    if change=='misplaced_branch':text=text.replace("    def call(self,method,path,body=None,raw=False):", "    def call(self,method,path,body=None,raw=False):\n        if config['id']=='z_image_turbo':\n            tier_proof=z_tier_proof(config,job_id,metrics,job['result']['assets'][0]['recipe'],self.context['worker_log'])")
+    elif change=='nested_constant':text=text.replace('    def call(self,method,path,body=None,raw=False):',"    def call(self,method,path,body=None,raw=False):\n        FROZEN_SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'")
+    elif change=='missing_helper':text=text.replace('def z_tier_proof(', 'def renamed_z_tier_proof(')
+    elif change=='duplicate_branch':text=text.replace('        tier_proof=None','        tier_proof=None\n        tier_proof=None')
+    elif change=='unrelated_method':text=text.replace('timeout=30','timeout=31')
+    else:text+='\nUNREVIEWED_NATIVE_GLOBAL=1\n'
+    path.write_text(text)
+    try:projected=cr.native_source(path)
+    except ValueError:return
+    assert projected!=cr.native_source(ROOT/'native.py')

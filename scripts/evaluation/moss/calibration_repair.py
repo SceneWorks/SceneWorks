@@ -207,6 +207,15 @@ if config['id']=='flux2_klein_9b':
 if config['id']=='z_image_turbo':
  tier_proof=z_tier_proof(config,job_id,metrics,job['result']['assets'][0]['recipe'],self.context['worker_log'])""").body
     removed={ast.dump(n) for n in approved}
+    classes=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='Native']
+    need(len(classes)==1,'one native runtime class required')
+    renders=[n for n in classes[0].body if isinstance(n,ast.FunctionDef) and n.name=='render']
+    need(len(renders)==1,'one native render method required')
+    render=renders[0];render_nodes={id(n) for n in ast.walk(render)}
+    additions=[n for n in render.body if ast.dump(n) in removed]
+    has_helpers=any(isinstance(n,ast.FunctionDef) and n.name in ('klein_tier_proof','z_tier_proof') for n in tree.body)
+    need([ast.dump(n) for n in additions]==[ast.dump(n) for n in approved] if has_helpers else not additions,'packed proof plumbing missing, duplicated or misplaced')
+    allowed={id(n) for n in additions}
     class Project(ast.NodeTransformer):
         def visit(self,n):
             if isinstance(n,ast.FunctionDef) and n.name in ('klein_tier_proof','z_tier_proof'):
@@ -214,12 +223,12 @@ if config['id']=='z_image_turbo':
                 need(ast.dump(n)==ast.dump(ast.parse(contract).body[0]),'Klein helper changed outside reviewed proof contract')
                 return None
             if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id in KLEIN_CONSTANTS:
-                need(isinstance(n.value,ast.Constant) and n.value.value==KLEIN_CONSTANTS[n.targets[0].id],'Klein proof dependency changed')
+                need(n in tree.body and isinstance(n.value,ast.Constant) and n.value.value==KLEIN_CONSTANTS[n.targets[0].id],'Klein proof dependency changed')
                 return None
-            if ast.dump(n) in removed:return None
-            if ast.dump(n)==ast.dump(ast.parse("None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']]",mode='eval').body):
+            if id(n) in allowed:return None
+            if id(n) in render_nodes and ast.dump(n)==ast.dump(ast.parse("None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']]",mode='eval').body):
                 return ast.parse("{'bf16':None,'q8':8,'q4':4}[config['precision']]",mode='eval').body
-            if isinstance(n,ast.Dict):
+            if id(n) in render_nodes and isinstance(n,ast.Dict):
                 pairs=[(k,v) for k,v in zip(n.keys,n.values) if not (isinstance(k,ast.Constant) and k.value=='resolved_tier_proof' and isinstance(v,ast.Name) and v.id=='tier_proof')]
                 n.keys=[k for k,v in pairs];n.values=[v for k,v in pairs]
             return super().visit(n)
