@@ -634,7 +634,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8 -Value "PROVISION_SUBDIR_TAIL=$subdirTail"
           Write-Host "cache dir       : $cache"
           Write-Host "snapshot suffix : $suffix"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         with:
           node-version: 22
@@ -783,7 +783,7 @@ jobs:
       # Preserve listener isolation without repeating the entire Git/registry transfer
       # into RUNNER_TEMP every job. Never fall back to shared %USERPROFILE%\.cargo.
       - name: Set up Node for Cargo cache selection
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Isolate Cargo dependency checkout
@@ -895,7 +895,7 @@ jobs:
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-21714-candle-anchor.json"
       - name: Upload the raw schema-checked Candle Krea anchor
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-21714-krea-anchor-${{ github.run_id }}
           path: |
@@ -1005,7 +1005,7 @@ jobs:
           exit /b 1
       - name: Upload fresh Candle capability facts after a verification failure
         if: ${{ always() && steps.verify_candle_capabilities.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backend-capability-facts-candle
           path: ${{ runner.temp }}/engine-capability-facts-verify
@@ -1231,7 +1231,7 @@ jobs:
           ) | Out-File -LiteralPath (Join-Path $out 'sha256.txt') -Encoding ascii
       - name: Upload the LTX Eros acceptance evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-18902-ltx-eros-baseline-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1267,7 +1267,7 @@ jobs:
       - name: Set up the pinned terminal Node runtime
         id: terminal_node
         continue-on-error: true
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         with:
           node-version: 22
@@ -1400,7 +1400,7 @@ jobs:
           node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
       - name: Upload every epic-20738 terminal receipt
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-20945-epic-20738-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/sc-20945-epic-20738-${{ github.run_id }}-${{ github.run_attempt }}/
@@ -1454,7 +1454,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       - name: Set up Node for Cargo cache selection
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
@@ -1535,7 +1535,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       - name: Set up Node for the YuE2 terminal harnesses
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Isolate Cargo dependency checkout for the YuE2 terminal build
@@ -1635,7 +1635,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "FP8 profile record is stale or invalid: $recordPath" }
       - name: Upload the YuE2 terminal records and receipts (no audio)
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-23002-yue2-cuda${{ inputs.yue2_acceptance_only && '-acceptance-only' || inputs.yue2_fp8_profile_only && '-fp8-profile-only' || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -1714,7 +1714,7 @@ jobs:
           Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       - name: Set up Node for Cargo cache selection
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       # SC-25690: the two-card smoke puts one rank on EACH card, so both must be free before
