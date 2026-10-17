@@ -2,31 +2,31 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 137,
+    "modelCount": 138,
     "importedFamilyCount": 4,
-    "cellCount": 1061,
-    "mlxOnlyCellCount": 46,
+    "cellCount": 1063,
+    "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "4e6afcbfa357739491d64c880b51a8c76a061fbd3047b7e33f5f4bfd384e76de",
+    "apiContractEntry": "7ecb63053b888a15803a54e8cafbb4e822a4a202f8334b4dcf0da1ccfa7b61e7",
     "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
     "apiValidation": "696e591d5a03e42d96a4a1a59397ee05ef1bc355b08dd62aeeec0f26cfd23631",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "b343ab15e49a3e193ff9e8ab04d8c330871829786b21f6b4dcd1ed3969a9cf76",
-    "descriptorCandleFacts": "c742d6101a1490b7fe988fb811d922ff7410e42e1a38bba5a1db5006e3415eef",
-    "descriptorCandleRuntime": "a044717781bdca0fcf1b2e0a15c1dce98ea9edffcc54cfbb25e349b6ec88219a",
-    "descriptorMlxFacts": "445ceaa890b469b2be7f8de63e802fb564b5eb070c3c8ea2671ba008e960073a",
-    "descriptorMlxRuntime": "849eba2c710023f33f896915499ef4fd21d2bf55c43affb9d99552894b4c4f45",
-    "descriptorPreviewFacts": "cf16641470be6272229e16316ceb90159b52c1327288d03de55a85dc7c6bba59",
+    "descriptorAudioFacts": "5f0907044bdcb30cc9753142d8c2a553e5ebc8b86684eaf1f10e4cdc02a29ae9",
+    "descriptorCandleFacts": "b59475e3409241617e1705ac0bed23798567202f684e42aacb0c5617197ac34e",
+    "descriptorCandleRuntime": "d66e914a7916299ad91fe33066970c0a7be0415c9aecc31ff063d71b02ec769a",
+    "descriptorMlxFacts": "63dfbe193f48095424d8c44c774b86211809a9f09065d066e369e3ca0d799b14",
+    "descriptorMlxRuntime": "646f7d93957aa38f2a1ced064fa8036c7c8abae2f06cfb948500faa128dd6e66",
+    "descriptorPreviewFacts": "0a3f3c2d86a764cc0513b2dcdcb8a27406b0e8a5ec04161925961bbd1f26b996",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "0bbe3838d7387a3394ce0855c3a8f2471d75f0654482f4678e1171ef1713ab0d",
+    "manifest": "c7572bdeb816765b00e2b6f388b7d88a33a0f7bb5ab5790463e34db456ed2d3a",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
-    "routerCandle": "9f4adef06bcae0a06250e38e2e14acd92280ab7e2d0b2f85e6c6908e0a9ee947",
-    "routerCatalog": "a46297e1ef5d822c7066f38dee496f6a0f8c48e4aa40e2a249f72c90c586ba73",
-    "routerGaps": "dcb08b7a75dce6e5a5633f2c2eae13e25c8fdd5e5b88008d58d60728cd6acdfe",
+    "routerCandle": "e6b337ca9468d5ec179e7b13a8285dda9e16756b9bdc03edffe2daf7aca19ac8",
+    "routerCatalog": "bdb3a80d8d13752ba6f8930018f0b8bc0f7d940568e6959eab7167e45893e3a9",
+    "routerGaps": "ccf6c5b6b3e66976aaaa3b05c1ea09220867ff07dcd0c11b7c4e6287aa03175b",
     "routerMlx": "0f6afea74f40bc11a131fb13603aa7198636a56aaeea9845525ddac051d877cf",
     "scheduler": "1818d905cba00a3c927c680bc629a7937b92f5e4a366bc6b1c1b9c005c5ce2da",
     "trainingCatalog": "f615fb294f2b60ed84ba9280a801ca52a8efc32ddeeccc1eef09d021c66942ad",
@@ -44,12 +44,12 @@
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
-    "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "9f621761116d598440a65337d8fb75dc088c007e7e6131b08f85662ed9d13004",
+    "workerAudioDispatch": "3d93819cd7fa4e178c832e7cd022b72141edb4ee90d85a136220e1f60947bd31",
+    "workerDispatch": "24b7c95045af60a8721f0252862002170c401e65526031c9d568fffaa699d23a",
     "workerEngineTable": "85a15b1e623f7e1fab1643f490dd01b64560f84d3ff784b1642efd3fa5176e7c",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "b87ccabda813f0ba735a2d7fe29e3fcfec418994ec4240a99751db6a56d903c7",
-    "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
+    "workerImageDispatch": "bcccd13a11cdb039562b80194d9e551378cc06bd81457487d332c66702a6a53f",
+    "workerImageKreaImported": "44a5b7b2b7fa95be565597186aabd80f811b64919149856b497757685f0cfe35",
     "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
     "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "dbd3edacbfff16154b010fe7be463c7b118e7ceccb5a3b09365a7529124ade25"
+    "workerVideoWan": "bf16d4523f109501da068a548a649ab1b319f3e59f948a5a305b35cce6d36f68"
   },
   "models": [
     {
@@ -1555,6 +1555,23 @@
       }
     },
     {
+      "id": "flux3_image_klein_pup",
+      "family": "flux3",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "flux3_klein",
       "family": "flux3",
       "modelType": "image",
@@ -1562,17 +1579,19 @@
         "text_to_image"
       ],
       "evaluatedOperations": [
+        "prompt_enhancement",
         "text_to_image"
       ],
       "operationAndMode": [
         {
+          "capability": "prompt_enhancement",
+          "mlx": true,
+          "candle": true
+        },
+        {
           "capability": "text_to_image",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "candle": true
         }
       ],
       "conditioningShape": [],
@@ -1592,19 +1611,14 @@
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
         "mlx": false,
-        "candle": null
+        "candle": false
       }
     },
     {
