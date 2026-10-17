@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 139,
     "importedFamilyCount": 4,
-    "cellCount": 1073,
+    "cellCount": 1075,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -16,10 +16,10 @@
     "apiValidation": "2a1122f13ad5bcd2646d7868abceb48dd731d5ab35641c50dc96de2413fe0db1",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "5f0907044bdcb30cc9753142d8c2a553e5ebc8b86684eaf1f10e4cdc02a29ae9",
-    "descriptorCandleFacts": "b59475e3409241617e1705ac0bed23798567202f684e42aacb0c5617197ac34e",
-    "descriptorCandleRuntime": "d66e914a7916299ad91fe33066970c0a7be0415c9aecc31ff063d71b02ec769a",
-    "descriptorMlxFacts": "63dfbe193f48095424d8c44c774b86211809a9f09065d066e369e3ca0d799b14",
-    "descriptorMlxRuntime": "646f7d93957aa38f2a1ced064fa8036c7c8abae2f06cfb948500faa128dd6e66",
+    "descriptorCandleFacts": "ca2de02ec93e153743df864eae1be91af6fc85ebc06585c66737dab2fbb0524b",
+    "descriptorCandleRuntime": "1a04e585df89f5ffec8a7f1864a78581a931e9401f64f0c242f437ed5d534084",
+    "descriptorMlxFacts": "5a839cc93975a8f437138c8e0045398b9c198139ee21913a1c04c9f29c189839",
+    "descriptorMlxRuntime": "147f839823d066573f48134a598fea239e07955910511e7ec98c43cf81c6e351",
     "descriptorPreviewFacts": "22e1b3c69efb5478d2b060a7224bdcef1791d0e1a8dfa6ab3a596361db01ebae",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "5566c792589e6770900dd98ebb1e2f6ecc37cf0321574e6d80aa8442e9105d77",
@@ -4714,37 +4714,47 @@
       "operationAndMode": [
         {
           "capability": "edit_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "image_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "text_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "conditioningShape": [
         {
           "capability": "multiReference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
