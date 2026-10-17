@@ -237,7 +237,7 @@ class BootstrapContracts(unittest.TestCase):
         binary=self.root/'app.exe';binary.write_bytes(b'fixture')
         outputs={'dumpbin':'  KERNEL32.dll\n  unknown_model.dll\n','rustc':'rustc actual compiler','cargo':'cargo actual version','nvcc':'native CUDA compiler actual version'}
         def run(args,**kwargs):return outputs[args[0]]
-        with patch.object(b,'run',side_effect=run) as commands,patch.object(b.shutil,'which',return_value=None),patch.dict(os.environ,{'SystemRoot':str(self.root/'no-system'),'CUDA_PATH':'native-cuda-path'}):
+        with patch.object(b,'run',side_effect=run) as commands,patch.dict(os.environ,{'SystemRoot':str(self.root/'no-system'),'PATH':str(self.root/'no-path'),'CUDA_PATH':'native-cuda-path'}):
             result=b.native_identity(binary)
         self.assertEqual(result['rustc'],outputs['rustc'])
         self.assertEqual(result['nvcc'],outputs['nvcc'])
@@ -245,6 +245,31 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual(result['dependency_names'],['KERNEL32.dll','unknown_model.dll'])
         self.assertTrue(all(c['candidate_path'] is None and c['loaded_proof'] is False for c in result['dependency_candidates']))
         self.assertTrue(all(str(binary)!=str(c.args[0][0]) for c in commands.call_args_list))
+
+    def test_literal_dll_candidates_ignore_pathext_preserve_order_and_reject_exe_decoys(self):
+        binary=self.root/'app.exe';binary.write_bytes(b'not executed')
+        system=self.root/'windows'/'System32';system.mkdir(parents=True)
+        first=self.root/'cuda-bin';first.mkdir();second=self.root/'other-bin';second.mkdir()
+        (system/'shared.dll').write_bytes(b'system takes precedence')
+        (first/'shared.dll').write_bytes(b'PATH duplicate')
+        (first/'toolkit.dll').write_bytes(b'first literal PATH DLL')
+        (second/'toolkit.dll').write_bytes(b'second PATH DLL')
+        (first/'decoy.dll.exe').write_bytes(b'executable decoy must not match')
+        outputs={'dumpbin':'  shared.dll\n  toolkit.dll\n  decoy.dll\n  api-ms-win-missing.dll\n','powershell':'1.2.3','rustc':'compiler','cargo':'cargo','nvcc':'nvcc'}
+        env={'SystemRoot':str(system.parent),'PATH':os.pathsep.join((str(first),str(second))),'PATHEXT':'.COM;.EXE;.BAT'}
+        with patch.object(b,'run',side_effect=lambda args,**kwargs:outputs[args[0]]) as commands,patch.object(b.shutil,'which',side_effect=AssertionError('executable lookup forbidden')),patch.dict(os.environ,env):
+            result=b.native_identity(binary)
+            self.assertEqual({key:os.environ[key] for key in env},env)
+        rows={row['name']:row for row in result['dependency_candidates']}
+        for name,path in (('shared.dll',system/'shared.dll'),('toolkit.dll',first/'toolkit.dll')):
+            self.assertEqual(rows[name]['candidate_path'],str(path))
+            self.assertEqual(rows[name]['sha256'],b.digest(path))
+            self.assertEqual(rows[name]['file_version'],'1.2.3')
+        self.assertIsNone(rows['decoy.dll']['candidate_path'])
+        self.assertIsNone(rows['api-ms-win-missing.dll']['candidate_path'])
+        self.assertTrue(all(row['loaded_proof'] is False for row in rows.values()))
+        self.assertEqual(result['adjacent_dll_files'],[])
+        self.assertTrue(all(str(binary)!=str(call.args[0][0]) for call in commands.call_args_list))
 
     def test_prepared_receipt_binds_reuse_ledger(self):
         binary=self.root/'binary';binary.write_bytes(b'fixture');lock=self.root/'requirements.lock';lock.write_text('locked')

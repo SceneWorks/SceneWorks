@@ -349,9 +349,11 @@ def native_identity(binary):
     adjacent={p.name.casefold():p for p in binary.parent.iterdir() if p.is_file() and p.suffix.casefold()=='.dll'}
     required_adjacent=[str(adjacent[name.casefold()]) for name in imports if name.casefold() in adjacent]
     resolved=[]
+    roots=[Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32',*(Path(p) for p in os.get_exec_path())]
     for name in imports:
-        system=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32'/name
-        candidate=system if system.is_file() else Path(found) if (found:=shutil.which(name)) else None
+        # DLLs are literal files, not PATHEXT executables. In particular, a
+        # name.dll.exe on PATH is not a candidate for a name.dll PE import.
+        candidate=next((root/name for root in roots if (root/name).is_file()),None)
         item=dict(name=name,candidate_path=str(candidate) if candidate else None,sha256=None,file_version=None,loaded_proof=False)
         if candidate:
             physical(candidate)

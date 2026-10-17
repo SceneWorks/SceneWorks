@@ -97,8 +97,11 @@ overwriting that harness. Retained verified wheels/models can still seed it.
 
 Both build paths capture actual `rustc -Vv`, `cargo -V`, `nvcc --version`,
 `CUDA_PATH`, PE import names from `dumpbin /DEPENDENTS`, and hashes/versions of
-safely resolved DLL candidates. Unknown/dynamically loaded dependencies remain
-explicit. This read-only identity is not a loader/GPU compatibility proof and
+safely resolved DLL candidates. Candidate lookup checks literal DLL filenames in
+System32 then existing PATH order, independently of executable PATHEXT rules; a
+`.dll.exe` file cannot satisfy a `.dll` import. Unknown/dynamically loaded
+dependencies remain explicit. This read-only identity is not a loader/GPU
+compatibility proof.
 Torch's CUDA12.8 build is not the native compiler/runtime version. This source
 starts the API for unrecognized arguments, so `--help` is not used as a CPU probe.
 The new host/driver/runtime freeze and measured conditions still govern cost
