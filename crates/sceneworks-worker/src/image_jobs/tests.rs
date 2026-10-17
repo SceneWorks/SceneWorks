@@ -364,7 +364,7 @@ fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availa
     settings.backend_candle_enabled = false;
     for model in ["flux3_klein", "flux3_klein_base"] {
         let req = request(
-            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true}}),
+            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true,"enhanceMaxTokens":3584}}),
         );
         let result = validate_prompt_enhancement_request(&req, &settings);
         #[cfg(target_os = "macos")]
@@ -7816,6 +7816,7 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
     let off = PromptEnhance::from_advanced(
+        "flux2_dev",
         &request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
@@ -7828,7 +7829,7 @@ fn prompt_enhance_reads_advanced_settings() {
 
     // The dev Image-Studio toggle sets `enhancePrompt`; optional temperature / max-tokens follow
     // (same keys as the LTX-2.3 video path).
-    let on = PromptEnhance::from_advanced(&request(json!({
+    let on = PromptEnhance::from_advanced("flux2_dev", &request(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
@@ -7866,10 +7867,12 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error =
-            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
-                .expect_err("invalid settings reject")
-                .to_string();
+        let error = parse_prompt_enhancement_fields(
+            "flux2_dev",
+            &request(json!({ "advanced": advanced })).advanced,
+        )
+        .expect_err("invalid settings reject")
+        .to_string();
         assert!(error.contains(expected), "{error}");
     }
 

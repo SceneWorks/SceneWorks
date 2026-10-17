@@ -369,6 +369,12 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+
+/// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
+/// This is independent of effective-caption Unicode-character admission after enhancement.
+pub fn prompt_enhancement_max_tokens(model_id: &str) -> u64 {
+    u64::from(gen_core::generator::max_enhance_tokens_for_model(model_id))
+}
 mod vector_jobs;
 #[doc(hidden)]
 pub use vector_jobs::build_vector_asset_fact;

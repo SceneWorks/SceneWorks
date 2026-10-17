@@ -55,7 +55,7 @@ use gen_core::{
 mod prompt_upsampling;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use prompt_upsampling::{
-    attach_prompt_upsampler, prompt_enhancement_fact, publish_upsampling_progress,
+    attach_prompt_upsampler, prompt_enhancement_fact, publish_upsampling_progress, PromptEnhance,
 };
 
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
@@ -251,10 +251,10 @@ fn requested_decoder_id(
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 
 fn parse_prompt_enhancement_fields(
+    model_id: &str,
     advanced: &JsonObject,
 ) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
     if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
@@ -290,6 +290,7 @@ fn parse_prompt_enhancement_fields(
             Ok(value as f32)
         })
         .transpose()?;
+    let max_token_limit = crate::prompt_enhancement_max_tokens(model_id);
     let max_tokens = advanced
         .get("enhanceMaxTokens")
         .map(|value| {
@@ -298,9 +299,9 @@ fn parse_prompt_enhancement_fields(
                     "advanced.enhanceMaxTokens must be an integer".to_owned(),
                 )
             })?;
-            if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&value) {
+            if !(1..=max_token_limit).contains(&value) {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                    "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
                 )));
             }
             Ok(value as u32)
@@ -464,7 +465,7 @@ fn validate_prompt_enhancement_request(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
+    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.model, &request.advanced)?;
     if !enabled {
         return Ok(());
     }

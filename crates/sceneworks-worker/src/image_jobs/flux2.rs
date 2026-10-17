@@ -767,7 +767,7 @@ async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
     #[cfg(target_os = "macos")]
     let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
     #[cfg(not(target_os = "macos"))]
