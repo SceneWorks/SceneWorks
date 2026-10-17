@@ -12097,6 +12097,11 @@ fn candle_quant_for_resolved_tier(
     supports_quant: bool,
     force_dense: bool,
 ) -> (Option<Quant>, Option<i64>) {
+    // Z's packed directory self-describes both components. Its descriptor rejects
+    // load-time quantization; None must not erase the resolved artifact receipt.
+    if matches!(request.model.as_str(), "z_image" | "z_image_turbo" | "z_image_edit") {
+        return (None, dense_te_candle_metrics(Some(weights_dir)).1);
+    }
     if matches!(request.model.as_str(), "sana_1600m" | "sana_sprint_1600m") {
         return (None, None);
     }
@@ -12238,6 +12243,34 @@ mod candle_resolved_tier_contract_tests {
                     (None, expected_bits),
                     "{model}:{tier}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn z_packed_receipts_and_metrics_follow_final_directory_without_load_quant() {
+        for model in ["z_image", "z_image_turbo", "z_image_edit"] {
+            for requested in [0, 4, 8] {
+                let request = ImageRequest::from_payload(
+                    json!({"model": model, "advanced": {"mlxQuantize": requested}})
+                        .as_object().unwrap(),
+                );
+                for (dir, label, bits) in [
+                    ("q4", Some("q4"), Some(4)),
+                    ("q8", Some("q8"), Some(8)),
+                    ("bf16", Some("bf16"), None),
+                    ("opaque", None, None),
+                ] {
+                    let path = PathBuf::from(dir);
+                    // A stale tier/request must not override the final physical directory.
+                    for tier in ["q4", "q8", "bf16", "opaque"] {
+                        for supports_quant in [false, true] {
+                            assert_eq!(candle_quant_for_resolved_tier(&request, tier, &path, supports_quant, false), (None, bits), "{model}:{requested}:{tier}:{dir}");
+                        }
+                    }
+                    assert_eq!(effective_quant_label_gated(&request, false, Some(&path)), (label.map(str::to_owned), bits));
+                }
+                assert_eq!(effective_quant_label_gated(&request, false, None), (None, None));
             }
         }
     }
@@ -14745,7 +14778,9 @@ fn effective_quant_label_gated(
         };
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    if is_dense_te_tier(request) {
+    if is_dense_te_tier(request)
+        || matches!(request.model.as_str(), "z_image" | "z_image_turbo" | "z_image_edit")
+    {
         return dense_te_candle_metrics(tier_dir);
     }
     // FLUX.1's generic Candle route accepts only an exact packed q4/q8 directory. Its omitted
