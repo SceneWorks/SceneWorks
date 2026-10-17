@@ -884,8 +884,9 @@ pub fn image_dimension_error(
     // those models have always accepted, including stored recipes and workflow replays (a 1000x1000
     // Mage-Flow render is not a multiple of 16).
     //
-    // Gating on the envelope keeps the new refusal to models that declared one — today only
-    // `qwen_image_2_1` — while leaving the Mage family exactly as it was. It is also the honest
+    // Gating on the envelope keeps the new refusal to models that declared one — today the
+    // Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — while leaving the Mage
+    // family exactly as it was. It is also the honest
     // reading: a bare stride was authored as advice to a snapping control, whereas a declared
     // min/max/stride triple is a model stating its whole request contract.
     let grid = envelope

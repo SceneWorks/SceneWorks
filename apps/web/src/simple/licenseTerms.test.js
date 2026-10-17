@@ -125,6 +125,22 @@ describe("modelLicenseRows", () => {
     expect(row.id).not.toBe("qwen-image-2-1");
   });
 
+  it("covers Qwen Image 2.1 Turbo with its own row, the same agreement and the same badge (sc-25907)", () => {
+    // The distilled checkpoint is a different repository and revision under the byte-identical
+    // agreement, so it gets its own About row (not a silent ride on base's) that resolves the same
+    // document and badges Non-commercial through the explicit flag — the title alone would not.
+    const component = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1-turbo");
+    expect(component).toBeTruthy();
+    expect(component.models).toEqual(["qwen_image_2_1_turbo"]);
+    expect(component.nonCommercial).toBe(true);
+    expect(licenseIsNonCommercial(component.license)).toBe(false);
+    expect(licenseBadge(component)).toEqual({ label: "Non-commercial", tone: "danger" });
+    expect(component.documents.map((document) => document.key)).toEqual(["qwen-image-2-1-research"]);
+    expect(typeof component.documents[0].url).toBe("string");
+    const base = bundledLicenses.find((entry) => entry.id === "qwen-image-2-1");
+    expect(base.models).not.toContain("qwen_image_2_1_turbo");
+  });
+
   it("falls back to the licence name for a component that declares no flag", () => {
     // Every pre-existing component keeps the badge it had: no `nonCommercial` key, name match only.
     const fluxDev = bundledLicenses.find((entry) => entry.id === "flux1-dev");

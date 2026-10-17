@@ -16383,6 +16383,26 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--danger);
 }
 
+.worker-progress-card__prefix-cache > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__prefix-cache-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__prefix-cache-overflow {
+  margin: 2px 0 0;
+  color: color-mix(in oklch, var(--warn) 80%, var(--text));
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 480px) {
   .worker-progress-card__title-row {
     grid-template-columns: 1fr;

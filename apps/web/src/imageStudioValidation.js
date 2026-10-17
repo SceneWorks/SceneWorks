@@ -89,6 +89,10 @@ export function imageGenerateValidation({
   // (or null) — a value the user actively broke that nothing else on the form explains, so it blocks
   // Generate AND is surfaced. Null/absent leaves the gate unchanged for every other model.
   dimensionError = null,
+  // More ordered references than the selected model declares (`limits.maxReferenceAssets`,
+  // sc-25908). A pre-computed, user-facing ERROR string (or null): the enqueue gate 400s the
+  // request, so the dead Generate button must say why before the click.
+  referenceOverflowError = null,
   // A restored alternate decoder cannot be reconciled or safely omitted until the platform
   // capability response identifies the active engine. Native selections never set this gate.
   decoderCapabilitiesPending = false,
@@ -149,6 +153,9 @@ export function imageGenerateValidation({
   // hold a value the user actively broke, and only this message explains the dead Generate button.
   if (dimensionError) {
     issues.push(issue.error(null, dimensionError));
+  }
+  if (referenceOverflowError) {
+    issues.push(issue.error("references", referenceOverflowError));
   }
   if (decoderCapabilitiesPending) {
     issues.push(

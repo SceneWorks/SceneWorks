@@ -1385,6 +1385,11 @@ async fn validate_raw_job_payload(
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        // sc-25907: a base that is deliberately not trainable (the distilled Qwen-Image 2.1 Turbo)
+        // is a 400 that says to train on base, before any licence question is asked about it.
+        if let Some(error) = crate::training::raw_training_payload_base_error(payload) {
+            return Err(error);
+        }
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, totalmem } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -3402,4 +3402,38 @@ test("a single-render physical A/V session carries selected_av alone; the audio 
     () => validatePhysicalMlxAvContentsAgainstRecord(record, new Map([["reference_av", content]]), record.id),
     /must carry the selected_av render/,
   );
+});
+
+
+test("a failing guarded capture completes the guard's handshake and exits with its own status", { skip: process.platform !== "darwin" && "the footprint guard is Darwin-only" }, async () => {
+  // sc-26246: under `--require-completion-handshake` a root that exits without completing is a hard
+  // stop. The capture's FAILURE path must complete too, so a refusal surfaces as the capture's own
+  // exit status rather than as a guard stop that hides it.
+  const root = await mkdtemp(path.join(tmpdir(), "harness-completion-"));
+  const events = path.join(root, "events.jsonl");
+  const output = path.join(root, "captures", "anchor.json");
+  const watchdog = fileURLToPath(new URL("./memory-calibration-watchdog.py", import.meta.url));
+  const harness = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
+  let status = 0;
+  let stderr = "";
+  try {
+    await execFileAsync("/usr/bin/python3", [
+      watchdog, "--max-footprint-bytes", String(64 * 1024 ** 3),
+      "--host-memory-bytes", String(totalmem()), "--min-memory-free-bytes", "1",
+      "--max-runtime-seconds", "120", "--sample-interval", "0.2", "--telemetry-timeout", "10",
+      "--term-grace", "1", "--event-file", events, "--require-completion-handshake",
+      "--", process.execPath, harness, "capture", "--anchor", "no_such_model:q4:mlx",
+      "--provider-command", "[]", "--sceneworks-repo", root, "--inference-repo", root,
+      "--output", output,
+    ], { timeout: 120_000 });
+  } catch (error) {
+    status = error.code;
+    stderr = String(error.stderr);
+  }
+  const log = (await readFile(events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(log.find((event) => event.event === "hard_stop"), undefined, JSON.stringify(log.at(-1)));
+  assert.ok(log.some((event) => event.event === "child_completed"), "the capture completed the handshake");
+  assert.equal(status, 1, stderr);
+  assert.match(stderr, /memory-strategy calibration:/);
+  assert.deepEqual(await readdir(path.dirname(output)), [], "the private completion evidence is removed");
 });

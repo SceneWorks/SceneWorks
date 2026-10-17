@@ -5,17 +5,33 @@ import { appendFile, lstat, mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// sc-25907: the distilled Turbo sibling is measured by the same terminal MLX job over the same
+// task-owned hub, so it is accepted beside base. Each id's snapshots stay its own (the resolver pins
+// each manifest revision); this only widens which ids may share the hub.
+const QWEN_PERSISTENT_MODELS = new Set(["qwen_image_2_1", "qwen_image_2_1_turbo"]);
+
 export async function bindQwenPersistentCache(env = process.env) {
-  if (env.BACKEND !== "mlx" || env.MODELS_INPUT?.trim() !== "qwen_image_2_1") {
-    throw new Error("qwen_persistent_weights requires backend=mlx and models=qwen_image_2_1");
+  const models = (env.MODELS_INPUT ?? "").trim().split(/\s+/).filter(Boolean);
+  if (
+    env.BACKEND !== "mlx" ||
+    models.length === 0 ||
+    models.some((model) => !QWEN_PERSISTENT_MODELS.has(model))
+  ) {
+    throw new Error(
+      "qwen_persistent_weights requires backend=mlx and models drawn from qwen_image_2_1 / qwen_image_2_1_turbo",
+    );
   }
   if (env.HF_CACHE_INPUT?.trim()) {
     throw new Error("qwen_persistent_weights requires empty hf_cache_roots");
   }
   if (env.ANCHORS_INPUT?.trim()) {
     const anchors = env.ANCHORS_INPUT.split(",").map((anchor) => anchor.trim());
-    if (anchors.some((anchor) => !/^qwen_image_2_1:(q4|q8|bf16):mlx$/.test(anchor))) {
-      throw new Error("qwen_persistent_weights accepts only qwen_image_2_1 MLX anchors");
+    const outOfScope = (anchor) => {
+      const match = /^(qwen_image_2_1(?:_turbo)?):(q4|q8|bf16):mlx$/.exec(anchor);
+      return !match || !models.includes(match[1]);
+    };
+    if (anchors.some(outOfScope)) {
+      throw new Error("qwen_persistent_weights accepts only MLX anchors of the selected Qwen-Image 2.1 models");
     }
   }
   if (!env.HOME || !path.isAbsolute(env.HOME) || /[\r\n]/.test(env.HOME) || !env.GITHUB_ENV) {

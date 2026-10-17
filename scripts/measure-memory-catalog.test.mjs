@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   OUT_OF_MATRIX_CATALOG_ENTRIES,
@@ -5096,7 +5097,18 @@ async function stubCheckout() {
     const [command, ...args] = process.argv.slice(2);
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
-      if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-26246: the real harness's completion handshake, so a guarded stub capture exits the
+      // way a real one does — after the guard's final sample, never racing it.
+      const { mkdir } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      const { connectWatchdogCompletion } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, "scripts/lib/watchdog-completion.mjs")).href)});
+      const completion = await connectWatchdogCompletion();
+      const finish = async (code) => {
+        await mkdir(dirname(value("--output")), { recursive: true });
+        await completion.complete(dirname(value("--output")));
+        process.exit(code);
+      };
+      if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); await finish(1); }
       // sc-22738 review: the guard MEASURED a bound and wrote it down, and the post-stop reap then
       // wedged. The runner's backstop is what ends such a probe, minutes later, with the bound
       // already in the event log — so the stub writes exactly what the guard writes at the instant
@@ -5132,7 +5144,7 @@ async function stubCheckout() {
       if (process.env.STUB_CAPTURE_DEFERRED_NOTE) {
         console.error("memory-strategy provider adapter: LTX-2.3 admission rejected an exact-fit calibrated budget: ltx_2_3: incremental live demand 9 exceeds effective budget 7");
         console.error("memory-strategy provider adapter: note: GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
-        process.exit(1);
+        await finish(1);
       }
       // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
       // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
@@ -5142,11 +5154,11 @@ async function stubCheckout() {
       if (process.env.STUB_CAPTURE_ARTIFACT_UNSUPPORTED) {
         console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
         console.error("load real wan2_2_i2v_14b q4 provider: unsupported: /hub/q4/high_noise_model.safetensors packed head.head lacks scales");
-        process.exit(1);
+        await finish(1);
       }
       if (process.env.STUB_CAPTURE_METAL_REFUSAL) {
         console.error('Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured render: "[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). at /out/mlx-c-staged/mlx/c/transforms.cpp:73"');
-        process.exit(1);
+        await finish(1);
       }
       // sc-22738: the two MLX arms that emit a provider sourceCapture (mlx.rs qwen_source_capture,
       // mlx_ltx25.rs prepare_source_capture) required_env the capture dir UNCONDITIONALLY, before
@@ -5158,9 +5170,10 @@ async function stubCheckout() {
       if (/^(ltx_2_5|qwen_image):/.test(value("--anchor") ?? "") && !captureDir) {
         console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
         console.error("memory-strategy provider adapter: required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set");
-        process.exit(1);
+        await finish(1);
       }
       await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null, captureDir, sourcePathPrefix, rawLogDir: value("--raw-log-dir") ?? null }] }));
+      await finish(0);
     } else if (command === "record-exceeded") {
       const events = (await readFile(value("--watchdog-events"), "utf8")).trim().split("\\n").map(JSON.parse);
       const stop = events.find((event) => event.event === "hard_stop");
@@ -5646,6 +5659,9 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
   assert.equal(flag("--host-memory-bytes"), 137_438_953_472);
   assert.equal(flag("--min-memory-free-bytes"), UNIFIED_RESERVE_BYTES, "the whole-host floor is the absolute 2 GiB reserve, not the non-wired remainder");
   assert.equal(guard[guard.indexOf("--event-file") + 1], "/tmp/events.jsonl");
+  // sc-26246: the capture's exit must follow the guard's final sample, or an exit that lands between
+  // its census and its footprint sample reads as `RootTelemetryLost` and discards a finished render.
+  assert.ok(guard.includes("--require-completion-handshake"), "catalog captures complete through the guard");
   // The footprint ceiling is below the incident, and the two ceilings together leave room for
   // the host's own baseline: the guarded group can reach its ceiling without the whole-host floor
   // firing first (sc-22738 review: `memoryBytes − wiredLimitBytes` as the floor turned the
@@ -6498,6 +6514,12 @@ test(
       async () => (await readFile(eventFile, "utf8").catch(() => "")).includes('"event": "sample"')
         || (await readFile(eventFile, "utf8").catch(() => "")).includes('"event":"sample"'),
       { realSetTimeout, what: "the footprint guard's first sample" },
+    );
+    // The stub reaches its hang only after the guard's completion GO (sc-26246), which follows that
+    // first sample: wait until the adapter it stands in for actually exists before stopping it.
+    await untilReal(
+      async () => (await readFile(adapterPidFile, "utf8").catch(() => "")).trim().split("\n").length === 2,
+      { realSetTimeout, what: "the stub capture's adapter" },
     );
 
     // ONE MILLISECOND SHORT. The unguarded bound (60,000 ms) and the guard's own deadline are both

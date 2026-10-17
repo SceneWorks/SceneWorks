@@ -104,6 +104,28 @@ describe("Qwen Image 2.1 control surface (sc-24113)", () => {
     expect(seed.capabilities).toEqual(entry.capabilities);
   });
 
+  // Epic 25899 — Turbo had no seed at all, so before the catalog loaded it could not be picked.
+  // Every field the pre-catalog controls read must agree with the manifest, for BOTH 2.1 ids.
+  // *Mutation that reds this:* deleting the Turbo seed, or giving it base's 40 steps / floor 2.
+  it.each(["qwen_image_2_1", "qwen_image_2_1_turbo"])(
+    "%s has a pre-catalog seed whose control fields equal the manifest",
+    (id) => {
+      const entry = manifestEntry(id);
+      const fallback = fallbackModels.find((model) => model.id === id);
+      expect(entry).toBeTruthy();
+      expect(fallback, `${id} must be present in fallbackModels`).toBeTruthy();
+      expect(fallback.name).toBe(entry.name);
+      expect(fallback.type).toBe(entry.type);
+      expect(fallback.capabilities).toEqual(entry.capabilities);
+      expect(fallback[MODEL_ALPHA_CAPABILITY_FLAG]).toBe(entry[MODEL_ALPHA_CAPABILITY_FLAG]);
+      expect(fallback.limits).toEqual(entry.limits);
+      expect(fallback.defaults).toEqual(entry.defaults);
+      expect(fallback.ui.multiReference).toBe(entry.ui.multiReference);
+      expect(fallback.ui.promptGuide.path).toBe(entry.ui.promptGuide.path);
+      expect(fallback.ui.promptGuide.title).toBe(entry.ui.promptGuide.title);
+    },
+  );
+
   it("reads the model's step floor instead of the hardcoded 1", () => {
     expect(minStepsForModel(seed)).toBe(2);
     // Every model that declares nothing keeps 1 — the control is byte-identical for them.

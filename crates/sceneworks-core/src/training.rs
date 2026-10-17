@@ -691,6 +691,28 @@ pub struct TrainingConfig {
     pub extra: ExtraFields,
 }
 
+/// Why `base_model` — a shipped catalog image model — is deliberately NOT a training base, or
+/// `None` when it may be one (whether a trainer for it is registered is the target registry's
+/// business, not this list's).
+///
+/// Qwen-Image 2.1 Turbo (epic 25899 E9) is the case that made this a named refusal rather than a
+/// missing target: the engine registers no trainer under the distilled id, and the right answer
+/// for a user is not "unknown" but "train on base — the adapter loads on Turbo", because the two
+/// share the `qwen-image-2-1` LoRA family. The API refuses a raw training plan naming it with this
+/// text (`raw_training_payload_base_error`), and the worker's own kernel-to-trainer map refuses
+/// it too (`qwen_image_2_1_lora` is base-gated to `qwen_image_2_1`).
+pub fn untrainable_base_model_reason(base_model: &str) -> Option<String> {
+    match base_model.trim() {
+        "qwen_image_2_1_turbo" => Some(
+            "qwen_image_2_1_turbo is a distilled checkpoint with no trainer, so it cannot be a \
+             training base. Train the LoRA on qwen_image_2_1 instead — Turbo shares its \
+             qwen-image-2-1 LoRA family, so the adapter loads on Turbo unchanged."
+                .to_owned(),
+        ),
+        _ => None,
+    }
+}
+
 /// Payload contract for submitting a LoRA training job.
 ///
 /// The matching `JobType`, queue routing, and dry-run plan builder are added in

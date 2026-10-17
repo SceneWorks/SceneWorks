@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
@@ -98,6 +98,7 @@ import {
   releaseUnpublishedBoundedCarrierOutcome,
   preflightFreeFloor,
   repositoryToolchain,
+  killProcessGroup,
   runtimeFreeFloor,
   runOwnedCommand,
   sealedArtifactIdentity,
@@ -2908,6 +2909,34 @@ test("cancellation during clone, build and publication removes owned staging and
     const entries = await readdir(parent);
     assert.equal(entries.some((entry) => entry.includes(".stage-") || entry.endsWith(".lock")), false);
     await assert.rejects(() => stat(fixture.preparationRoot), { code: "ENOENT" });
+  }
+});
+
+test("signalling a group whose only member is an unreaped zombie is not a failure", { skip: process.platform !== "darwin" && "Darwin-specific EPERM" }, async () => {
+  // Darwin answers EPERM, not ESRCH, for a zombie-only group. That is the routine state right after
+  // an owned command's root exits and launchd has not yet reaped an orphaned descendant, so the
+  // close-time SIGKILL used to reject an otherwise clean cancellation under load.
+  const holder = spawn("python3", ["-c", [
+    "import os, sys",
+    "leader = os.fork()",
+    "if leader == 0:",
+    "    os.setsid(); os._exit(0)",
+    "print(leader, flush=True)",
+    "sys.stdin.read()",
+    "os.waitpid(leader, 0)",
+  ].join("\n")], { stdio: ["pipe", "pipe", "inherit"] });
+  try {
+    const leader = Number(await new Promise((resolve) => holder.stdout.once("data", resolve)));
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const state = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(leader)], { encoding: "utf8" });
+      if (state.stdout.trim().startsWith("Z")) break;
+      await delay(10);
+    }
+    assert.throws(() => process.kill(-leader, "SIGKILL"), (error) => error.code === "EPERM");
+    assert.doesNotThrow(() => killProcessGroup({ pid: leader }, "SIGKILL"));
+  } finally {
+    holder.stdin.end();
+    await new Promise((resolve) => holder.once("close", resolve));
   }
 });
 

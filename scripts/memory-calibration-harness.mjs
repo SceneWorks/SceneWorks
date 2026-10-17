@@ -2,13 +2,14 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createReadStream, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
+import { connectWatchdogCompletion } from "./lib/watchdog-completion.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -2754,16 +2755,46 @@ async function main() {
     ));
   }
   if (command === "capture") {
-    return void await atomicWrite(outputPath(), await captureAnchor({
-      plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
-      anchorKey: value("--anchor"),
-      providerCommand: JSON.parse(value("--provider-command")),
-      sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
-      inferenceRepo: path.resolve(value("--inference-repo")),
-      rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
-      sourcePathPrefix: value("--source-path-prefix"),
-      ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
-    }));
+    // Under the catalog's guard (sc-26246) this root may exit only after the guard has committed a
+    // final sample — on failure too, so a refusal still exits with its own status. Without a guard
+    // socket in the environment the completion client is a no-op.
+    const output = path.resolve(ROOT, outputPath());
+    const completion = await connectWatchdogCompletion();
+    try {
+      let failure = null;
+      try {
+        await atomicWrite(output, await captureAnchor({
+          plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+          anchorKey: value("--anchor"),
+          providerCommand: JSON.parse(value("--provider-command")),
+          sceneWorksRepo: path.resolve(value("--sceneworks-repo")),
+          inferenceRepo: path.resolve(value("--inference-repo")),
+          rawLogDir: value("--raw-log-dir") ? path.resolve(value("--raw-log-dir")) : null,
+          sourcePathPrefix: value("--source-path-prefix"),
+          ltx25SnapshotRoot: value("--ltx25-snapshot-root") ?? null,
+        }));
+      } catch (error) {
+        failure = error;
+      }
+      // The completion evidence is THIS capture's output alone, in a private directory: the shared
+      // captures directory grows with the walk and may hold files this run never wrote.
+      await mkdir(path.dirname(output), { recursive: true });
+      const evidence = await mkdtemp(path.join(path.dirname(output), `.${path.basename(output)}.completion-`));
+      try {
+        if (!failure) await link(output, path.join(evidence, path.basename(output)));
+        await completion.complete(evidence);
+      } catch (completionError) {
+        // The capture's own failure is what the runner classifies; never let this one replace it.
+        if (!failure) throw completionError;
+        failure.message += `; watchdog completion also failed: ${completionError.message}`;
+      } finally {
+        await rm(evidence, { recursive: true, force: true });
+      }
+      if (failure) throw failure;
+      return;
+    } finally {
+      completion.close();
+    }
   }
   if (command === "record-exceeded") {
     return void await atomicWrite(outputPath(), await recordExceededBound({

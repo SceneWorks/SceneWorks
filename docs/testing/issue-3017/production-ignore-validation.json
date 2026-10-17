@@ -1,0 +1,10 @@
+{
+  "scope": "Actual linuxdeploy AppImage output plugin, cwd apps/desktop, checked-in .appimageignore; no explicit --exclude-file",
+  "artifact_check": {
+    "passed": true,
+    "forbidden": []
+  },
+  "gpu_check_exit_code": 0,
+  "gpu_evidence": "production-ignore-gpu.json",
+  "packaging_log": "/home/sceneworks/sc3017/production-packaging/packaging.log"
+}

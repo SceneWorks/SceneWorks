@@ -241,15 +241,16 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
   // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys), and sc-25213's ostris Z-Image-Turbo
   // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
-  // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), and the
-  // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), and the relicensed SANA / SANA-Sprint
-  // mirror revisions (same 144 keys). sc-26234's whole-repo FLUX 3 entry creates no selective
-  // evidence row; removing its orphan restores these exact historical evidence bytes. The Illustrious
+  // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), the
+  // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), the relicensed SANA / SANA-Sprint
+  // mirror revisions (same 144 keys), and epic 25899's base NOTICE re-record and published Turbo
+  // re-host (sc-25909: 145 keys). sc-26234's whole-repo FLUX 3 entry adds no selective row;
+  // main's honest evidence re-record and digest are retained. The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "1c5fe4dbdefd112ea48b5b30a8d7a3af6b34c16b10ec6fe10b429df7bf15f920");
+    "58aae9b38ad00e1bb1411e222cd5fe8d3e053b428c301f03d206679936e889d5");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

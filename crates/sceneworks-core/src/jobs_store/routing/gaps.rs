@@ -1138,7 +1138,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         //
         // An over-cap or empty conditioning set never reaches here: the API refuses it at enqueue
         // with a message that names the cap.
-        "qwen_image_2_1" => UnsupportedReason::new(
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => UnsupportedReason::new(
             Some(model),
             "pose / strict-control conditioning",
             "Qwen Image 2.1 takes up to 10 ordered reference images, but no pose or ControlNet input — it has no strict-control tier. To constrain an edit, draw the marking into the reference image itself, or attach a mask as another reference and name it in the prompt (\"use the second image as a mask\").",

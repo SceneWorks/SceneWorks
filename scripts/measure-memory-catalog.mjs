@@ -1277,12 +1277,22 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // upstream `Qwen/Qwen-Image-2.1` snapshot at its OWN root (the converter refuses to emit a `bf16/`
   // copy) — hence `layout: "flat"` on that tier alone. Both lanes load the same three roots (the
   // Candle port binds the MLX-packed tiers through `AdaptLinear::linear_detect_gs`), mirroring the
-  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are published (sc-24114, @1691de01…)
+  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are published (sc-24114; @ef03535e… since sc-25909)
   // and resolve like any pinned row; a `pendingArtifact` row would be reported by
   // `resolveArtifactRoot` rather than probed.
   qwen_image_2_1: {
     env: "QWEN_IMAGE_2_1", repo: "SceneWorks/qwen-image-2-1-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat" } },
+    requiredTensorComponents: ["text_encoder", "transformer", "vae"],
+  },
+  // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): base's shape over the distilled checkpoint's OWN
+  // two repositories and env families, split the way `lens_turbo` is from `lens` — a Turbo plan
+  // satisfied by base weights would re-label base's peaks as Turbo's (E10). Its `q8`/`q4` re-host
+  // rows are published (sc-25909, @9095dfbb…) and resolve like base's; the `bf16` upstream row is
+  // pinned and resolves the same way.
+  qwen_image_2_1_turbo: {
+    env: "QWEN_IMAGE_2_1_TURBO", repo: "SceneWorks/qwen-image-2-1-turbo-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "QWEN_IMAGE_2_1_TURBO_BF16", repo: "Qwen/Qwen-Image-2.1-Turbo", layout: "flat" } },
     requiredTensorComponents: ["text_encoder", "transformer", "vae"],
   },
   // The three Iris-3B TASK routes (sc-25690, epic 25678): generation (`iris_3b`), monocular depth
@@ -3624,7 +3634,8 @@ export function watchdogCeilings({ memoryBytes }) {
  * The footprint hard stop every Darwin capture runs under: `scripts/memory-calibration-watchdog.py`
  * wrapped around the harness, the same guard `scripts/run-ltx-safety-canary.mjs` puts around its
  * contained runs, minus the nonce-authenticated child attestation and provider-phase channel that
- * only the frozen canary profiles speak. Without those the guard still does the one thing the
+ * only the frozen canary profiles speak — but WITH the completion handshake, so the capture exits
+ * only after the guard's final sample (sc-26246). Without those the guard still does the one thing the
  * SC-18946 incident needed: it samples the guarded group's kernel `phys_footprint` every quarter
  * second and terminates the whole group the instant it reaches the ceiling, before the host
  * watchdog can panic.
@@ -3664,6 +3675,11 @@ export function watchdogGuard({ hardware, eventFile, budgetMinutes }) {
     "--telemetry-timeout", "10",
     "--term-grace", "1",
     "--event-file", eventFile,
+    // sc-26246: without it, a capture whose root exited between the guard's census and its
+    // footprint sample was a `RootTelemetryLost` hard stop, and a finished render was discarded as
+    // `capture_failed`. The harness now asks for a final sample and exits only once it is
+    // committed, so the guard never has to excuse a missing root.
+    "--require-completion-handshake",
   ];
 }
 

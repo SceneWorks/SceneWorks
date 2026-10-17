@@ -1278,6 +1278,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                         context,
                         decode_quality_decisions: Vec::new(),
                         process_limit_bytes: None,
+                        prefix_kv_cache: None,
                     })
                 },
             )
@@ -1380,6 +1381,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
             context,
             decode_quality_decisions: vec![],
             process_limit_bytes: None,
+            prefix_kv_cache: None,
         }
     };
 
@@ -18644,7 +18646,9 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
     let final_selector = source
-        .split_once("let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(")
+        .split_once(
+            "let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(",
+        )
         .expect("final-pass selector")
         .1
         .split_once("let first_pass_shared_memory")
@@ -28071,9 +28075,14 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         !stream.contains("ladder_reserve_gb(budget"),
         "the ladder reserve must never be derived from the reclaimable-credited budget"
     );
+    // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
+    // the hires first pass is the plain selection.
     let shared_calls = stream
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
-        .count();
+        .count()
+        + stream
+            .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .count();
     assert_eq!(
         shared_calls, 2,
         "the final-pass and hires first-pass shared selections"
@@ -28527,9 +28536,10 @@ mod qwen_image_2_1_tiers {
     const UPSTREAM_REPO: &str = "Qwen/Qwen-Image-2.1";
     const UPSTREAM_REVISION: &str = "790c92633540aa0cb11d9abf19eb46d861714758";
     const REHOST_REPO: &str = "SceneWorks/qwen-image-2-1-mlx";
-    /// The revision the q8/q4 tiers were PUBLISHED at (sc-24114). The shipped catalog pins it, and
+    /// The revision the q8/q4 tiers are PUBLISHED at (sc-24114; republished with each tier's NOTICE by
+    /// sc-25909). The shipped catalog pins it, and
     /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
-    const REHOST_REVISION: &str = "1691de01c24a070131e0a28bf4c065fd027f4fe9";
+    const REHOST_REVISION: &str = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0";
 
     fn isolate_hf_cache() -> crate::test_env::EnvVars {
         crate::test_env::EnvVars::set(&[
@@ -28687,6 +28697,55 @@ mod qwen_image_2_1_tiers {
             &request(&entry, Some(4)),
         )
         .is_err());
+    }
+
+    /// sc-25909 — a v0.9.0 install (q4 at the superseded `1691de01…`, never at the republished pin)
+    /// still RENDERS after the upgrade: the resolver carries it to the current pin cache-only and
+    /// resolves the tier there, explicitly and as the unselected default. Before the migration this
+    /// answered "tier q4 is not installed" while the Model Manager showed the tier installed.
+    ///
+    /// *Mutation that reds this:* `qwen_image_2_1_declared_tier_dir` calling
+    /// `huggingface_pinned_snapshot_dir` directly again (no supersession step).
+    #[cfg(unix)]
+    #[test]
+    fn a_tier_installed_at_the_superseded_revision_resolves_after_the_pin_bump() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
+        assert_eq!(supersession.current_revision, REHOST_REVISION);
+        crate::model_jobs::stage_superseded_legacy_tier_for_test(
+            data.path(),
+            &supersession,
+            true,
+            &[(
+                "q4/transformer/config.json",
+                br#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )],
+        );
+        assert!(
+            !tier_root(data.path(), REHOST_REPO, REHOST_REVISION, None).exists(),
+            "precondition: nothing at the current pin"
+        );
+
+        let q4 = tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(4)),
+            Some((q4.clone(), "q4"))
+        );
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None),
+            Some((q4.clone(), "q4"))
+        );
+        assert_eq!(
+            std::fs::read(q4.join("NOTICE")).expect("NOTICE carried"),
+            supersession.added[0].contents
+        );
+        assert!(
+            !tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8")).exists(),
+            "the uninstalled q8 tier is not conjured"
+        );
     }
 
     fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
@@ -29474,4 +29533,133 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
     assert!(posts.iter().any(|post| post["status"] == "canceled"));
     assert_eq!(asset_writes.len(), 1, "no restored variant appended");
     assert_eq!(iris::png_files_under(&project_path.join("assets")), before);
+}
+
+/// Epic 25899 (sc-25909) — `rawAdapterSettings.prefixKvCache` says which path a render RAN, so it is
+/// worker-owned: a replayed or hand-built `advanced.prefixKvCache` must never reach an asset or the
+/// job result's summary (the job card's "which path ran" record). Driven through the production
+/// consumer every image route shares on both lanes, with the raw settings a route hands it — a copy
+/// of `request.advanced` carrying the forged record. Image 0 reports a real record; image 1 reports
+/// nothing (hires fix, native batch, or any model without a cache).
+///
+/// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from the per-image settings
+/// in `consume_gen_events_with_disclosure`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let forged = json!({ "selected": "cached", "path": "cached", "pricedBytes": 1 });
+    let real = json!({ "selected": "cached", "path": "prefill", "pricedBytes": 4096 });
+    let req = request(json!({
+        "projectId": "p", "mode": "text_to_image", "model": "qwen_image_2_1_turbo",
+        "prompt": "a red fox", "count": 2, "width": 64, "height": 64, "seed": 5,
+        "advanced": { "prefixKvCache": forged },
+    }));
+    let plan = ImagePlan::with_count(&req, 2, None);
+    let raw_settings = req.advanced.clone();
+    assert_eq!(raw_settings[lane_controls::PREFIX_KV_CACHE_KEY], forged);
+
+    let (base_url, _posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+    let mut settings = crate::tests::test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
+        .expect("job snapshot deserializes");
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+    let report = real.clone();
+    let blocking = tokio::task::spawn_blocking(move || {
+        let mut facts = JsonObject::new();
+        facts.insert(lane_controls::PREFIX_KV_CACHE_KEY.to_owned(), report);
+        let _ = tx.blocking_send(GenEvent::ImageFacts { index: 0, facts });
+        for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
+            let _ = tx.blocking_send(GenEvent::Image {
+                index,
+                seed,
+                width: 64,
+                height: 64,
+                pixels: stub_rgb8(64, 64, seed),
+                face_likeness: None,
+            });
+        }
+        Ok(())
+    });
+    let mut asset_writes = Vec::new();
+    consume_gen_events(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        "mlx_qwen_2_1",
+        &raw_settings,
+        2,
+        rx,
+        CancelFlag::new(),
+        blocking,
+        &mut asset_writes,
+    )
+    .await
+    .expect("the render completes");
+
+    assert_eq!(asset_writes.len(), 2);
+    assert_eq!(
+        asset_writes[0]["rawAdapterSettings"][lane_controls::PREFIX_KV_CACHE_KEY],
+        real,
+        "the image's own report is the record"
+    );
+    assert!(
+        asset_writes[1]["rawAdapterSettings"]
+            .get(lane_controls::PREFIX_KV_CACHE_KEY)
+            .is_none(),
+        "no report, no record — the forged one never survives: {}",
+        asset_writes[1]["rawAdapterSettings"]
+    );
+    assert_eq!(
+        streaming_result(&plan, &asset_writes)[PREFIX_KV_CACHE_RESULT_KEY],
+        json!([real]),
+        "the job result summarises only real records"
+    );
+}
+
+/// The MLX/Candle generic lanes' shared raw-settings builder drops a forged record too (epic 25899).
+///
+/// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from `mlx_raw_settings`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mlx_raw_settings_drops_a_forged_prefix_kv_cache() {
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1_turbo", "prompt": "a red fox",
+        "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
+    }));
+    let raw = mlx_raw_settings(&req, "Qwen/Qwen-Image-2.1-Turbo", 8, None, None);
+    assert!(
+        raw.get(lane_controls::PREFIX_KV_CACHE_KEY).is_none(),
+        "{raw:?}"
+    );
+    assert_eq!(raw["sampler"], "euler", "every other advanced key is kept");
+}
+
+/// The backend-less stub lane renders no prefix cache, so a replayed record must not reach its
+/// assets or the job result (epic 25899).
+///
+/// *Mutation that reds this:* dropping the removal from `stub_raw_settings`.
+#[test]
+fn stub_raw_settings_drops_a_forged_prefix_kv_cache() {
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1_turbo", "prompt": "a red fox",
+        "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
+    }));
+    let raw = stub_raw_settings(&req);
+    assert!(raw.get(PREFIX_KV_CACHE_RESULT_KEY).is_none(), "{raw:?}");
+    assert_eq!(raw["sampler"], "euler");
 }

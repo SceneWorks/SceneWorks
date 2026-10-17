@@ -8423,6 +8423,74 @@ fn exact_rename_side_cache_health(
     }
 }
 
+/// Install-state health for a tier whose pinned revision SUPERSEDES an exact older one
+/// ([`sceneworks_core::hf_revision_supersessions`]) while the tier exists ONLY at that older
+/// revision — the v0.9.0 install of the Qwen-Image 2.1 q8/q4 re-host after sc-25909 republished it
+/// to add each tier's NOTICE. The worker carries such a tier to the current pin cache-only at load
+/// time, but only when the legacy snapshot holds every carried file at its exact size; the coarse
+/// revision-agnostic probe would otherwise call a partial legacy tier installed and the render would
+/// fail "not installed". Like the rename seam, serving the catalog never mutates the cache.
+///
+/// `None` (the ordinary probe decides) for every row without a declaration, and whenever the tier
+/// is already present at the current pin.
+fn superseded_revision_tier_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    use sceneworks_core::hf_revision_supersessions::{
+        exact_huggingface_revision_supersession, supersession_tier,
+        validate_superseded_legacy_snapshot,
+    };
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let revision = download.get("revision").and_then(Value::as_str)?;
+    let supersession = exact_huggingface_revision_supersession(repo, revision, files)?;
+    let tier = supersession_tier(supersession)?;
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return None;
+    }
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshots = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?;
+    let legacy_snapshot = snapshots.join(supersession.legacy_revision);
+    if snapshots
+        .join(supersession.current_revision)
+        .join(tier)
+        .exists()
+        || !legacy_snapshot.join(tier).exists()
+    {
+        return None;
+    }
+    if validate_superseded_legacy_snapshot(
+        library.root(),
+        &repo_root,
+        &legacy_snapshot,
+        supersession,
+    )
+    .is_some()
+    {
+        return Some(HuggingFaceCacheHealth::installed());
+    }
+    let missing = supersession
+        .carried
+        .iter()
+        .filter(|file| {
+            std::fs::metadata(legacy_snapshot.join(file.path)).map_or(true, |metadata| {
+                !metadata.is_file() || metadata.len() != file.size
+            })
+        })
+        .map(|file| file.path.to_owned())
+        .collect::<Vec<_>>();
+    Some(HuggingFaceCacheHealth::missing(if missing.is_empty() {
+        // Every entry reads at its size yet confinement failed (an escaping link): name the tier.
+        vec![format!("{tier}/*")]
+    } else {
+        missing
+    }))
+}
+
 // Per-variant install state (sc-8508, epic 8506): a single downloadable tier of a quant-matrix
 // model. `install_state_for` reports the DEFAULT variant's install state (back-compat single-variant
 // contract); `model_variants` reports one of these per declared download entry so the catalog knows
@@ -8612,14 +8680,17 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 .to_owned();
             let files = string_array_field(entry, "files");
             let cache_path = huggingface_repo_cache_path(data_dir, &repo);
-            let cache_health = model_cache_health_for_download(
-                model_id,
-                &repo,
-                Some(entry),
-                cache_path.as_deref(),
-                &files,
-                data_dir,
-            );
+            let cache_health = superseded_revision_tier_cache_health(data_dir, entry, &files)
+                .or_else(|| {
+                    model_cache_health_for_download(
+                        model_id,
+                        &repo,
+                        Some(entry),
+                        cache_path.as_deref(),
+                        &files,
+                        data_dir,
+                    )
+                });
             let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
             let mut cache_incomplete = cache_health
                 .as_ref()

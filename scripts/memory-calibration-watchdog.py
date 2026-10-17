@@ -764,6 +764,22 @@ class OwnedGroup:
             raise RuntimeError(f"owned process group retained live identities: {survivors}")
 
 
+def js_canonical(value: object) -> object:
+    """Whole-number floats as integers, so the chain hashes the bytes a JavaScript reader re-derives.
+
+    `json.dumps(0.0)` is `0.0`; `JSON.stringify(0)` is `0`. The first tolerated `telemetry_fault`
+    carries `faultElapsedSeconds: 0.0`, so `validateWatchdogEventChain` read every stream with a
+    tolerated fault as mutated (sc-26257).
+    """
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, dict):
+        return {key: js_canonical(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [js_canonical(item) for item in value]
+    return value
+
+
 class EventChain:
     """Append-only event evidence with deletion/reorder/mutation detection."""
 
@@ -774,12 +790,12 @@ class EventChain:
 
     def emit(self, event: dict[str, object]) -> None:
         self.sequence += 1
-        payload = {
+        payload = js_canonical({
             "eventSequence": self.sequence,
             "previousEventHash": self.previous_hash,
             "at": time.time(),
             **event,
-        }
+        })
         event_hash = hashlib.sha256(json.dumps(
             payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
         ).encode()).hexdigest()
@@ -1176,6 +1192,25 @@ def guard(args: argparse.Namespace) -> int:
             return last_live, False, f"telemetry_lost:{type(error).__name__}:{error}"
         return last_live, True, None
 
+    def fault_heartbeat() -> str | None:
+        """PING the attested child from a tick that ended in a TOLERATED fault (sc-26257 review).
+
+        Only a good sample reaches the per-tick PING, so a whole fault run — up to the fault window
+        plus slow ticks — went silent, and the completion client's idle timeout could give up on a
+        run the guard was still entitled to recover. The same states the client already accepts a
+        PING in: before DONE, and (handshake only) between DONE and BYE.
+        """
+        if attestation_stream is None or (child_reported_done and not (
+                args.require_completion_handshake and not completion_released)):
+            return None
+        message = f"PING {attestation_nonce}\n".encode()
+        try:
+            if attestation_stream.send(message) != len(message):
+                return "child_attestation_heartbeat_was_partial"
+        except (BlockingIOError, BrokenPipeError, ConnectionResetError):
+            return "child_attestation_channel_lost_before_done"
+        return None
+
     def pause_runtime() -> None:
         sleep_seconds = args.sample_interval
         if runtime_deadline is not None:
@@ -1498,8 +1533,14 @@ def guard(args: argparse.Namespace) -> int:
                 attestation_stream.setblocking(False)
             if args.require_completion_handshake and child_reported_done and not completion_released:
                 # DONE is a request, never success. The root blocks until this fresh group +
-                # host observation is durably committed and all ceilings pass. Any final-probe
-                # failure is fail-closed, even if an ordinary tick would tolerate it.
+                # host observation is durably committed and all ceilings pass. A telemetry-SOURCE
+                # fault on that observation is retried on the next tick under the same fault window
+                # as any other tick (sc-26257): the root is still blocked, so nothing it does goes
+                # unmeasured, and one slow probe no longer discards a finished render. A root that
+                # is gone, a missing host-pressure source, and any other error stay fail-closed.
+                if host_sampler is None:
+                    hard_stop = "completion_telemetry_lost:RuntimeError:completion requires host pressure"
+                    break
                 try:
                     if group.root is None or not identity_is_live(group.root):
                         raise RootTelemetryLost("completion root exited before final sample")
@@ -1507,11 +1548,23 @@ def guard(args: argparse.Namespace) -> int:
                         group, sampler, host_sampler, bounded_telemetry_timeout())
                     if not identity_is_live(group.root):
                         raise RootTelemetryLost("completion root exited during final sample")
-                    if pressure is None:
-                        raise RuntimeError("completion requires host pressure")
                 except MonitorSignal:
                     raise
                 except Exception as error:
+                    if runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline:
+                        hard_stop = (
+                            telemetry_fault_reason
+                            or f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                        )
+                        break
+                    if (isinstance(error, TELEMETRY_SOURCE_ERRORS)
+                            and not isinstance(error, RootTelemetryLost)
+                            and tolerate_telemetry_fault(error, "completion")):
+                        hard_stop = fault_heartbeat()
+                        if hard_stop is not None:
+                            break
+                        pause_runtime()
+                        continue
                     hard_stop = f"completion_telemetry_lost:{type(error).__name__}:{error}"
                     break
                 record_good_sample(footprint, pressure)
@@ -1565,6 +1618,9 @@ def guard(args: argparse.Namespace) -> int:
                     hard_stop = census_lost
                     break
                 if tolerate_telemetry_fault(error, "runtime"):
+                    hard_stop = fault_heartbeat()
+                    if hard_stop is not None:
+                        break
                     pause_runtime()
                     continue
                 hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"

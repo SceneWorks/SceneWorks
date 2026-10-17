@@ -214,7 +214,8 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
-        models: ModelMatch::Any(&["qwen_image_2_1"]),
+        // Turbo (sc-25907) is the same request contract under a second engine id.
+        models: ModelMatch::Any(crate::jobs_store::routing::QWEN_IMAGE_2_1_MODEL_IDS),
         shape: qwen_image_2_1_edit_candle_eligible,
     },
     CandleImageRoute {

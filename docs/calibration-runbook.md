@@ -791,7 +791,8 @@ SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
 # halves swapped: q8/q4 are the `<tier>/` subdirs of the SceneWorks re-host, and bf16 IS the upstream
 # `Qwen/Qwen-Image-2.1` snapshot at its ROOT (the converter refuses to emit a `bf16/` copy), exactly
 # the directories the worker's `qwen_image_2_1_declared_tier_dir` resolves. The re-host rows are
-# PUBLISHED (sc-24114) at `SceneWorks/qwen-image-2-1-mlx@1691de01c24a070131e0a28bf4c065fd027f4fe9`, each
+# PUBLISHED (sc-24114; republished with each tier's NOTICE by sc-25909) at
+# `SceneWorks/qwen-image-2-1-mlx@ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, each
 # tier a packed `transformer/model.safetensors` + `text_encoder/model.safetensors` with a
 # `quantization` marker in each `config.json`. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
 # SCOPE (sc-24114): the six qwen_image_2_1 anchors are TEXT-TO-IMAGE at the 2048x2048 DEFAULT preset with
@@ -806,6 +807,21 @@ SCENEWORKS_QWEN_IMAGE_2_1_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY=Qwen/Qwen-Image-2.1       # fixed; validated against QWEN_IMAGE_2_1_BF16_REPOSITORY
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
+
+# BOTH adapters — qwen_image_2_1_turbo (sc-25907, epic 25899). The distilled checkpoint is base's
+# split-repo shape over its OWN two repositories and its OWN env families, split from base's the way
+# Lens-Turbo is split from Lens, so a Turbo plan can never be satisfied by base weights (adapter
+# `QWEN_IMAGE_2_1_TURBO_FAMILY` / `QWEN_IMAGE_2_1_TURBO_BF16_FAMILY` in `bin/mlx.rs`,
+# `qwen_image_2_1_turbo_five_rung_family` in `bin/candle.rs`). q8/q4 are the `<tier>/` subdirs of the
+# SceneWorks re-host, PUBLISHED (sc-25909) at
+# `SceneWorks/qwen-image-2-1-turbo-mlx@9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`; bf16 IS the upstream
+# `Qwen/Qwen-Image-2.1-Turbo` snapshot at its ROOT.
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY=SceneWorks/qwen-image-2-1-turbo-mlx  # fixed; validated against QWEN_IMAGE_2_1_TURBO_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8 ONLY — bf16 is the family below
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY=Qwen/Qwen-Image-2.1-Turbo       # fixed; validated against QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
 
 # BOTH adapters — the three Iris-3B TASK routes (sc-25690): generation (iris_3b), monocular depth
 # (iris_3b_depth) and restoration (iris_3b_restore). Three fine-tunes in ONE upstream repository at
@@ -925,7 +941,11 @@ SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier 
 # across the probes, `footprint` on a 38 GB process received 0.31 s of budget and `bernini:q4:mlx`
 # was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside 1.2 s; with the
 # census still on 1 s, `bernini:q8:mlx` was SIGKILLed 85 minutes in at a steady 52 GB by a single
-# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`).
+# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`). Every catalog capture
+# also runs under `--require-completion-handshake` (sc-26246): the harness asks the guard for a
+# final sample and exits only once it is committed, on failure too. Without it, a capture whose
+# root exited between the census and the footprint sample was a `RootTelemetryLost` hard stop
+# that discarded a finished render as `capture_failed`.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target

@@ -192,6 +192,20 @@ playback libraries are included (`bundleMediaFramework: true`). This keeps MP4
 previews working on a stock supported Ubuntu install rather than relying on
 multimedia plugins that happen to be present on the build or user machine.
 
+AppImage packaging excludes host NVIDIA driver libraries, including `libcuda.so`
+and NVML, through `apps/desktop/.appimageignore`. The host's installed NVIDIA
+driver supplies those libraries; the CUDA toolkit, cuDNN, and playback libraries
+remain bundled or provisioned as above. Both Linux packaging workflows inspect
+the finished AppImages before uploading them or attaching them to a release:
+
+```sh
+npm --prefix apps/desktop run check:linux-drivers -- --appimage /absolute/path/SceneWorks.AppImage
+```
+
+The check requires Linux for extraction, but no GPU or FUSE mount. It rejects
+driver libraries and driver symlinks anywhere in the image. Exclusion happens
+while creating the SquashFS image, before Tauri creates updater signatures.
+
 Inspect a built Debian package's dependency declaration with:
 
 ```sh

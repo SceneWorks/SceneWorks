@@ -1352,6 +1352,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn wheel_extraction_preserves_dlls_and_confines_paths() {
+        use std::io::Write;
+        let tmp = scratch("zip9-wheel");
+        let wheel = tmp.path().join("runtime.whl");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&wheel).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, bytes) in [
+            (
+                "nvidia/cuda_runtime/bin/cudart64_12.dll",
+                b"runtime".as_slice(),
+            ),
+            ("nvidia/cuda_runtime/bin/other.dll", b"other".as_slice()),
+            ("../escape.dll", b"escape".as_slice()),
+            ("nvidia/README.txt", b"readme".as_slice()),
+        ] {
+            writer.start_file(name, options).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let all = tmp.path().join("all");
+        assert_eq!(extract_dlls(&wheel, None, &all).unwrap(), 2);
+        assert_eq!(fs::read(all.join("cudart64_12.dll")).unwrap(), b"runtime");
+        assert_eq!(fs::read(all.join("other.dll")).unwrap(), b"other");
+        assert!(!all.join("escape.dll").exists());
+        assert!(!tmp.path().join("escape.dll").exists());
+        assert!(!all.join("README.txt").exists());
+
+        let selected = tmp.path().join("selected");
+        let names = ["cudart64_12.dll".to_owned()];
+        assert_eq!(extract_dlls(&wheel, Some(&names), &selected).unwrap(), 1);
+        assert_eq!(fs::read(selected.join(&names[0])).unwrap(), b"runtime");
+        assert!(!selected.join("other.dll").exists());
+    }
+
     /// End-to-end smoke of the download → sha256 → unzip path on the SMALLEST pinned
     /// wheel (nvidia-cuda-runtime-cu12, ~3 MB): proves the pinned URL/sha256 + the zip
     /// extractor actually produce the expected DLL. Network-gated (`#[ignore]`) so the

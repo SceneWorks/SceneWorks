@@ -201,6 +201,18 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen_2_1",
     },
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899) — the distilled checkpoint under its OWN engine id;
+    // the same `mlx-gen-qwen-image-2-1` crate registers it beside the base id. 8 steps is the
+    // snapshot's saved distilled schedule (its 8 `sample_sigmas`); guidance 1.0 is true-CFG off,
+    // as on base. `default_repo` is the upstream Turbo repo, public and ungated, for base's reason.
+    ModelRow {
+        sceneworks_id: "qwen_image_2_1_turbo",
+        engine_id: "qwen_image_2_1_turbo",
+        default_repo: "Qwen/Qwen-Image-2.1-Turbo",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_qwen_2_1_turbo",
+    },
     // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
     // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
@@ -1789,6 +1801,7 @@ mod tests {
         "z_image_edit",
         "qwen_image",
         "qwen_image_2_1",
+        "qwen_image_2_1_turbo",
         "qwen_image_edit_2511",
         "qwen_image_edit_2511_lightning",
         "lens",
@@ -1908,7 +1921,7 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             // FLUX 3 Image Klein (sc-26234): the pinned contract publishes its packed-token grid.
@@ -1959,7 +1972,7 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
@@ -2228,6 +2241,7 @@ mod tests {
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),
+            ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
             ("flux3_klein", 16),
             ("z_image_turbo", 16),

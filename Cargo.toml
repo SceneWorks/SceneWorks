@@ -182,3 +182,7 @@ opt-level = 3
 # Provenance and removal criteria: vendor/glib-0.18.5/VENDORED.md.
 [patch.crates-io]
 glib = { path = "vendor/glib-0.18.5" }
+
+# Keep the published updater API while moving its Windows archive reader to zip 9.
+# Provenance and removal criteria: vendor/tauri-plugin-updater-2.11.0/VENDORED.md.
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater-2.11.0" }

@@ -412,6 +412,8 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // Qwen-Image 2.1 (sc-24108): a true-CFG family — the engine takes a real negative branch
         // and a `true_cfg` scale.
         ("qwen_image_2_1", true, true),
+        // sc-25907: the distilled Turbo id is the base descriptor under a second id.
+        ("qwen_image_2_1_turbo", true, true),
         ("qwen_image_edit", true, true),
         ("qwen_image_edit_2509", true, true),
         ("qwen_image_edit_2511", true, true),
@@ -3413,4 +3415,166 @@ fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
             "limits.{key} leads with the engine-default sentinel"
         );
     }
+}
+
+/// sc-25907 (epic 25899 E10) — every floor key the UI reads for `qwen_image_2_1_turbo` is TURBO's
+/// own derivation from the linked provider, never base's: on MLX the per-tier floor is
+/// `ceil(derived::default_path_peak_max_bytes_for(Variant::Turbo, tier) GiB x 1.25)` (base's rule
+/// over Turbo's bf16-VAE resident set), and it differs from base's at every tier because the VAE
+/// does; the Candle keys are the same `binding` keys the gate consumes, with no measured row.
+///
+/// *Mutation that reds this:* copying base's MLX floors (44/29/21) onto the Turbo entry, or
+/// pinning the MLX side to the base accessor.
+#[test]
+fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is in the shipped catalog")
+        .as_object()
+        .expect("entry object")
+        .clone();
+    for backend in ["mlx", "candle"] {
+        let floors: std::collections::BTreeSet<&str> = entry[backend]
+            .as_object()
+            .expect("backend block")
+            .keys()
+            .map(String::as_str)
+            .filter(|key| key.contains("MemoryGb"))
+            .collect();
+        assert_eq!(
+            floors,
+            ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
+            "{backend}: every floor key must have a worker source"
+        );
+        for key in ["vramGbByTier", "measured", "sequentialPeakGb", "calibrations"] {
+            assert!(entry[backend].get(key).is_none(), "{backend}.{key} is measured evidence");
+        }
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    for tier in ["bf16", "q8", "q4"] {
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(&entry, tier),
+            entry["candle"]["minMemoryGbByTier"][tier].as_f64(),
+            "candle/{tier}"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        use provider::memory_strategy::derived;
+        const GIB: f64 = (1_u64 << 30) as f64;
+        let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
+        let base = models
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("base entry");
+        for tier in provider::quant::Tier::ALL {
+            let name = match tier {
+                provider::quant::Tier::Bf16 => "bf16",
+                provider::quant::Tier::Q8 => "q8",
+                provider::quant::Tier::Q4 => "q4",
+            };
+            let turbo_peak = derived::default_path_peak_max_bytes_for(provider::Variant::Turbo, tier);
+            assert_eq!(
+                entry["mlx"]["minMemoryGbByTier"][name].as_u64(),
+                Some(floor(turbo_peak)),
+                "mlx.minMemoryGbByTier.{name} is ceil(Turbo default-path peak max GiB x 1.25)"
+            );
+            assert_ne!(
+                entry["mlx"]["minMemoryGbByTier"][name], base["mlx"]["minMemoryGbByTier"][name],
+                "{name}: Turbo's derived floor is its own, not base's (E10)"
+            );
+        }
+        assert_eq!(
+            entry["mlx"]["minMemoryGb"].as_u64(),
+            Some(floor(derived::default_path_peak_max_bytes_for(
+                provider::Variant::Turbo,
+                provider::quant::Tier::Bf16
+            )))
+        );
+    }
+}
+
+/// sc-25907 — Turbo's request envelope, reference cap, sampler/scheduler menu and admission
+/// geometry are read FROM THE LINKED PROVIDER under the Turbo id, and its pinned upstream revision
+/// is the provider's own `UPSTREAM_TURBO_HF_REVISION`, so a pin that moves any of them reds here.
+///
+/// *Mutation that reds this:* editing Turbo's `maxReferenceAssets`, any `admissionGeometry`
+/// value, a scheduler name, or the bf16 row's revision.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
+    use std::collections::BTreeSet;
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    use runtime_cuda::providers::qwen_image_2_1 as provider;
+
+    let models = builtin_models_manifest();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is in the shipped catalog");
+    assert_eq!(
+        entry["limits"]["maxReferenceAssets"].as_u64(),
+        Some(provider::config::MAX_REFERENCE_IMAGES as u64)
+    );
+    let engine = provider::memory_strategy::admission_geometry();
+    let geometry = &entry["admissionGeometry"];
+    for (key, value) in [
+        ("maxSide", u64::from(engine.max_side)),
+        ("maxPresetArea", engine.max_preset_area),
+        ("maxTargetImageTokens", engine.max_target_image_tokens),
+        ("maxReferenceImages", u64::from(engine.max_reference_images)),
+        ("tokensPerMaxReference", engine.tokens_per_max_reference),
+        ("maxJointTokens", engine.max_joint_tokens),
+        ("pixelsPerToken", engine.pixels_per_token),
+        ("maxBatch", u64::from(engine.max_batch)),
+    ] {
+        assert_eq!(geometry[key].as_u64(), Some(value), "admissionGeometry.{key}");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let bf16 = entry["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .expect("bf16 row");
+        assert_eq!(bf16["repo"], provider::UPSTREAM_TURBO_HF_REPO);
+        assert_eq!(bf16["revision"], provider::UPSTREAM_TURBO_HF_REVISION);
+    }
+    let registration = crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == "qwen_image_2_1_turbo")
+        .expect("qwen_image_2_1_turbo is registered on this lane");
+    let capabilities = (registration.descriptor)().capabilities;
+    for (key, engine) in [
+        ("samplers", &capabilities.samplers),
+        ("schedulers", &capabilities.schedulers),
+    ] {
+        let declared: BTreeSet<String> = entry["limits"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("limits.{key} is declared"))
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| *name != "default")
+            .map(str::to_owned)
+            .collect();
+        let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
+        assert_eq!(declared, published, "limits.{key} must be the Turbo provider's curated menu");
+    }
+    assert!(
+        capabilities.supports_alpha_output,
+        "the Turbo descriptor advertises the RGBA decode the catalog's supportsAlphaOutput claims"
+    );
+    assert!(
+        capabilities
+            .execution
+            .prefix_kv_cache
+            .accepts(gen_core::PrefixKvCacheMode::Cached),
+        "the Turbo descriptor declares the prefix-KV-cache domain the worker prices"
+    );
 }
