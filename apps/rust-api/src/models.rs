@@ -7086,8 +7086,92 @@ mod download_receipt_tests {
             serde_json::to_vec(&json!({"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
     }
 
+    fn assert_flux3_primary_and_optional_pup(model: &Value) -> &Value {
+        let downloads = model["downloads"].as_array().unwrap();
+        let primary: Vec<_> = downloads
+            .iter()
+            .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .collect();
+        assert_eq!(
+            primary.len(),
+            1,
+            "one whole primary package, no required component split"
+        );
+        let primary = primary[0];
+        assert_eq!(primary["provider"], "huggingface");
+        assert_eq!(primary["repo"], "black-forest-labs/flux-3-image-klein");
+        assert_eq!(
+            primary["revision"],
+            "8454017f9ebaada30c998fccd9f67a80c7580f68"
+        );
+        assert_eq!(primary["default"], true);
+        assert_eq!(
+            primary["files"],
+            json!([]),
+            "whole primary repository required"
+        );
+        assert!(primary
+            .get("required")
+            .is_none_or(|value| value.as_bool() == Some(true)));
+        let optional = model_co_requisite_downloads(model);
+        assert!(
+            optional.len() <= 1,
+            "only the exact soft PUP may accompany the primary"
+        );
+        assert_eq!(
+            downloads.len(),
+            1 + optional.len(),
+            "no unrecognized extra downloads"
+        );
+        for row in optional {
+            assert_eq!(row["provider"], "huggingface");
+            assert_eq!(row["repo"], "black-forest-labs/flux-3-image-klein-pup");
+            assert_eq!(row["revision"], "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed");
+            assert_eq!(row["componentId"], "prompt_upsampler");
+            assert_eq!(row["required"], "soft", "no required external components");
+            assert_eq!(row["files"], json!([]));
+            assert_ne!(row.get("default").and_then(Value::as_bool), Some(true));
+        }
+        primary
+    }
+
     #[test]
-    fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_component() {
+    fn flux3_package_fixture_rejects_required_or_wrong_optional_components() {
+        let model = builtin_models_entry("flux3_klein");
+        let index = model["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["coRequisite"] == true)
+            .expect("combined catalog exposes the soft PUP");
+        for (field, value) in [
+            ("required", json!(true)),
+            ("repo", json!("not-the-pinned-source")),
+            ("revision", json!("0".repeat(40))),
+            ("componentId", json!("text_encoder")),
+            ("files", json!(["model.safetensors"])),
+            ("coRequisite", json!(false)),
+        ] {
+            let mut invalid = model.clone();
+            invalid["downloads"][index][field] = value;
+            assert!(
+                std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&invalid))
+                    .is_err(),
+                "{field} must not weaken the exact primary/soft-PUP fixture"
+            );
+        }
+        let mut duplicate = model.clone();
+        duplicate["downloads"]
+            .as_array_mut()
+            .unwrap()
+            .push(model["downloads"][index].clone());
+        assert!(
+            std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&duplicate)).is_err()
+        );
+    }
+
+    #[test]
+    fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_required_split() {
         let _env = isolate_hf_cache();
         let temp = tempfile::Builder::new()
             .prefix(&format!("flux3-install-{}-", std::process::id()))
@@ -7095,15 +7179,9 @@ mod download_receipt_tests {
             .unwrap();
         let data_dir = temp.path();
         let model = builtin_models_entry("flux3_klein");
-        let downloads = model["downloads"].as_array().unwrap();
-        assert_eq!(
-            downloads.len(),
-            1,
-            "one whole-repo download, no component split"
-        );
-        assert!(model_co_requisite_downloads(&model).is_empty());
+        let primary = assert_flux3_primary_and_optional_pup(&model);
         assert!(model.get("component").is_none());
-        let revision = downloads[0]["revision"].as_str().unwrap();
+        let revision = primary["revision"].as_str().unwrap();
         assert_eq!(revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
         let context = model_download_context(&model).unwrap().unwrap();
         assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein");
@@ -7318,10 +7396,7 @@ mod download_receipt_tests {
                 "{os}"
             );
             retain_downloads_for_os(&mut model, os);
-            assert!(
-                model_co_requisite_downloads(&model).is_empty(),
-                "{os}: still no component"
-            );
+            assert_flux3_primary_and_optional_pup(&model);
             let context = model_download_context(&model).unwrap().unwrap();
             assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein", "{os}");
         }
