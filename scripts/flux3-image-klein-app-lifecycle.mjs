@@ -25,8 +25,13 @@ export function assertCheckoutIdentity({ source, inference, dispatch, head, dirt
 export function assertModel(model) {
   fact(model?.id === "flux3_klein" && model.family === "flux3" && model.capabilities?.includes("text_to_image"), "select the native FLUX3 distilled T2I catalog entry");
   fact(model.gated === true && model.credentialHost === "huggingface.co" && /^https:\/\/huggingface\.co\/black-forest-labs\/flux-3-image-klein\/blob\/(main|8454017f9ebaada30c998fccd9f67a80c7580f68)\/LICENSE\.md$/.test(model.licenseUrl ?? ""), "frozen upstream FLUX Kommunity license and gated HF credential declaration required; no rehost");
-  const downloads = model.downloads;
-  fact(downloads?.length === 1 && downloads[0].provider === "huggingface" && downloads[0].repo === MODEL_REPO && downloads[0].revision === MODEL_REVISION, "one exact upstream pinned package required");
+  fact(Array.isArray(model.downloads), "pinned model downloads required");
+  const downloads = model.downloads.filter((download) => download.coRequisite !== true);
+  const optional = model.downloads.filter((download) => download.coRequisite === true);
+  fact(downloads.length === 1 && downloads[0].provider === "huggingface" && downloads[0].repo === MODEL_REPO && downloads[0].revision === MODEL_REVISION, "one exact upstream pinned primary package required");
+  // S5 exposes a separate optional package. Its presence in the catalog must not
+  // reject this unchanged plain T2I profile or turn enhancement into a requirement.
+  fact(optional.length <= 1 && optional.every((download) => download.provider === "huggingface" && download.repo === "black-forest-labs/flux-3-image-klein-pup" && download.revision === "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed" && download.required === "soft" && download.componentId === "prompt_upsampler" && Array.isArray(download.files) && download.files.length === 0), "only the exact pinned soft PUP component may accompany the primary package");
   // Fetch every file at the pinned authority. Required component/index/SHA validation below
   // remains independent of this download policy; an allow-list must not under-fetch the package.
   fact(Array.isArray(downloads[0].files) && downloads[0].files.length === 0, "whole pinned repository download required (files: []), not a selective allow-list");

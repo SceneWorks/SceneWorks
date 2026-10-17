@@ -309,3 +309,13 @@ test('API exit event immediately aborts shared cancellation and owned-child clea
   assert.equal(f.controller.signal.aborted, true);
   assert.deepEqual(killed, [[-45678, 'SIGTERM']]);
 });
+
+test('combined catalog may expose exact soft PUP without changing the plain lifecycle profile', () => {
+  const pup = { provider: 'huggingface', repo: 'black-forest-labs/flux-3-image-klein-pup', revision: '8b069751eb5dcab23829d9c5eccb470eb8b8a4ed', coRequisite: true, required: 'soft', componentId: 'prompt_upsampler', files: [] };
+  const m = model(); m.downloads.push(pup); assert.doesNotThrow(() => assertModel(m));
+  assert.equal(imageBody('project_test').advanced.enhancePrompt, undefined, 'ordinary profile retains disabled-by-default enhancement');
+  for (const change of [{ required: true }, { repo: 'unapproved/rehost' }, { revision: sha }, { componentId: 'text_encoder' }, { files: ['model.safetensors'] }, { coRequisite: false }]) {
+    const mutated = model(); mutated.downloads.push({ ...pup, ...change }); assert.throws(() => assertModel(mutated));
+  }
+  const duplicate = model(); duplicate.downloads.push(pup, pup); assert.throws(() => assertModel(duplicate));
+});
