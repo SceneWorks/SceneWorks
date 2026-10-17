@@ -1852,7 +1852,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          $python = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v7\venv\Scripts\python.exe'
+          $python = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v8\venv\Scripts\python.exe'
+          if (-not (Test-Path -LiteralPath $python)) { $python = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v7\venv\Scripts\python.exe' }
           function Assert-MossIdentityPhysical($path) {
             $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
             for ($probe = $item; $null -ne $probe; $probe = $(if ($probe.PSIsContainer) { $probe.Parent } else { $probe.Directory })) {
@@ -1872,7 +1873,7 @@ jobs:
           cim = {int(row['ProcessId']): row for row in cim}
           compute = list(csv.DictReader((out / 'compute.csv').read_text(encoding='utf-8-sig').splitlines(), skipinitialspace=True))
           rows = []
-          for pid in sorted({int(row['pid']) for row in compute}):
+          for pid in sorted({int(row['pid']) for row in compute} | {4}):
               row = {'pid': pid, 'gpu_uuids': sorted({item['gpu_uuid'] for item in compute if int(item['pid']) == pid}), 'cim': cim.get(pid), 'psutil': {}}
               try:
                   process = psutil.Process(pid)
@@ -1893,7 +1894,7 @@ jobs:
 
           '@
           & $python -I -B -c $psutilIdentityDiagnostic $out
-          if ($LASTEXITCODE -ne 0) { throw 'Prepared v7 psutil process identity capture failed' }
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared psutil process identity capture failed' }
       - name: Capture bounded owned MOSS snapshot and run file metadata
         shell: powershell
         run: |
