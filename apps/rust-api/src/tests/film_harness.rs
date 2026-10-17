@@ -1130,6 +1130,7 @@ fn spawn_fake_worker(
         register_fake_worker(&app, &capabilities).await;
         let _ = registered_tx.send(());
         loop {
+            fake_worker_heartbeat(&app, None).await;
             let (status, claim) = request(
                 app.clone(),
                 "POST",
@@ -1148,27 +1149,53 @@ fn spawn_fake_worker(
                 .lock()
                 .claimed
                 .push((job_type.clone(), job_id.clone(), job["payload"].clone()));
-            match job_type.as_str() {
-                "video_generate" => run_fake_video_job(&app, &script, &job_id, &job).await,
-                "timeline_export" => run_fake_export_job(&app, &script, &job_id, &job).await,
-                // sc-22714: the two understanding seams the reviewer drives. Neither renders
-                // anything — `frame_extract` writes a placeholder still where FFmpeg would, and
-                // `image_vqa` answers from the script's table in the shape SenseNova-U1 posts.
-                "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
-                "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
-                "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
-                // sc-23404: the TTS seam. Writes a deterministic canonical PCM-16 WAV where the
-                // real audio worker writes its clip and reports the same `assetWrites` fact, so
-                // asset persistence, the audio sidecar and the two-phase result rewrite are
-                // production code paths here exactly as they are for a render.
-                "audio_generate" => run_fake_audio_job(&app, &script, &job_id, &job).await,
-                // sc-23403: the image-generation seam the reference-fixture generator drives.
-                "image_generate" => run_fake_image_job(&app, &script, &job_id, &job).await,
-                other => panic!("fake worker claimed an unexpected job type {other}"),
+            let work = async {
+                match job_type.as_str() {
+                    "video_generate" => run_fake_video_job(&app, &script, &job_id, &job).await,
+                    "timeline_export" => run_fake_export_job(&app, &script, &job_id, &job).await,
+                    // sc-22714: the two understanding seams the reviewer drives. Neither renders
+                    // anything — `frame_extract` writes a placeholder still where FFmpeg would, and
+                    // `image_vqa` answers from the script's table in the shape SenseNova-U1 posts.
+                    "frame_extract" => run_fake_frame_job(&app, &script, &job_id, &job).await,
+                    "image_vqa" => run_fake_vqa_job(&app, &script, &job_id, &job).await,
+                    "prompt_refine" => run_fake_refine_job(&app, &script, &job_id, &job).await,
+                    // sc-23404: the TTS seam. Writes a deterministic canonical PCM-16 WAV where the
+                    // real audio worker writes its clip and reports the same `assetWrites` fact, so
+                    // asset persistence, the audio sidecar and the two-phase result rewrite are
+                    // production code paths here exactly as they are for a render.
+                    "audio_generate" => run_fake_audio_job(&app, &script, &job_id, &job).await,
+                    // sc-23403: the image-generation seam the reference-fixture generator drives.
+                    "image_generate" => run_fake_image_job(&app, &script, &job_id, &job).await,
+                    other => panic!("fake worker claimed an unexpected job type {other}"),
+                }
+            };
+            tokio::pin!(work);
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = &mut work => break,
+                    _ = heartbeat.tick() => fake_worker_heartbeat(&app, Some(&job_id)).await,
+                }
             }
         }
     });
     (handle, registered_rx)
+}
+
+/// Liveness belongs to the worker loop, including intentionally hanging job scripts. Busy
+/// heartbeats must retain the claimed job: an idle heartbeat means a restarted worker to the API.
+async fn fake_worker_heartbeat(app: &axum::Router, job_id: Option<&str>) {
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/workers/{WORKER_ID}/heartbeat"),
+        json!({ "status": if job_id.is_some() { "busy" } else { "idle" },
+            "currentJobId": job_id, "loadedModels": [],
+            "utilization": { "memoryTotalMb": HOST_MEMORY_MB } }),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "heartbeat: {body}");
 }
 
 async fn post_progress(app: &axum::Router, job_id: &str, body: Value) -> Value {
@@ -2079,11 +2106,17 @@ pub(crate) struct Harness {
     /// worker can script the fake first and spawn it afterwards (`spawn_worker`).
     worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
     server: Option<tokio::task::JoinHandle<()>>,
+    _cache_root: sceneworks_core::hf_home::test_support::CacheRootGuard,
 }
 
 impl Harness {
     pub(crate) async fn start(with_worker: bool, behaviors: Vec<(&str, VideoBehavior)>) -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let data_dir = temp_dir.path().join("data");
+        let cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         // `/api/v1/models` serves the manifests under the config dir, so seed the REAL shipped
         // builtin manifest: the harness validates the fixture against `minimax_h3`'s actual
         // declared menus, caps and memory minimum, not a stand-in.
@@ -2125,6 +2158,7 @@ impl Harness {
             script,
             worker: Mutex::new(worker),
             server: None,
+            _cache_root: cache_root,
         }
     }
 
@@ -2144,6 +2178,11 @@ impl Harness {
         boundary: Option<Arc<CancelBoundaryTransport>>,
     ) -> Self {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let data_dir = temp_dir.path().join("data");
+        let cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let manifests_dir = temp_dir.path().join("config/manifests");
         std::fs::create_dir_all(&manifests_dir).expect("manifest dir creates");
         std::fs::write(
@@ -2232,6 +2271,7 @@ impl Harness {
             script,
             worker: Mutex::new(worker),
             server: Some(server),
+            _cache_root: cache_root,
         }
     }
 
@@ -2676,6 +2716,40 @@ impl Drop for Harness {
             server.abort();
         }
     }
+}
+
+/// Two live apps must not borrow either one another's model state or the process HF cache,
+/// even when resolution runs on another runtime thread and the outer app outlives the inner one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn film_fixture_cache_roots_are_nested_concurrent_and_thread_independent() {
+    let ambient = tempfile::tempdir().unwrap();
+    let _environment = crate::tests::support::pin_hf_hub_cache(ambient.path());
+    let (outer, inner) = tokio::join!(Harness::start(false, vec![]), Harness::start(false, vec![]));
+    let outer_data = outer.state.settings.data_dir.clone();
+    let inner_data = inner.state.settings.data_dir.clone();
+    let expected_outer = outer_data.join("cache/huggingface/hub");
+    let expected_inner = inner_data.join("cache/huggingface/hub");
+    let (actual_outer, actual_inner) = tokio::task::spawn_blocking(move || {
+        (
+            sceneworks_core::hf_home::huggingface_hub_cache_dir(&outer_data),
+            sceneworks_core::hf_home::huggingface_hub_cache_dir(&inner_data),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(actual_outer, expected_outer);
+    assert_eq!(actual_inner, expected_inner);
+    assert_ne!(actual_outer, actual_inner);
+    let inner_data = inner.state.settings.data_dir.clone();
+    drop(inner);
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&inner_data),
+        ambient.path()
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&outer.state.settings.data_dir),
+        expected_outer
+    );
 }
 
 /// One line per attempt — the shot, status and error of every attempt plus the export — for
@@ -4222,6 +4296,44 @@ async fn a_cancel_the_worker_ignores_stops_dispatch_instead_of_retrying() {
         .count();
     assert_eq!(video_jobs, 1, "exactly one render was ever dispatched");
     assert_eq!(harness.run_record()["outcome"], "failed");
+    let (_, workers) = request(harness.app.clone(), "GET", "/api/v1/workers", Value::Null).await;
+    let worker = workers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == WORKER_ID)
+        .unwrap();
+    assert_eq!(
+        worker["status"], "busy",
+        "an ignored cancel is still executing"
+    );
+    let previous_heartbeat = worker["lastSeenAt"].clone();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (_, workers) = request(harness.app.clone(), "GET", "/api/v1/workers", Value::Null).await;
+    let worker = workers
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == WORKER_ID)
+        .unwrap();
+    assert_ne!(
+        worker["lastSeenAt"], previous_heartbeat,
+        "hanging work must keep heartbeating"
+    );
+    assert_eq!(worker["status"], "busy");
+    let job_id = harness.script.lock().claimed[0].1.clone();
+    assert_eq!(worker["currentJobId"], job_id);
+    let (_, job) = request(
+        harness.app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        job["status"], "running",
+        "busy heartbeats must never interrupt the active render"
+    );
 }
 
 /// A terminal job whose assets the API never finishes persisting is bounded and reported for what
