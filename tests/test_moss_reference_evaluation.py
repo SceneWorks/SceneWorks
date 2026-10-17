@@ -1258,7 +1258,7 @@ def test_fixed_v6_repair_preserves_four_and_only_two_calibration_slots(repaired_
     with pytest.raises(ValueError):cs.install(root,m,f['request'])
 
 
-@pytest.mark.parametrize('change',['extra_invalidation','different_fault','qwen_tamper','binary','driver','prior_claim','native_dependency','native_helper','scored','budget','unsealed_claim','new_carried_image','new_carried_receipt','diagnostic_tier','diagnostic_event','diagnostic_png'])
+@pytest.mark.parametrize('change',['extra_invalidation','different_fault','qwen_tamper','binary','driver','prior_claim','native_dependency','native_helper','native_component_proof','native_other_expression','scored','budget','unsealed_claim','new_carried_image','new_carried_receipt','diagnostic_tier','diagnostic_event','diagnostic_png'])
 def test_fixed_v6_repair_rejects_mutations(repaired_v6_fixture,change):
     import calibration_source as cs
     f=repaired_v6_fixture;root=f['root'];m=f['manifest'];s=f['source'];r=f['request']
@@ -1269,8 +1269,12 @@ def test_fixed_v6_repair_rejects_mutations(repaired_v6_fixture,change):
     elif change=='binary':m['configs'][3]['settings']['binary_sha256']='0'*64
     elif change=='driver':m['runtime']['driver']='changed'
     elif change=='prior_claim':r['prior_claim']['sha256']='0'*64
-    elif change in ('native_dependency','native_helper'):
-        p=root/'harness/native.py';text=p.read_text().replace('timeout=30','timeout=31') if change=='native_dependency' else p.read_text().replace("'Klein defect proof requires exact frozen source/pin/q4'","'altered proof helper'")
+    elif change in ('native_dependency','native_helper','native_component_proof','native_other_expression'):
+        p=root/'harness/native.py';text=p.read_text()
+        if change=='native_dependency':text=text.replace('timeout=30','timeout=31')
+        elif change=='native_helper':text=text.replace("'Klein defect proof requires exact frozen source/pin/q4'","'altered proof helper'")
+        elif change=='native_component_proof':text=text.replace("component_dtypes={","component_dtypes={'resolved_tier_proof':tier_proof,")
+        else:text=text.replace("generation_seconds=time.monotonic()-start","generation_seconds=(None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']])")
         p.write_text(text);prepared=ev.read(root/'prepared.json');prepared['harness']['native.py']=ev.file_hash(p);(root/'prepared.json').write_text(json.dumps(prepared));m['preparation']['sha256']=ev.file_hash(root/'prepared.json');r['authorization']['new_harness_sha256']=ev.digest(prepared['harness'])
     elif change=='scored':(s/'run/outputs/scored.fake.png').write_bytes(b'forbidden')
     elif change=='budget':r['authorization']['remaining_calibration_images']=3
@@ -1403,6 +1407,27 @@ def test_native_compatibility_projection_cannot_mask_misplaced_code(tmp_path,cha
     elif change=='unrelated_method':text=text.replace('timeout=30','timeout=31')
     else:text+='\nUNREVIEWED_NATIVE_GLOBAL=1\n'
     path.write_text(text)
+    try:projected=cr.native_source(path)
+    except ValueError:return
+    assert projected!=cr.native_source(ROOT/'native.py')
+
+
+@pytest.mark.parametrize('change',['component_dict','other_dict','timing_expression','other_comparison','missing_proof','duplicate_proof','missing_conditional','duplicate_guard'])
+def test_native_projection_rejects_ordinary_dict_expression_and_guard_changes(tmp_path,change):
+    import calibration_repair as cr
+    text=(ROOT/'native.py').read_text()
+    conditional="None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']]"
+    proof="'resolved_tier_proof':tier_proof"
+    if change=='component_dict':text=text.replace('component_dtypes={','component_dtypes={'+proof+',')
+    elif change=='other_dict':text=text.replace("'native_metrics':metrics}","'native_metrics':metrics,"+proof+"}")
+    elif change=='timing_expression':text=text.replace('generation_seconds=time.monotonic()-start','generation_seconds=('+conditional+')')
+    elif change=='other_comparison':text=text.replace("recipe.get('model')!=config['id']", "recipe.get('model')!=("+conditional+")")
+    elif change=='missing_proof':text=text.replace(','+proof,'')
+    elif change=='duplicate_proof':text=text.replace(proof,proof+','+proof)
+    elif change=='missing_conditional':text=text.replace('('+conditional+')',"{'bf16':None,'q8':8,'q4':4}[config['precision']]")
+    else:
+        lines=text.splitlines();i=next(i for i,line in enumerate(lines) if "if recipe.get('model')" in line);lines[i:i]=lines[i:i+2];text='\n'.join(lines)
+    path=tmp_path/'native.py';path.write_text(text)
     try:projected=cr.native_source(path)
     except ValueError:return
     assert projected!=cr.native_source(ROOT/'native.py')

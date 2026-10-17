@@ -211,11 +211,27 @@ if config['id']=='z_image_turbo':
     need(len(classes)==1,'one native runtime class required')
     renders=[n for n in classes[0].body if isinstance(n,ast.FunctionDef) and n.name=='render']
     need(len(renders)==1,'one native render method required')
-    render=renders[0];render_nodes={id(n) for n in ast.walk(render)}
+    render=renders[0]
     additions=[n for n in render.body if ast.dump(n) in removed]
     has_helpers=any(isinstance(n,ast.FunctionDef) and n.name in ('klein_tier_proof','z_tier_proof') for n in tree.body)
     need([ast.dump(n) for n in additions]==[ast.dump(n) for n in approved] if has_helpers else not additions,'packed proof plumbing missing, duplicated or misplaced')
     allowed={id(n) for n in additions}
+    # Match complete guards and the exact final return field. No expression or
+    # dictionary elsewhere in render is an authorized compatibility omission.
+    old_recipe_guard=ast.parse("""if recipe.get('model')!=config['id'] or raw.get('realModelInference') is not True or not raw.get('repo') or raw.get('numInferenceSteps')!=config['steps'] or raw.get('mlxQuantize')!={'bf16':None,'q8':8,'q4':4}[config['precision']]:
+ raise ValueError('native actual asset route/repo/tier mismatch')""").body[0]
+    new_recipe_guard=ast.parse("""if recipe.get('model')!=config['id'] or raw.get('realModelInference') is not True or not raw.get('repo') or raw.get('numInferenceSteps')!=config['steps'] or raw.get('mlxQuantize')!=(None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']]):
+ raise ValueError('native actual asset route/repo/tier mismatch')""").body[0]
+    guards=[n for n in render.body if ast.dump(n)==ast.dump(new_recipe_guard if has_helpers else old_recipe_guard)]
+    need(len(guards)==1,'exact native recipe guard missing or duplicated')
+    recipe_guard=guards[0]
+    returns=[n for n in render.body if isinstance(n,ast.Return)]
+    need(len(returns)==1 and returns[0] is render.body[-1] and isinstance(returns[0].value,ast.Call) and isinstance(returns[0].value.func,ast.Name) and returns[0].value.func.id=='dict','exact final native metrics return required')
+    fields=[k.value for k in returns[0].value.keywords if k.arg=='native_proof']
+    old_proof=ast.parse("{'submitted_request':body,'job':job,'metrics':metrics,'asset':assets[0],'route_events':self.route_events,'job_events':events,'runtime_context':self.context}",mode='eval').body
+    new_proof=ast.parse("{'submitted_request':body,'job':job,'metrics':metrics,'asset':assets[0],'route_events':self.route_events,'job_events':events,'runtime_context':self.context,'resolved_tier_proof':tier_proof}",mode='eval').body
+    need(len(fields)==1 and ast.dump(fields[0])==ast.dump(new_proof if has_helpers else old_proof),'exact returned native proof missing, duplicated or changed')
+    proof_field=fields[0]
     class Project(ast.NodeTransformer):
         def visit(self,n):
             if isinstance(n,ast.FunctionDef) and n.name in ('klein_tier_proof','z_tier_proof'):
@@ -226,11 +242,8 @@ if config['id']=='z_image_turbo':
                 need(n in tree.body and isinstance(n.value,ast.Constant) and n.value.value==KLEIN_CONSTANTS[n.targets[0].id],'Klein proof dependency changed')
                 return None
             if id(n) in allowed:return None
-            if id(n) in render_nodes and ast.dump(n)==ast.dump(ast.parse("None if config['id']=='z_image_turbo' else {'bf16':None,'q8':8,'q4':4}[config['precision']]",mode='eval').body):
-                return ast.parse("{'bf16':None,'q8':8,'q4':4}[config['precision']]",mode='eval').body
-            if id(n) in render_nodes and isinstance(n,ast.Dict):
-                pairs=[(k,v) for k,v in zip(n.keys,n.values) if not (isinstance(k,ast.Constant) and k.value=='resolved_tier_proof' and isinstance(v,ast.Name) and v.id=='tier_proof')]
-                n.keys=[k for k,v in pairs];n.values=[v for k,v in pairs]
+            if has_helpers and n is recipe_guard:return old_recipe_guard
+            if has_helpers and n is proof_field:return old_proof
             return super().visit(n)
     for name in ('klein_tier_proof','z_tier_proof'):
         helpers=[n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name==name]

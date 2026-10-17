@@ -482,7 +482,16 @@ def copy_v6_native(root,record):
     require({k:v for k,v in identity.items() if k!='dependency_report_sha256'}=={k:v for k,v in prep['native_build'].items() if k not in ('build','dependency_report_sha256')},'v6 native tool/DLL candidate identity changed')
     require(not identity['required_adjacent_dlls'] and not identity['adjacent_dll_files'],'v6 native adjacent DLL closure not supported')
     target=root/'target'/'release'/'sceneworks-rust-api.exe'
-    target.parent.mkdir(parents=True,exist_ok=True)
+    # Inspect the existing ancestor chain before even creating an intermediate
+    # directory. mkdir is exclusive for each missing owned component; recheck
+    # existing or newly created components before traversing/inspecting them.
+    physical(target)
+    for directory in (root,root/'target',target.parent):
+        physical(directory)
+        try:directory.mkdir()
+        except FileExistsError:require(directory.is_dir(),'native copy ancestor is not a directory')
+        physical(directory)
+    physical(target)
     require(not any(p.suffix.casefold()=='.dll' for p in target.parent.iterdir()),'new native copy directory has unexpected adjacent DLLs')
     record['native']=dict(mode='exact_v6_binary_copy_no_build',source_prepared_sha256=request['prepared_sha256'],source_job_receipt_sha256=request['job_receipt_sha256'],binary=seed_file(binary,target,request['binary_sha256'],link=False),identity=prep['native_build'],current_dependency_audit=identity,dependency_report_note='Raw dumpbin text binds its displayed executable path; parsed dependency names and actual tool/DLL candidate identities must match the original, while both raw report digests are retained.')
     return target,prep['native_build']

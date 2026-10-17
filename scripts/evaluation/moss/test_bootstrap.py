@@ -73,6 +73,29 @@ class BootstrapContracts(unittest.TestCase):
         with patch.object(b,'prepared',return_value=prep),patch.object(b,'verify_native_source') as verify,patch.object(b,'native_identity',return_value=identity),patch.object(b,'run',side_effect=AssertionError('no build or executable allowed')):
             target,actual=b.copy_v6_native(root,record)
             self.assertEqual(actual,prep['native_build']);self.assertEqual(b.digest(target),prep['binary_sha256']);self.assertFalse(os.path.samefile(target,binary));verify.assert_called_once_with(native)
+            outside=self.root/'outside';outside.mkdir();(outside/'sentinel').write_bytes(b'untouched')
+            snapshot=lambda:sorted((p.relative_to(outside).as_posix(),p.is_dir(),p.read_bytes() if p.is_file() else None) for p in outside.rglob('*'))
+            original=snapshot()
+            for level in ('root','target','release'):
+                unsafe=self.root/('unsafe-'+level)
+                if level=='root':unsafe.symlink_to(outside,target_is_directory=True)
+                else:
+                    unsafe.mkdir()
+                    if level=='target':(unsafe/'target').symlink_to(outside,target_is_directory=True)
+                    else:
+                        (unsafe/'target').mkdir();(unsafe/'target/release').symlink_to(outside,target_is_directory=True)
+                with self.assertRaisesRegex(ValueError,'reparse'):b.copy_v6_native(unsafe,record)
+                self.assertEqual(snapshot(),original,'copy must refuse before creating any outside directory or file')
+            # A path appearing between the initial check and exclusive mkdir is
+            # inspected again, rather than being traversed after FileExistsError.
+            raced=self.root/'raced';raced.mkdir();mkdir=Path.mkdir
+            def race(path,*args,**kwargs):
+                if path==raced/'target':
+                    path.symlink_to(outside,target_is_directory=True);raise FileExistsError(path)
+                return mkdir(path,*args,**kwargs)
+            with patch.object(Path,'mkdir',race):
+                with self.assertRaisesRegex(ValueError,'reparse'):b.copy_v6_native(raced,record)
+            self.assertEqual(snapshot(),original)
             binary.write_bytes(b'drift')
             with self.assertRaisesRegex(ValueError,'identity changed'):b.copy_v6_native(root,record)
 
