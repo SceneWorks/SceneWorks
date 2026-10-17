@@ -119,9 +119,12 @@ export function bindOwnedEnv(childEnv, { state, workerId }, url) {
   return bound;
 }
 
+// Field names are the API's serialized camelCase HealthResponse/DirectoriesResponse
+// (apps/rust-api dto.rs). The JS tests consume scripts/fixtures/sceneworks-api-health-ready.json,
+// which a rust-api test asserts is the real ready body, so a rename fails both suites.
 export async function assertOwnedHealth(health, state) {
-  fact(health?.status === "ok" && health.service === "sceneworks-api" && health.runtime === "rust" && health.readiness?.status === "ready" && health.auth_required === false, "owned API readiness/identity required");
-  const expected = { data: path.join(state, "data"), config: path.join(state, "config"), projects: path.join(state, "data", "projects"), jobs_db: path.join(state, "data", "cache", "jobs.db") };
+  fact(health?.status === "ok" && health.service === "sceneworks-api" && health.runtime === "rust" && health.readiness?.status === "ready" && health.authRequired === false, "owned API readiness/identity required");
+  const expected = { data: path.join(state, "data"), config: path.join(state, "config"), projects: path.join(state, "data", "projects"), jobsDb: path.join(state, "data", "cache", "jobs.db") };
   for (const [key, file] of Object.entries(expected)) {
     const actual = health.directories?.[key];
     fact(typeof actual === "string" && path.isAbsolute(actual), "owned API directory identity missing");
