@@ -1918,6 +1918,70 @@ jobs:
           }
           # Names, sizes and timestamps only: no hashes, contents, model loads or arbitrary roots.
           @{ base = $base; base_safe = $baseSafe; max_entries = $maxEntries; visited_entries = $visited; truncated = $truncated; skipped_reparse_paths = @($skipped.ToArray()); campaigns = @($campaigns.ToArray()); entries = @($entries.ToArray()) } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $out 'owned-file-metadata.json')
+      - name: Retrieve bounded owned MOSS native startup logs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $base = 'E:\sceneworks-evaluation\moss'
+          $maxFiles = 64
+          $maxBytes = 65536
+          $logs = New-Object 'System.Collections.Generic.List[object]'
+          $skipped = New-Object 'System.Collections.Generic.List[string]'
+          $truncated = $false
+          function Test-MossNativeDirectory($directory) {
+            if ($null -eq $directory -or -not $directory.PSIsContainer) { return $false }
+            for ($probe = $directory; $null -ne $probe; $probe = $probe.Parent) {
+              if (($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+            }
+            return $true
+          }
+          $baseItem = Get-Item -LiteralPath $base -Force -ErrorAction SilentlyContinue
+          $baseSafe = Test-MossNativeDirectory $baseItem
+          if ($baseSafe) {
+            $owned = @(Get-ChildItem -LiteralPath $base -Directory -Force | Where-Object { $_.Name -cmatch '^sc-26322-[a-z0-9][a-z0-9-]{0,48}$' } | Select-Object -First 33)
+            if ($owned.Count -gt 32) { $truncated = $true }
+            foreach ($campaign in ($owned | Select-Object -First 32)) {
+              if (-not (Test-MossNativeDirectory $campaign)) { $skipped.Add($campaign.FullName); continue }
+              $native = Get-Item -LiteralPath (Join-Path $campaign.FullName 'native-state') -Force -ErrorAction SilentlyContinue
+              if ($null -eq $native) { continue }
+              if (-not (Test-MossNativeDirectory $native)) { $skipped.Add($native.FullName); continue }
+              $states = @(Get-ChildItem -LiteralPath $native.FullName -Directory -Force | Where-Object { $_.Name -cmatch '^owned-[0-9]+$' } | Select-Object -First 17)
+              if ($states.Count -gt 16) { $truncated = $true }
+              foreach ($state in ($states | Select-Object -First 16)) {
+                if (-not (Test-MossNativeDirectory $state)) { $skipped.Add($state.FullName); continue }
+                foreach ($name in @('api.log', 'worker.log')) {
+                  if ($logs.Count -ge $maxFiles) { $truncated = $true; break }
+                  $file = Get-Item -LiteralPath (Join-Path $state.FullName $name) -Force -ErrorAction SilentlyContinue
+                  if ($null -eq $file) { continue }
+                  if ($file.PSIsContainer -or ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $skipped.Add($file.FullName); continue }
+                  # Read only the final64KiB; preserve originals and raw bytes, including empty logs.
+                  $stream = [IO.File]::Open($file.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+                  try {
+                    $length = $stream.Length
+                    $offset = [Math]::Max(0, $length - $maxBytes)
+                    [void]$stream.Seek($offset, [IO.SeekOrigin]::Begin)
+                    $buffer = New-Object byte[] ([int]($length - $offset))
+                    $read = 0
+                    while ($read -lt $buffer.Length) {
+                      $count = $stream.Read($buffer, $read, $buffer.Length - $read)
+                      if ($count -eq 0) { break }
+                      $read += $count
+                    }
+                    if ($read -lt $buffer.Length) { [Array]::Resize([ref]$buffer, $read) }
+                  } finally { $stream.Dispose() }
+                  $relative = Join-Path 'native-service-logs' (Join-Path $campaign.Name (Join-Path $state.Name $name))
+                  $destination = Join-Path $out $relative
+                  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+                  [IO.File]::WriteAllBytes($destination, $buffer)
+                  $logs.Add(@{ source = $file.FullName; artifact = $relative; original_bytes = $length; tail_offset = $offset; tail_truncated = ($offset -gt 0); copied_bytes = $buffer.Length; modified_utc = $file.LastWriteTimeUtc.ToString('o') })
+                }
+                if ($logs.Count -ge $maxFiles) { $truncated = $true; break }
+              }
+              if ($logs.Count -ge $maxFiles) { $truncated = $true; break }
+            }
+          }
+          @{ base = $base; base_safe = $baseSafe; max_files = $maxFiles; max_bytes_per_file = $maxBytes; truncated = $truncated; skipped_paths = @($skipped.ToArray()); logs = @($logs.ToArray()) } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $out 'native-service-log-index.json')
       - name: Upload MOSS telemetry
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
