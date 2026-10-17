@@ -651,7 +651,7 @@ class SharedOwnershipContracts(unittest.TestCase):
         run=self.root/'run';run.mkdir();(run/'logs').mkdir();(run/'receipts').mkdir()
         cells=[]
         for key in o.REPOS:
-            cell=dict(id='calibration.'+key);cells.append(cell)
+            cell=dict(id='calibration.'+key,config_id=key);cells.append(cell)
             log=run/'logs'/(key+'.log');log.write_text('CPU guard fixture')
             b.write(run/'receipts'/(cell['id']+'.json'),dict(log=dict(path='logs/'+log.name,sha256=b.digest(log))))
         estimate=self.root/'calibration-estimate.json';b.write(estimate,{'fixture':True})

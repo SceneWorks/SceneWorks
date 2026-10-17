@@ -5454,6 +5454,7 @@ test("MOSS execution uses existing registered path, fixed script, and pre-checko
   }
   assert.match(job, /bootstrap.py scored/);
   assert.match(job, /scored-authorization.json/);
+  assert.ok(job.includes("${{ env.MOSS_RECEIPTS }}/run/calibration-source/**"), "retain original calibration archive for offline combined evidence validation");
   assert.match(job, /completed receipts persist, failed cells never retry/);
   assert.match(job, /persist-credentials: false/);
 });

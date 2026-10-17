@@ -80,6 +80,7 @@ def control(mode, raw, base=BASE):
     allowed = required | ({'ownership', 'gpu_uuid'} if mode == 'freeze' else
                           ({'protocol_sha256', 'lease', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization'} if mode == 'scored' else {'protocol_sha256', 'lease'}) if mode in ('calibration', 'scored') else set())
     if mode=='prepare' and 'reuse' in value:allowed.add('reuse')
+    if mode=='freeze' and 'calibration_carry_forward' in value:allowed.add('calibration_carry_forward')
     if mode=='scored' and 'unavailable_configs' in value:allowed.add('unavailable_configs')
     require(set(value) == allowed, f'{mode} control fields must be exactly {sorted(allowed)}')
     require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}', value['campaign']), 'invalid campaign id')
@@ -553,6 +554,12 @@ def freeze(root, value):
                 worker_id='sc26322-' + config['id'], device_id=gpu['uuid'], job_timeout_seconds=manifest['ownership']['timeout_seconds'],
                 runtime_versions=dict(sceneworks_source=SOURCE, inference=INFERENCE,native_build=prep.get('native_build',{'status':'not captured'})))
         config['files'] = evaluation.inventory(config)
+    if value.get('calibration_carry_forward'):
+        from calibration_source import install
+        archive=install(root,manifest,value['calibration_carry_forward'])
+        for config in manifest['configs']:
+            config['settings']['calibration_source_root']=str(archive.resolve())
+            config['files']=evaluation.inventory(config)
     write(root / 'manifest.json', manifest)
     evaluation.freeze(root / 'manifest.json', root / 'protocol.lock.json')
     print(f'Frozen protocol {evaluation.read(root / "protocol.lock.json")["sha256"]}; calibration requires coordinator review and matching lease.', flush=True)
@@ -735,13 +742,23 @@ def execute_phase(root, value, phase):
         if phase=='scored':require(not any(r['status'] in ('failed','timeout') for r in results.values()),'scored attempts complete with runtime failures/censored cells; inspect full matrix, no retry or retrospective exclusion')
         if phase == 'calibration':
             parity_records = []
-            for path in sorted((campaign / 'parity').glob('*.json')):
+            parity_paths=list((campaign / 'parity').glob('*.json'))
+            if manifest.get('calibration_carry_forward'):
+                parity_paths.extend((campaign/'calibration-source'/'run'/'parity').glob('*.json'))
+            for path in sorted(parity_paths):
                 record = read(path)
                 evidence = record['evidence']
                 parity_records.append(dict(path=str(path.resolve()), sha256=digest(path),
                     numerical_seconds=evidence['elapsed_seconds'], initialization_seconds=evidence.get('initialization_seconds'),
                     total_process_seconds=evidence.get('total_process_seconds'), forward_count=evidence['forward_count'], generated_images=evidence['generated_images']))
             estimate = calibration_estimate(manifest, results, parity_records)
+            if manifest.get('calibration_carry_forward'):
+                estimate['calibration_carry_forward']=manifest['calibration_carry_forward']
+                estimate['limitations']+=' MOSS calibration metrics are unchanged original-source measurements; native metrics belong to this repaired campaign.'
+                estimate.update(calibration_attempts=9,effective_calibration_rows=6,historical_failed_native_attempts=3,carried_calibration_outputs=3,current_calibration_output_cap=3)
+                for key,condition in estimate['conditions'].items():
+                    row=next(r for r in results.values() if r['cell']['config_id']==key)
+                    condition.update(measurement_protocol_sha256=row['lock_sha256'],measurement_origin='carried_original' if key.startswith('moss_') else 'current_campaign')
             path = root / 'calibration-estimate.json'
             if path.exists():
                 require(read(path) == estimate, 'calibration estimate changed')

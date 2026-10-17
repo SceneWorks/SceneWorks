@@ -125,7 +125,11 @@ def ensure_parity(manifest,lock_hash,run,phase,guard,attempt):
     """Separate oracle process, joined before any measured candidate process exists."""
     config=next(c for c in manifest['configs'] if c['id']=='moss_dmd')
     root=run/'parity';root.mkdir(exist_ok=True);pending=[];records=[]
+    from calibration_source import carried
+    _,prior=carried(manifest,run)
     for cell in parity_cells(manifest,phase):
+        if cell['id'] in prior:
+            records.append(prior[cell['id']]);continue
         path=root/(cell['id']+'.json')
         if path.exists():records.append(validate_parity(run,lock_hash,cell,read(path)))
         else:pending.append(cell)
@@ -161,9 +165,12 @@ def ensure_parity(manifest,lock_hash,run,phase,guard,attempt):
 
 
 def existing_successes(manifest,lock_hash,run,config_id,phase,approved=None):
+    from calibration_source import carried
+    carried_rows,_=carried(manifest,run)
     selected=[c for c in cells(manifest,phase) if c['config_id']==config_id]
     pending=[]
     for cell in selected:
+        if cell['id'] in carried_rows:continue
         path=run/'receipts'/(cell['id']+'.json')
         if path.exists():
             row=validate_receipt(run,lock_hash,cell,read(path),manifest=manifest)

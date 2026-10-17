@@ -120,6 +120,9 @@ def template():
 
 
 def validate_manifest(manifest,config_id=None):
+    if manifest.get('calibration_carry_forward'):
+        from calibration_source import carried
+        carried(manifest,Path(manifest['preparation']['path']).parent/'run')
     require(manifest['corpus'] == corpus(), 'corpus changed: new freeze required')
     require(manifest['dmd_parity_fixtures']==template()['dmd_parity_fixtures'],'controlled parity fixture plan changed')
     require(tuple(c['id'] for c in manifest['configs']) == CONFIG_IDS, 'six ordered configuration identities required')
@@ -135,6 +138,8 @@ def validate_manifest(manifest,config_id=None):
         for name,version in packages.items():
             require(importlib.metadata.version(name)==version,f'runtime dependency changed: {name}')
     for config in manifest['configs']:
+        if manifest.get('calibration_carry_forward'):
+            require(config['settings'].get('calibration_source_root')==str(Path(manifest['preparation']['path']).parent/'run'/'calibration-source'),'carried archive is outside current campaign')
         require((config['repo'], config['revision']) == REVISIONS[config['id']], 'unexpected model revision')
         require(config['prompt_mode'] in ('raw','enhanced'), 'prompt_mode must be declared')
         require(config['prompt_contracts']=={case['id']:prompt_contract(case,config['id']) for case in manifest['corpus']['cases']},'reviewed prompt representation or hash changed')
@@ -184,6 +189,8 @@ def inventory(config):
         require({p.name for p in (repo_root/'snapshots').iterdir()}=={config['revision']},'alternative native resolver snapshot present')
         # Include refs and all resolver metadata, not merely weight files in one snapshot.
         roots=[repo_root]
+    if settings.get('calibration_source_root'):
+        roots.append(settings['calibration_source_root'])
     for root in roots:
         require(root and Path(root).is_dir(), f'missing snapshot {root}')
         paths.update(p for p in Path(root).rglob('*') if p.is_file())
@@ -355,11 +362,8 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
         declared=metrics.get('parity_fixture_digests',[])
         require(len(declared)==expected_count and len(set(declared))==expected_count,'DMD controlled parity evidence incomplete')
         actual={}
-        for path in (Path(root)/'parity').glob('*.json'):
-            doc=read(path)
-            if doc.get('sha256') in declared:
-                row=validate_parity(root,lock_hash,doc['cell'],doc)
-                actual[doc['sha256']]=row
+        for sha,row in parity_evidence(manifest or {},root,lock_hash).items():
+            if sha in declared:actual[sha]=row
         require(set(actual)==set(declared),'DMD parity receipt missing or changed')
         fixtures=template()['dmd_parity_fixtures'][:1] if cell['phase']=='calibration' else template()['dmd_parity_fixtures']
         expected_ids={f"scored.moss_dmd.{f['case_id']}.{f['seed']}" for f in fixtures}
@@ -373,13 +377,28 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
     return r
 
 
+def parity_evidence(manifest,root,lock_hash):
+    from calibration_source import carried
+    _,prior=carried(manifest,root)
+    result={digest(row):row for row in prior.values()}
+    for path in (Path(root)/'parity').glob('*.json'):
+        doc=read(path);row=validate_parity(root,lock_hash,doc['cell'],doc)
+        require(row['cell']['id'] not in {r['cell']['id'] for r in result.values()},'duplicate controlled parity fixture')
+        result[doc['sha256']]=row
+    return result
+
+
 def receipts(lock, run, phase='scored', complete=True):
     run = Path(run)
     lock_doc = read(lock)
     manifest = load_lock(lock)
     expected = list(cells(manifest, phase))
     results = {}
+    if phase=='calibration':
+        from calibration_source import carried
+        results,_=carried(manifest,run)
     for cell in expected:
+        if cell['id'] in results:continue
         path = run / 'receipts' / (cell['id'] + '.json')
         if not path.exists():
             require(not complete, f"missing cell {cell['id']}")
@@ -488,10 +507,7 @@ def report(lock,run,pairs_path,judgments_path,annotations_path):
                     scores.append(objective_scores(case,ann))
             output.append(dict(case_id=case['id'],scenario=case['scenario'],config_id=config['id'],statuses=dict(Counter(r['status'] for r in rows)),objective=scores,
                 costs=[r['metrics'] for r in rows if r['status']=='ok'],failure_kinds=dict(Counter(r.get('failure_kind','none') for r in rows)),censored=sum(r.get('failure_kind')=='runtime_censored' for r in rows)))
-    parity=[]
-    for cell in parity_cells(manifest):
-        path=Path(run)/'parity'/(cell['id']+'.json')
-        if path.exists():parity.append(validate_parity(run,read(lock)['sha256'],cell,read(path)))
+    parity=list(parity_evidence(manifest,run,read(lock)['sha256']).values())
     parity_complete=len(parity)==5 and all(step['max_abs']<=manifest['thresholds']['dmd_prediction_max_abs'] and step['mean_abs']<=manifest['thresholds']['dmd_prediction_mean_abs'] for fixture in parity for step in fixture['evidence']['steps'])
     usable_pairs=sum(j['winner']!='unavailable' for j in judgments)
     all_outputs=len(results)==288 and all(r['status']=='ok' for r in results.values())

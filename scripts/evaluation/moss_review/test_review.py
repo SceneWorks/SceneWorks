@@ -82,6 +82,13 @@ class ReviewPackets(unittest.TestCase):
         for batch in (self.public / 'judge-batches').glob('*.json'):
             self.assertLessEqual(len(r.sealed(batch)['pairs']), 24)
 
+    def test_carried_archive_validation_dependencies_are_frozen(self):
+        body=copy.deepcopy(self.protocol)
+        r.verify_review_code(body)
+        body['harness_dependencies_sha256']['calibration_source.py']='0'*64
+        with self.assertRaisesRegex(ValueError,'frozen review dependency changed'):
+            r.verify_review_code(body)
+
     def test_observed_text_survives_translation_and_legacy_report_accepts_pairs(self):
         annotations, judgments = self.translate()
         key = next(k for k in annotations if annotations[k]['text'])

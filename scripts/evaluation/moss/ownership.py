@@ -138,9 +138,11 @@ def reject_run_invalidated(run_root, lock_hash):
 
 def calibration_results(manifest, lock_hash, run_root, *, complete=True):
     from evaluate import cells, validate_receipt
+    from calibration_source import carried
     reject_run_invalidated(run_root,lock_hash)
-    results={}
+    results,_=carried(manifest,run_root)
     for cell in cells(manifest,'calibration'):
+        if cell['id'] in results:continue
         path=Path(run_root)/'receipts'/(cell['id']+'.json')
         if not path.exists():
             require(not complete,'six terminal validated calibration attempts required')
@@ -275,10 +277,12 @@ class ExecutionGuard:
                 mirror=self.prepared_root/'run'/'availability-authorization.json'
                 require(digest(mirror)==authority['sha256'],'availability authorization mirror changed')
                 from evaluate import cells, artifact
+                from calibration_source import calibration_record_root
                 evidence=[mirror]
                 for cell in cells(manifest,'calibration'):
-                    path=self.prepared_root/'run'/'receipts'/(cell['id']+'.json')
-                    evidence.extend([path,artifact(self.prepared_root/'run',read(path)['log'])])
+                    receipt_root=calibration_record_root(self.manifest,self.prepared_root/'run',cell['config_id'])
+                    path=receipt_root/'receipts'/(cell['id']+'.json')
+                    evidence.extend([path,artifact(receipt_root,read(path)['log'])])
                 self.availability_fingerprints={str(p):self.fingerprint(p) for p in evidence}
 
         self.check()
@@ -290,6 +294,8 @@ class ExecutionGuard:
         return (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
 
     def check(self, allowed_pids=None, idle=False):
+        from calibration_source import check_carry_closure
+        check_carry_closure(self.manifest,self.prepared_root/'run',execution=True)
         import psutil
         require(self.now() < self.deadline_epoch, 'device lease expired or execution deadline reached')
         reject_run_invalidated(self.prepared_root/'run',self.protocol_sha256)

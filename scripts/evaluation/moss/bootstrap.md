@@ -119,6 +119,78 @@ starts the API for unrecognized arguments, so `--help` is not used as a CPU prob
 The new host/driver/runtime freeze and measured conditions still govern cost
 comparisons. The old harness, refs and prepared receipt are never rewritten.
 
+After the diagnosed Windows native-child stdin lifecycle failure, retain the
+three successful v5 MOSS calibrations and run only the three native calibration
+cells in a newly prepared campaign. Preparation uses the existing explicit
+model/wheel reuse control; no original campaign file is rewritten. Add this
+optional field to the ordinary new campaign `freeze` control:
+
+```json
+"calibration_carry_forward": {
+  "campaign": "sc-26322-reference-v5",
+  "protocol_sha256": "<original protocol canonical sha256>",
+  "prepared_sha256": "<original prepared.json file sha256>",
+  "job": "38990087847-1",
+  "job_receipt_sha256": "<original successful calibration job file sha256>",
+  "calibration_sha256": "<original six-attempt bundle sha256>",
+  "authorization": {
+    "id": "<unique reviewed native-stdin repair authorization>",
+    "coordinator": "<responsible chat from ownership>",
+    "reason": "Supervised Windows worker stdin pipe was omitted; preserve original MOSS measurements.",
+    "native_services_sha256": "<new prepared harness/native_services.py sha256>",
+    "new_harness_sha256": "<canonical digest of new prepared.harness mapping>",
+    "remaining_calibration_images": 3
+  }
+}
+```
+
+Compute/inspect the original bundle from downloaded unchanged evidence, using the
+reviewed helper (this command performs no execution-input or GPU checks):
+
+```sh
+PYTHONPATH=scripts/evaluation/moss python3 - <<'PY'
+from pathlib import Path
+from ownership import calibration_bundle
+from evaluate import digest, read
+old = Path('/absolute/path/to/downloaded/calibration-v5')
+new = Path('/absolute/path/to/downloaded/new-prepare')
+print('original bundle:', calibration_bundle(old/'protocol.lock.json', old/'run'))
+print('new harness:', digest(read(new/'prepared.json')['harness']))
+PY
+```
+
+The original six terminal receipts, logs, three PNGs, first parity proof and
+protocol/prepared/job evidence are copied unchanged under
+`run/calibration-source`. Their original protocol identity remains in every
+receipt. The separate exact archive closure and hashes enter the existing frozen
+input inventory/stat guard; an additional cheap archive-closure check rejects
+added files. Compatibility keeps full `reference.py` bytes, MOSS recipes/model
+inventories and installed runtime/hardware/driver. Entire evaluation, runner and
+live-guard ASTs must match after
+removing only exact, separately-bound archive lookup/skip statements; no ordinary
+resource, lease, cache, generation or measurement code is omitted. The original
+responsible chat and timeout match; new lease/job identity is explicit.
+
+A one-time immutable claim under the owned `calibration-repairs` directory binds
+the source protocol to this destination and authorization. A second repair
+campaign, source invalidation, scored source work, tampered evidence or incompatible
+MOSS execution is refused. Failed freeze claims are never stolen automatically.
+The ordinary calibration dispatch then skips carried MOSS cells before spawn and
+attempts only three native cells. It permits at most three new calibration PNGs,
+preserves original failed native history, and records old MOSS costs as original
+measurements. Successful current cells resume unchanged; failed cells are never
+automatically retried. The combined accepted bundle contains six effective rows
+and nine historical attempts (three original native startup failures).
+
+All 48 scored outputs per MOSS configuration remain required, including the first
+calibration scene. Scored DMD parity reuses the unchanged original first fixture
+and executes only the other four fixtures: 80 total forwards including 16 original
+forwards, no extra images. Numerical thresholds retain report-only eligibility.
+Freeze the separate review protocol on an empty persistent Mac run root before
+copying any current outputs or prior source archive into it. Later download the
+entire current `run`, including untouched `calibration-source`, into that same
+root; keep original Windows bytes and both protocol identities intact.
+
 Create `freeze-control.json` with exactly these fields, using the actual host GPU UUID from telemetry and a coordinator-issued lease identity:
 
 ```json

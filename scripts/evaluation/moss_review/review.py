@@ -11,9 +11,13 @@ from pathlib import Path
 import secrets
 import statistics
 import struct
+import sys
 import zlib
 
 HARNESS = Path(__file__).resolve().parents[1] / 'moss' / 'evaluate.py'
+DEPENDENCIES = ('calibration_source.py', 'ownership.py')
+# The offline reader also resolves the separately bound calibration archive.
+sys.path.insert(0, str(HARNESS.parent))
 _spec = importlib.util.spec_from_file_location('frozen_moss_evaluate', HARNESS)
 ev = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ev)
@@ -74,9 +78,15 @@ def freeze(lock_path, run, specs_path, out):
     protocol = dict(schema_version=1, lock_sha256=lock['sha256'], run_root=str(Path(run).resolve()), created_at=datetime.now(timezone.utc).isoformat(),
                     before_scored_receipts=True, rubric=manifest['visual_rubric'], thresholds=manifest['thresholds'], scoring_protocol=manifest['scoring_protocol'], roles=roles,
                     review_tool_sha256=ev.file_hash(__file__), harness_sha256=ev.file_hash(HARNESS),
+                    harness_dependencies_sha256={name:ev.file_hash(HARNESS.with_name(name)) for name in DEPENDENCIES},
                     legacy_rubric_meaning='componentwise minimum of A/B absolute scores; unavailable pairs omit rubric',
                     limitations='Hashes bind recorded bytes; custody and reviewer independence must be established operationally. Freeze is not a trusted timestamp or signature.')
     save_new(out, ev.seal(protocol))
+
+
+def verify_review_code(proto):
+    check(proto['harness_sha256'] == ev.file_hash(HARNESS) and proto['review_tool_sha256'] == ev.file_hash(__file__), 'frozen review code changed')
+    check(proto['harness_dependencies_sha256']=={name:ev.file_hash(HARNESS.with_name(name)) for name in DEPENDENCIES}, 'frozen review dependency changed')
 
 
 def png_pixels(data):
@@ -212,7 +222,7 @@ def export(lock, run, protocol, public, private):
     doc = load(protocol); proto = ev.unseal(doc)
     check(load(lock)['sha256'] == proto['lock_sha256'], 'protocol/lock mismatch')
     check(proto['run_root'] == str(Path(run).resolve()), 'checked run root differs from review freeze')
-    check(proto['harness_sha256'] == ev.file_hash(HARNESS) and proto['review_tool_sha256'] == ev.file_hash(__file__), 'frozen review code changed')
+    verify_review_code(proto)
     manifest, results = ev.receipts(lock, run)
     verify_protocol(proto, manifest)
     export_verified(doc, manifest, results, run, public, private)
@@ -371,7 +381,7 @@ def validate_translate(lock, run, protocol_path, public, private, raw_path, rati
     check(ev.unseal(protocol)['run_root'] == str(Path(run).resolve()), 'checked run root differs from review freeze')
     manifest, results = ev.receipts(lock, run)
     protocol = load(protocol_path); check(ev.unseal(protocol)['lock_sha256'] == load(lock)['sha256'], 'lock identity mismatch')
-    check(ev.unseal(protocol)['review_tool_sha256'] == ev.file_hash(__file__) and ev.unseal(protocol)['harness_sha256'] == ev.file_hash(HARNESS), 'frozen review code changed')
+    verify_review_code(ev.unseal(protocol))
     mapping = load(Path(private) / 'mapping.json'); ap = load(Path(public) / 'annotations.packet.json'); jp = load(Path(public) / 'judgments.packet.json')
     raw, ratings, alignment = load(raw_path), load(ratings_path), load(alignment_path)
     annotations, judgments = translate_verified(manifest, results, protocol, mapping, ap, jp, raw, ratings, alignment, public, evidence)

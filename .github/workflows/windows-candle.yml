@@ -2080,5 +2080,6 @@ jobs:
             ${{ env.MOSS_RECEIPTS }}/run/receipts/*
             ${{ env.MOSS_RECEIPTS }}/run/invalidations/*
             ${{ env.MOSS_RECEIPTS }}/run/parity/*
+            ${{ env.MOSS_RECEIPTS }}/run/calibration-source/**
             ${{ env.MOSS_RECEIPTS }}/run/*-transport-*.log
           if-no-files-found: warn
