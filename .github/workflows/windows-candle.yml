@@ -1847,6 +1847,53 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           # Names, PIDs and creation times only, to resolve WDDM permission-hidden GPU owners.
           @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,@{Name='CreatedUtc';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}}) | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'process-identities.json')
+      - name: Capture guard-matched psutil process identities
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $python = 'E:\sceneworks-evaluation\moss\sc-26322-reference-v7\venv\Scripts\python.exe'
+          function Assert-MossIdentityPhysical($path) {
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            for ($probe = $item; $null -ne $probe; $probe = $(if ($probe.PSIsContainer) { $probe.Parent } else { $probe.Directory })) {
+              if (($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Process identity diagnostic refuses reparse path: $path" }
+            }
+          }
+          foreach ($path in @($python, $out, (Join-Path $out 'compute.csv'), (Join-Path $out 'process-identities.json'))) {
+            Assert-MossIdentityPhysical $path
+          }
+          if (Test-Path -LiteralPath (Join-Path $out 'psutil-process-identities.json')) { throw 'Process identity sidecar already exists; no overwrite' }
+          $diagnostic = @'
+          import csv, datetime, json, sys
+          from pathlib import Path
+          import psutil
+          out = Path(sys.argv[1])
+          cim = json.loads((out / 'process-identities.json').read_text(encoding='utf-8-sig'))
+          cim = {int(row['ProcessId']): row for row in cim}
+          compute = list(csv.DictReader((out / 'compute.csv').read_text(encoding='utf-8-sig').splitlines(), skipinitialspace=True))
+          rows = []
+          for pid in sorted({int(row['pid']) for row in compute}):
+              row = {'pid': pid, 'gpu_uuids': sorted({item['gpu_uuid'] for item in compute if int(item['pid']) == pid}), 'cim': cim.get(pid), 'psutil': {}}
+              try:
+                  process = psutil.Process(pid)
+                  for field in ('name', 'create_time'):
+                      try:
+                          row['psutil'][field] = getattr(process, field)()
+                      except Exception as error:
+                          row['psutil'][field + '_error'] = {'type': type(error).__name__, 'message': str(error)[:240]}
+              except Exception as error:
+                  row['psutil']['process_error'] = {'type': type(error).__name__, 'message': str(error)[:240]}
+              if row['cim'] and 'create_time' in row['psutil'] and row['cim'].get('CreatedUtc'):
+                  epoch = datetime.datetime.fromisoformat(row['cim']['CreatedUtc'].replace('Z', '+00:00')).timestamp()
+                  row['cim_create_time'] = epoch
+                  row['create_time_delta_seconds'] = row['psutil']['create_time'] - epoch
+              rows.append(row)
+          result = {'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'python': sys.executable, 'psutil_version': psutil.__version__, 'identity_method': 'psutil.Process(pid).name()/create_time(), identical to ExecutionGuard', 'processes': rows}
+          (out / 'psutil-process-identities.json').write_text(json.dumps(result, indent=2, allow_nan=False), encoding='utf-8')
+
+          '@
+          & $python -I -B -c $diagnostic $out
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared v7 psutil process identity capture failed' }
       - name: Capture bounded owned MOSS snapshot and run file metadata
         shell: powershell
         run: |
