@@ -36,7 +36,10 @@ def worker_failure(exc):
 
 
 def worker(config, requests, replies, log, gpu_uuid, mode='candidate'):
-    os.environ.update(HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=gpu_uuid)
+    # Verified pipeline source lives inside the immutable snapshot closure.
+    # importlib must not create a .pyc there, including direct CLI spawned workers.
+    sys.dont_write_bytecode=True
+    os.environ.update(PYTHONDONTWRITEBYTECODE='1',HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=gpu_uuid)
     with open(log,'a',encoding='utf-8') as stream,contextlib.redirect_stdout(stream),contextlib.redirect_stderr(stream):
         runtime=None
         try:

@@ -626,6 +626,21 @@ class SharedOwnershipContracts(unittest.TestCase):
         ref.write_text(item['revision']);(snapshot.parent/('f'*40)).mkdir()
         with self.assertRaisesRegex(ValueError,'unexpected snapshot'):guard.check()
 
+    def test_json_roundtrip_closure_diagnostics_keep_bytecode_strict(self):
+        staged=json.loads(json.dumps(b.read(self.root/'prepared.json')['staged']))
+        o.verify_staged(self.root,staged,hash_weights=False)
+        item=staged['moss_sft'];missing=Path(item['files'][0]['path']);missing.unlink()
+        bytecode=Path(item['snapshot'])/'__pycache__'/'pipeline_moss_image.cpython-312.pyc'
+        bytecode.parent.mkdir();bytecode.write_bytes(b'injected bytecode must invalidate')
+        with self.assertRaisesRegex(ValueError,'snapshot input closure changed') as failure:
+            o.verify_staged(self.root,staged,hash_weights=False)
+        detail=json.loads(str(failure.exception).split(': ',1)[1])
+        self.assertEqual(detail['config_id'],'moss_sft')
+        self.assertEqual(detail['added'],[str(bytecode.resolve())])
+        self.assertEqual(detail['removed'],[str(missing)])
+        self.assertEqual((detail['added_count'],detail['removed_count']),(1,1))
+        self.assertFalse(detail['paths_truncated'])
+
     def test_same_size_weight_change_is_detected_without_payload_hash_per_check(self):
         guard=self.guard();file=Path(self.manifest['configs'][0]['files'][0]['path'])
         file.write_bytes(b'x'*file.stat().st_size)

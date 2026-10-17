@@ -229,6 +229,26 @@ def test_unreviewed_pipeline_rejected_before_any_import(tmp_path):
     with pytest.raises(ValueError,match='unreviewed'):import_pipeline(p)
 
 
+def test_worker_pipeline_import_keeps_snapshot_bytecode_free(tmp_path,monkeypatch):
+    import queue
+    import reference
+    import run
+    source=tmp_path/'snapshot'/'pipeline_moss_image.py';source.parent.mkdir()
+    source.write_text('FIXTURE_VALUE = 123\n')
+    monkeypatch.setattr(reference,'PIPELINE_SHA256',ev.file_hash(source))
+    monkeypatch.setattr(sys,'dont_write_bytecode',False)
+    monkeypatch.setenv('PYTHONDONTWRITEBYTECODE','')
+    class FixtureReference:
+        def __init__(self,*args,**kwargs):
+            assert sys.dont_write_bytecode and os.environ['PYTHONDONTWRITEBYTECODE']=='1'
+            assert reference.import_pipeline(source).FIXTURE_VALUE==123
+    monkeypatch.setattr(reference,'Reference',FixtureReference)
+    requests=queue.Queue();requests.put(None);replies=queue.Queue()
+    run.worker({'id':'moss_base'},requests,replies,str(tmp_path/'worker.log'),'CPU-FIXTURE')
+    assert replies.get_nowait()[0]=='ready'
+    assert sorted(p.relative_to(source.parent).as_posix() for p in source.parent.rglob('*'))==[source.name]
+
+
 def test_native_advanced_request_and_precision_are_explicit():
     m=ev.template();config=m['configs'][3];cell=next(c for c in ev.cells(m) if c['config_id']==config['id'])
     body=request_body(config,cell,'fixture-project')

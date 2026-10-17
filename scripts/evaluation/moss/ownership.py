@@ -103,7 +103,11 @@ def verify_staged(root, staged, hash_weights=True):
         require({p.name for p in snapshot.parent.iterdir()} == {item['revision']}, 'unexpected snapshot in isolated cache')
         expected = {f['path'] for f in item['files']}
         actual = {str(p.resolve()) for p in snapshot.rglob('*') if p.is_file()}
-        require(actual == expected, 'snapshot input closure changed')
+        if actual != expected:
+            added,removed=sorted(actual-expected),sorted(expected-actual)
+            raise ValueError('snapshot input closure changed: '+json.dumps(dict(config_id=key,snapshot=str(snapshot),
+                added_count=len(added),removed_count=len(removed),added=added[:32],removed=removed[:32],
+                paths_truncated=len(added)>32 or len(removed)>32),ensure_ascii=False))
         for file in item['files']:
             path = Path(file['path'])
             physical(path)

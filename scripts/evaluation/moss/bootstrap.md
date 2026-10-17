@@ -7,6 +7,18 @@ concurrency group and all lease/physical GPU1 UUID checks; listener selection do
 not grant separate GPU capacity. An OS installer prompt on another listener
 requires coordinator intervention, not a permission bypass by this workflow.
 
+Read-only telemetry includes `owned-file-metadata.json`: bounded file names,
+sizes and timestamps beneath fixed owned campaign `hub/models--*/snapshots`,
+`refs`, and `run` directories. It skips reparse points and ancestors, caps visits
+at4096 entries (32 campaigns/16 repositories each), and marks incomplete/truncated
+observations. Per-campaign run/PNG counts are authoritative only when complete;
+it reads no file contents or weight hashes. An invalidated campaign stays intact.
+
+Owned Python runtimes start with bytecode writing disabled before pipeline
+imports, including direct CLI workers. Snapshot closure checks still reject
+unexpected `.pyc` files and report bounded added/removed path lists. Existing
+invalidations are never repaired or retried by deleting their evidence.
+
 Preparation downloads approximately the selected artifact bytes reported by the pinned Hub metadata, plus binary Python wheels, and builds the native baseline API. It requires that sum plus 48GiB free build/wheel/output headroom. All six snapshots, the Python environment, wheel locks, native source/build, protocol and receipts persist under `E:\sceneworks-evaluation\moss\sc-26322-<campaign>`. Cargo builds use four concurrent jobs. Cargo dependencies/target, native data/config/cache and Hugging Face snapshots are isolated from production caches. Preparation does not load a model or initialize CUDA. Its Rust build compiles CUDA kernels; compiler availability is a separate prerequisite from GPU ownership.
 
 The fixed Python3.12 primary requirements are torch2.9.1+cu128, diffusers0.38.0, transformers5.3.0, accelerate1.10.1, safetensors0.8.0, Pillow12.1.1, psutil7.2.2 and huggingface-hub1.5.0. The checked-in `dependency-resolution.json` records the official-metadata Windows CPython3.12 resolution: all43 packages, exact wheel URLs and SHA256s,43 metadata requests and zero binary wheel requests. Diffusers0.38.0 requires Safetensors>=0.8.0rc0; the former0.6.2 pin was unsatisfiable. Preparation downloads exactly the43 reviewed wheel hashes without dependency re-resolution, writes the full hash lock, installs offline with `--require-hashes`, and runs actual imports including Qwen3_5Model and AutoencoderKLFlux2. These versions are a source-based compatible candidate until that host import and real-weight load succeed; CPU protocol tests do not prove runtime compatibility. Subsequent stages reuse the exact installed environment, full package inventory and wheel lock. The public native inference dependency is fetched through the source's `git-fetch-with-cli` configuration; a fetch/authentication failure is a preparation failure, never GPU or model unavailability evidence.

@@ -691,7 +691,7 @@ def execute_phase(root, value, phase):
         job=os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'),
         scored_authorization=authority)
     with device_lock(root.parent, lease['gpu_uuid'], lock_record) as held_lock:
-        env = dict(os.environ, CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=lease['gpu_uuid'], HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', MOSS_DEVICE_LOCK=str(held_lock.resolve()), MOSS_LEASE_ID=lease['id'], MOSS_PROTOCOL_SHA256=protocol['sha256'])
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=lease['gpu_uuid'], HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', MOSS_DEVICE_LOCK=str(held_lock.resolve()), MOSS_LEASE_ID=lease['id'], MOSS_PROTOCOL_SHA256=protocol['sha256'])
         guard = ExecutionGuard(manifest, protocol['sha256'], phase=phase, allow_owner=True, environ=env)
         observation = guard.check(idle=True)
         job = lock_record['job']
@@ -707,7 +707,7 @@ def execute_phase(root, value, phase):
                 continue
             log = campaign / (phase + '-transport-' + config['id'] + '-' + job + '.log')
             with log.open('x', encoding='utf-8') as stream:
-                process = subprocess.Popen([str(python(root)), str(root / 'harness' / 'run.py'), str(root / 'protocol.lock.json'), str(campaign), '--config', config['id'], '--phase', phase], env=env, stdout=stream, stderr=subprocess.STDOUT)
+                process = subprocess.Popen([str(python(root)), '-B', str(root / 'harness' / 'run.py'), str(root / 'protocol.lock.json'), str(campaign), '--config', config['id'], '--phase', phase], env=env, stdout=stream, stderr=subprocess.STDOUT)
                 owned = {}
                 try:
                     while process.poll() is None:

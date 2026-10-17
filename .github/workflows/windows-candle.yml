@@ -1847,6 +1847,77 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           # Names, PIDs and creation times only, to resolve WDDM permission-hidden GPU owners.
           @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,@{Name='CreatedUtc';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}}) | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'process-identities.json')
+      - name: Capture bounded owned MOSS snapshot and run file metadata
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $base = 'E:\sceneworks-evaluation\moss'
+          $maxEntries = 4096
+          $visited = 0
+          $entries = New-Object 'System.Collections.Generic.List[object]'
+          $campaigns = New-Object 'System.Collections.Generic.List[object]'
+          $skipped = New-Object 'System.Collections.Generic.List[string]'
+          $truncated = $false
+          function Test-MossPlainDirectory($directory) {
+            if ($null -eq $directory -or -not $directory.PSIsContainer) { return $false }
+            for ($probe = $directory; $null -ne $probe; $probe = $probe.Parent) {
+              if (($probe.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+            }
+            return $true
+          }
+          $baseItem = Get-Item -LiteralPath $base -Force -ErrorAction SilentlyContinue
+          $baseSafe = Test-MossPlainDirectory $baseItem
+          if ($baseSafe) {
+            $owned = @(Get-ChildItem -LiteralPath $base -Directory -Force | Where-Object { $_.Name -cmatch '^sc-26322-[a-z0-9][a-z0-9-]{0,48}$' } | Select-Object -First 33)
+            if ($owned.Count -gt 32) { $truncated = $true }
+            foreach ($campaign in ($owned | Select-Object -First 32)) {
+              if (-not (Test-MossPlainDirectory $campaign)) { $skipped.Add($campaign.FullName); continue }
+              $roots = New-Object 'System.Collections.Generic.List[object]'
+              $run = Get-Item -LiteralPath (Join-Path $campaign.FullName 'run') -Force -ErrorAction SilentlyContinue
+              if ($null -ne $run) { $roots.Add($run) }
+              $hub = Get-Item -LiteralPath (Join-Path $campaign.FullName 'hub') -Force -ErrorAction SilentlyContinue
+              $complete = -not $truncated
+              if (Test-MossPlainDirectory $hub) {
+                $repos = @(Get-ChildItem -LiteralPath $hub.FullName -Directory -Filter 'models--*' -Force | Select-Object -First 17)
+                if ($repos.Count -gt 16) { $complete = $false; $truncated = $true }
+                foreach ($repo in ($repos | Select-Object -First 16)) {
+                  if (-not (Test-MossPlainDirectory $repo)) { $skipped.Add($repo.FullName); $complete = $false; continue }
+                  foreach ($leaf in @('snapshots', 'refs')) {
+                    $root = Get-Item -LiteralPath (Join-Path $repo.FullName $leaf) -Force -ErrorAction SilentlyContinue
+                    if ($null -ne $root) { $roots.Add($root) }
+                  }
+                }
+              } elseif ($null -ne $hub) { $skipped.Add($hub.FullName); $complete = $false }
+              $runFiles = 0
+              $pngFiles = 0
+              $queue = New-Object 'System.Collections.Generic.Queue[object]'
+              foreach ($root in $roots) { $queue.Enqueue($root) }
+              while ($queue.Count -gt 0) {
+                $directory = $queue.Dequeue()
+                if (-not (Test-MossPlainDirectory $directory)) { $skipped.Add($directory.FullName); $complete = $false; continue }
+                $remaining = $maxEntries - $visited
+                $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force | Select-Object -First ($remaining + 1))
+                if ($children.Count -gt $remaining) { $complete = $false; $truncated = $true }
+                foreach ($item in ($children | Select-Object -First $remaining)) {
+                  $visited++
+                  if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { $skipped.Add($item.FullName); $complete = $false; continue }
+                  $relative = $item.FullName.Substring($campaign.FullName.Length + 1)
+                  $entries.Add(@{ campaign = $campaign.Name; path = $relative; directory = [bool]$item.PSIsContainer; bytes = $(if ($item.PSIsContainer) { $null } else { $item.Length }); created_utc = $item.CreationTimeUtc.ToString('o'); modified_utc = $item.LastWriteTimeUtc.ToString('o') })
+                  if ($item.PSIsContainer) { $queue.Enqueue($item) }
+                  elseif ($relative.StartsWith('run\', [StringComparison]::OrdinalIgnoreCase)) {
+                    $runFiles++
+                    if ($item.Extension -ieq '.png') { $pngFiles++ }
+                  }
+                }
+                if ($visited -ge $maxEntries) { $complete = $false; $truncated = $true; break }
+              }
+              $campaigns.Add(@{ campaign = $campaign.Name; run_present = ($null -ne $run); observed_run_file_count = $runFiles; observed_run_png_count = $pngFiles; complete = $complete })
+              if ($visited -ge $maxEntries) { break }
+            }
+          }
+          # Names, sizes and timestamps only: no hashes, contents, model loads or arbitrary roots.
+          @{ base = $base; base_safe = $baseSafe; max_entries = $maxEntries; visited_entries = $visited; truncated = $truncated; skipped_reparse_paths = @($skipped.ToArray()); campaigns = @($campaigns.ToArray()); entries = @($entries.ToArray()) } | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 (Join-Path $out 'owned-file-metadata.json')
       - name: Upload MOSS telemetry
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
