@@ -1,6 +1,10 @@
 //! Tensor-neutral FLUX3 producer binding and scoped lifecycle, shared by both lanes.
 //! Nothing in this module opens a device. Only the lane's `run` loads a registry generator.
 use super::*;
+#[cfg(not(target_os = "macos"))]
+use runtime_cuda::gen_core as core;
+#[cfg(target_os = "macos")]
+use runtime_macos::gen_core as core;
 
 pub(super) const PROVIDER: &str = "flux3_klein";
 pub(super) const FLUX3_REPOSITORY: &str = "black-forest-labs/flux-3-image-klein";
@@ -263,17 +267,15 @@ pub(super) enum BoundaryError {
 impl std::fmt::Display for BoundaryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::MissingPreDenoise => "missing_phase_boundary: native FLUX3 must emit typed ConditioningComplete after materialized, stream-fenced conditioning and before the first DiT forward (or a staged Renderer load); completed Step1 cannot label conditioning. Update the inference pin and wire the typed event before capturing this resident route",
+            Self::MissingPreDenoise => "missing_phase_boundary: native FLUX3 must emit typed ConditioningComplete after materialized, stream-fenced positive/negative/reference conditioning and before the first DiT forward; neither Renderer loading nor completed Step1 can label conditioning",
             Self::InvalidZeroStep => "invalid_phase_boundary: Progress::Step is 1-based; Step0 is not a conditioning-completion event",
         })
     }
 }
 impl std::error::Error for BoundaryError {}
 
-/// Reducer for the native typed ConditioningComplete event. The current pin
-/// predates that variant; S8's pin update must add the explicit match arm below,
-/// not overload the documented 1-based Step protocol. This reducer is independently
-/// weights-free testable while old resident providers fail closed.
+/// Reducer for the native typed ConditioningComplete event, shared by both capture
+/// adapters. Duplicate completion never resets a phase's peak or reopens conditioning.
 pub(super) fn conditioning_complete(
     phase: &mut protocol::ReferencePhase,
 ) -> Option<protocol::ReferencePhase> {
@@ -293,9 +295,9 @@ pub(super) fn boundary(
     if matches!(progress, Progress::Step { current: 0, .. }) {
         return Err(BoundaryError::InvalidZeroStep);
     }
-    // S8 typed-event pin integration seam:
-    // Progress::ConditioningComplete => return Ok(conditioning_complete(phase)).
-    if matches!(progress, Progress::Loading(LoadPhase::Renderer)) {
+    // Renderer loading can precede reference encoding. Only the provider's typed,
+    // synchronized completion covers ALL conditioning on resident and staged routes.
+    if matches!(progress, Progress::ConditioningComplete) {
         return Ok(conditioning_complete(phase));
     }
     if *phase == protocol::ReferencePhase::Conditioning
@@ -337,6 +339,7 @@ pub(super) fn render(
         .map_err(|error| format!("begin FLUX3 memory request: {error}"))?
         .ok_or_else(|| "FLUX3 provider did not open its native memory request scope".to_owned())?;
     // Every post-open exit finishes the scope, including configure/enter errors.
+    let mut canceled = false;
     let result = (|| {
         scope
             .configure_request(&mut request)
@@ -347,45 +350,42 @@ pub(super) fn render(
         let mut phase = protocol::ReferencePhase::Conditioning;
         let mut phase_error = None;
         let cancel = request.cancel.clone();
-        let output = generator
-            .generate(&request, &mut |progress| {
-                if phase_error.is_some() {
+        let output = generator.generate(&request, &mut |progress| {
+            if phase_error.is_some() {
+                return;
+            }
+            let next = match boundary(&mut phase, &progress) {
+                Ok(next) => next,
+                Err(error) => {
+                    phase_error = Some(error.to_string());
+                    cancel.cancel();
                     return;
                 }
-                let next = match boundary(&mut phase, &progress) {
-                    Ok(next) => next,
-                    Err(error) => {
-                        phase_error = Some(error.to_string());
-                        cancel.cancel();
-                        return;
+            };
+            if let Some(next) = next {
+                observed(next);
+                let (before, after) = match next {
+                    protocol::ReferencePhase::Denoise => {
+                        (MemoryPhase::Conditioning, MemoryPhase::Denoise)
                     }
+                    protocol::ReferencePhase::Decode => (MemoryPhase::Denoise, MemoryPhase::Decode),
+                    _ => return,
                 };
-                if let Some(next) = next {
-                    observed(next);
-                    let (before, after) = match next {
-                        protocol::ReferencePhase::Denoise => {
-                            (MemoryPhase::Conditioning, MemoryPhase::Denoise)
-                        }
-                        protocol::ReferencePhase::Decode => {
-                            (MemoryPhase::Denoise, MemoryPhase::Decode)
-                        }
-                        _ => return,
-                    };
-                    if phase_error.is_none() {
-                        if let Err(error) = scope
-                            .leave_phase(before)
-                            .and_then(|_| scope.enter_phase(after))
-                        {
-                            phase_error = Some(error.to_string());
-                        }
+                if phase_error.is_none() {
+                    if let Err(error) = scope
+                        .leave_phase(before)
+                        .and_then(|_| scope.enter_phase(after))
+                    {
+                        phase_error = Some(error.to_string());
                     }
                 }
-            })
-            .map_err(|error| format!("native FLUX3 generation failed: {error}"));
+            }
+        });
         if let Some(error) = phase_error {
             return Err(error);
         }
-        let output = output?;
+        canceled = matches!(&output, Err(core::Error::Canceled));
+        let output = output.map_err(|error| format!("native FLUX3 generation failed: {error}"))?;
         if phase != protocol::ReferencePhase::Decode {
             return Err("FLUX3 generation omitted a measured phase boundary".to_owned());
         }
@@ -400,6 +400,7 @@ pub(super) fn render(
     })();
     let outcome = match &result {
         Ok(()) => MemoryRunOutcome::Complete,
+        Err(_) if canceled => MemoryRunOutcome::Canceled,
         Err(message) => MemoryRunOutcome::Error {
             message: message.clone(),
         },
@@ -559,82 +560,326 @@ mod tests {
 
     #[test]
     fn flux3_phase_boundaries_follow_native_staged_and_resident_progress() {
-        let mut phase = protocol::ReferencePhase::Conditioning;
-        assert_eq!(
-            boundary(&mut phase, &Progress::Loading(LoadPhase::TextEncoder)),
-            Ok(None)
-        );
-        assert_eq!(
-            boundary(&mut phase, &Progress::Loading(LoadPhase::Renderer)),
-            Ok(Some(protocol::ReferencePhase::Denoise))
-        );
-        assert_eq!(
-            boundary(
-                &mut phase,
-                &Progress::Step {
-                    current: 1,
-                    total: STEPS
+        for staged in [false, true] {
+            let mut phase = protocol::ReferencePhase::Conditioning;
+            assert_eq!(
+                boundary(&mut phase, &Progress::Loading(LoadPhase::TextEncoder)),
+                Ok(None)
+            );
+            if staged {
+                assert_eq!(
+                    boundary(&mut phase, &Progress::Loading(LoadPhase::Renderer)),
+                    Ok(None),
+                    "reference encoding can still follow Renderer loading"
+                );
+            }
+            assert_eq!(phase, protocol::ReferencePhase::Conditioning);
+            assert_eq!(
+                boundary(&mut phase, &Progress::ConditioningComplete),
+                Ok(Some(protocol::ReferencePhase::Denoise))
+            );
+            assert_eq!(
+                boundary(&mut phase, &Progress::ConditioningComplete),
+                Ok(None),
+                "duplicate completion must not reset peaks"
+            );
+            for current in 1..=STEPS {
+                assert_eq!(
+                    boundary(
+                        &mut phase,
+                        &Progress::Step {
+                            current,
+                            total: STEPS
+                        }
+                    ),
+                    Ok(None)
+                );
+                assert_eq!(phase, protocol::ReferencePhase::Denoise);
+            }
+            assert_eq!(
+                boundary(&mut phase, &Progress::Decoding),
+                Ok(Some(protocol::ReferencePhase::Decode))
+            );
+            assert_eq!(
+                boundary(&mut phase, &Progress::ConditioningComplete),
+                Ok(None)
+            );
+            assert_eq!(phase, protocol::ReferencePhase::Decode);
+        }
+    }
+
+    #[test]
+    fn flux3_missing_or_late_boundary_and_zero_steps_fail_closed() {
+        for staged in [false, true] {
+            for current in [1, STEPS] {
+                let mut phase = protocol::ReferencePhase::Conditioning;
+                if staged {
+                    assert_eq!(
+                        boundary(&mut phase, &Progress::Loading(LoadPhase::Renderer)),
+                        Ok(None)
+                    );
                 }
-            ),
-            Ok(None)
-        );
-        assert_eq!(
-            boundary(&mut phase, &Progress::Decoding),
-            Ok(Some(protocol::ReferencePhase::Decode))
-        );
-        let mut resident = protocol::ReferencePhase::Conditioning;
-        assert_eq!(
-            boundary(
-                &mut resident,
-                &Progress::Step {
-                    current: 1,
-                    total: STEPS
-                }
-            ),
-            Err(BoundaryError::MissingPreDenoise)
-        );
-        assert_eq!(
-            boundary(&mut resident, &Progress::Decoding),
-            Err(BoundaryError::MissingPreDenoise)
-        );
-        assert_eq!(
-            resident,
+                assert_eq!(
+                    boundary(
+                        &mut phase,
+                        &Progress::Step {
+                            current,
+                            total: STEPS
+                        }
+                    ),
+                    Err(BoundaryError::MissingPreDenoise)
+                );
+                assert_eq!(
+                    boundary(&mut phase, &Progress::Decoding),
+                    Err(BoundaryError::MissingPreDenoise)
+                );
+                assert_eq!(phase, protocol::ReferencePhase::Conditioning);
+            }
+        }
+        for mut phase in [
             protocol::ReferencePhase::Conditioning,
-            "late/missing events must not fabricate a phase"
-        );
-        assert_eq!(
-            boundary(
-                &mut resident,
-                &Progress::Step {
-                    current: 0,
-                    total: STEPS
-                }
-            ),
-            Err(BoundaryError::InvalidZeroStep)
-        );
-        assert_eq!(
-            conditioning_complete(&mut resident),
-            Some(protocol::ReferencePhase::Denoise)
-        );
-        assert_eq!(
-            conditioning_complete(&mut resident),
-            None,
-            "duplicate completion does not reset peaks"
-        );
-        assert_eq!(
-            boundary(
-                &mut resident,
-                &Progress::Step {
+            protocol::ReferencePhase::Denoise,
+            protocol::ReferencePhase::Decode,
+        ] {
+            assert_eq!(
+                boundary(
+                    &mut phase,
+                    &Progress::Step {
+                        current: 0,
+                        total: STEPS
+                    }
+                ),
+                Err(BoundaryError::InvalidZeroStep)
+            );
+        }
+    }
+
+    /// Scripted tensor-neutral provider: exercise the real render callback and scope
+    /// cleanup without a registry, weights, allocator, or device.
+    struct ScriptedGenerator {
+        descriptor: core::ModelDescriptor,
+        events: Vec<Progress>,
+        cancel_at_end: bool,
+        lifecycle: std::cell::RefCell<Vec<String>>,
+        outcomes: std::cell::RefCell<Vec<MemoryRunOutcome>>,
+        cancel_seen: std::cell::Cell<bool>,
+    }
+
+    impl ScriptedGenerator {
+        fn new(events: Vec<Progress>, cancel_at_end: bool) -> Self {
+            Self {
+                descriptor: core::ModelDescriptor {
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    id: "flux3-capture-script",
+                    family: "flux3",
+                    backend: "script",
+                    modality: core::Modality::Image,
+                    capabilities: core::Capabilities::default(),
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                events,
+                cancel_at_end,
+                lifecycle: Default::default(),
+                outcomes: Default::default(),
+                cancel_seen: Default::default(),
+            }
+        }
+    }
+
+    struct ScriptedScope<'a>(&'a ScriptedGenerator);
+
+    impl core::MemoryRequestScope for ScriptedScope<'_> {
+        fn configure_request(&mut self, _: &mut GenerationRequest) -> core::Result<()> {
+            Ok(())
+        }
+        fn enter_phase(&mut self, phase: MemoryPhase) -> core::Result<()> {
+            self.0
+                .lifecycle
+                .borrow_mut()
+                .push(format!("enter:{phase:?}"));
+            Ok(())
+        }
+        fn leave_phase(&mut self, phase: MemoryPhase) -> core::Result<()> {
+            self.0
+                .lifecycle
+                .borrow_mut()
+                .push(format!("leave:{phase:?}"));
+            Ok(())
+        }
+        fn configure_decode(&mut self, _: u32, _: u32, _: MemoryGeometry) -> core::Result<()> {
+            Ok(())
+        }
+        fn configure_attention(&mut self, _: u32) -> core::Result<()> {
+            Ok(())
+        }
+        fn materialize_transformer_window(&mut self, _: u32, _: u32) -> core::Result<()> {
+            Ok(())
+        }
+        fn finish(&mut self, outcome: MemoryRunOutcome) -> core::Result<()> {
+            self.0.outcomes.borrow_mut().push(outcome);
+            Ok(())
+        }
+    }
+
+    impl Generator for ScriptedGenerator {
+        fn descriptor(&self) -> &core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _: &GenerationRequest) -> core::Result<()> {
+            Ok(())
+        }
+        fn begin_memory_strategy_request(
+            &self,
+            _: &MemoryRunContext,
+        ) -> core::Result<Option<Box<dyn core::MemoryRequestScope + '_>>> {
+            Ok(Some(Box::new(ScriptedScope(self))))
+        }
+        fn generate(
+            &self,
+            request: &GenerationRequest,
+            progress: &mut dyn FnMut(Progress),
+        ) -> core::Result<GenerationOutput> {
+            for event in &self.events {
+                // Deliberately deliver late callbacks even after cancellation: the
+                // capture must preserve the FIRST refusal rather than relabel peaks.
+                progress(*event);
+            }
+            self.cancel_seen.set(request.cancel.is_cancelled());
+            if self.cancel_at_end || request.cancel.is_cancelled() {
+                return Err(core::Error::Canceled);
+            }
+            Ok(GenerationOutput::Images(vec![core::Image {
+                width: 1024,
+                height: 1024,
+                pixels: vec![0; 1024 * 1024 * 3],
+            }]))
+        }
+    }
+
+    #[test]
+    fn flux3_render_callback_orders_scopes_and_ignores_duplicate_boundaries() {
+        for lane in ["candle", "mlx"] {
+            let plan = plan(&request(lane, "bf16"), lane).unwrap();
+            let mut events = vec![Progress::Loading(LoadPhase::TextEncoder)];
+            if lane == "candle" {
+                events.push(Progress::Loading(LoadPhase::Renderer));
+            }
+            events.extend([
+                Progress::ConditioningComplete,
+                Progress::ConditioningComplete,
+                Progress::Step {
                     current: 1,
-                    total: STEPS
+                    total: STEPS,
+                },
+                Progress::Step {
+                    current: STEPS,
+                    total: STEPS,
+                },
+                Progress::Decoding,
+                Progress::ConditioningComplete,
+            ]);
+            let generator = ScriptedGenerator::new(events, false);
+            let mut observed = Vec::new();
+            render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
+                observed.push(phase)
+            })
+            .unwrap();
+            assert_eq!(
+                observed,
+                [
+                    protocol::ReferencePhase::Denoise,
+                    protocol::ReferencePhase::Decode
+                ]
+            );
+            assert_eq!(
+                *generator.lifecycle.borrow(),
+                [
+                    "enter:Conditioning",
+                    "leave:Conditioning",
+                    "enter:Denoise",
+                    "leave:Denoise",
+                    "enter:Decode",
+                    "leave:Decode",
+                ]
+            );
+            assert!(matches!(
+                generator.outcomes.borrow().as_slice(),
+                [MemoryRunOutcome::Complete]
+            ));
+            assert!(!generator.cancel_seen.get());
+        }
+    }
+
+    #[test]
+    fn flux3_render_missing_or_late_boundary_cancels_and_preserves_typed_refusal() {
+        let plan = plan(&request("candle", "bf16"), "candle").unwrap();
+        for current in [0, 1] {
+            let generator = ScriptedGenerator::new(
+                vec![
+                    Progress::Loading(LoadPhase::Renderer),
+                    Progress::Step {
+                        current,
+                        total: STEPS,
+                    },
+                    Progress::ConditioningComplete,
+                    Progress::Decoding,
+                ],
+                false,
+            );
+            let mut observed = Vec::new();
+            let error = render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
+                observed.push(phase)
+            })
+            .unwrap_err();
+            let expected = if current == 0 {
+                BoundaryError::InvalidZeroStep
+            } else {
+                BoundaryError::MissingPreDenoise
+            };
+            assert_eq!(error, expected.to_string());
+            assert!(generator.cancel_seen.get());
+            assert!(
+                observed.is_empty(),
+                "late completion must not recover a failed capture"
+            );
+            assert_eq!(*generator.lifecycle.borrow(), ["enter:Conditioning"]);
+            assert!(
+                matches!(generator.outcomes.borrow().as_slice(), [MemoryRunOutcome::Error { message }] if message == &error)
+            );
+        }
+    }
+
+    #[test]
+    fn flux3_render_provider_cancellation_finishes_once_without_fabricating_phases() {
+        let plan = plan(&request("mlx", "bf16"), "mlx").unwrap();
+        for after_conditioning in [false, true] {
+            let events = if after_conditioning {
+                vec![Progress::ConditioningComplete]
+            } else {
+                vec![]
+            };
+            let generator = ScriptedGenerator::new(events, true);
+            let mut observed = Vec::new();
+            let error = render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
+                observed.push(phase)
+            })
+            .unwrap_err();
+            assert_eq!(error, "native FLUX3 generation failed: cancelled");
+            assert_eq!(
+                observed,
+                if after_conditioning {
+                    vec![protocol::ReferencePhase::Denoise]
+                } else {
+                    vec![]
                 }
-            ),
-            Ok(None)
-        );
-        assert_eq!(
-            boundary(&mut resident, &Progress::Decoding),
-            Ok(Some(protocol::ReferencePhase::Decode))
-        );
+            );
+            assert!(matches!(
+                generator.outcomes.borrow().as_slice(),
+                [MemoryRunOutcome::Canceled]
+            ));
+        }
     }
 
     #[test]
