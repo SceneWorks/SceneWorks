@@ -63,6 +63,13 @@ API exit aborts pending requests and terminates only owned process groups. The
 controller has a 150-minute bound, workflow 180; these are safety bounds, not
 measured runtime estimates.
 
+Before the release build, and again before posting the download, it measures free
+disk on the weights and output volumes (`statfs`). It refuses unless they can hold the
+part of the 43,317,649,602 declared repository bytes not already in the hub's blobs, plus
+fixed safety margins (32 GiB for the build target, 16 GiB for state, xet staging and
+logs; margins, not measurements). Run 39143131468 instead crashed its runner with
+"No space left on device" mid-installation.
+
 Before posting the download it requires one of the attempt's own nonce-bound
 utility workers to be registered, idle and `model_download`-capable. Any ordinary
 job still unclaimed after 300 seconds fails immediately instead of consuming the

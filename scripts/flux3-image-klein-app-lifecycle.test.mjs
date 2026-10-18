@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,13 +7,13 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, assertClaimedWithin, assertDownloadWorker, assertOwnedHealth, bindOwnedEnv, CLAIM_WINDOW_SECONDS, utilityWorkerId, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
+import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, assertClaimedWithin, assertDiskBudget, BUILD_HEADROOM_BYTES, DECLARED_REPO_BYTES, measureDisk, presentRepoBytes, STATE_HEADROOM_BYTES, assertDownloadWorker, assertOwnedHealth, bindOwnedEnv, CLAIM_WINDOW_SECONDS, utilityWorkerId, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), inference = "b".repeat(40);
 const revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
 const repo = "black-forest-labs/flux-3-image-klein";
 const files = ["config.json", "manifest.json", "model.safetensors", "ae.safetensors", "LICENSE.md", "NOTICE.md", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors.index.json", "text_encoder/model-00001-of-00002.safetensors", "text_encoder/model-00002-of-00002.safetensors"];
-const model = () => ({ id: "flux3_klein", family: "flux3", gated: true, credentialHost: "huggingface.co", licenseUrl: `https://huggingface.co/${repo}/blob/main/LICENSE.md`, capabilities: ["text_to_image"], downloads: [{ provider: "huggingface", repo, revision, files: [] }] });
+const model = () => ({ id: "flux3_klein", family: "flux3", gated: true, credentialHost: "huggingface.co", licenseUrl: `https://huggingface.co/${repo}/blob/main/LICENSE.md`, capabilities: ["text_to_image"], downloads: [{ provider: "huggingface", repo, revision, default: true, files: [], estimatedSizeBytes: 43317649602, footprint: { diskSizeBytes: 43317649602, residentMemoryBytes: null, peakMemoryBytes: null } }] });
 const context = { projectId: "project_test", workerId: "worker_test", backend: "mlx", adapter: "mlx_flux3" };
 function fixture() {
   const body = imageBody(context.projectId);
@@ -251,6 +251,57 @@ test('lifecycle wires the utility precheck before posting the download and the c
   assert.match(lines[post - 1], /^\s+assertDownloadWorker\(await must\("GET", "\/api\/v1\/workers"\), workerId\);/);
   assert.ok(lines.slice(0, post - 1).some((line) => line.includes('receipt.download_worker = await wait(') && line.includes('assertDownloadWorker(')));
   assert.match(run, /const completedJob = async \(id\) => \{ const j = await getJob\(id\); if \(!firstSeen\.has\(id\)\) firstSeen\.set\(id, Date\.now\(\)\); assertClaimedWithin\(j, firstSeen\.get\(id\), Date\.now\(\)\);/);
+});
+
+test('disk budget refuses before build/download when the runner cannot hold the pinned repo plus headroom', () => {
+  const GB = 1e9, fresh = DECLARED_REPO_BYTES + BUILD_HEADROOM_BYTES + STATE_HEADROOM_BYTES;
+  assert.equal(DECLARED_REPO_BYTES, 43_317_649_602);
+  // Shared volume: needs add up; exactly enough passes, one byte short refuses.
+  assert.equal(assertDiskBudget({ weightsFreeBytes: fresh, outputFreeBytes: fresh, sameVolume: true, presentRepoBytes: 0, includeBuild: true }).remaining, DECLARED_REPO_BYTES);
+  assert.throws(() => assertDiskBudget({ weightsFreeBytes: fresh - 1, outputFreeBytes: fresh - 1, sameVolume: true, presentRepoBytes: 0, includeBuild: true }), /insufficient free disk on the weights\+output volume: .* required \(43\.3 GB of the 43\.3 GB pinned repository not yet present \+ .* build \+ .* state headroom\)\. Free space on this runner before re-dispatch; refusing before build or download\./);
+  // Already-present blobs reduce the requirement; never below zero.
+  assert.doesNotThrow(() => assertDiskBudget({ weightsFreeBytes: BUILD_HEADROOM_BYTES + STATE_HEADROOM_BYTES, outputFreeBytes: 0, sameVolume: true, presentRepoBytes: DECLARED_REPO_BYTES, includeBuild: true }));
+  assert.equal(assertDiskBudget({ weightsFreeBytes: fresh, outputFreeBytes: fresh, sameVolume: true, presentRepoBytes: 2 * DECLARED_REPO_BYTES, includeBuild: false }).remaining, 0);
+  // Separate volumes are checked independently.
+  assert.throws(() => assertDiskBudget({ weightsFreeBytes: 40 * GB, outputFreeBytes: 1e15, sameVolume: false, presentRepoBytes: 0, includeBuild: true }), /on the weights volume/);
+  assert.throws(() => assertDiskBudget({ weightsFreeBytes: 1e15, outputFreeBytes: STATE_HEADROOM_BYTES, sameVolume: false, presentRepoBytes: 0, includeBuild: true }), /on the output volume/);
+  assert.doesNotThrow(() => assertDiskBudget({ weightsFreeBytes: 1e15, outputFreeBytes: STATE_HEADROOM_BYTES, sameVolume: false, presentRepoBytes: 0, includeBuild: false }));
+  assert.throws(() => assertDiskBudget({ weightsFreeBytes: NaN, outputFreeBytes: 1e15, sameVolume: true, presentRepoBytes: 0, includeBuild: false }), /insufficient free disk/);
+});
+
+test('present repository bytes count physical blobs (complete and partial), not snapshot entries', async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), 'flux3-disk-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  assert.equal(await presentRepoBytes(path.join(root, 'hub')), 0);
+  const blobs = path.join(root, 'hub', 'models--black-forest-labs--flux-3-image-klein', 'blobs');
+  await mkdir(blobs, { recursive: true }); await mkdir(path.join(blobs, 'subdir'));
+  await writeFile(path.join(blobs, 'a'), Buffer.alloc(1000)); await writeFile(path.join(blobs, 'b.incomplete'), Buffer.alloc(234));
+  assert.equal(await presentRepoBytes(path.join(root, 'hub')), 1234);
+  // A link in the blob directory is not a physical blob (lstat size is the link text). Where the
+  // host refuses unprivileged symlinks, a nonzero-size directory entry still covers isFile().
+  let linked = false;
+  try { await symlink(path.join(blobs, 'a'), path.join(blobs, 'link-to-a')); linked = true; } catch { /* Windows without symlink privilege */ }
+  const subdirSize = (await stat(path.join(blobs, 'subdir'))).size;
+  assert.ok(linked || subdirSize > 0 || process.platform === 'win32', 'host must exercise a non-file entry');
+  assert.equal(await presentRepoBytes(path.join(root, 'hub')), 1234);
+  const measured = await measureDisk({ weights: root, output: root, hub: path.join(root, 'hub'), includeBuild: false }).catch((error) => error);
+  // Real statfs on this host: either a passing budget for a shared volume, or the actionable refusal.
+  if (measured instanceof Error) assert.match(measured.message, /insufficient free disk on the weights\+output volume/);
+  else { assert.equal(measured.checks.length, 1); assert.equal(measured.remaining, DECLARED_REPO_BYTES - 1234); }
+});
+
+test('catalog declared repository bytes must equal the disk-budget constant', () => {
+  const m = model(); assert.doesNotThrow(() => assertModel(m));
+  m.downloads[0].estimatedSizeBytes = 1; assert.throws(() => assertModel(m), /declared repository bytes/);
+  const n = model(); delete n.downloads[0].footprint; assert.throws(() => assertModel(n), /declared repository bytes/);
+});
+
+test('lifecycle measures the disk budget before the build and again before posting the download', async () => {
+  const source = await readFile(new URL('./flux3-image-klein-app-lifecycle.mjs', import.meta.url), 'utf8');
+  const run = source.slice(source.indexOf('export async function runLifecycle'));
+  const build = run.indexOf('await checked("cargo", ["build"'), post = run.indexOf('"/api/v1/models/flux3_klein/download"');
+  const pre = run.indexOf('measureDisk({ weights, output, hub, includeBuild: true })'), late = run.indexOf('measureDisk({ weights, output, hub, includeBuild: false })');
+  assert.ok(pre > 0 && pre < build, 'pre-build budget'); assert.ok(late > build && late < post, 'pre-download budget');
 });
 
 test('discover only existing structured owned listener event with actual loopback port', () => {
