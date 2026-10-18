@@ -5,7 +5,7 @@ use candle_gen::testkit::{StableIdleConfig, VramProbe};
 use runtime_cuda::gen_core::{
     adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, ComponentPrecisionFloor,
     Conditioning, GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image,
-    LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
+    LoadPhase, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
     MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope,
     MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, ModelDescriptor, OffloadPolicy, Precision, Progress, Quant,
@@ -26,6 +26,12 @@ use std::process::Command;
 // identity table are a self-contained apparatus.
 #[path = "candle_wan_scail2.rs"]
 mod candle_wan_scail2;
+
+#[path = "candle_flux3.rs"]
+mod candle_flux3;
+#[path = "flux3_common.rs"]
+mod flux3_common;
+const FLUX3_ID: &str = "flux3_klein";
 
 #[path = "candle_iris.rs"]
 mod candle_iris;
@@ -7693,6 +7699,9 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let provider = planned_provider(request)?;
+    if matches!(provider, FLUX3_ID) {
+        return candle_flux3::run(request);
+    }
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
     }

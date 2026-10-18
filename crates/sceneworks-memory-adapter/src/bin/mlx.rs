@@ -40,6 +40,12 @@ mod mlx_ltx25;
 #[path = "mlx_wan_scail2.rs"]
 mod mlx_wan_scail2;
 
+#[path = "flux3_common.rs"]
+mod flux3_common;
+#[path = "mlx_flux3.rs"]
+mod mlx_flux3;
+const FLUX3_PROVIDER: &str = "flux3_klein";
+
 #[path = "mlx_iris.rs"]
 mod mlx_iris;
 
@@ -22574,6 +22580,7 @@ fn run_with(
     // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
+        FLUX3_PROVIDER => mlx_flux3::run(request),
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
         // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
         // family and execution path; the arm resolves which member from `(provider, mode)`.

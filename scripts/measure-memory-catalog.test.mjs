@@ -23,6 +23,10 @@ import {
   PLAN_PATH,
   PACKAGED_SOURCES_PATH,
   PROVIDER_FAMILIES,
+  FLUX3_REPOSITORY,
+  FLUX3_REVISION,
+  flux3Conversion,
+  hashAnchorInventory,
   SDXL_COMPONENTS,
   SDXL_TIER_MAIN_TENSORS,
   MAGE_COMPONENTS,
@@ -150,6 +154,8 @@ import {
   LTX25_LANE_PROVIDERS,
   parseWatchdogHardStop,
   planAnchor,
+  parseAnchorKey,
+  validatePlan,
 } from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -658,6 +664,114 @@ test("an Iris cell is runnable only on the files its own task loads", async () =
     const whole = await hashArtifactInventory(generation.tierRoot);
     assert.equal(own.bytes, 2, "two one-byte files");
     assert.ok(whole.bytes > own.bytes, "the whole tree also counts the staged task folders");
+  }
+});
+
+// Enabling/weights-free tests only: these prove producer reach and artifact binding,
+// NOT MLX execution, measurement quality or any physical memory number.
+test("FLUX3 native producers bind the pinned original and exact local backend packages", async (t) => {
+  assert.equal(flux3Conversion("candle", "q4"), "flux3-candle-ggml-q4_1-v1");
+  assert.equal(flux3Conversion("candle", "q8"), "flux3-candle-ggml-q8_0-v1");
+  assert.equal(flux3Conversion("mlx", "q4"), "flux3-mlx-affine-q4-g64-v1");
+  assert.equal(flux3Conversion("mlx", "q8"), "flux3-mlx-affine-q8-g64-v1");
+  const hub = await fakeHub([[FLUX3_REPOSITORY, FLUX3_REVISION]], { empty: true });
+  const original = snapshotPath(hub, FLUX3_REPOSITORY, FLUX3_REVISION);
+  const data = await mkdtemp(path.join(tmpdir(), "flux3-producer-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const prior = Object.fromEntries(["SCENEWORKS_DATA_DIR", "SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT"].map(k => [k, process.env[k]]));
+  t.after(() => { for (const [k, value] of Object.entries(prior)) { if (value === undefined) delete process.env[k]; else process.env[k] = value; } });
+  delete process.env.SCENEWORKS_DATA_DIR;
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  const models = [{ id: "flux3_klein", downloads: [{ provider: "huggingface", repo: FLUX3_REPOSITORY, revision: FLUX3_REVISION, variant: "bf16", files: [] }] }];
+  const classify = (backend, tier) => classifyAnchor(`flux3_klein:${tier}:${backend}`, { provider: "flux3_klein" }, { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+  const stage = async (root, files) => { for (const file of files) { await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), "fixture-not-weights"); } };
+  assert.equal((await classify("mlx", "q4")).status, "weights_missing");
+  await stage(original, ["config.json", "model.safetensors", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors"]);
+  for (const backend of ["candle", "mlx"]) {
+    assert.equal((await classify(backend, "bf16")).status, "runnable");
+    const absent = await classify(backend, "q4");
+    assert.equal(absent.status, "weights_missing");
+    assert.match(absent.reason, /SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT/);
+  }
+  process.env.SCENEWORKS_DATA_DIR = data;
+  const derived = path.join(data, "models", "derived", "flux3_klein");
+  for (const tier of ["q4", "q8"]) {
+    // A tempting snapshot/<tier> must NOT satisfy the local derivation.
+    await stage(path.join(original, tier), ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+    for (const backend of ["candle", "mlx"]) {
+      assert.equal((await classify(backend, tier)).status, "weights_missing");
+      const conversion = flux3Conversion(backend, tier);
+      const root = path.join(derived, tier, conversion);
+      await stage(root, ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+      const row = await classify(backend, tier);
+      assert.equal(row.status, "runnable", row.reason);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ROOT, root);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT, original);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY, FLUX3_REPOSITORY);
+      assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REVISION, FLUX3_REVISION);
+      assert.equal(row.artifact.variant, tier);
+      assert.ok(row.inventoryFiles.includes("flux3-conversion-receipt.json"));
+    }
+  }
+  process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT = path.join(data, "explicit-missing");
+  assert.equal((await classify("candle", "q4")).status, "weights_missing", "explicit root overrides the data-dir default");
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  // Inventory provenance includes real external files, not merely package metadata.
+  const bound = await classify("candle", "q4");
+  const first = await hashAnchorInventory(bound);
+  const reordered = await hashAnchorInventory({ ...bound, externalComponents: [...bound.externalComponents].reverse() });
+  assert.equal(first.sha256, reordered.sha256);
+  assert.equal(first.bytes, reordered.bytes);
+  assert.equal(first.files, 10, "five package files, four encoder files, one AE file");
+  await writeFile(path.join(original, "text_encoder/model.safetensors"), "changed-encoder-bytes");
+  const encoderChanged = await hashAnchorInventory(bound);
+  assert.notEqual(encoderChanged.sha256, first.sha256);
+  await writeFile(path.join(original, "ae.safetensors"), "changed-ae-bytes");
+  assert.notEqual((await hashAnchorInventory(bound)).sha256, encoderChanged.sha256);
+  // External components remain mandatory even for a whole converted package.
+  await rm(path.join(original, "ae.safetensors"));
+  await assert.rejects(hashAnchorInventory(bound), /ENOENT/);
+  const missingAe = await classify("candle", "q4");
+  assert.equal(missingAe.status, "weights_missing");
+  assert.match(missingAe.reason, /ae.safetensors/);
+  await stage(original, ["ae.safetensors"]);
+  await writeFile(path.join(original, "text_encoder/model.safetensors.index.json"), JSON.stringify({ weight_map: { a: "missing-shard.safetensors" } }));
+  const partial = await classify("mlx", "q8");
+  assert.equal(partial.status, "weights_missing");
+  assert.match(partial.reason, /missing-shard/);
+});
+
+test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without claiming execution", async () => {
+  const plan = await readPlan();
+  for (const tier of ["fp8r", "nvfp4"]) {
+    const key = `flux3_klein:${tier}:candle`;
+    assert.equal(anchorParts(key).tier, tier);
+    assert.equal(parseAnchorKey(key).tier, tier);
+    assert.equal(planAnchor(plan, key).target.tier, tier);
+  }
+  for (const tier of ["q3", "fp8", "fp8r_extra", "nvfp4_extra", "dense"]) {
+    const key = `flux3_klein:${tier}:candle`;
+    assert.throws(() => anchorParts(key), /not an anchor key/);
+    assert.throws(() => parseAnchorKey(key), /anchor key/);
+    const invalid = { ...plan, anchors: { [key]: plan.anchors["flux3_klein:bf16:candle"] } };
+    assert.throws(() => validatePlan(invalid), /anchor plan is invalid/);
+  }
+  for (const backend of ["candle", "mlx"]) {
+    const relative = `crates/sceneworks-memory-adapter/src/bin/${backend}.rs`;
+    const source = await readFile(path.join(ROOT, relative), "utf8");
+    assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein"), `${backend} must dispatch to a real modular producer`);
+    const module = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}_flux3.rs`), "utf8");
+    assert.match(module, /catalog\.media\(\)|\.media\(\)/);
+    assert.match(module, /\.load\(common::PROVIDER, &spec\)/);
+    assert.match(module, /common::render\(generator\.as_ref\(\)/);
+    for (const tier of ["bf16", "q4", "q8", ...(backend === "candle" ? ["fp8r", "nvfp4"] : [])]) {
+      const row = plan.anchors[`flux3_klein:${tier}:${backend}`];
+      assert.ok(row);
+      assert.equal(row.fixture, `flux3-klein-${backend}-${tier}-1024-seed26243-step16`);
+      assert.deepEqual(row.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+      assert.equal(row.provider, "flux3_klein");
+      assert.equal(row.loadShape, "eager_materialization");
+    }
   }
 });
 
@@ -1542,7 +1656,7 @@ test("every family's derived env names are read back by each arm it declares", a
   const binFiles = (await readdir(binDir)).filter((name) => name.endsWith(".rs"));
   for (const backend of ["mlx", "candle"]) {
     const members = binFiles.filter(
-      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`),
+      (name) => name === `${backend}.rs` || name.startsWith(`${backend}_`) || name === "flux3_common.rs",
     );
     assert.ok(members.length >= 2, `${backend}: expected the bin plus its arm modules`);
     lanes.set(
@@ -4723,13 +4837,16 @@ test("every planned turnkey-still fingerprint is one its lane's declaration can 
 // (`validate_artifact_identity`). Editing either alone yields a runner that stages a root the
 // adapter then refuses by name, with every test in both languages still green.
 test("PROVIDER_FAMILIES repos are the adapter's *_REPOSITORY constants", async () => {
-  const lib = await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8");
+  const lib = [
+    await readFile(path.join(ROOT, ADAPTER_LIB_PATH), "utf8"),
+    await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/flux3_common.rs"), "utf8"),
+  ].join("\n");
   const declared = new Set();
   // `\s*` after the `=`, not a space (sc-22734): rustfmt wraps the initializer onto its own line
   // whenever the declaration exceeds the width, which four of the six SenseNova repository consts
   // do. A single-space pattern reads those four as UNDECLARED and fails a lane that is in fact
   // bound — the binding this case exists to check is the const's VALUE, not its line breaks.
-  for (const match of lib.matchAll(/pub const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
+  for (const match of lib.matchAll(/pub(?:\(super\))? const [A-Z0-9_]+_REPOSITORY: &str =\s*"([^"]+)";/g)) {
     declared.add(match[1]);
   }
   assert.ok(declared.size > 0, "lib.rs declares repository constants");
