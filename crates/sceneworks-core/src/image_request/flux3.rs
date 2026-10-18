@@ -103,13 +103,16 @@ pub fn parse(payload: &JsonObject) -> Result<ReferenceRequest, String> {
             return Err(format!("FLUX.3 references are conditioning, not img2img noise initialization; `{key}` is unsupported, including 1.0. Remove this control."));
         }
     }
+    // The 64px single-reference padding floor is not an output kernel floor. Retain legacy
+    // no-reference bounds, but allow every positive token-grid side for reference conditioning.
+    let min_output_side = if asset_ids.is_empty() { 64 } else { 16 };
     let side = |key: &str| -> Result<Option<u32>, String> {
         match payload.get(key) {
             None | Some(Value::Null) => Ok(None),
             Some(value) => value.as_u64().and_then(|value| u32::try_from(value).ok())
-                .filter(|value| (64..=4096).contains(value) && value.is_multiple_of(16))
+                .filter(|value| (min_output_side..=4096).contains(value) && value.is_multiple_of(16))
                 .map(Some)
-                .ok_or_else(|| format!("FLUX.3 explicit {key} must be a multiple of 16 in 64..=4096; omit it for reference-derived sizing.")),
+                .ok_or_else(|| format!("FLUX.3 explicit {key} must be a multiple of 16 in {min_output_side}..=4096; omit it for reference-derived sizing.")),
         }
     };
     Ok(ReferenceRequest {
@@ -144,6 +147,14 @@ mod tests {
         for (fields, expected) in [
             (json!({"referenceAssetId":"a"}), (None, None)),
             (
+                json!({"referenceAssetId":"a","width":48,"height":64}),
+                (Some(48), Some(64)),
+            ),
+            (
+                json!({"referenceAssetId":"a","width":16,"height":64}),
+                (Some(16), Some(64)),
+            ),
+            (
                 json!({"referenceAssetId":"a","width":1024}),
                 (Some(1024), None),
             ),
@@ -175,6 +186,7 @@ mod tests {
             json!({"referenceAssetId":"a","advanced":{"ipAdapterScale":1.0}}),
             json!({"referenceAssetId":"a","width":0}),
             json!({"referenceAssetId":"a","height":65}),
+            json!({"mode":"text_to_image","width":48,"height":64}),
         ] {
             assert!(parse(&object(value.clone())).is_err(), "{value}");
         }

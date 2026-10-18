@@ -9100,7 +9100,11 @@ mod tests {
     #[test]
     fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions() {
         fn descriptor() -> gen_core::ModelDescriptor {
-            fixture_generator().descriptor
+            let mut descriptor = fixture_generator().descriptor;
+            descriptor.capabilities.min_size = 16;
+            descriptor.capabilities.max_size = 4096;
+            descriptor.capabilities.max_count = 1;
+            descriptor
         }
         fn no_load(_: &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
             panic!("reference fit must not load a generator")

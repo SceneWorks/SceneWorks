@@ -7670,6 +7670,8 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             json!({"width":1024}),
             json!({"height":64}),
             json!({"width":1024,"height":80}),
+            json!({"width":48,"height":64}),
+            json!({"width":16,"height":64}),
         ] {
             let (status, job) = request(
                 app.clone(),

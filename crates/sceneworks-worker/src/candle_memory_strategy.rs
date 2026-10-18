@@ -6480,7 +6480,12 @@ mod tests {
                 family: "test",
                 backend: "candle",
                 modality: gen_core::Modality::Image,
-                capabilities: gen_core::Capabilities::default(),
+                capabilities: gen_core::Capabilities {
+                    min_size: 16,
+                    max_size: 4096,
+                    max_count: 1,
+                    ..Default::default()
+                },
                 encoder_contract: None,
                 denoiser_output_latent_space: None,
                 required_components: &[],

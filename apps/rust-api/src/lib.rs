@@ -5216,21 +5216,31 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
     // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
     // to any pre-existing model still 400s, just one layer down and with the model named.
+    // Reference output can be one 16px token wide. A preset's model is not canonical yet, so
+    // allow that outer shape for reference-bearing presets too; the post-preset model/family
+    // validation still enforces the actual floor and never loosens another model's envelope.
+    let has_reference = !payload.reference_asset_ids.is_empty()
+        || payload
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        || payload
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let shape_floor = if has_reference
+        && (sceneworks_core::image_request::flux3::is_model(&payload.model)
+            || payload.recipe_preset_id.is_some())
+    {
+        16
+    } else {
+        SHAPE_MIN_IMAGE_DIMENSION
+    };
     if let Some(width) = payload.width {
-        validate_dimension_in(
-            width,
-            "width",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
+        validate_dimension_in(width, "width", shape_floor, MAX_IMAGE_DIMENSION)?;
     }
     if let Some(height) = payload.height {
-        validate_dimension_in(
-            height,
-            "height",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
+        validate_dimension_in(height, "height", shape_floor, MAX_IMAGE_DIMENSION)?;
     }
     if payload.upscale.enabled {
         if payload.upscale.engine.trim().is_empty() {
