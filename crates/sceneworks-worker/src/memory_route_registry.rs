@@ -31,6 +31,11 @@ pub enum MemoryRouteTier {
     Q4,
     Q8,
     Nvfp4,
+    /// The publisher FP8 rowwise package (sc-26241, FLUX 3 Image Klein), named by identity so a
+    /// FLUX 3 FP8R load is never read back as another tier. Deliberately NOT in [`Self::ALL`]: no
+    /// deferred route declares it, and `ALL` is the enumeration route witnesses are minted from,
+    /// so listing it there would advertise an FP8R witness for every tier-agnostic declared route.
+    Fp8Rowwise,
 }
 
 impl MemoryRouteTier {
@@ -42,6 +47,7 @@ impl MemoryRouteTier {
             Self::Q4 => "q4",
             Self::Q8 => "q8",
             Self::Nvfp4 => "nvfp4",
+            Self::Fp8Rowwise => sceneworks_core::image_request::FP8R_QUANT_TIER,
         }
     }
 
@@ -54,8 +60,7 @@ impl MemoryRouteTier {
             Some(Quant::Q4) => Some(Self::Q4),
             Some(Quant::Q8) => Some(Self::Q8),
             Some(Quant::Nvfp4) => Some(Self::Nvfp4),
-            // No SceneWorks memory route is registered for FP8 rowwise yet.
-            Some(Quant::Fp8Rowwise) => None,
+            Some(Quant::Fp8Rowwise) => Some(Self::Fp8Rowwise),
         }
     }
 
@@ -65,6 +70,7 @@ impl MemoryRouteTier {
             "q4" => Some(Self::Q4),
             "q8" => Some(Self::Q8),
             "nvfp4" => Some(Self::Nvfp4),
+            sceneworks_core::image_request::FP8R_QUANT_TIER => Some(Self::Fp8Rowwise),
             _ => None,
         }
     }
@@ -3395,6 +3401,33 @@ pub fn declared_candle_request_strategy_route_witnesses(
 mod tests {
     use super::*;
 
+    /// sc-26241: the FP8R package is a route tier named by identity on every reader — the
+    /// resolved tier key, the load spec's quant, and back — never folded into bf16 or q8.
+    #[test]
+    fn fp8r_is_a_route_tier_by_identity() {
+        assert_eq!(
+            MemoryRouteTier::from_resolved_tier("fp8r"),
+            Some(MemoryRouteTier::Fp8Rowwise)
+        );
+        assert_eq!(MemoryRouteTier::Fp8Rowwise.as_str(), "fp8r");
+        let spec =
+            LoadSpec::new(WeightsSource::Dir("fixture".into())).with_quant(Quant::Fp8Rowwise);
+        assert_eq!(
+            MemoryRouteTier::from_spec(&spec),
+            Some(MemoryRouteTier::Fp8Rowwise)
+        );
+        for tier in MemoryRouteTier::ALL {
+            assert_eq!(
+                MemoryRouteTier::from_resolved_tier(tier.as_str()),
+                Some(tier)
+            );
+        }
+        assert!(
+            !MemoryRouteTier::ALL.contains(&MemoryRouteTier::Fp8Rowwise),
+            "no deferred route declares FP8R; enumerating it would mint false route witnesses"
+        );
+    }
+
     fn staged_contract(provider: &str) -> gen_core::MemoryProviderContract {
         let mut contract = gen_core::MemoryProviderContract::compatibility_default(
             provider,
@@ -3980,6 +4013,7 @@ mod tests {
             MemoryRouteTier::Q4 => base.with_quant(Quant::Q4),
             MemoryRouteTier::Q8 => base.with_quant(Quant::Q8),
             MemoryRouteTier::Nvfp4 => base.with_quant(Quant::Nvfp4),
+            MemoryRouteTier::Fp8Rowwise => base.with_quant(Quant::Fp8Rowwise),
         };
         match profile {
             MemoryRouteLoadProfile::Plain => base,

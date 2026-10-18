@@ -1170,7 +1170,7 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
     // MLX and Candle/CUDA. Neither lane advertises quant tiers or adapters; the Candle surface
     // delegates to the MLX predicate so unsupported carriers are never silently discarded.
-    ModelCaps::new("flux3_klein", true, true, false, false, false),
+    ModelCaps::new("flux3_klein", true, true, true, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2566,6 +2566,9 @@ mod tests {
         "sensenova_u1_8b_infographic_v2_fast",
         "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_infographic_v3_fast",
+        // sc-26241: FLUX 3 Image Klein's locally converted GGML q4/q8 packages (its publisher
+        // FP8R/NVFP4 ride `quantTier`, judged by the FLUX 3 surface predicate).
+        "flux3_klein",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle

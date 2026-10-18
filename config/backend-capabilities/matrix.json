@@ -6,29 +6,29 @@
     "importedFamilyCount": 4,
     "cellCount": 1082,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 83,
+    "candleOnlyCellCount": 84,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "3dadb83412ac839587679d63976839d7464697c80e94fcdc40edb893ad799460",
+    "apiContractEntry": "1e2543a06d4142ed7597451ce4e764f7abdfafa8697a34a0558107fee1cdc814",
     "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
     "apiValidation": "2a1122f13ad5bcd2646d7868abceb48dd731d5ab35641c50dc96de2413fe0db1",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "a4cc9cb485e049bb92960664a70d1914bad689308a7e3b77bc0def52f8df1733",
     "descriptorCandleFacts": "704fcf439c71d3c2e2644fdda041501bdaabffae50fb969f3ad1c5300b24e40c",
-    "descriptorCandleRuntime": "9b087d4a638e67006126867b5d8e32d386a99ba1849ec2fce8591855897b4a57",
-    "descriptorMlxFacts": "5a839cc93975a8f437138c8e0045398b9c198139ee21913a1c04c9f29c189839",
-    "descriptorMlxRuntime": "147f839823d066573f48134a598fea239e07955910511e7ec98c43cf81c6e351",
-    "descriptorPreviewFacts": "22e1b3c69efb5478d2b060a7224bdcef1791d0e1a8dfa6ab3a596361db01ebae",
+    "descriptorCandleRuntime": "ebf594754207456841c234828df39215c42169c3533fd5f1f369ec8a77ac3b41",
+    "descriptorMlxFacts": "3de225f098ede42b66f122672db24b27384c383a25aa1a35d0387e40291094ad",
+    "descriptorMlxRuntime": "b17110164b6f9d25590525a5b9cdfd3ef00b0ca61096c2379cc839cd9507ccdf",
+    "descriptorPreviewFacts": "18032961547109f2707f00d4ce4a9807fae0ea0917d87a596eee22f0ffcc807e",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "5566c792589e6770900dd98ebb1e2f6ecc37cf0321574e6d80aa8442e9105d77",
+    "manifest": "2272e4466329def059c5cdb608d8532e1e2d2a016c093dcf22f8989cbf8b47e3",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
-    "routerCandle": "6aca01034dfa740e4530299a17bdbfbbba1ddccbcd559611ca6572e317fbcc40",
-    "routerCatalog": "75f56511bb8d0131ab6c9bc66ff2ac91254e9deee302fc684dd6a43b80d08980",
-    "routerGaps": "a48e675aeaeb65d278e399219591749ddafdabd4e07cea2aa06d08d550d682d2",
-    "routerMlx": "636670abd3ec8c4ed508861e54a546a4b6bc1a2a6d79561fcc6913d47a129df2",
-    "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
+    "routerCandle": "0928f15b0a79a037b8044fa4115aed5c78e12aa71cd9e0a5567c7c4a2d649461",
+    "routerCatalog": "c1baaf0fb980d9876319c0dac28ef1d0c2a9781852cecb40b8bc380e08a94e31",
+    "routerGaps": "61da947af19fa3f695774cc143d5876e2d84d0f52371b04996c966b3441b2222",
+    "routerMlx": "12fe38afbcfc3eaa0b69b15ed6f123e04812336091efbbe93d1d23374de273a0",
+    "scheduler": "05fda3f00246930599992ef746a6b81489539a1c6754eeec297336bdb077ee02",
     "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
@@ -47,8 +47,8 @@
     "workerAudioDispatch": "3d93819cd7fa4e178c832e7cd022b72141edb4ee90d85a136220e1f60947bd31",
     "workerDispatch": "24b7c95045af60a8721f0252862002170c401e65526031c9d568fffaa699d23a",
     "workerEngineTable": "4ce6753ba6b66eaa90154dabd684d883205fa4272cff1909714c4ea099bc663f",
-    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "33f76e35814c63169547980502658f2eb3c2125e9173d29e59810e54bdb94461",
+    "workerGpuCapabilities": "0f221c578c46d35dfffc512ed56b9e38e640af131f77211dca7d96c3429e06b6",
+    "workerImageDispatch": "28528dcb71f63c08272d5d3b266054520cb9653dd363a73b28e26fadd32d38eb",
     "workerImageKreaImported": "52a835948e6dc7f8e7212b9d8de86e400f59c94fd451fbde5ba5296cef6946fb",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
@@ -1638,17 +1638,18 @@
         {
           "capability": "nvfp4",
           "mlx": false,
-          "candle": false
+          "candle": true,
+          "preservedCandleOnly": true
         },
         {
           "capability": "q4",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "q8",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "guidanceMethod": [],

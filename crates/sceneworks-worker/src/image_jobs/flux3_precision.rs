@@ -1,44 +1,29 @@
-//! FLUX 3 Image Klein precision selection (sc-26241).
+//! FLUX 3 Image Klein package selection (sc-26241).
 //!
-//! The distilled `flux3_klein` route loads exactly one of two weight sets, both inside its single
-//! pinned whole-repository snapshot:
+//! The distilled `flux3_klein` route loads exactly one [`Flux3Tier`] package, every one of them a
+//! distinct artifact rather than a load-time transform of another:
 //!
-//! * **bf16** — the dense package at the snapshot root (`config.json` + `model.safetensors`), with
-//!   the bundled Qwen3-VL encoder and autoencoder its config names. `LoadSpec.quantize` is `None`.
-//! * **fp8r** — the publisher FP8 rowwise package at `variants/fp8r`, loaded AS SHIPPED by the
-//!   Candle provider on CUDA (`LoadSpec.quantize = Some(Quant::Fp8Rowwise)`). Its config names the
-//!   same encoder and autoencoder by repository-relative path; they live at the snapshot root, not
-//!   inside the variant directory, so they ride as explicit `text_encoder` / `autoencoder`
-//!   components.
+//! * **bf16** — the dense package at the pinned snapshot root (`config.json` + `model.safetensors`),
+//!   with the bundled Qwen3-VL encoder and autoencoder its config names. `quantize = None`.
+//! * **q4 / q8** — native packages CONVERTED ON THIS MACHINE from that dense package (the catalog's
+//!   `localDerivation` rows): Candle GGML off-Mac, MLX affine on macOS. `quantize = Some(Q4 | Q8)`.
+//! * **fp8r / nvfp4** — the publisher packages at `variants/<tier>` inside the same snapshot,
+//!   loaded AS SHIPPED by the Candle provider on CUDA past their device floor.
+//!   `quantize = Some(Fp8Rowwise | Nvfp4)`.
 //!
-//! Precision is selected ONLY by the request: an absent tier is bf16, never the bits-ladder `q8`
-//! default the generic resolvers fall back to (the descriptor advertising q4/q8 would otherwise turn
-//! a plain request into a re-quantization the dense package refuses). Nothing here downtiers,
-//! dequantizes or substitutes another precision; every shape it cannot honor is a typed refusal.
+//! Every non-dense package names the encoder and autoencoder by repository-relative path; they live
+//! at the snapshot root, so they ride as explicit `text_encoder` / `autoencoder` components.
+//!
+//! The tier is selected ONLY by the request ([`flux3_requested_tier`]): an absent tier is bf16,
+//! never the bits-ladder `q8` default the generic resolvers fall back to. Nothing here downtiers,
+//! dequantizes or substitutes another package; every shape it cannot honor is a typed refusal.
 
-// Only the trust-boundary check runs on every lane; the package resolution is the Candle lane's
-// (the MLX lane refuses FP8R and loads FLUX 3 dense via `fixed_mlx_artifact_quant`).
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-use std::path::{Path, PathBuf};
-
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-use gen_core::{LoadSpec, Quant, WeightsSource};
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::image_request::{
-    fp8r_quant_tier_refusal, requests_fp8r_tier, FP8R_QUANT_TIER,
+    flux3_requested_tier, image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS,
 };
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-use serde_json::Value;
 
 use super::{WorkerError, WorkerResult};
-
-/// The distilled FLUX 3 catalog id this module governs.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) const FLUX3_KLEIN_MODEL_ID: &str = "flux3_klein";
-
-/// The FP8R package directory, relative to the pinned snapshot root.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) const FLUX3_FP8R_VARIANT_DIR: &str = "variants/fp8r";
 
 /// The native image lane a request is about to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,310 +41,564 @@ impl ImageLane {
             Self::Candle
         }
     }
-}
 
-/// The weight set a `flux3_klein` request names.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Flux3Precision {
-    Bf16,
-    Fp8Rowwise,
-}
-
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-impl Flux3Precision {
-    /// The tier key the fit gate, shared memory selector and telemetry name this load by — the
-    /// tier IDENTITY, so FP8R is never sized or labelled as q8.
-    pub(super) const fn tier(self) -> &'static str {
+    const fn serves(self, tier: Flux3Tier) -> bool {
         match self {
-            Self::Bf16 => "bf16",
-            Self::Fp8Rowwise => FP8R_QUANT_TIER,
+            Self::Mlx => tier.served_by_mlx(),
+            Self::Candle => tier.served_by_candle(),
         }
     }
 
-    /// `LoadSpec.quantize` for this precision.
-    pub(super) const fn quant(self) -> Option<Quant> {
+    const fn name(self) -> &'static str {
         match self {
-            Self::Bf16 => None,
-            Self::Fp8Rowwise => Some(Quant::Fp8Rowwise),
+            Self::Mlx => "MLX",
+            Self::Candle => "Candle",
         }
     }
 }
 
-/// Worker trust-boundary check of the FP8R tier label for EVERY image request (raw queue writes
-/// and stored jobs never passed the API validator). Refuses a model with no FP8R package, a second
-/// precision carrier, and the MLX lane — no MLX descriptor advertises the tier.
-pub(super) fn validate_image_fp8r_request(
+/// Worker trust-boundary check of named precision tiers for EVERY image request (raw queue writes
+/// and stored jobs never passed the API validator): a malformed or conflicting FLUX 3 tier, FP8R on
+/// a model with no package, and a FLUX 3 package this lane does not serve are all refused by name.
+pub(super) fn validate_image_quant_tier_request(
     model: &str,
     advanced: &JsonObject,
     lane: ImageLane,
 ) -> WorkerResult<()> {
-    if let Some(reason) = fp8r_quant_tier_refusal(model, advanced) {
+    if let Some(reason) = image_quant_tier_refusal(model, advanced) {
         return Err(WorkerError::InvalidPayload(reason));
     }
-    if requests_fp8r_tier(advanced) && lane == ImageLane::Mlx {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{model}: advanced.quantTier \"{FP8R_QUANT_TIER}\" is a CUDA format served by the \
-             Candle backend; the MLX backend has no FP8R tier. Run it on a Candle CUDA worker, or \
-             re-submit without the tier for the dense bf16 package"
-        )));
-    }
-    Ok(())
+    flux3_requested_tier_for_lane(model, advanced, lane).map(|_| ())
 }
 
-/// The precision a `flux3_klein` request names, or `None` for any other model. Every other
-/// precision carrier (`mlxQuantize`, another named tier, ConvRot) is refused by name: the package
-/// set is bf16 + fp8r, and routing admits nothing else, so reaching here with one is a raw or
-/// stale payload that must not be reinterpreted.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) fn flux3_requested_precision(
+/// The FLUX 3 package a request names, or `None` for any other model. A package this lane does not
+/// serve is refused: the MLX provider has bf16/q4/q8 only, the CUDA formats are Candle's.
+pub(super) fn flux3_requested_tier_for_lane(
     model: &str,
     advanced: &JsonObject,
-) -> WorkerResult<Option<Flux3Precision>> {
-    if model != FLUX3_KLEIN_MODEL_ID {
+    lane: ImageLane,
+) -> WorkerResult<Option<Flux3Tier>> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
         return Ok(None);
     }
-    if let Some(reason) = fp8r_quant_tier_refusal(model, advanced) {
-        return Err(WorkerError::InvalidPayload(reason));
-    }
-    if requests_fp8r_tier(advanced) {
-        return Ok(Some(Flux3Precision::Fp8Rowwise));
-    }
-    match advanced.get("quantTier") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(tier))
-            if tier.trim().is_empty() || tier.trim().eq_ignore_ascii_case("bf16") => {}
-        Some(other) => {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{model}: advanced.quantTier {other} is not a FLUX 3 Image Klein package; the \
-                 pinned repository ships bf16 and \"{FP8R_QUANT_TIER}\" only"
-            )))
-        }
-    }
-    if let Some(bits) = advanced.get("mlxQuantize").filter(|bits| !bits.is_null()) {
+    let tier = flux3_requested_tier(advanced)
+        .map_err(|reason| WorkerError::InvalidPayload(format!("{model}: {reason}")))?;
+    if !lane.serves(tier) {
         return Err(WorkerError::InvalidPayload(format!(
-            "{model}: advanced.mlxQuantize {bits} is not a FLUX 3 Image Klein package; select \
-             the dense bf16 package or advanced.quantTier \"{FP8R_QUANT_TIER}\""
+            "{model}: the {} package is a CUDA format served by the Candle backend; the {} \
+             backend serves bf16, q4 and q8. Run it on a Candle CUDA worker, or select one of those",
+            tier.key(),
+            lane.name()
         )));
     }
-    if advanced
-        .get("convRot")
-        .is_some_and(|convrot| !matches!(convrot, Value::Null | Value::Bool(false)))
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{model}: advanced.convRot is not a FLUX 3 Image Klein package"
-        )));
-    }
-    Ok(Some(Flux3Precision::Bf16))
+    Ok(Some(tier))
 }
 
-/// Refuse a precision the linked provider does not advertise, before any weight is touched. The
-/// Candle FLUX 3 provider advertises `Fp8Rowwise` only in CUDA builds, so a CPU-only worker refuses
-/// an FP8R request here by name instead of reaching a loader that would.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) fn require_advertised_flux3_precision(
-    model: &str,
-    precision: Flux3Precision,
-    supported_quants: &[Quant],
-) -> WorkerResult<()> {
-    match precision.quant() {
-        Some(quant) if !supported_quants.contains(&quant) => {
-            Err(WorkerError::InvalidPayload(format!(
-                "{model}: advanced.quantTier \"{tier}\" needs a provider that advertises it, and \
-                 this worker's linked FLUX 3 provider advertises {supported_quants:?} (FP8R is \
-                 served by CUDA builds only)",
-                tier = precision.tier()
-            )))
-        }
-        _ => Ok(()),
-    }
-}
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) use native::*;
 
-/// The resolved, existence-checked resources of the FP8R package inside the pinned snapshot.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Flux3Fp8rPackage {
-    /// `variants/fp8r` — the LoadSpec weights directory.
-    pub(super) package_dir: PathBuf,
-    /// The bundled Qwen3-VL encoder the variant config names, resolved against the snapshot root.
-    pub(super) text_encoder_dir: PathBuf,
-    /// The autoencoder file the variant config names, resolved against the snapshot root.
-    pub(super) autoencoder_file: PathBuf,
-}
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod native {
+    use std::path::{Component, Path, PathBuf};
 
-/// Resolve the FP8R package from the snapshot `root`. The variant's `config.json` must declare
-/// `"quantization": "fp8r"` and name its encoder / autoencoder by repository-relative path; every
-/// missing piece is a typed refusal naming the path, never a fallback to the dense package.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) fn resolve_flux3_fp8r_package(root: &Path) -> WorkerResult<Flux3Fp8rPackage> {
-    let package_dir = root.join(FLUX3_FP8R_VARIANT_DIR);
-    let incomplete = |what: &str, path: &Path| {
-        WorkerError::InvalidPayload(format!(
-            "{FLUX3_KLEIN_MODEL_ID}: the FP8R package is incomplete — {what} {} is missing; \
-             reinstall the whole pinned repository (the fp8r tier is never substituted by another)",
-            path.display()
-        ))
+    use gen_core::{LoadSpec, Quant, WeightsSource};
+    use sceneworks_core::contracts::JsonObject;
+    use sceneworks_core::image_request::Flux3Tier;
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        derived_snapshot_state, local_derivation, local_derivation_snapshot_dir,
+        DerivedSnapshotState,
     };
-    let config_path = package_dir.join("config.json");
-    if !config_path.is_file() {
-        return Err(incomplete("the variant config", &config_path));
+    use serde_json::Value;
+
+    use super::{ImageLane, WorkerError, WorkerResult};
+
+    /// `LoadSpec.quantize` for a FLUX 3 package.
+    pub(in crate::image_jobs) const fn flux3_quant(tier: Flux3Tier) -> Option<Quant> {
+        match tier {
+            Flux3Tier::Bf16 => None,
+            Flux3Tier::Q4 => Some(Quant::Q4),
+            Flux3Tier::Q8 => Some(Quant::Q8),
+            Flux3Tier::Fp8Rowwise => Some(Quant::Fp8Rowwise),
+            Flux3Tier::Nvfp4 => Some(Quant::Nvfp4),
+        }
     }
-    let weights = package_dir.join("model.safetensors");
-    if !weights.is_file() {
-        return Err(incomplete("the FP8R transformer", &weights));
+
+    /// The resolved, existence-checked load of one FLUX 3 package. The generic lanes consume it
+    /// at their five seams: the weights directory, the gate/selector tier, the load quant + recipe
+    /// bits, the (skipped) capability downtier, and the root encoder/autoencoder components.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(in crate::image_jobs) struct Flux3LoadPlan {
+        pub(in crate::image_jobs) tier: Flux3Tier,
+        /// The package directory: the snapshot root for bf16, else the variant/derived package.
+        pub(in crate::image_jobs) weights_dir: PathBuf,
+        /// The root encoder and autoencoder, attached as explicit components for every non-dense
+        /// package (`None` for bf16, which reads them from its own root).
+        pub(in crate::image_jobs) components: Option<(PathBuf, PathBuf)>,
     }
-    let config: Value = std::fs::read(&config_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .ok_or_else(|| {
+
+    impl Flux3LoadPlan {
+        pub(in crate::image_jobs) const fn quant(&self) -> Option<Quant> {
+            flux3_quant(self.tier)
+        }
+
+        /// The `mlxQuantize` bits the recipe records: q4/q8 only, never an alias for FP8R/NVFP4.
+        pub(in crate::image_jobs) const fn recipe_bits(&self) -> Option<i64> {
+            self.tier.recipe_bits()
+        }
+
+        /// The `(quant, recipe bits)` pair the generic lanes thread through.
+        pub(in crate::image_jobs) const fn quant_and_bits(&self) -> (Option<Quant>, Option<i64>) {
+            (self.quant(), self.recipe_bits())
+        }
+
+        /// Attach the root encoder and autoencoder the package config names, so the selector, fit
+        /// gate and provider load all inspect the same artifact set. Identity for bf16.
+        pub(in crate::image_jobs) fn attach_components(&self, spec: LoadSpec) -> LoadSpec {
+            match &self.components {
+                None => spec,
+                Some((text_encoder, autoencoder)) => spec
+                    .with_component(
+                        gen_core::flux3::TEXT_ENCODER_COMPONENT,
+                        WeightsSource::Dir(text_encoder.clone()),
+                    )
+                    .with_component(
+                        gen_core::flux3::AUTOENCODER_COMPONENT,
+                        WeightsSource::File(autoencoder.clone()),
+                    ),
+            }
+        }
+    }
+
+    /// Refuse a package the linked provider does not advertise, before any weight is touched.
+    pub(in crate::image_jobs) fn require_advertised_flux3_tier(
+        model: &str,
+        tier: Flux3Tier,
+        supported_quants: &[Quant],
+    ) -> WorkerResult<()> {
+        match flux3_quant(tier) {
+            Some(quant) if !supported_quants.contains(&quant) => {
+                Err(WorkerError::InvalidPayload(format!(
+                    "{model}: the {} package needs a provider that advertises it, and this \
+                     worker's linked FLUX 3 provider advertises {supported_quants:?} (FP8R and \
+                     NVFP4 are served by CUDA builds only)",
+                    tier.key()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuse a publisher package on a device below its floor, using the inference rule
+    /// (`DitFormat::check_device`: FP8R sm_89+, NVFP4 sm_120+). `compute_cap` is the probed
+    /// `major.minor`; `None` (no CUDA probe) refuses every publisher package. Never a dense
+    /// fallback. Candle-only: the MLX lane never resolves a publisher package.
+    #[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+    pub(in crate::image_jobs) fn require_flux3_device_floor(
+        model: &str,
+        tier: Flux3Tier,
+        compute_cap: Option<f32>,
+    ) -> WorkerResult<()> {
+        use gen_core::flux3::quantization::{DitFormat, QuantDevice};
+        let format = match tier {
+            Flux3Tier::Fp8Rowwise => DitFormat::Fp8Rowwise,
+            Flux3Tier::Nvfp4 => DitFormat::Nvfp4,
+            Flux3Tier::Bf16 | Flux3Tier::Q4 | Flux3Tier::Q8 => return Ok(()),
+        };
+        let device = match compute_cap {
+            Some(cap) => {
+                // `nvidia-smi` reports `major.minor` as one decimal (8.9, 12.0).
+                let tenths = (cap * 10.0).round() as u32;
+                QuantDevice::Cuda {
+                    major: tenths / 10,
+                    minor: tenths % 10,
+                }
+            }
+            None => QuantDevice::Cpu,
+        };
+        format.check_device(device).map_err(|error| {
             WorkerError::InvalidPayload(format!(
-                "{FLUX3_KLEIN_MODEL_ID}: the FP8R variant config {} is not readable JSON",
-                config_path.display()
+                "{model}: the {} package cannot run on this worker's device: {error}",
+                tier.key()
+            ))
+        })
+    }
+
+    /// Resolve the package of `tier` for a request on `lane`. `snapshot_root` is the pinned
+    /// snapshot (the bf16 package); `data_dir` + `manifest_entry` locate a derived q4/q8 package.
+    pub(in crate::image_jobs) fn plan_flux3_load(
+        tier: Flux3Tier,
+        lane: ImageLane,
+        snapshot_root: &Path,
+        data_dir: &Path,
+        manifest_entry: &JsonObject,
+    ) -> WorkerResult<Flux3LoadPlan> {
+        if tier == Flux3Tier::Bf16 {
+            return Ok(Flux3LoadPlan {
+                tier,
+                weights_dir: snapshot_root.to_path_buf(),
+                components: None,
+            });
+        }
+        let package_dir = if tier.is_publisher_variant() {
+            snapshot_root.join("variants").join(tier.key())
+        } else {
+            flux3_derived_tier_dir(data_dir, manifest_entry, tier, lane_platform(lane))?
+        };
+        let package = resolve_flux3_package(tier, snapshot_root, &package_dir)?;
+        Ok(Flux3LoadPlan {
+            tier,
+            weights_dir: package.0,
+            components: Some((package.1, package.2)),
+        })
+    }
+
+    /// The manifest platform a lane's derived packages are declared for.
+    fn lane_platform(lane: ImageLane) -> &'static str {
+        match lane {
+            ImageLane::Mlx => "macos",
+            ImageLane::Candle => {
+                if cfg!(target_os = "windows") {
+                    "windows"
+                } else {
+                    "linux"
+                }
+            }
+        }
+    }
+
+    /// The verified derived package of `tier` on `platform`: the catalog row's
+    /// `localDerivation` location, which must match its pinned weights. A tier that is not derived
+    /// yet (or no longer verifies) is a typed "install the tier" refusal, never another package.
+    pub(in crate::image_jobs) fn flux3_derived_tier_dir(
+        data_dir: &Path,
+        manifest_entry: &JsonObject,
+        tier: Flux3Tier,
+        platform: &str,
+    ) -> WorkerResult<PathBuf> {
+        let model_id = manifest_entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("flux3_klein");
+        let rows: Vec<&Value> = manifest_entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|row| {
+                row.get("variant").and_then(Value::as_str) == Some(tier.key())
+                    && row.get("localDerivation").is_some()
+                    && row
+                        .get("platforms")
+                        .and_then(Value::as_array)
+                        .is_none_or(|platforms| {
+                            platforms.iter().any(|p| p.as_str() == Some(platform))
+                        })
+            })
+            .collect();
+        let [row] = rows.as_slice() else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{model_id}: the catalog declares {} {} derivations for {platform}; exactly one \
+                 is required",
+                rows.len(),
+                tier.key()
+            )));
+        };
+        let derivation = local_derivation(row).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{model_id}: the {} derivation row is malformed",
+                tier.key()
             ))
         })?;
-    let quantization = config.get("quantization").and_then(Value::as_str);
-    if quantization != Some(FP8R_QUANT_TIER) {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{FLUX3_KLEIN_MODEL_ID}: {} declares quantization {quantization:?}, not \
-             \"{FP8R_QUANT_TIER}\" — it is not the publisher FP8R package",
-            config_path.display()
-        )));
-    }
-    let relative = |section: &str| {
-        config
-            .get(section)
-            .and_then(|section| section.get("path"))
-            .and_then(Value::as_str)
-            .filter(|path| is_plain_relative(path))
-            .map(|path| root.join(path))
+        let dir = local_derivation_snapshot_dir(data_dir, model_id, tier.key(), &derivation)
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
-                    "{FLUX3_KLEIN_MODEL_ID}: {} has no repository-relative {section}.path",
+                    "{model_id}: the {} derivation names no plain path",
+                    tier.key()
+                ))
+            })?;
+        match derived_snapshot_state(&dir, &derivation) {
+            DerivedSnapshotState::Verified => Ok(dir),
+            DerivedSnapshotState::Absent => Err(WorkerError::InvalidPayload(format!(
+                "{model_id}: the {} package is not installed; install the {} tier (it is \
+                 converted on this machine from the pinned original)",
+                tier.key(),
+                tier.key()
+            ))),
+            DerivedSnapshotState::Invalid(why) => Err(WorkerError::InvalidPayload(format!(
+                "{model_id}: the installed {} package does not match its pinned conversion \
+                 ({why}); reinstall the {} tier",
+                tier.key(),
+                tier.key()
+            ))),
+        }
+    }
+
+    /// Existence- and containment-check one non-dense package: `config.json` declares the tier's
+    /// quantization marker, `model.safetensors` is present, and the encoder / autoencoder its
+    /// config names resolve INSIDE the snapshot. Returns `(package, text encoder, autoencoder)`.
+    ///
+    /// Containment is checked on canonical paths: a publisher variant directory, and the encoder
+    /// directory, must not be a link out of the snapshot (a Hub snapshot links each FILE to its
+    /// blob, which is followed; a linked DIRECTORY would let the package escape and is refused).
+    pub(in crate::image_jobs) fn resolve_flux3_package(
+        tier: Flux3Tier,
+        snapshot_root: &Path,
+        package_dir: &Path,
+    ) -> WorkerResult<(PathBuf, PathBuf, PathBuf)> {
+        let incomplete = |what: &str, path: &Path| {
+            WorkerError::InvalidPayload(format!(
+                "flux3_klein: the {} package is incomplete — {what} {} is missing; reinstall the \
+                 tier (it is never substituted by another)",
+                tier.key(),
+                path.display()
+            ))
+        };
+        let canonical = |path: &Path, what: &str| {
+            std::fs::canonicalize(path).map_err(|_| incomplete(what, path))
+        };
+        let root = canonical(snapshot_root, "the pinned snapshot")?;
+        let package = canonical(package_dir, "the package directory")?;
+        if tier.is_publisher_variant() && !package.starts_with(&root) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "flux3_klein: the {} package {} resolves outside the pinned snapshot ({}); a \
+                 linked package directory is refused",
+                tier.key(),
+                package_dir.display(),
+                package.display()
+            )));
+        }
+        for name in ["config.json", "model.safetensors"] {
+            let allowed_root = if tier.is_publisher_variant() {
+                snapshot_root
+            } else {
+                package_dir
+            };
+            crate::flux3_snapshot_member(allowed_root, &package.join(name), false)
+                .map_err(WorkerError::InvalidPayload)?;
+        }
+        let config_path = package.join("config.json");
+        if !config_path.is_file() {
+            return Err(incomplete("the package config", &config_path));
+        }
+        let weights = package.join("model.safetensors");
+        if !weights.is_file() {
+            return Err(incomplete("the transformer", &weights));
+        }
+        let config: Value = std::fs::read(&config_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "flux3_klein: the {} package config {} is not readable JSON",
+                    tier.key(),
                     config_path.display()
                 ))
-            })
+            })?;
+        let marker = config.get("quantization");
+        let marker_ok = if tier.is_publisher_variant() {
+            marker.and_then(Value::as_str) == Some(tier.key())
+        } else {
+            // A native package names its exact storage object; the provider verifies the receipt.
+            marker.is_some_and(Value::is_object)
+        };
+        if !marker_ok {
+            return Err(WorkerError::InvalidPayload(format!(
+                "flux3_klein: {} declares quantization {marker:?}, which is not the {} package",
+                config_path.display(),
+                tier.key()
+            )));
+        }
+        let relative = |section: &str| -> WorkerResult<PathBuf> {
+            config
+                .get(section)
+                .and_then(|section| section.get("path"))
+                .and_then(Value::as_str)
+                .filter(|path| is_plain_relative(path))
+                .map(|path| root.join(path))
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                        "flux3_klein: {} has no repository-relative {section}.path",
+                        config_path.display()
+                    ))
+                })
+        };
+        let text_encoder = relative("text_encoder")?;
+        if !text_encoder.is_dir() {
+            return Err(incomplete("the bundled text encoder", &text_encoder));
+        }
+        if !canonical(&text_encoder, "the bundled text encoder")?.starts_with(&root) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "flux3_klein: the text encoder {} resolves outside the pinned snapshot",
+                text_encoder.display()
+            )));
+        }
+        let autoencoder = relative("vae")?;
+        if !autoencoder.is_file() {
+            return Err(incomplete("the autoencoder", &autoencoder));
+        }
+        crate::flux3_snapshot_member(snapshot_root, &autoencoder, false)
+            .map_err(WorkerError::InvalidPayload)?;
+        Ok((package, text_encoder, autoencoder))
+    }
+
+    /// A config path that stays inside the snapshot: relative, no parent or root components.
+    fn is_plain_relative(path: &str) -> bool {
+        let path = Path::new(path);
+        !path.as_os_str().is_empty()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+    }
+}
+
+/// The Candle lane's FLUX 3 load: the requested package, refused unless the linked provider
+/// advertises it and this device clears its floor, resolved against the snapshot at
+/// `snapshot_root`. `None` for every other model.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_flux3_plan(
+    request: &super::ImageRequest,
+    settings: &super::Settings,
+    snapshot_root: &std::path::Path,
+    supported_quants: &[gen_core::Quant],
+) -> WorkerResult<Option<Flux3LoadPlan>> {
+    let Some(tier) =
+        flux3_requested_tier_for_lane(&request.model, &request.advanced, ImageLane::Candle)?
+    else {
+        return Ok(None);
     };
-    let text_encoder_dir = relative("text_encoder")?;
-    if !text_encoder_dir.is_dir() {
-        return Err(incomplete("the bundled text encoder", &text_encoder_dir));
-    }
-    let autoencoder_file = relative("vae")?;
-    if !autoencoder_file.is_file() {
-        return Err(incomplete("the autoencoder", &autoencoder_file));
-    }
-    Ok(Flux3Fp8rPackage {
-        package_dir,
-        text_encoder_dir,
-        autoencoder_file,
-    })
+    require_advertised_flux3_tier(&request.model, tier, supported_quants)?;
+    require_flux3_device_floor(&request.model, tier, crate::gpu::cached_compute_cap())?;
+    plan_flux3_load(
+        tier,
+        ImageLane::Candle,
+        snapshot_root,
+        &settings.data_dir,
+        &request.model_manifest_entry,
+    )
+    .map(Some)
 }
 
-/// Attach the root-level encoder and autoencoder the FP8R variant config names as the provider's
-/// explicit `text_encoder` / `autoencoder` components, so the selector, fit gate and provider load
-/// all inspect the same artifact set.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-pub(super) fn attach_flux3_fp8r_components(spec: LoadSpec, package: &Flux3Fp8rPackage) -> LoadSpec {
-    spec.with_component(
-        gen_core::flux3::TEXT_ENCODER_COMPONENT,
-        WeightsSource::Dir(package.text_encoder_dir.clone()),
+/// The MLX lane's FLUX 3 load (bf16 / affine q4 / q8). `None` for every other model.
+#[cfg(target_os = "macos")]
+pub(super) fn mlx_flux3_plan(
+    request: &super::ImageRequest,
+    settings: &super::Settings,
+    snapshot_root: &std::path::Path,
+    supported_quants: &[gen_core::Quant],
+) -> WorkerResult<Option<Flux3LoadPlan>> {
+    let Some(tier) =
+        flux3_requested_tier_for_lane(&request.model, &request.advanced, ImageLane::Mlx)?
+    else {
+        return Ok(None);
+    };
+    require_advertised_flux3_tier(&request.model, tier, supported_quants)?;
+    plan_flux3_load(
+        tier,
+        ImageLane::Mlx,
+        snapshot_root,
+        &settings.data_dir,
+        &request.model_manifest_entry,
     )
-    .with_component(
-        gen_core::flux3::AUTOENCODER_COMPONENT,
-        WeightsSource::File(package.autoencoder_file.clone()),
-    )
-}
-
-/// A config path that stays inside the snapshot: relative, no parent or root components.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-fn is_plain_relative(path: &str) -> bool {
-    let path = Path::new(path);
-    !path.as_os_str().is_empty()
-        && path
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    .map(Some)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use gen_core::{LoadSpec, Quant, WeightsSource};
+    use serde_json::{json, Value};
+    use std::path::Path;
 
     fn advanced(value: Value) -> JsonObject {
         value.as_object().cloned().expect("object")
     }
 
     #[test]
-    fn an_absent_tier_is_dense_bf16_never_the_q8_bits_default() {
-        for value in [
-            json!({}),
-            json!({"quantTier": null, "mlxQuantize": null}),
-            json!({"quantTier": "bf16"}),
-            json!({"quantTier": " BF16 "}),
-            json!({"convRot": false}),
+    fn each_lane_resolves_only_the_packages_its_provider_serves() {
+        for (value, tier) in [
+            (json!({}), Flux3Tier::Bf16),
+            (json!({"mlxQuantize": 0}), Flux3Tier::Bf16),
+            (json!({"mlxQuantize": 4}), Flux3Tier::Q4),
+            (
+                json!({"mlxQuantize": 8, "mlxQuantizeExplicit": true}),
+                Flux3Tier::Q8,
+            ),
         ] {
-            let precision = flux3_requested_precision("flux3_klein", &advanced(value.clone()))
-                .expect("dense request");
-            assert_eq!(precision, Some(Flux3Precision::Bf16), "{value}");
-            assert_eq!(precision.unwrap().quant(), None);
-            assert_eq!(precision.unwrap().tier(), "bf16");
+            for lane in [ImageLane::Mlx, ImageLane::Candle] {
+                assert_eq!(
+                    flux3_requested_tier_for_lane("flux3_klein", &advanced(value.clone()), lane)
+                        .unwrap(),
+                    Some(tier),
+                    "{value} on {lane:?}"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn fp8r_maps_to_the_inference_fp8_rowwise_tier_by_identity() {
-        let precision =
-            flux3_requested_precision("flux3_klein", &advanced(json!({"quantTier": "fp8r"})))
-                .expect("fp8r request")
-                .expect("flux3");
-        assert_eq!(precision, Flux3Precision::Fp8Rowwise);
-        assert_eq!(precision.quant(), Some(Quant::Fp8Rowwise));
-        assert_eq!(precision.tier(), "fp8r");
-        assert_ne!(precision.tier(), "q8");
-    }
-
-    #[test]
-    fn every_other_flux3_precision_carrier_is_a_typed_refusal() {
-        for value in [
-            json!({"quantTier": "nvfp4"}),
-            json!({"quantTier": "q8"}),
-            json!({"quantTier": 8}),
-            json!({"mlxQuantize": 8}),
-            json!({"mlxQuantize": 0}),
-            json!({"convRot": true}),
-            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
-            json!({"quantTier": "fp8r", "convRot": true}),
-        ] {
-            let error = flux3_requested_precision("flux3_klein", &advanced(value.clone()))
-                .expect_err("refused");
-            assert!(
-                matches!(error, WorkerError::InvalidPayload(_)),
-                "{value}: {error:?}"
-            );
+        for value in [json!({"quantTier": "fp8r"}), json!({"quantTier": "nvfp4"})] {
+            let tier = flux3_requested_tier_for_lane(
+                "flux3_klein",
+                &advanced(value.clone()),
+                ImageLane::Candle,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(tier.is_publisher_variant(), "{value}");
+            let error = flux3_requested_tier_for_lane(
+                "flux3_klein",
+                &advanced(value.clone()),
+                ImageLane::Mlx,
+            )
+            .expect_err("CUDA format on MLX");
+            assert!(format!("{error:?}").contains("MLX"), "{error:?}");
         }
-        // Other models are not this resolver's business.
         assert_eq!(
-            flux3_requested_precision("z_image", &advanced(json!({"mlxQuantize": 8}))).unwrap(),
+            flux3_requested_tier_for_lane(
+                "z_image",
+                &advanced(json!({"mlxQuantize": 8})),
+                ImageLane::Mlx
+            )
+            .unwrap(),
             None
         );
     }
 
     #[test]
-    fn the_worker_boundary_refuses_fp8r_off_flux3_and_on_mlx() {
+    fn the_worker_boundary_refuses_malformed_tiers_and_fp8r_off_flux3() {
         let fp8r = advanced(json!({"quantTier": "fp8r"}));
-        assert!(validate_image_fp8r_request("flux3_klein", &fp8r, ImageLane::Candle).is_ok());
-        let mlx = validate_image_fp8r_request("flux3_klein", &fp8r, ImageLane::Mlx)
-            .expect_err("MLX has no FP8R tier");
-        assert!(format!("{mlx:?}").contains("MLX"), "{mlx:?}");
+        assert!(validate_image_quant_tier_request("flux3_klein", &fp8r, ImageLane::Candle).is_ok());
+        assert!(validate_image_quant_tier_request("flux3_klein", &fp8r, ImageLane::Mlx).is_err());
         for model in ["z_image", "flux2_klein_9b", "flux3_klein_base"] {
             for lane in [ImageLane::Candle, ImageLane::Mlx] {
-                let error = validate_image_fp8r_request(model, &fp8r, lane)
+                let error = validate_image_quant_tier_request(model, &fp8r, lane)
                     .expect_err("non-flux3 fp8r refused");
                 assert!(format!("{error:?}").contains(model), "{error:?}");
             }
         }
-        // Requests without the label are untouched on both lanes.
+        for value in [
+            json!({"mlxQuantize": 6}),
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+            json!({"convRot": true}),
+        ] {
+            assert!(
+                validate_image_quant_tier_request(
+                    "flux3_klein",
+                    &advanced(value.clone()),
+                    ImageLane::Candle
+                )
+                .is_err(),
+                "{value}"
+            );
+        }
+        // Requests without a FLUX 3 tier are untouched on both lanes.
         for lane in [ImageLane::Candle, ImageLane::Mlx] {
-            assert!(validate_image_fp8r_request(
+            assert!(validate_image_quant_tier_request(
                 "z_image",
                 &advanced(json!({"mlxQuantize": 8})),
                 lane
@@ -369,105 +608,358 @@ mod tests {
     }
 
     #[test]
-    fn fp8r_needs_a_provider_that_advertises_it() {
-        assert!(require_advertised_flux3_precision(
-            "flux3_klein",
-            Flux3Precision::Fp8Rowwise,
-            &[Quant::Q4, Quant::Q8, Quant::Fp8Rowwise, Quant::Nvfp4],
-        )
-        .is_ok());
-        // The CPU build's advertisement.
-        let error = require_advertised_flux3_precision(
-            "flux3_klein",
-            Flux3Precision::Fp8Rowwise,
-            &[Quant::Q4, Quant::Q8],
-        )
-        .expect_err("CPU build has no FP8R");
-        assert!(format!("{error:?}").contains("CUDA"), "{error:?}");
-        assert!(
-            require_advertised_flux3_precision("flux3_klein", Flux3Precision::Bf16, &[]).is_ok()
-        );
+    fn every_package_maps_to_its_inference_quant_by_identity() {
+        assert_eq!(flux3_quant(Flux3Tier::Bf16), None);
+        assert_eq!(flux3_quant(Flux3Tier::Q4), Some(Quant::Q4));
+        assert_eq!(flux3_quant(Flux3Tier::Q8), Some(Quant::Q8));
+        assert_eq!(flux3_quant(Flux3Tier::Fp8Rowwise), Some(Quant::Fp8Rowwise));
+        assert_eq!(flux3_quant(Flux3Tier::Nvfp4), Some(Quant::Nvfp4));
     }
 
-    fn write_snapshot(root: &Path, config: Value) {
-        let variant = root.join(FLUX3_FP8R_VARIANT_DIR);
-        std::fs::create_dir_all(&variant).unwrap();
-        std::fs::write(variant.join("config.json"), config.to_string()).unwrap();
-        std::fs::write(variant.join("model.safetensors"), b"x").unwrap();
+    #[test]
+    fn a_package_needs_a_provider_that_advertises_it() {
+        let cuda = [Quant::Q4, Quant::Q8, Quant::Fp8Rowwise, Quant::Nvfp4];
+        let cpu = [Quant::Q4, Quant::Q8];
+        for tier in Flux3Tier::ALL {
+            assert!(require_advertised_flux3_tier("flux3_klein", tier, &cuda).is_ok());
+        }
+        for tier in [Flux3Tier::Fp8Rowwise, Flux3Tier::Nvfp4] {
+            let error = require_advertised_flux3_tier("flux3_klein", tier, &cpu)
+                .expect_err("CPU build has no publisher kernels");
+            assert!(format!("{error:?}").contains("CUDA"), "{error:?}");
+        }
+        assert!(require_advertised_flux3_tier("flux3_klein", Flux3Tier::Q4, &cpu).is_ok());
+        assert!(require_advertised_flux3_tier("flux3_klein", Flux3Tier::Bf16, &[]).is_ok());
+    }
+
+    #[test]
+    fn publisher_packages_refuse_a_device_below_the_inference_floor() {
+        let ok = |tier, cap| require_flux3_device_floor("flux3_klein", tier, cap).is_ok();
+        assert!(ok(Flux3Tier::Fp8Rowwise, Some(8.9)));
+        assert!(ok(Flux3Tier::Fp8Rowwise, Some(12.0)));
+        assert!(!ok(Flux3Tier::Fp8Rowwise, Some(8.6)));
+        assert!(ok(Flux3Tier::Nvfp4, Some(12.0)));
+        assert!(!ok(Flux3Tier::Nvfp4, Some(9.0)));
+        assert!(!ok(Flux3Tier::Nvfp4, None));
+        assert!(!ok(Flux3Tier::Fp8Rowwise, None));
+        for tier in [Flux3Tier::Bf16, Flux3Tier::Q4, Flux3Tier::Q8] {
+            assert!(ok(tier, None), "{tier:?} runs on every Candle device");
+        }
+    }
+
+    fn write_root(root: &Path) {
         std::fs::create_dir_all(root.join("text_encoder")).unwrap();
         std::fs::write(root.join("ae.safetensors"), b"x").unwrap();
+        std::fs::write(root.join("config.json"), b"{}").unwrap();
     }
 
-    fn upstream_config() -> Value {
-        json!({
-            "quantization": "fp8r",
+    fn write_package(dir: &Path, marker: Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        let config = json!({
+            "quantization": marker,
             "text_encoder": {"path": "text_encoder"},
             "vae": {"path": "ae.safetensors"}
-        })
+        });
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(dir.join("model.safetensors"), b"x").unwrap();
+    }
+
+    fn canonical(path: &Path) -> std::path::PathBuf {
+        std::fs::canonicalize(path).unwrap()
     }
 
     #[test]
-    fn the_fp8r_package_resolves_its_encoder_and_autoencoder_at_the_snapshot_root() {
+    fn publisher_packages_load_from_their_variant_with_root_components() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        write_snapshot(root, upstream_config());
-        let package = resolve_flux3_fp8r_package(root).expect("complete package");
-        assert_eq!(package.package_dir, root.join("variants").join("fp8r"));
-        assert_eq!(package.text_encoder_dir, root.join("text_encoder"));
-        assert_eq!(package.autoencoder_file, root.join("ae.safetensors"));
+        write_root(root);
+        for tier in [Flux3Tier::Fp8Rowwise, Flux3Tier::Nvfp4] {
+            write_package(&root.join("variants").join(tier.key()), json!(tier.key()));
+            let plan = plan_flux3_load(
+                tier,
+                ImageLane::Candle,
+                root,
+                Path::new("unused"),
+                &JsonObject::new(),
+            )
+            .expect("complete package");
+            assert_eq!(
+                plan.weights_dir,
+                canonical(&root.join("variants").join(tier.key()))
+            );
+            let (te, ae) = plan.components.clone().expect("non-dense components");
+            assert_eq!(te, canonical(root).join("text_encoder"));
+            assert_eq!(ae, canonical(root).join("ae.safetensors"));
+            let spec = plan.attach_components(
+                LoadSpec::new(WeightsSource::Dir(plan.weights_dir.clone()))
+                    .with_quant(plan.quant().unwrap()),
+            );
+            assert_eq!(spec.quantize, flux3_quant(tier));
+            assert_eq!(
+                spec.components.get(gen_core::flux3::TEXT_ENCODER_COMPONENT),
+                Some(&WeightsSource::Dir(te))
+            );
+            assert_eq!(
+                spec.components.get(gen_core::flux3::AUTOENCODER_COMPONENT),
+                Some(&WeightsSource::File(ae))
+            );
+            assert_eq!(
+                plan.recipe_bits(),
+                None,
+                "never aliased onto the bits ladder"
+            );
+        }
     }
 
     #[test]
-    fn the_fp8r_load_spec_carries_the_root_encoder_and_autoencoder_components() {
+    fn the_dense_package_is_the_snapshot_root_with_no_overrides() {
         let temp = tempfile::tempdir().unwrap();
-        write_snapshot(temp.path(), upstream_config());
-        let package = resolve_flux3_fp8r_package(temp.path()).unwrap();
-        let spec = attach_flux3_fp8r_components(
-            LoadSpec::new(WeightsSource::Dir(package.package_dir.clone()))
-                .with_quant(Flux3Precision::Fp8Rowwise.quant().expect("fp8r quant")),
-            &package,
-        );
-        assert_eq!(
-            spec.weights,
-            WeightsSource::Dir(package.package_dir.clone())
-        );
-        assert_eq!(spec.quantize, Some(Quant::Fp8Rowwise));
-        assert_eq!(
-            spec.components.get(gen_core::flux3::TEXT_ENCODER_COMPONENT),
-            Some(&WeightsSource::Dir(temp.path().join("text_encoder")))
-        );
-        assert_eq!(
-            spec.components.get(gen_core::flux3::AUTOENCODER_COMPONENT),
-            Some(&WeightsSource::File(temp.path().join("ae.safetensors")))
-        );
+        let plan = plan_flux3_load(
+            Flux3Tier::Bf16,
+            ImageLane::Mlx,
+            temp.path(),
+            Path::new("unused"),
+            &JsonObject::new(),
+        )
+        .unwrap();
+        assert_eq!(plan.weights_dir, temp.path());
+        assert_eq!(plan.components, None);
+        assert_eq!(plan.quant_and_bits(), (None, None));
+        let spec = LoadSpec::new(WeightsSource::Dir(plan.weights_dir.clone()));
+        assert!(plan.attach_components(spec).components.is_empty());
     }
 
     #[test]
-    fn an_incomplete_or_foreign_fp8r_package_is_refused_by_path() {
-        // Missing variant entirely.
+    fn an_incomplete_or_foreign_publisher_package_is_refused_by_path() {
         let temp = tempfile::tempdir().unwrap();
-        let error = resolve_flux3_fp8r_package(temp.path()).expect_err("no variant");
-        assert!(format!("{error:?}").contains("config.json"), "{error:?}");
-
-        // Missing root autoencoder.
-        let temp = tempfile::tempdir().unwrap();
-        write_snapshot(temp.path(), upstream_config());
-        std::fs::remove_file(temp.path().join("ae.safetensors")).unwrap();
-        let error = resolve_flux3_fp8r_package(temp.path()).expect_err("no autoencoder");
-        assert!(format!("{error:?}").contains("ae.safetensors"), "{error:?}");
-
-        // A dense config in the variant slot is not the FP8R package.
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = upstream_config();
-        config["quantization"] = Value::Null;
-        write_snapshot(temp.path(), config);
-        assert!(resolve_flux3_fp8r_package(temp.path()).is_err());
-
+        write_root(temp.path());
+        let plan = |root: &Path| {
+            plan_flux3_load(
+                Flux3Tier::Fp8Rowwise,
+                ImageLane::Candle,
+                root,
+                Path::new("unused"),
+                &JsonObject::new(),
+            )
+        };
+        assert!(format!("{:?}", plan(temp.path()).unwrap_err()).contains("fp8r"));
+        // A dense config in the variant slot, or another tier's package, is not this package.
+        write_package(&temp.path().join("variants/fp8r"), Value::Null);
+        assert!(plan(temp.path()).is_err());
+        write_package(&temp.path().join("variants/fp8r"), json!("nvfp4"));
+        assert!(plan(temp.path()).is_err());
         // A config path escaping the snapshot is refused.
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = upstream_config();
+        let mut config: Value = serde_json::from_slice(
+            &std::fs::read(temp.path().join("variants/fp8r/config.json")).unwrap(),
+        )
+        .unwrap();
+        config["quantization"] = json!("fp8r");
         config["vae"]["path"] = json!("../ae.safetensors");
-        write_snapshot(temp.path(), config);
-        assert!(resolve_flux3_fp8r_package(temp.path()).is_err());
+        std::fs::write(
+            temp.path().join("variants/fp8r/config.json"),
+            config.to_string(),
+        )
+        .unwrap();
+        assert!(plan(temp.path()).is_err());
+        // Missing root autoencoder.
+        config["vae"]["path"] = json!("ae.safetensors");
+        std::fs::write(
+            temp.path().join("variants/fp8r/config.json"),
+            config.to_string(),
+        )
+        .unwrap();
+        std::fs::remove_file(temp.path().join("ae.safetensors")).unwrap();
+        assert!(format!("{:?}", plan(temp.path()).unwrap_err()).contains("ae.safetensors"));
+    }
+
+    /// A linked variant DIRECTORY pointing out of the snapshot is refused on its canonical path.
+    /// Skipped (with a note) where the host forbids creating directory links (unprivileged
+    /// Windows); the Linux CI lanes always run it.
+    #[test]
+    fn a_variant_directory_linked_out_of_the_snapshot_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("snapshot");
+        write_root(&root);
+        let outside = temp.path().join("elsewhere");
+        write_package(&outside, json!("fp8r"));
+        std::fs::create_dir_all(root.join("variants")).unwrap();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&outside, root.join("variants/fp8r"));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(&outside, root.join("variants/fp8r"));
+        if let Err(error) = linked {
+            eprintln!(
+                "directory links unavailable on this host ({error}); containment unexercised"
+            );
+            return;
+        }
+        let error = plan_flux3_load(
+            Flux3Tier::Fp8Rowwise,
+            ImageLane::Candle,
+            &root,
+            Path::new("unused"),
+            &JsonObject::new(),
+        )
+        .expect_err("escaping package");
+        assert!(
+            format!("{error:?}").contains("outside the pinned snapshot"),
+            "{error:?}"
+        );
+    }
+
+    fn derived_manifest(sha: &str, bytes: u64) -> JsonObject {
+        let row = |platforms: Value, conversion: &str| {
+            json!({
+                "variant": "q8",
+                "platforms": platforms,
+                "localDerivation": {
+                    "fromVariant": "bf16",
+                    "conversion": conversion,
+                    "weightsFile": "model.safetensors",
+                    "weightsBytes": bytes,
+                    "weightsSha256": sha,
+                    "reason": "test"
+                }
+            })
+        };
+        advanced(json!({
+            "id": "flux3_klein",
+            "downloads": [
+                {"variant": "bf16"},
+                row(json!(["windows", "linux"]), "flux3-candle-ggml-q8_0-v1"),
+                row(json!(["macos"]), "flux3-mlx-affine-q8-g64-v1"),
+            ]
+        }))
+    }
+
+    #[test]
+    fn a_derived_package_loads_only_once_it_matches_its_platform_pins() {
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("snapshot");
+        write_root(&root);
+        let data = temp.path().join("data");
+        let weights = b"x";
+        let sha = format!("{:x}", Sha256::digest(weights));
+        let manifest = derived_manifest(&sha, weights.len() as u64);
+        let candle_dir = data.join("models/derived/flux3_klein/q8/flux3-candle-ggml-q8_0-v1");
+        // Not converted yet: an install instruction, never the dense package.
+        let error = plan_flux3_load(Flux3Tier::Q8, ImageLane::Candle, &root, &data, &manifest)
+            .expect_err("not installed");
+        assert!(
+            format!("{error:?}").contains("install the q8 tier"),
+            "{error:?}"
+        );
+        write_package(&candle_dir, json!({"format": "ggml_q8_0"}));
+        let plan = plan_flux3_load(Flux3Tier::Q8, ImageLane::Candle, &root, &data, &manifest)
+            .expect("verified derivation");
+        assert_eq!(plan.weights_dir, canonical(&candle_dir));
+        assert_eq!(plan.quant_and_bits(), (Some(Quant::Q8), Some(8)));
+        assert!(plan.components.is_some());
+        // The MLX lane resolves ITS conversion, which is a different (absent) package.
+        assert!(plan_flux3_load(Flux3Tier::Q8, ImageLane::Mlx, &root, &data, &manifest).is_err());
+        // Bytes that no longer match the pins are refused, not loaded.
+        std::fs::write(candle_dir.join("model.safetensors"), b"yy").unwrap();
+        let error = plan_flux3_load(Flux3Tier::Q8, ImageLane::Candle, &root, &data, &manifest)
+            .expect_err("tampered derivation");
+        assert!(format!("{error:?}").contains("reinstall"), "{error:?}");
+    }
+
+    /// The text from `declaration` to the end of its body.
+    fn function_body(source: &'static str, declaration: &str) -> &'static str {
+        let body = &source[source.find(declaration).expect(declaration)..];
+        let mut depth = 0_usize;
+        for (offset, byte) in body.bytes().enumerate().skip(body.find('{').expect("body")) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[..=offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body for {declaration}");
+    }
+
+    fn position(body: &str, needle: &str, lane: &str) -> usize {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("{lane}: the FLUX 3 plan seam `{needle}` is gone"))
+    }
+
+    /// sc-26241: the generic Candle lane consumes the FLUX 3 plan at all five seams, in order.
+    /// These lanes load real weights on a GPU, so their wiring is what can be asserted here: deleting
+    /// any one seam (or moving it past the step that reads it) turns this red.
+    #[test]
+    fn the_candle_lane_consumes_every_flux3_plan_seam_in_order() {
+        let body = function_body(
+            include_str!("base.rs"),
+            "async fn generate_candle_stream_using(",
+        );
+        let lane = "generate_candle_stream_using";
+        let plan = position(
+            body,
+            "let flux3_plan = flux3_precision::candle_flux3_plan(",
+            lane,
+        );
+        let dir = position(body, "weights_dir = plan.weights_dir.clone();", lane);
+        let gate_key = position(body, "let mut tier = candle_resolved_tier_key(", lane);
+        let tier = position(body, "tier = plan.tier.key();", lane);
+        let evidence = position(body, "validate_candle_tier_memory_evidence(", lane);
+        let downtier = position(
+            body,
+            "if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {",
+            lane,
+        );
+        let quant = position(body, "Some(plan) => plan.quant_and_bits(),", lane);
+        let spec = position(body, "let mut shared_contract_spec = load_spec(", lane);
+        let components = position(
+            body,
+            "shared_contract_spec = plan.attach_components(shared_contract_spec);",
+            lane,
+        );
+        let encoder = position(body, "attach_manifest_text_encoder(", lane);
+        assert!(
+            plan < dir && dir < gate_key,
+            "the package directory is the gated directory"
+        );
+        assert!(
+            gate_key < tier && tier < evidence,
+            "the plan tier replaces the bits key"
+        );
+        assert!(
+            tier < downtier && downtier < quant,
+            "a FLUX 3 package is never downtiered"
+        );
+        assert!(quant < spec && spec < components && components < encoder);
+    }
+
+    /// The MLX lane's three FLUX 3 seams: the package directory, the load quant + recipe bits and
+    /// tier identity of every prepared candidate, and the root components.
+    #[test]
+    fn the_mlx_lane_consumes_every_flux3_plan_seam() {
+        let body = function_body(include_str!("base.rs"), "async fn generate_stream_using(");
+        let lane = "generate_stream_using";
+        let plan = position(
+            body,
+            "let flux3_plan = flux3_precision::mlx_flux3_plan(",
+            lane,
+        );
+        let dir = position(
+            body,
+            ".map_or(weights_dir, |plan| plan.weights_dir.clone());",
+            lane,
+        );
+        let quant = position(body, "Some(plan) => plan.quant_and_bits(),", lane);
+        let tier = position(body, ".map(|plan| plan.tier.key())", lane);
+        let components = position(body, "spec = plan.attach_components(spec);", lane);
+        let reconcile = position(body, ".map(|plan| plan.quant_and_bits())", lane);
+        assert!(plan < dir && dir < quant && quant < tier && tier < components);
+        assert!(
+            components < reconcile,
+            "the fixed pair skips tier reconciliation"
+        );
     }
 }

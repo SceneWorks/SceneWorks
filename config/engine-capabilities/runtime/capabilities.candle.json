@@ -377,6 +377,7 @@
     "dataset_face_analysis",
     "dataset_upscale",
     "face_likeness_compare",
+    "fp8r",
     "gpu",
     "image_depth",
     "image_detail",

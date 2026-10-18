@@ -3578,3 +3578,41 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
         "the Turbo descriptor declares the prefix-KV-cache domain the worker prices"
     );
 }
+
+/// sc-26241: FLUX 3's per-tier floors are DERIVED, not measured, by one rule — the dense floor with
+/// its DiT term replaced by the tier's DiT as the provider memory contract prices it — and the
+/// Candle gate reads them, so an FP8R / NVFP4 / q4 / q8 request is no longer sized against the
+/// dense 32 GB scalar. The arithmetic lives in the manifest comment; the numbers are pinned here.
+#[test]
+fn flux3_klein_tier_floors_are_derived_from_the_provider_dit_pricing() {
+    let entry = builtin_model_entry("flux3_klein");
+    let object = entry.as_object().expect("entry object");
+    // ceil(32 - (10.335 - tier DiT GiB)), DiT per provider `native_dit_bytes`.
+    let candle = [("bf16", 32), ("q8", 29), ("q4", 27), ("fp8r", 28), ("nvfp4", 27)];
+    for (tier, floor) in candle {
+        assert_eq!(
+            entry["candle"]["minMemoryGbByTier"][tier], floor,
+            "candle/{tier}: changing a floor changes which cards are refused"
+        );
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(object, tier),
+            Some(floor as f64),
+            "candle/{tier}: the gate reads the derived per-tier floor, not the dense scalar"
+        );
+    }
+    assert_eq!(
+        entry["candle"]["minMemoryGbByTier"].as_object().map(serde_json::Map::len),
+        Some(candle.len()),
+        "a row per shipped Candle tier and no other"
+    );
+    for (tier, floor) in [("bf16", 32), ("q8", 28), ("q4", 26)] {
+        assert_eq!(entry["mlx"]["minMemoryGbByTier"][tier], floor, "mlx/{tier}");
+    }
+    assert!(
+        entry["mlx"]["minMemoryGbByTier"].get("fp8r").is_none()
+            && entry["mlx"]["minMemoryGbByTier"].get("nvfp4").is_none(),
+        "MLX ships no publisher tier"
+    );
+    assert_eq!(entry["candle"]["minMemoryGb"], 32, "the scalar is the densest tier's floor");
+    assert!(entry["candle"].get("vramGbByTier").is_none(), "nothing is measured yet (sc-26243)");
+}

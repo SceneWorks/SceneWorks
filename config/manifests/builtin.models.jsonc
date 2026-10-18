@@ -6168,7 +6168,14 @@
       // shards), and the engine reads all three from the package root
       // (`gen_core::flux3::GenerationResources`): no separate component install. Download the WHOLE
       // pinned repo, including variants, diffusers layout, configs, licenses and gallery assets.
-      // Fetching those files does not advertise unsupported quantized tiers (sc-26241 owns tiers).
+      //
+      // TIERS (sc-26241) — five packages, every one a distinct artifact, never a load-time
+      // transform of another: bf16 (the dense root package, both backends); q4 / q8 converted ON
+      // THIS MACHINE from the dense package by the backend's own inference converter (Candle GGML
+      // Q4_1 / Q8_0 off-Mac, MLX affine W4/W8 group 64 on macOS — the `localDerivation` rows); and
+      // the publisher fp8r / nvfp4 packages shipped inside the same snapshot at `variants/<tier>`,
+      // Candle on CUDA past their device floor (sm_89 / sm_120). A request names exactly one; an
+      // absent tier is bf16, never the app-wide q8 default.
       //
       // CONTROL SURFACE (E6) — exactly what the engine honours in S1: prompt, size on a 16-px grid
       // (64..=2048 here; the engine admits up to 4096), count <= 8 (rendered one after another from
@@ -6177,7 +6184,7 @@
       // map: NO classifier-free guidance and NO negative prompt — the engine refuses a guidance
       // other than 1.0 and any negative prompt by name (`supportsGuidance` /
       // `supportsNegativePrompt` false, the z_image_turbo shape). References / boxes (sc-26236/7),
-      // the base checkpoint + LoRA (sc-26239) and quantized tiers (sc-26241) are later stories.
+      // the base checkpoint + LoRA (sc-26239) are later stories; the tiers are above (sc-26241).
       // Prompt upsampling uses the separate optional component below (sc-26238).
       "id": "flux3_klein",
       "image": {
@@ -6203,10 +6210,126 @@
           "provider": "huggingface",
           "repo": "black-forest-labs/flux-3-image-klein",
           "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "bf16",
           "default": true,
           "files": [],
           "estimatedSizeBytes": 43317649602,
           "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher FP8 rowwise package. It ships INSIDE the same pinned snapshot
+          // (`variants/fp8r/`: config.json, hf_quant_config.json, manifest.json and a
+          // 6,270,949,144-byte model.safetensors, by the unauthenticated Hub tree listing), so this
+          // tier row is the SAME whole-repository download as the bf16 row: installing either
+          // installs both. Loaded as shipped by the Candle provider (`Quant::Fp8Rowwise`) on CUDA
+          // past the sm_89 floor, with the root `text_encoder/` and `ae.safetensors` as explicit
+          // components. MLX advertises no FP8R tier, so the row is Windows/Linux only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "fp8r",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher NVFP4 package (`variants/nvfp4/`, a 5,277,674,144-byte
+          // model.safetensors), the same whole-repository download. Candle on CUDA past the sm_120
+          // floor only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "nvfp4",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q8_0, CONVERTED ON THIS MACHINE from the dense bf16 package by the
+          // inference converter (`candle_gen_flux3::convert::convert_ggml`) — the FLUX Kommunity
+          // License weights are never re-hosted. The pins are the converter's deterministic output
+          // for this exact source (`local_derivation::tests::flux3_conversions_reproduce_the_catalog_pins`).
+          // The derived package owns only its DiT, config, licence files and receipt; the text
+          // encoder and autoencoder stay the snapshot's own (receipt-verified external components).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q8_0-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567555584,
+            "weightsSha256": "60d8c4b83a04741168d8bb17992e772e105d735db82b6c796d787007ab09e34f",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885249611, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q4_1, converted locally exactly like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q4_1-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4453626272,
+            "weightsSha256": "037e023c665c44bd35bc979512f8b5e2a25b21dff6a5b59ac24ffcde2ab5b7ba",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47771320299, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W8A16 (group 64), converted locally by the backend-neutral inference
+          // packer (`gen_core::flux3::native_convert::convert_affine`) for MLX's `quantized_matmul`.
+          // Deterministic and CPU-only, so its pins are reproduced on any host; only LOADING it needs
+          // Apple Silicon. A Candle GGML package and this one are different artifacts: no
+          // cross-backend reuse.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q8-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567607528,
+            "weightsSha256": "2ca6f2dbd2f921b3b561c89a8d1b0e327691405260278bc070b59d35fc2b314b",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885301565, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W4A16 (group 64), converted locally like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q4-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4151688144,
+            "weightsSha256": "114ab4381c7a129dda73641ecac090b2d8705d717ba6e3986b20cf48f88c8e87",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47469382181, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           // sc-26238: OPTIONAL separate VLM. Never required for bypass/plain generation and never
@@ -6251,13 +6374,32 @@
         // Conservative DECLARED floor (no measurement campaign): bf16 DiT (11.1 GB) + bf16 Qwen3-VL-4B
         // tower (8.9 GB) + f32 autoencoder (0.34 GB) resident plus the 1024² attention and decoder
         // activations. Replaced by measured evidence at the epic-end campaign (sc-26243).
-        "minMemoryGb": 32
+        //
+        // Per-tier floors (sc-26241), DERIVED with one rule on both lanes: the dense floor with its
+        // DiT term replaced by the tier's DiT as the provider's own memory contract prices it
+        // (`native_dit_bytes` over the package's tensor headers — packed targets at stored bytes,
+        // everything else as the dense path holds it), rounded UP:
+        //   floor = ceil(32 - (dense DiT GiB - tier DiT GiB)); dense DiT = 10.335 GiB
+        //   MLX affine (W4/W8 + bf16 scales/biases, no packed transient):
+        //     q8 6.116 GiB -> ceil(27.78) = 28    q4 3.866 GiB -> ceil(25.53) = 26
+        // Advisory on MLX (the MLX fit gate admits from the provider's own memory model). Measured
+        // rows from sc-26243 replace every derived floor.
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 28, "q4": 26 }
       },
       "candle": {
         // Declared conservative resident floor, not measured: dense bf16 transformer and encoder,
         // f32 autoencoder, activation scratch and allocator reserve. Terminal sc-26243 owns fitting.
+        //
+        // Per-tier floors (sc-26241), the same rule as the MLX block above, over the Candle
+        // provider's `native_dit_bytes` (which also charges the 256 MiB packed-GEMM transient once):
+        //   q8 GGML Q8_0 6.366 GiB -> ceil(28.03) = 29    q4 GGML Q4_1 4.398 GiB -> ceil(26.06) = 27
+        //   fp8r 6.090 GiB -> ceil(27.76) = 28            nvfp4 5.165 GiB -> ceil(26.83) = 27
+        // (fp8r/nvfp4 from the publisher packages' own headers, staged scales included). The
+        // scalar stays the densest tier's floor, the conservative fallback for any unlisted key.
         "measured": false,
-        "minMemoryGb": 32
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 29, "q4": 27, "fp8r": 28, "nvfp4": 27 }
       },
       "ui": {
         "promptEnhance": true,

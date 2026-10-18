@@ -7092,12 +7092,20 @@ mod download_receipt_tests {
             .iter()
             .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
             .collect();
-        assert_eq!(
-            primary.len(),
-            1,
-            "one whole primary package, no required component split"
-        );
-        let primary = primary[0];
+        assert!(!primary.is_empty(), "at least the dense primary package");
+        for row in &primary {
+            assert_eq!(row["repo"], "black-forest-labs/flux-3-image-klein");
+            assert_eq!(
+                row["files"],
+                json!([]),
+                "every tier fetches the whole original"
+            );
+        }
+        let primary_count = primary.len();
+        let primary = primary
+            .into_iter()
+            .find(|row| row["default"] == true)
+            .unwrap();
         assert_eq!(primary["provider"], "huggingface");
         assert_eq!(primary["repo"], "black-forest-labs/flux-3-image-klein");
         assert_eq!(
@@ -7120,8 +7128,8 @@ mod download_receipt_tests {
         );
         assert_eq!(
             downloads.len(),
-            1 + optional.len(),
-            "no unrecognized extra downloads"
+            primary_count + optional.len(),
+            "tier rows plus the one optional component"
         );
         for row in optional {
             assert_eq!(row["provider"], "huggingface");
@@ -7306,9 +7314,10 @@ mod download_receipt_tests {
             current.installed,
             "an exact managed receipt plus the complete canonical runtime bundle is usable"
         );
-        assert_eq!(
-            current.installed_path.as_deref(),
-            Some(managed.to_string_lossy().as_ref())
+        let selected_path = PathBuf::from(current.installed_path.as_ref().expect("installed path"));
+        assert!(
+            selected_path == managed || selected_path.ends_with(revision),
+            "variant aggregation retains the selected snapshot or the managed root: {selected_path:?}"
         );
         assert!(model_variant_states(&model, temp.path())[0].installed);
         std::fs::remove_file(managed.join("text_encoder/model-00002-of-00002.safetensors"))
@@ -7952,8 +7961,27 @@ fn model_cache_health_for_download(
             missing_files: vec![format!("snapshots/{revision}")],
         });
     }
+    if let Some(tier @ ("fp8r" | "nvfp4")) = download
+        .and_then(|row| row.get("variant"))
+        .and_then(Value::as_str)
+    {
+        if !snapshot.join("variants").join(tier).exists() {
+            return Some(HuggingFaceCacheHealth {
+                installed: false,
+                incomplete: false,
+                missing_files: vec![format!("variants/{tier}")],
+            });
+        }
+    }
     Some(
-        match sceneworks_worker::flux3_runtime_bundle_check(&snapshot, model_id) {
+        match sceneworks_worker::flux3_runtime_tier_bundle_check(
+            &snapshot,
+            download
+                .and_then(|d| d.get("variant"))
+                .and_then(Value::as_str)
+                .unwrap_or("bf16"),
+            model_id,
+        ) {
             Ok(()) => HuggingFaceCacheHealth::installed(),
             Err(error) => HuggingFaceCacheHealth::missing(vec![error]),
         },
@@ -7978,7 +8006,15 @@ fn flux3_managed_bundle_is_current(
                 .is_none_or(|id| id == model_id)
     });
     identity_matches
-        && sceneworks_worker::flux3_runtime_bundle_check(managed_path, model_id).is_ok()
+        && sceneworks_worker::flux3_runtime_tier_bundle_check(
+            managed_path,
+            download
+                .and_then(|d| d.get("variant"))
+                .and_then(Value::as_str)
+                .unwrap_or("bf16"),
+            model_id,
+        )
+        .is_ok()
 }
 
 fn install_state_for(
@@ -8772,8 +8808,11 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     missing_required_files.push(format!("derived {variant} snapshot: {why}"));
                 }
                 // The companion check below still applies to a verified derived tier.
-                installed = verified;
-                derivation_pending = Some(!verified);
+                installed = verified && (model_id != "flux3_klein" || cache_installed || managed_installed);
+                if verified && !installed {
+                    missing_required_files.push("FLUX 3 derived tier requires its complete pinned original text encoder and autoencoder".to_owned());
+                }
+                derivation_pending = Some(!installed);
                 derived_path = located
                     .filter(|_| derived_exists)
                     .map(|(dir, _)| dir.display().to_string());

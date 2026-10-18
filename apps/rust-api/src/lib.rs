@@ -5184,10 +5184,10 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
-    // sc-26241: the publisher FP8R tier exists only for the model that ships the package, and
-    // never alongside a second precision carrier. Which backend can load it is routing's call.
+    // sc-26241: a FLUX 3 request names exactly one of its packages, and the publisher FP8R tier
+    // exists only for the model that ships it. Which backend and worker can load it is routing's.
     if let Some(reason) =
-        sceneworks_core::image_request::fp8r_quant_tier_refusal(&payload.model, &payload.advanced)
+        sceneworks_core::image_request::image_quant_tier_refusal(&payload.model, &payload.advanced)
     {
         return Err(ApiError::bad_request(reason));
     }

@@ -53,8 +53,9 @@ use gen_core::{
 // this same implementation without pulling in an accelerator runtime bundle.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod prompt_upsampling;
-// sc-26241: FLUX 3 bf16 / publisher-FP8R precision selection. Tensor-neutral, compiled on every
-// lane so the worker trust-boundary refusal (MLX, non-FLUX3) holds even without a native backend.
+// sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
+// check compiles on every lane, so the worker trust-boundary refusal holds even without a native
+// backend; package resolution compiles with the native lanes.
 mod flux3_precision;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use prompt_upsampling::{
@@ -510,9 +511,9 @@ pub(crate) async fn run_image_generate_job(
     }
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
-    // sc-26241: an FP8R tier label is honored only on the model and lane that can load it; raw
-    // queue writes and stored jobs never passed the API validator.
-    flux3_precision::validate_image_fp8r_request(
+    // sc-26241: a named precision tier is honored only on the model and lane that can load it;
+    // raw queue writes and stored jobs never passed the API validator.
+    flux3_precision::validate_image_quant_tier_request(
         &request.model,
         &request.advanced,
         flux3_precision::ImageLane::current(),

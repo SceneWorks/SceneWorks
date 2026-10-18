@@ -11,6 +11,11 @@
 //!
 //! Nothing here touches the original: a derivation that fails or does not verify removes only the
 //! derived snapshot it wrote.
+//!
+//! FLUX 3 Image Klein's native `q4` / `q8` packages (sc-26241) are the second user: the same
+//! fetch → derive → verify flow, with [`flux3_preparer`] running the inference FLUX 3 converter
+//! of the backend that loads the package (Candle GGML off-Mac, MLX affine on macOS) instead of
+//! the audio preparer.
 
 use super::*;
 
@@ -79,7 +84,16 @@ pub(crate) async fn derive_local_tier(
                 )
             })?;
     match derived_snapshot_state(&out_dir, &derivation) {
-        DerivedSnapshotState::Verified => return Ok(out_dir),
+        DerivedSnapshotState::Verified => {
+            if !derivation.conversion.starts_with("flux3-")
+                || crate::flux3_converted_bundle_check(source, &out_dir).is_ok()
+            {
+                return Ok(out_dir);
+            }
+            // A pinned weights file alone does not certify the config, licenses, receipt or
+            // external components. Repair only this owned output, never the original.
+            std::fs::remove_dir_all(&out_dir)?;
+        }
         // Not this derivation's bytes: it is our own derived artifact, never the original.
         DerivedSnapshotState::Invalid(_) => std::fs::remove_dir_all(&out_dir)?,
         DerivedSnapshotState::Absent => {}
@@ -121,7 +135,13 @@ pub(crate) async fn derive_local_tier(
         return Err(error);
     }
     match derived_snapshot_state(&out_dir, &derivation) {
-        DerivedSnapshotState::Verified => Ok(out_dir),
+        DerivedSnapshotState::Verified => {
+            if derivation.conversion.starts_with("flux3-") {
+                crate::flux3_converted_bundle_check(source, &out_dir)
+                    .map_err(WorkerError::InvalidPayload)?;
+            }
+            Ok(out_dir)
+        }
         other => {
             let _ = std::fs::remove_dir_all(&out_dir);
             Err(WorkerError::Engine(format!(
@@ -130,6 +150,139 @@ pub(crate) async fn derive_local_tier(
             )))
         }
     }
+}
+
+/// One FLUX 3 Image Klein native conversion (sc-26241), named by its catalog
+/// `localDerivation.conversion` id. Each converts the ORIGINAL dense package with the inference
+/// converter of the backend that loads it — never another backend's package, never a publisher
+/// FP8R/NVFP4 artifact — into a NEW owned directory published atomically with a full-checksum
+/// receipt. The text encoder and autoencoder stay EXTERNAL (the pinned snapshot's own files).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flux3Conversion {
+    /// Candle GGML Q4_1 (`candle_gen_flux3::convert::convert_ggml`).
+    CandleGgmlQ4_1,
+    /// Candle GGML Q8_0.
+    CandleGgmlQ8_0,
+    /// MLX affine W`bits`A16 at `group` (`gen_core::flux3::native_convert::convert_affine`, the
+    /// backend-neutral pack MLX's `quantized_matmul` reads; CPU-only and deterministic).
+    MlxAffine { bits: u32, group: u32 },
+}
+
+impl Flux3Conversion {
+    /// Every conversion the catalog may name, by id.
+    pub(crate) const ALL: [(&'static str, Self); 4] = [
+        ("flux3-candle-ggml-q4_1-v1", Self::CandleGgmlQ4_1),
+        ("flux3-candle-ggml-q8_0-v1", Self::CandleGgmlQ8_0),
+        (
+            "flux3-mlx-affine-q4-g64-v1",
+            Self::MlxAffine { bits: 4, group: 64 },
+        ),
+        (
+            "flux3-mlx-affine-q8-g64-v1",
+            Self::MlxAffine { bits: 8, group: 64 },
+        ),
+    ];
+
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find_map(|(name, conversion)| (name == id).then_some(conversion))
+    }
+
+    /// The tier this conversion produces (`localDerivation` rows are keyed by it).
+    pub(crate) const fn quantize(self) -> Quantize {
+        match self {
+            Self::CandleGgmlQ4_1 | Self::MlxAffine { bits: 4, .. } => Quantize::Q4,
+            Self::CandleGgmlQ8_0 | Self::MlxAffine { .. } => Quantize::Q8,
+        }
+    }
+}
+
+/// The preparer [`derive_local_tier`] runs for a FLUX 3 conversion: the inference converter over
+/// the fetched original at `spec.source`, writing `spec.out_dir`. `repository`/`revision` are the
+/// original's Hub identity, which the converter validates against the frozen FLUX 3 checkpoints
+/// and records in the receipt.
+pub(crate) fn flux3_preparer(
+    conversion: Flux3Conversion,
+    repository: String,
+    revision: String,
+) -> impl FnOnce(&PrepareSpec) -> Result<PrepareReport, String> + Send + 'static {
+    move |spec: &PrepareSpec| {
+        if spec.quantize != Some(conversion.quantize()) {
+            return Err(format!(
+                "{conversion:?} produces {:?}, but the derivation asked for {:?}",
+                conversion.quantize(),
+                spec.quantize
+            ));
+        }
+        let source = gen_core::flux3::native_convert::ConversionSource {
+            root: spec.source.clone(),
+            repository,
+            revision,
+        };
+        let cancel = gen_core::CancelFlag::new();
+        let receipt = match conversion {
+            Flux3Conversion::MlxAffine { bits, group } => {
+                gen_core::flux3::native_convert::convert_affine(
+                    &source,
+                    bits,
+                    group,
+                    &spec.out_dir,
+                    &cancel,
+                )
+                .map_err(|error| error.to_string())?
+            }
+            Flux3Conversion::CandleGgmlQ4_1 | Flux3Conversion::CandleGgmlQ8_0 => {
+                convert_flux3_ggml(conversion, &source, &spec.out_dir, &cancel)?
+            }
+        };
+        let num_tensors = receipt
+            .components
+            .iter()
+            .map(|component| component.quantized_targets.len() + component.dense_targets.len())
+            .sum();
+        Ok(PrepareReport {
+            input_format: gen_core::core_llm::ModelFormat::Safetensors,
+            quantized: spec.quantize,
+            out_dir: spec.out_dir.clone(),
+            num_tensors,
+            passthrough: false,
+        })
+    }
+}
+
+/// The Candle GGML pack is Candle's own quantizer, linked only by the Candle runtime bundle.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn convert_flux3_ggml(
+    conversion: Flux3Conversion,
+    source: &gen_core::flux3::native_convert::ConversionSource,
+    out_dir: &Path,
+    cancel: &gen_core::CancelFlag,
+) -> Result<gen_core::flux3::conversion::ConversionReceipt, String> {
+    use gen_core::flux3::artifacts::NativeDitStorage;
+    let storage = match conversion {
+        Flux3Conversion::CandleGgmlQ4_1 => NativeDitStorage::GgmlQ4_1,
+        Flux3Conversion::CandleGgmlQ8_0 => NativeDitStorage::GgmlQ8_0,
+        Flux3Conversion::MlxAffine { .. } => {
+            return Err("an MLX affine conversion is not a GGML pack".to_owned())
+        }
+    };
+    runtime_cuda::providers::flux3::convert::convert_ggml(source, storage, out_dir, cancel)
+        .map_err(|error| error.to_string())
+}
+
+/// A build without the Candle bundle cannot produce Candle's GGML blocks; it refuses rather than
+/// writing anything (the job stays a typed failure, never a substitute format).
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+fn convert_flux3_ggml(
+    conversion: Flux3Conversion,
+    _source: &gen_core::flux3::native_convert::ConversionSource,
+    _out_dir: &Path,
+    _cancel: &gen_core::CancelFlag,
+) -> Result<gen_core::flux3::conversion::ConversionReceipt, String> {
+    Err(format!(
+        "{conversion:?} is Candle's GGML pack; this worker does not link the Candle runtime"
+    ))
 }
 
 #[cfg(test)]
@@ -298,5 +451,131 @@ mod tests {
             .join("models/derived/yue2/q8/yue2-ggml-tier-v1")
             .exists());
         assert!(source.is_dir(), "the original is never removed");
+    }
+
+    /// Every FLUX 3 conversion id the catalog names is one this worker knows, produces the tier
+    /// its row is keyed by, and derives from the dense `bf16` original on its own platform (Candle
+    /// GGML off-Mac, MLX affine on macOS) — never from another derived or publisher package.
+    #[test]
+    fn flux3_catalog_derivations_name_known_conversions_for_their_platform() {
+        let entry = crate::tests::builtin_model_entry("flux3_klein");
+        let rows: Vec<&Value> = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row.get("localDerivation").is_some())
+            .collect();
+        assert_eq!(rows.len(), 4, "q4 + q8 on each of the two native platforms");
+        for row in rows {
+            let block = &row["localDerivation"];
+            let id = block["conversion"].as_str().unwrap();
+            let conversion = Flux3Conversion::from_id(id)
+                .unwrap_or_else(|| panic!("{id}: no FLUX 3 converter of that name"));
+            let variant = row["variant"].as_str().unwrap();
+            assert_eq!(quantize_of(variant).unwrap(), conversion.quantize(), "{id}");
+            assert_eq!(block["fromVariant"], "bf16", "{id}");
+            let platforms: Vec<&str> = row["platforms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            match conversion {
+                Flux3Conversion::MlxAffine { .. } => assert_eq!(platforms, ["macos"], "{id}"),
+                _ => assert_eq!(platforms, ["windows", "linux"], "{id}"),
+            }
+            assert!(local_derivation(row).is_some(), "{id}: incomplete pins");
+        }
+    }
+
+    /// A derivation asked for the wrong tier refuses before writing anything.
+    #[test]
+    fn a_flux3_preparer_refuses_a_tier_it_does_not_produce() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = PrepareSpec {
+            source: dir.path().join("source"),
+            out_dir: dir.path().join("out"),
+            quantize: Some(Quantize::Q4),
+        };
+        let error = flux3_preparer(
+            Flux3Conversion::MlxAffine { bits: 8, group: 64 },
+            "black-forest-labs/flux-3-image-klein".into(),
+            "8454017f9ebaada30c998fccd9f67a80c7580f68".into(),
+        )(&spec)
+        .expect_err("q8 conversion asked for q4");
+        assert!(error.contains("Q8"), "{error}");
+        assert!(!spec.out_dir.exists());
+    }
+
+    /// Reproducibility receipt for the catalog pins (sc-26241). Converts the real pinned dense
+    /// snapshot (`FLUX3_KLEIN_SNAPSHOT_DIR`, a caller-provisioned path) with each conversion this
+    /// build links into `FLUX3_DERIVE_OUT_DIR`, then checks the output against the catalog's
+    /// `weightsBytes` / `weightsSha256` — the pins are these outputs, not estimates. The Candle
+    /// GGML pair needs a `backend-candle` build; the MLX affine pair is backend-neutral and runs on
+    /// any host. CPU only; tens of GB of output.
+    #[test]
+    #[ignore = "converts the real 43 GB FLUX 3 snapshot; set FLUX3_KLEIN_SNAPSHOT_DIR and FLUX3_DERIVE_OUT_DIR"]
+    fn flux3_conversions_reproduce_the_catalog_pins() {
+        let source = PathBuf::from(
+            std::env::var("FLUX3_KLEIN_SNAPSHOT_DIR").expect("FLUX3_KLEIN_SNAPSHOT_DIR"),
+        );
+        let out =
+            PathBuf::from(std::env::var("FLUX3_DERIVE_OUT_DIR").expect("FLUX3_DERIVE_OUT_DIR"));
+        let entry = crate::tests::builtin_model_entry("flux3_klein");
+        let original = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .expect("the dense original row")
+            .clone();
+        let mut mismatches = Vec::new();
+        for row in entry["downloads"].as_array().unwrap() {
+            let Some(derivation) = local_derivation(row) else {
+                continue;
+            };
+            let conversion = Flux3Conversion::from_id(&derivation.conversion).unwrap();
+            let linked = cfg!(all(not(target_os = "macos"), feature = "backend-candle"))
+                || matches!(conversion, Flux3Conversion::MlxAffine { .. });
+            if !linked {
+                eprintln!(
+                    "{}: not linked by this build; skipped",
+                    derivation.conversion
+                );
+                continue;
+            }
+            let dir = out.join(&derivation.conversion);
+            if derived_snapshot_state(&dir, &derivation) != DerivedSnapshotState::Verified {
+                if dir.exists() {
+                    std::fs::remove_dir_all(&dir).unwrap();
+                }
+                flux3_preparer(
+                    conversion,
+                    original["repo"].as_str().unwrap().to_owned(),
+                    original["revision"].as_str().unwrap().to_owned(),
+                )(&PrepareSpec {
+                    source: source.clone(),
+                    out_dir: dir.clone(),
+                    quantize: Some(conversion.quantize()),
+                })
+                .unwrap_or_else(|error| panic!("{}: {error}", derivation.conversion));
+            }
+            let weights = dir.join(&derivation.weights_file);
+            let bytes = std::fs::metadata(&weights).unwrap().len();
+            let mut hasher = Sha256::new();
+            std::io::copy(&mut std::fs::File::open(&weights).unwrap(), &mut hasher).unwrap();
+            let sha = format!("{:x}", hasher.finalize());
+            eprintln!(
+                "{}: weightsBytes {bytes} weightsSha256 {sha}",
+                derivation.conversion
+            );
+            if bytes != derivation.weights_bytes || sha != derivation.weights_sha256 {
+                mismatches.push(derivation.conversion.clone());
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "outputs differ from the catalog pins: {mismatches:?}"
+        );
     }
 }

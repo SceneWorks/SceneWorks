@@ -5054,11 +5054,43 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // may claim it. `audio_generate` is advertised exactly when that lane is linked
         // (`inference_runtime::audio()`); the utility worker of a server build without the lane
         // (the Docker image) therefore leaves it queued for the GPU worker instead of failing it.
+        // A FLUX 3 local derivation (sc-26241: the q4/q8 native packages) runs the image lane's
+        // own converter, so only an image worker may claim it.
+        JobType::ModelDownload
+            if job
+                .payload
+                .get("localDerivation")
+                .and_then(|block| block.get("conversion"))
+                .and_then(Value::as_str)
+                .is_some_and(|conversion| conversion.starts_with(FLUX3_CONVERSION_PREFIX)) =>
+        {
+            WorkerCapability::ImageGenerate.as_str()
+        }
         JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
             WorkerCapability::AudioGenerate.as_str()
         }
+        // sc-26241: a FLUX 3 publisher package (FP8R, NVFP4) runs only past its CUDA device floor.
+        // The worker advertises the floor's marker exactly when its GPU clears it, so the job
+        // stays queued for a capable worker instead of being claimed and refused at load.
+        JobType::ImageGenerate | JobType::ImageEdit => {
+            flux3_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
+        }
         _ => job.job_type.as_str(),
     }
+}
+
+/// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).
+pub const FLUX3_CONVERSION_PREFIX: &str = "flux3-";
+
+/// The device-floor marker a FLUX 3 image job's package requires, if any.
+fn flux3_required_worker_capability(job: &JobSnapshot) -> Option<&'static str> {
+    let model = job.payload.get("model").and_then(Value::as_str)?;
+    if !crate::image_request::FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    routing::mlx::flux3_payload_tier(&job.payload)
+        .ok()?
+        .required_worker_capability()
 }
 
 /// True when a person detection/tracking job explicitly opts into the procedural
