@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
+import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, assertOwnedHealth, bindOwnedEnv, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), inference = "b".repeat(40);
 const revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
@@ -164,13 +164,25 @@ test("served PNG must exactly match persisted bytes and requested dimensions", (
   assert.throws(() => assertServedPng(Buffer.from("provider PNG path"), bytes, 1024, 1024));
 });
 
+// The real ready /api/v1/health body, as serialized by apps/rust-api. A rust-api test
+// (ready_health_body_matches_the_checked_in_lifecycle_capture) asserts this capture equals the
+// actual response, so these tests can never again pass against a hand-typed shape.
+const HEALTH_CAPTURE = new URL("./fixtures/sceneworks-api-health-ready.json", import.meta.url);
+async function realHealth(state) {
+  const health = JSON.parse(await readFile(HEALTH_CAPTURE, "utf8"));
+  const owned = { data: path.join(state, 'data'), config: path.join(state, 'config'), projects: path.join(state, 'data', 'projects'), jobsDb: path.join(state, 'data', 'cache', 'jobs.db') };
+  assert.deepEqual(Object.keys(health.directories).sort(), Object.keys(owned).sort(), 'capture directory keys');
+  for (const [key, file] of Object.entries(owned)) { assert.equal(health.directories[key], `<${key}>`); health.directories[key] = await realpath(file); }
+  return health;
+}
+
 async function ownershipFixture(t) {
   const output = await mkdtemp(path.join(tmpdir(), 'flux3-owned-api-'));
   const identity = attemptIdentity(output), { state } = identity;
   await mkdir(path.join(state, 'data', 'cache'), { recursive: true });
   await mkdir(path.join(state, 'data', 'projects')); await mkdir(path.join(state, 'config'));
   await writeFile(path.join(state, 'data', 'cache', 'jobs.db'), 'fixture');
-  const health = { status: 'ok', service: 'sceneworks-api', runtime: 'rust', auth_required: false, readiness: { status: 'ready' }, directories: { data: await realpath(path.join(state, 'data')), config: await realpath(path.join(state, 'config')), projects: await realpath(path.join(state, 'data', 'projects')), jobs_db: await realpath(path.join(state, 'data', 'cache', 'jobs.db')) } };
+  const health = await realHealth(state);
   const api = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
   const controller = new AbortController(), requests = []; let workers = 0;
   const server = createServer((req, res) => { requests.push({ method: req.method, url: req.url }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(req.url === '/api/v1/health' ? health : { accepted: true })); });
@@ -208,7 +220,7 @@ test('matching owned canonical API launches worker then permits ordinary mutatio
 });
 
 test('foreign healthy endpoint with any wrong canonical directory refuses worker, POST and upload', async (t) => {
-  for (const key of ['data', 'config', 'projects', 'jobs_db']) {
+  for (const key of ['data', 'config', 'projects', 'jobsDb']) {
     await t.test(key, async (t) => {
       const f = await ownershipFixture(t), foreign = ['foreign', 'raw', 'body', 'credential'].join('-');
       f.health.directories[key] = path.resolve(foreign); f.health.secret = foreign;
@@ -219,6 +231,27 @@ test('foreign healthy endpoint with any wrong canonical directory refuses worker
       assert.ok(f.requests.every((r) => r.method === 'GET' && r.url === '/api/v1/health'));
     });
   }
+});
+
+test('real serialized health capture is accepted and is camelCase throughout', async (t) => {
+  const f = await ownershipFixture(t);
+  const keys = (value) => value && typeof value === 'object' ? Object.entries(value).flatMap(([k, v]) => [k, ...keys(v)]) : [];
+  const raw = JSON.parse(await readFile(HEALTH_CAPTURE, 'utf8'));
+  assert.equal(raw.authRequired, false); assert.equal(raw.directories.jobsDb, '<jobsDb>');
+  assert.deepEqual(keys(raw).filter((k) => k.includes('_')), []);
+  await assert.doesNotReject(assertOwnedHealth(f.health, f.identity.state));
+  assert.equal((await f.endpoint.verify()).authRequired, false);
+});
+
+test('snake_case-shaped or auth-required health never proves ownership', async (t) => {
+  const f = await ownershipFixture(t);
+  const snake = (value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`), snake(v)])) : value;
+  await assert.rejects(assertOwnedHealth(snake(f.health), f.identity.state), /owned API readiness\/identity required/);
+  const { jobsDb, ...rest } = f.health.directories;
+  await assert.rejects(assertOwnedHealth({ ...f.health, directories: { ...rest, jobs_db: jobsDb } }, f.identity.state), /owned API directory identity missing/);
+  await assert.rejects(assertOwnedHealth({ ...f.health, authRequired: true }, f.identity.state), /owned API readiness\/identity required/);
+  const { authRequired, ...noAuth } = f.health; assert.equal(authRequired, false);
+  await assert.rejects(assertOwnedHealth(noAuth, f.identity.state), /owned API readiness\/identity required/);
 });
 
 test('HTTP200 without actual ready never authorizes registration or mutation', async (t) => {
@@ -258,7 +291,7 @@ test('API exit while request is pending aborts fetch/body and prevents any subse
 
 test('each mutation independently refuses a listener whose paths changed after initial verification', async (t) => {
   const f = await ownershipFixture(t); await f.endpoint.verify();
-  f.health.directories.jobs_db = path.join(path.dirname(f.identity.state), 'other.db');
+  f.health.directories.jobsDb = path.join(path.dirname(f.identity.state), 'other.db');
   await assert.rejects(f.endpoint.call('POST', '/api/v1/models/flux3_klein/download', {}), /identity refused/);
   assert.equal(f.workerCount(), 0); assert.ok(f.requests.every((r) => r.method === 'GET'));
 });

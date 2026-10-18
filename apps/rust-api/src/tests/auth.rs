@@ -135,6 +135,47 @@ async fn public_health_withholds_host_paths_when_a_token_is_configured() {
     assert!(health.get("directories").is_none());
 }
 
+/// The lifecycle harnesses (scripts/flux3-image-klein-app-lifecycle.mjs) prove endpoint
+/// ownership from this exact body, and their JS tests consume the checked-in capture rather
+/// than a hand-typed mock. Any serialized field rename here must update that capture, which
+/// the JS suite then re-validates — so the harness and the DTO cannot drift apart silently.
+#[tokio::test]
+async fn ready_health_body_matches_the_checked_in_lifecycle_capture() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let expected_dirs = [
+        ("data", settings.data_dir.display().to_string()),
+        ("config", settings.config_dir.display().to_string()),
+        ("projects", settings.projects_dir().display().to_string()),
+        ("jobsDb", settings.jobs_db_path.display().to_string()),
+    ];
+    let app = create_app(settings).expect("app creates");
+    let (status, mut health) = request(app, "GET", "/api/v1/health", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Normalize only host- and timing-specific VALUES; every key stays as serialized.
+    for (key, path) in expected_dirs {
+        assert_eq!(health["directories"][key], path.as_str(), "{key}");
+        health["directories"][key] = Value::String(format!("<{key}>"));
+    }
+    health["version"] = Value::String("<version>".to_owned());
+    health["startupMaintenance"]["status"] = Value::String("<status>".to_owned());
+
+    let capture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/fixtures/sceneworks-api-health-ready.json");
+    let capture: Value = serde_json::from_str(
+        &std::fs::read_to_string(&capture_path).expect("lifecycle health capture reads"),
+    )
+    .expect("lifecycle health capture parses");
+    assert_eq!(
+        health,
+        capture,
+        "the ready /api/v1/health body changed; update {} to:\n{}",
+        capture_path.display(),
+        serde_json::to_string_pretty(&health).expect("health serializes"),
+    );
+}
+
 #[tokio::test]
 async fn host_capabilities_requires_token_and_reports_host_memory() {
     // epic 4484 story 9: the remote-browser host-memory signal is auth-protected and
