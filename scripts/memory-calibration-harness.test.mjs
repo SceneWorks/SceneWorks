@@ -1184,7 +1184,7 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   assert.equal(ANCHOR_PLAN_SCHEMA.properties.anchors.type, "object");
   assert.equal(
     ANCHOR_PLAN_SCHEMA.properties.anchors.propertyNames.pattern,
-    "^[a-z][a-z0-9_]*:(q4|q8|bf16):(mlx|candle)$",
+    "^[a-z][a-z0-9_]*:(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$",
   );
   const keys = Object.keys(plan.anchors);
   assert.equal(new Set(keys).size, keys.length);

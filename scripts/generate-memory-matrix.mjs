@@ -1246,7 +1246,7 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
       (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
     )
     .map((download) => download.variant)
-    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
+    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|fp8r|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
   // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment

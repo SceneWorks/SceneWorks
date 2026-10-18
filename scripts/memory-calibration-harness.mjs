@@ -1575,7 +1575,7 @@ function loadAnchorStrategy() {
 export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
-const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
+const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$/;
 
 export function parseAnchorKey(key) {
   const match = ANCHOR_KEY.exec(typeof key === "string" ? key : "");

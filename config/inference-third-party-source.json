@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory rescanned at inference main revision 6bfe5f36 (inference main carrying the epic sc-25140 MiniMax-H3 Veda block-sparse attention feature, its review fixes and its CUDA performance pass, the Qwen-Image 2.1 work, and the Iris-3B epic sc-25678 / epic 2123 work): 772 provenance candidates and 111 production-Rust crate prefixes. No provenance candidate or crate prefix was added or removed since 6eadd2f3; the only candidate change is a content edit to crates/media/candle-gen/candle-gen/src/quant/mod.rs under its existing crate architecture prefix. The vendored crates/media/candle-gen/vendor/candle-metal-kernels (upstream Hugging Face Candle candle-metal-kernels 0.10.2 plus one unmodified upstream Metal strided-reduce fix documented in its VENDORED.md) stays classified under the Hugging Face Candle About component alongside the vendored candle-core. Veda sources (gen-core veda/topk.rs and veda/workspace.rs, mlx-gen-minimax-h3 veda/mod.rs, the candle-quant-kernels CUDA veda_int8 kernel, and the frozen TripPool tile-scorer kernels veda_score.rs/veda_score.cu added at 6bfe5f36) remain routed to the veda-sparse-source area, whose frozen Veda-on-ComfyUI 60bfae6 MIT, SageAttention BSD-3-Clause and LLVM Apache-2.0-with-LLVM-exceptions notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The mlx-gen-iris and candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component; the gen-core iris modules fall under the existing gen-core ported-source area. The perceptual/body production crates remain unclassified open advisory items for epic 2123's compliance pass; other open compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution, and generated inventories and digests describe this exact source with no measurement currency claim. Historical main-pin audit context retained verbatim: Audit inventory rescanned at inference revision d47ce76f for the zip 9 security migration: 772 provenance candidates and 111 production-Rust crate prefixes. The changes update the existing Candle, MLX, and Kokoro archive readers to propagate filename decoding errors and retain their existing source-area classifications. No new ported-source area or licensing permission is introduced. Existing unclassified compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "db354e0ff57b58cd1a7cb7b7016b628c229f5f0c",
-  "auditDigest": "37dfb1bd162a470691c07e1dab6af86b26a633858489cfaa0ef5c409f404d17b",
+  "inferenceRevision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
+  "auditDigest": "3f91a88accf75da8a3dd14f41776da1207802f2a067f30ace3d1218dca942a0c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "db354e0ff57b58cd1a7cb7b7016b628c229f5f0c",
+    "revision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 782,
-    "populationSha256": "197988f5b83358a26c5af197e30295104ea8223054c674c695f1ced0bd896ad6"
+    "matchedFiles": 784,
+    "populationSha256": "2486e614f4218087b1e9e939b2d0ecbd697dae112de0fc4324657a6fcb77fd74"
   },
   "portedSourceAreas": [
     {
@@ -980,7 +980,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "db354e0ff57b58cd1a7cb7b7016b628c229f5f0c",
+    "revision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 113,
     "cratePopulationSha256": "f228f8fa51255ec7ab6aae7342d07e2bc26137fc4ab3f75315be53fcf89b506d"

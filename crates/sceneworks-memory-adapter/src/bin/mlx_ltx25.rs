@@ -656,6 +656,7 @@ fn context(
             frames: target.geometry.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay,
         budget: MemoryBudget {
             total_bytes,

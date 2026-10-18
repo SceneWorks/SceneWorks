@@ -27,6 +27,12 @@ use std::process::Command;
 #[path = "candle_wan_scail2.rs"]
 mod candle_wan_scail2;
 
+#[path = "candle_flux3.rs"]
+mod candle_flux3;
+#[path = "flux3_common.rs"]
+mod flux3_common;
+const FLUX3_ID: &str = "flux3_klein";
+
 #[path = "candle_iris.rs"]
 mod candle_iris;
 
@@ -1121,6 +1127,7 @@ fn sdxl_candle_arm(request: &Value) -> Result<SdxlCandleArm, String> {
 /// This is derived rather than transcribed so a plan row can be checked against it without a
 /// weights root, and `run_five_rung_reference_loaded` still compares the LOADED contract's own
 /// string — this function is never the authority, only the plan-time expectation.
+#[cfg(test)]
 fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
     let tokens = model_id
         .replace('_', "-")
@@ -2243,6 +2250,7 @@ fn missing_contract_reason(generator: &dyn Generator, request: &Value) -> String
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: 0,
@@ -3162,6 +3170,7 @@ fn run_five_rung_reference_loaded(
             frames: 1,
             reference_count: u32::from(edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -4055,6 +4064,7 @@ fn pulid_flux_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -4555,6 +4565,7 @@ fn sensenova_candle_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -5279,6 +5290,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
             frames: target.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: adapter_stack_identity(&adapters),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -5633,6 +5645,7 @@ struct Sc22737VideoArm {
     /// eager whatever the spec asks. The plan rows this arm serves must declare the same shape —
     /// `sc22737_plan_rows_declare_the_load_shape_their_arm_stages` holds them to it weights-free,
     /// because `run_sc22737_video_capture`'s plan/provider re-assert only fires on a CUDA host.
+    #[cfg(test)]
     load_shape: LoadShape,
 }
 
@@ -5670,6 +5683,7 @@ const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:bernini-dual-expert",
     validate_geometry: validate_bernini_candle_geometry,
     load_plan: bernini_candle_load_plan,
+    #[cfg(test)]
     load_shape: BERNINI_CANDLE_LOAD_SHAPE,
 };
 
@@ -5687,6 +5701,7 @@ const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:ltx-2.3",
     validate_geometry: validate_ltx23_candle_geometry,
     load_plan: ltx23_candle_load_plan,
+    #[cfg(test)]
     load_shape: LTX23_CANDLE_LOAD_SHAPE,
 };
 
@@ -5704,6 +5719,7 @@ const MINIMAX_CANDLE_BASE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    #[cfg(test)]
     load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
@@ -5726,6 +5742,7 @@ const MINIMAX_CANDLE_REFERENCE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    #[cfg(test)]
     load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
@@ -6402,6 +6419,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
+        reference_resources: None,
         overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6918,6 +6936,7 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay.clone()),
         budget: MemoryBudget {
             total_bytes: budget_bytes,
@@ -7510,6 +7529,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         },
         // `validate_edit_route` requires this to be exactly `Some("lora")` when the load carries
         // adapters and `None` when it does not — so it is derived from the spec's own stack.
+        reference_resources: None,
         overlay: (loaded_adapters > 0).then(|| "lora".to_owned()),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -7685,6 +7705,9 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let provider = planned_provider(request)?;
+    if matches!(provider, FLUX3_ID) {
+        return candle_flux3::run(request);
+    }
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
     }
@@ -7894,6 +7917,7 @@ fn run(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -12235,6 +12259,7 @@ mod sc22738_arm_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: MemoryBudget {
                 total_bytes: 1 << 34,

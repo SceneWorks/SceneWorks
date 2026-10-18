@@ -1799,8 +1799,20 @@ def test_locally_derived_tiers_fetch_exactly_their_source_variant():
             ]
             assert len(source) == 1, (model["id"], row["variant"])
             assert "localDerivation" not in source[0]
-            for key in ("provider", "repo", "revision", "files", "platforms"):
+            for key in ("provider", "repo", "revision", "files"):
                 assert row.get(key) == source[0].get(key), (model["id"], row["variant"], key)
+            # A conversion belongs to the backend that loads it (sc-26241: FLUX 3's Candle GGML
+            # q4/q8 off-Mac, its MLX affine q4/q8 on macOS), so a derived row may narrow its
+            # source's platforms — never widen them to a host the original does not install on.
+            source_platforms = source[0].get("platforms")
+            if source_platforms is None:
+                assert row.get("platforms") is None or row["platforms"], (model["id"], row["variant"])
+            else:
+                assert set(row.get("platforms") or source_platforms) <= set(source_platforms), (
+                    model["id"],
+                    row["variant"],
+                    "platforms",
+                )
             assert row["footprint"]["diskSizeBytes"] > source[0]["footprint"]["diskSizeBytes"]
     # Shape, not population: the catalog declares at least one derived tier (so the loop above
     # judged something), and every one of them resolved its `fromVariant` row above.

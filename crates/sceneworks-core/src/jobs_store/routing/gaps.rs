@@ -5,6 +5,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
+use crate::image_request::image_quant_tier_refusal;
 use crate::jobs_store::routing::candle::{
     candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
     image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
@@ -998,11 +999,28 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             "distilled FLUX 3 request outside plain text-to-image",
             &format!(
                 "FLUX 3 Image Klein serves plain text_to_image on both native backends. \
-                 References, boxes, controls, adapters, quantized checkpoints and hires fix are \
-                 not supported by this distilled route. Re-submit without those carriers and \
-                 select the pinned distilled checkpoint, rather than the base checkpoint.{also}"
+                 References, boxes, controls, adapters and hires fix are not supported by this \
+                 distilled route, and the precision must name exactly one installed package: \
+                 bf16, q4 or q8 (advanced.mlxQuantize 0/4/8 or advanced.quantTier), or the \
+                 CUDA-only publisher fp8r / nvfp4 (advanced.quantTier). Re-submit without those \
+                 carriers and select the pinned distilled checkpoint, rather than the base \
+                 checkpoint.{also}"
             ),
             Some("sc-26235"),
+        ),
+        CandleImageRefusal::Fp8rTier => UnsupportedReason::new(
+            Some(model),
+            "fp8r quant tier request this model cannot load",
+            &format!(
+                "{reason}. Candle refuses rather than silently rendering at a precision the \
+                 request did not name.{also}",
+                reason = payload
+                    .get("advanced")
+                    .and_then(Value::as_object)
+                    .and_then(|advanced| image_quant_tier_refusal(model, advanced))
+                    .unwrap_or_else(|| "advanced.quantTier \"fp8r\" is not loadable here".to_owned()),
+            ),
+            Some("sc-26241"),
         ),
         CandleImageRefusal::IrisSurface => UnsupportedReason::new(
             Some(model),
