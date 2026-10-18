@@ -2,7 +2,7 @@
   "registry": "audio",
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "db354e0ff57b58cd1a7cb7b7016b628c229f5f0c",
+    "inferenceRevision": "8feaf437862f8e62ac1ae450d256ecb33e0039f9",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities [--no-default-features --features backend-candle]"
   },
   "engines": [
