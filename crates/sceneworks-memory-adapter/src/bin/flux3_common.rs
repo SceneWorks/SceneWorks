@@ -258,20 +258,46 @@ pub(super) fn context(plan: &Plan, abi: u32, hardware_bytes: u64) -> MemoryRunCo
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum BoundaryError {
     MissingPreDenoise,
+    InvalidZeroStep,
 }
 impl std::fmt::Display for BoundaryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("missing_phase_boundary: native FLUX3 must emit synchronized Step{current:0} after conditioning and before the first DiT forward (or a staged Renderer load); completed Step1 cannot label conditioning. Update the inference pin before capturing this resident route")
+        formatter.write_str(match self {
+            Self::MissingPreDenoise => "missing_phase_boundary: native FLUX3 must emit typed ConditioningComplete after materialized, stream-fenced conditioning and before the first DiT forward (or a staged Renderer load); completed Step1 cannot label conditioning. Update the inference pin and wire the typed event before capturing this resident route",
+            Self::InvalidZeroStep => "invalid_phase_boundary: Progress::Step is 1-based; Step0 is not a conditioning-completion event",
+        })
     }
 }
+impl std::error::Error for BoundaryError {}
 
-/// Cross only real pre-denoise boundaries. Step0 is the provider's materialized,
-/// stream-fenced conditioning completion, NOT completed solver Step1. Older pins
-/// without this event fail explicitly rather than publishing mislabeled phases.
+/// Reducer for the native typed ConditioningComplete event. The current pin
+/// predates that variant; S8's pin update must add the explicit match arm below,
+/// not overload the documented 1-based Step protocol. This reducer is independently
+/// weights-free testable while old resident providers fail closed.
+pub(super) fn conditioning_complete(
+    phase: &mut protocol::ReferencePhase,
+) -> Option<protocol::ReferencePhase> {
+    if *phase != protocol::ReferencePhase::Conditioning {
+        return None;
+    }
+    *phase = protocol::ReferencePhase::Denoise;
+    Some(*phase)
+}
+
+/// Cross only real pre-denoise boundaries, never completed solver Step1. Older
+/// pins without the typed completion event fail rather than mislabeling phases.
 pub(super) fn boundary(
     phase: &mut protocol::ReferencePhase,
     progress: &Progress,
 ) -> Result<Option<protocol::ReferencePhase>, BoundaryError> {
+    if matches!(progress, Progress::Step { current: 0, .. }) {
+        return Err(BoundaryError::InvalidZeroStep);
+    }
+    // S8 typed-event pin integration seam:
+    // Progress::ConditioningComplete => return Ok(conditioning_complete(phase)).
+    if matches!(progress, Progress::Loading(LoadPhase::Renderer)) {
+        return Ok(conditioning_complete(phase));
+    }
     if *phase == protocol::ReferencePhase::Conditioning
         && matches!(
             progress,
@@ -281,8 +307,6 @@ pub(super) fn boundary(
         return Err(BoundaryError::MissingPreDenoise);
     }
     let reference = match progress {
-        Progress::Loading(LoadPhase::Renderer) => protocol::ReferenceBoundary::RendererLoad,
-        Progress::Step { current: 0, .. } => protocol::ReferenceBoundary::FirstDenoiseStep,
         Progress::Decoding => protocol::ReferenceBoundary::Decoding,
         _ => return Ok(None),
     };
@@ -586,7 +610,16 @@ mod tests {
                     total: STEPS
                 }
             ),
-            Ok(Some(protocol::ReferencePhase::Denoise))
+            Err(BoundaryError::InvalidZeroStep)
+        );
+        assert_eq!(
+            conditioning_complete(&mut resident),
+            Some(protocol::ReferencePhase::Denoise)
+        );
+        assert_eq!(
+            conditioning_complete(&mut resident),
+            None,
+            "duplicate completion does not reset peaks"
         );
         assert_eq!(
             boundary(
