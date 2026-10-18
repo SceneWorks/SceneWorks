@@ -560,6 +560,38 @@ mod tests {
                 })
                 .unwrap_or_else(|error| panic!("{}: {error}", derivation.conversion));
             }
+            crate::flux3_converted_bundle_check(&source, &dir)
+                .unwrap_or_else(|error| panic!("{} inventory: {error}", derivation.conversion));
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            if matches!(
+                conversion,
+                Flux3Conversion::CandleGgmlQ4_1 | Flux3Conversion::CandleGgmlQ8_0
+            ) {
+                use gen_core::flux3::artifacts::NativeDitStorage;
+                use runtime_cuda::providers::flux3::memory_strategy::{
+                    dit_bytes, native_dit_bytes,
+                };
+                let config = gen_core::flux3::Flux3Config::from_dir(&dir).unwrap();
+                let storage = NativeDitStorage::from_package(&dir).unwrap();
+                let dense = dit_bytes(&source.join("model.safetensors"), gen_core::Precision::Bf16)
+                    .unwrap();
+                let packed = native_dit_bytes(
+                    &dir.join("model.safetensors"),
+                    gen_core::Precision::Bf16,
+                    storage,
+                    &config.dit,
+                )
+                .unwrap();
+                let floor =
+                    (32.0 - (dense as f64 - packed as f64) / 1024_f64.powi(3)).ceil() as u64;
+                let tier = if conversion.quantize() == Quantize::Q4 {
+                    "q4"
+                } else {
+                    "q8"
+                };
+                assert_eq!(entry["candle"]["minMemoryGbByTier"][tier], floor,
+                    "the derived floor replaces the dense DiT term with inference's exact packed pricing");
+            }
             let weights = dir.join(&derivation.weights_file);
             let bytes = std::fs::metadata(&weights).unwrap().len();
             let mut hasher = Sha256::new();
