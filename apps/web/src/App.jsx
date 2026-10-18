@@ -39,7 +39,6 @@ import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
-import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
 import {
   persistWorkflowEmbedPreference,
   readEmbedWorkflowInImages,
@@ -47,7 +46,7 @@ import {
   subscribeWorkflowEmbedFlags,
   writeEmbedWorkflowInImages,
   writeWorkflowEmbedNoticeSeen,
-} from "./workflowEmbed.js";
+} from "./workflowEmbedPreferences.js";
 import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
@@ -235,6 +234,11 @@ const SimpleShell = lazyScreen(
   () => import("./simple/SimpleShell.jsx"),
   "SimpleShell",
   "Simple UI",
+);
+const WorkflowEmbedDecisionModal = lazyInteraction(
+  () => import("./components/WorkflowEmbedNotice.jsx"),
+  "WorkflowEmbedDecisionModal",
+  "Workflow sharing choice",
 );
 const WorkflowDropPanel = lazyInteraction(
   () => import("./components/WorkflowDropPanel.jsx"),

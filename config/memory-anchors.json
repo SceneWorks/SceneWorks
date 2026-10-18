@@ -12679,6 +12679,50 @@
       "evidence": null
     },
     {
+      "id": "analytic:moss_image_base:candle:default",
+      "modelId": "moss_image_base",
+      "modelFamily": "moss_image",
+      "route": "moss_image_base",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_base:mlx:default",
+      "modelId": "moss_image_base",
+      "modelFamily": "moss_image",
+      "route": "moss_image_base",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_sft:candle:default",
+      "modelId": "moss_image_sft",
+      "modelFamily": "moss_image",
+      "route": "moss_image_sft",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_sft:mlx:default",
+      "modelId": "moss_image_sft",
+      "modelFamily": "moss_image",
+      "route": "moss_image_sft",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:pulid_flux_dev:candle:bf16",
       "modelId": "pulid_flux_dev",
       "modelFamily": "flux",

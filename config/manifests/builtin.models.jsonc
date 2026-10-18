@@ -12,6 +12,298 @@
   "schemaVersion": 1,
   "models": [
     {
+      "id": "moss_image_base",
+      "name": "MOSS-Image Base",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_base",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "image": {
+        "supportsSchedulerShift": true,
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-Base",
+          "revision": "1ceede80badddd6a7812069619edaa5633587192",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "estimatedSizeBytes": 10164749652,
+          "default": true
+        },
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "estimatedSizeBytes": 17055137947,
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-Base"
+      },
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/blob/1ceede80badddd6a7812069619edaa5633587192/LICENSE",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3,
+        "schedulerShift": 5,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 16,
+        "maxDimension": 4096,
+        "requiresDimensionsMultipleOf": 16
+      },
+      "mlx": {},
+      "candle": {
+        "measured": false
+      },
+      "ui": {
+        "label": "MOSS-Image Base",
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "recommendedFor": [
+          "text_to_image"
+        ],
+        "promptGuide": {
+          "title": "MOSS-Image Prompt Guide",
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "name": "MOSS-Image SFT",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_sft",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "image": {
+        "supportsSchedulerShift": true,
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "estimatedSizeBytes": 10164749875,
+          "default": true
+        },
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "estimatedSizeBytes": 17055137947,
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-SFT"
+      },
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/blob/fc5de0d56fc910cbca6f6625a70f5f582b26deb1/LICENSE",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3,
+        "schedulerShift": 5,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 16,
+        "maxDimension": 4096,
+        "requiresDimensionsMultipleOf": 16
+      },
+      "mlx": {},
+      "candle": {
+        "measured": false
+      },
+      "ui": {
+        "label": "MOSS-Image SFT",
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "recommendedFor": [
+          "text_to_image"
+        ],
+        "promptGuide": {
+          "title": "MOSS-Image Prompt Guide",
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT"
+            }
+          ]
+        }
+      },
+      "conditionalComponents": [
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "lora.safetensors"
+          ],
+          "estimatedSizeBytes": 1189176800,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-lora",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "time_embedding.safetensors"
+          ],
+          "estimatedSizeBytes": 41017896,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-time",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "dataspace.safetensors"
+          ],
+          "estimatedSizeBytes": 65728,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-dataspace",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16",
+            "moss_dmd_full_fp32"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00004-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json"
+          ],
+          "estimatedSizeBytes": 20329321561,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-transformer",
+          "requiredFor": [
+            "moss_dmd_full_fp32"
+          ]
+        }
+      ]
+    },
+    {
       "id": "mage_flow_edit_base",
       "name": "Mage-Flow Edit-Base",
       "family": "mage-flow",

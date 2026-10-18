@@ -1379,7 +1379,9 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     // MiniMax-H3 is no longer part of the unmeasured population: SC-20754 supplies its measured
     // Candle rows at the shipped 1344x768 geometry, and the feature branch must retain that evidence.
     const unmeasured = rest.filter((model) => !Number.isFinite(model.candle?.minMemoryGb));
-    expect(unmeasured).toEqual([]);
+    // MOSS uses authenticated selected-mode bytes and native request admission rather than
+    // a fabricated catalog peak; terminal native acceptance does not invent calibration.
+    expect(unmeasured.map((model) => model.id).sort()).toEqual(["moss_image_base", "moss_image_sft"]);
 
     // The three shapes are exhaustive over the lane: `withPerTier ∪ blanketOnly ∪ unmeasured` is
     // exactly `uncalibratedLane`. With each subset pinned by id above, this closes the population

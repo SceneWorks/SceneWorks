@@ -6184,6 +6184,12 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
             crate::classify_engine_error("MLX residency source validation failed", error)
         })?;
     }
+    // MOSS's generic stream admits the authenticated SELECTED precision closure plus request
+    // workspace inside the cache transaction. The generic source sum includes the unselected SFT
+    // transformer during full-FP32 acceleration and must not choose a different load policy.
+    if sceneworks_core::moss_image::is_moss(engine_id) {
+        return Ok(spec);
+    }
     // Respect an offload policy already chosen upstream (defensive: the MLX cache seam normally sees
     // the default `Resident`, but never downgrade a `Sequential` set by another gate).
     if spec.offload_policy == OffloadPolicy::Sequential {
@@ -20110,6 +20116,12 @@ mod tests {
         }
         assert!(!engine_engages_staged_residency("sensenova_u1_8b"));
         assert!(!engine_engages_staged_residency("no_such_engine_xyz"));
+        for id in ENGINES_WITHOUT_A_STAGED_RESIDENCY_CAPABILITY {
+            assert!(
+                !engine_engages_staged_residency(id),
+                "{id}: registered descriptor must continue to advertise no staged residency"
+            );
+        }
 
         // COMPLETENESS (sc-24108). The sweep above only asserts the ids it LISTS, so a newly
         // registered engine that belongs in it is invisible: the list stays green, the memory-matrix
@@ -20172,6 +20184,9 @@ mod tests {
         "mage_flow_edit_base",
         "mage_flow_edit_turbo",
         "mage_flow_turbo",
+        // sc-26325: native MOSS accepts resident/eager loading and advertises neither staging bit.
+        "moss_image_base",
+        "moss_image_sft",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
     ];

@@ -5412,6 +5412,8 @@ fn mlx_raw_settings(
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
     // Worker-owned too (epic 25899): only the image's own render report adds the record back.
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::REPORT_KEY);
+    raw.remove("moss_image_execution_report");
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -10037,6 +10039,11 @@ async fn generate_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -10905,6 +10912,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1" => "candle_qwen_2_1",
         // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
+        "moss_image_base" => "candle_moss_image_base",
+        "moss_image_sft" => "candle_moss_image_sft",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -12686,6 +12695,11 @@ async fn generate_candle_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
@@ -18774,3 +18788,5 @@ mod declared_sequential_resident_tests {
         assert!(!admission_needs_no_staging(&rejected));
     }
 }
+
+include!("moss.rs");

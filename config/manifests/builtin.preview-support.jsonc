@@ -7,11 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
-      "audioInferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce"
+      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9"
     },
     "mlx": {
-      "inferenceRevision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce"
+      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9"
     }
   },
   "models": {
@@ -157,6 +156,14 @@
     },
     "mmaudio_small_16k": {
       "candle": false
+    },
+    "moss_image_base": {
+      "candle": false,
+      "mlx": false
+    },
+    "moss_image_sft": {
+      "candle": false,
+      "mlx": false
     },
     "moss_sfx_v2": {
       "candle": false

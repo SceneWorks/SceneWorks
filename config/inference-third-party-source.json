@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference revision d47ce76f for the zip 9 security migration: 772 provenance candidates and 111 production-Rust crate prefixes. The changes update the existing Candle, MLX, and Kokoro archive readers to propagate filename decoding errors and retain their existing source-area classifications. No new ported-source area or licensing permission is introduced. Existing unclassified compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "d47ce76f55b852091985a978dbeeadc49a8de9d2",
-  "auditDigest": "fce174d937da0fbece6f70d92efb106f72e26dc667b54db5221d888c9fe6a3cb",
+  "_comment": "Audit inventory reviewed at inference revision 16fbf98e for native MOSS-Image integration: 772 provenance candidates and 113 production-Rust crate prefixes. The two new marker-free MOSS MLX/Candle provider crates are explicitly classified as native architecture reimplementations using the frozen Base/SFT pipeline and DMD formulas; no copied upstream production Python or new marker-bearing portedSourceAreas entry is claimed. Official Base/SFT Apache-2.0 LICENSE texts and the optional DMD README Apache-2.0 declaration are disclosed in About; DMD publishes no standalone LICENSE, and no MIT grant is inferred. Existing source-area classifications and advisory compliance items under sc-19751 remain unchanged. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
+  "auditDigest": "57b2fad118839ee375b91f3bf9f8ad4aec97a414b7ef207573ace3e9c7664cc2",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "d47ce76f55b852091985a978dbeeadc49a8de9d2",
+    "revision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 772,
-    "populationSha256": "3869e454f688c5e3283ed5296a09a7675ff9b3de55fcf843723089692570d238"
+    "populationSha256": "9cc69521b01c6c52c738c75d37573a8db4471a5438a7e588337bedcf4bf919f7"
   },
   "portedSourceAreas": [
     {
@@ -980,10 +980,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "d47ce76f55b852091985a978dbeeadc49a8de9d2",
+    "revision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 111,
-    "cratePopulationSha256": "99015076703c1fa369041bb4f1cd1390248a7007ea79331857e1bff8552f3f03"
+    "cratePrefixes": 113,
+    "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"
   },
   "crateDispositions": [
     {
@@ -1077,6 +1077,18 @@
       "disposition": "upstream-content-existing-terms",
       "component": "candle-transformers-source",
       "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
     }
   ]
 }
