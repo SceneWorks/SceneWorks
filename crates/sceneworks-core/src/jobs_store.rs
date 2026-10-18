@@ -402,7 +402,9 @@ pub struct PlatformReachabilitySweepStats {
 /// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
 /// backfills every older row before workers can claim it, keeping policy changes
 /// out of the latency-sensitive claim transaction.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 2;
+// sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
+// eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 3;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
