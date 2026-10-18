@@ -1,0 +1,29 @@
+{
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "appdir": "/home/sceneworks/sc3017/production-packaging/checked/squashfs-root",
+  "api_sha256": "84e35de20f0b2bf6f54c94ec385e65a88ea9a479edc236213deba744d1f70da7",
+  "bundled_host_driver_libraries": [],
+  "packaging_passed": true,
+  "scope": "AppImage packaging and one-shot CUDA probe; not a Bazzite desktop or model-generation test",
+  "artifact": {
+    "name": "SceneWorks_production-ignore.AppImage",
+    "sha256": "bf11be94ad8cad2b65c64f0fc97fe22ee757e2ebdca109f9432bfbf241240dc5"
+  },
+  "nvidia_smi": {
+    "exit_code": 0,
+    "stdout": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\nNVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\n",
+    "stderr": ""
+  },
+  "bundled_driver": {
+    "ldd": {
+      "exit_code": 0,
+      "stdout": "\tlinux-vdso.so.1 (0x00007fffc8072000)\n\tlibcuda.so.1 => /usr/lib/wsl/lib/libcuda.so.1 (0x00007c16a10e0000)\n\tlibnvrtc.so.12 => /home/sceneworks/sc3017/production-packaging/checked/squashfs-root/usr/lib/libnvrtc.so.12 (0x00007c167cc00000)\n\tlibcurand.so.10 => /home/sceneworks/sc3017/production-packaging/checked/squashfs-root/usr/lib/libcurand.so.10 (0x00007c1672400000)\n\tlibcublas.so.12 => /home/sceneworks/sc3017/production-packaging/checked/squashfs-root/usr/lib/libcublas.so.12 (0x00007c166bc00000)\n\tlibcublasLt.so.12 => /home/sceneworks/sc3017/production-packaging/checked/squashfs-root/usr/lib/libcublasLt.so.12 (0x00007c1639800000)\n\tlibcudart.so.12 => /home/sceneworks/sc3017/production-packaging/checked/squashfs-root/usr/lib/libcudart.so.12 (0x00007c1639200000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007c1638e00000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007c16a10b0000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007c1683517000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007c1638a00000)\n\t/lib64/ld-linux-x86-64.so.2 (0x00007c16a111e000)\n\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007c16a10a9000)\n\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007c16a10a4000)\n\tlibrt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x00007c16a109f000)\n",
+      "stderr": ""
+    },
+    "gpu_check": {
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  }
+}

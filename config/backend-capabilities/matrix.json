@@ -2,36 +2,36 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 139,
+    "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1067,
+    "cellCount": 1090,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 82,
+    "candleOnlyCellCount": 86,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "b697375b24ab4b8b055be166ab144498ac3e1b656e1bbea35d095a5a2a44e26c",
+    "apiContractEntry": "1e2543a06d4142ed7597451ce4e764f7abdfafa8697a34a0558107fee1cdc814",
     "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
-    "apiValidation": "696e591d5a03e42d96a4a1a59397ee05ef1bc355b08dd62aeeec0f26cfd23631",
+    "apiValidation": "05ba80de4f2a6e342bacb4e40cb7c201482e1ec426cdd2e38663b0dce28a22b4",
     "baseWeightImports": "b468fd4ac5f68d6c3a855c2745b3581601314de9cceaa0e9140973a3ba8e368d",
-    "descriptorAudioFacts": "c758f6eb145be2e1f736f7edb1b15f174c327c5c0f9e506ceff4003af0224485",
-    "descriptorCandleFacts": "756f38cdfa521c3f98fda82220a0e191acfc5f1f3a0b4b3e15118260c62051ff",
-    "descriptorCandleRuntime": "780e1875cbba03f36df39fdfc2f39f4a4931578a8275a9ee4dfee333b986b221",
-    "descriptorMlxFacts": "0657ed49a49213de979637077abbf142660a30d515b4322f8c599bc2b225e207",
-    "descriptorMlxRuntime": "a91c5ba0c5e4580d8f63d58d5436960af23bcf3ce63fcd9ab147d4f794262046",
-    "descriptorPreviewFacts": "46fb2ddc72947b4f6c1c644380ac944a755070a76d18cba070e7a98d6bc32b1a",
+    "descriptorAudioFacts": "2278e8cda8b71e78209a3fd980d0a3133abbf995e4a08a605754674a5801a9ed",
+    "descriptorCandleFacts": "0bcfd4d60b7306f9521dfe56f527649b3518c7837b5afda5b3f9be45b26da694",
+    "descriptorCandleRuntime": "7552f7bb261a3db4685ac5cae58061575ba05d8c3f95fd1ea9bbc9401fe6539f",
+    "descriptorMlxFacts": "9b248164d9116a2e2b88980de626550b7799ca84b175de0148548e80b0d700b9",
+    "descriptorMlxRuntime": "b6ca296abccc41c2e2dbd8ef49893cb141dfbf624ce1495eb2a040ada54341a5",
+    "descriptorPreviewFacts": "7133d4822f3f617db96a02b431034c0d255f33c3ccea24d7cdce0ffa5e0f0c0b",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "3cb32156ffbf2e356052718a54f51fc35c30e744ece166f1882bd5ce01ff438f",
-    "modelImportDefaults": "bf8e8f04560d69282a43bf6ef8f702597a0c0016e5689abb31e0f306e5dd63bc",
-    "routerCandle": "a9086edf4148dfe6da5a1e6466db343d6eaf8093c2ab03c3d49b13b3ce4ea29f",
-    "routerCatalog": "2cc48474814c9eaa2eda47d94057a0af8fdae1fb6617b4ae56b61f3f033bfa3c",
-    "routerGaps": "8c0f573a0304c1339bf82cf84b4a221a9ccb8d76eccca1e05321f75a0f22a883",
-    "routerMlx": "ebcec6cf5ea3fbb9bdd326cc5bc7a8bbefac52f8854fac7aa6a2e767429e3f76",
-    "scheduler": "1818d905cba00a3c927c680bc629a7937b92f5e4a366bc6b1c1b9c005c5ce2da",
-    "trainingCatalog": "f615fb294f2b60ed84ba9280a801ca52a8efc32ddeeccc1eef09d021c66942ad",
+    "manifest": "d6b4c9ee201259ce5a94ad72ce4231568063f6b174624ef60b2d087d36d92a12",
+    "modelImportDefaults": "5a9b453897bd5df5e0096412c20d8163fcecc7a523e4afd874a504eac6d7386b",
+    "routerCandle": "f97251af1f0f9c866c68d3bc3d2e565673f5be2b7462827b1526a1e317c19d6c",
+    "routerCatalog": "f4645a0d50357b7259e01064e9dadf2ebec24f98e30dd933496ba2b6a1c6c8d0",
+    "routerGaps": "6d541c25c4b36a141021f0ee5846d12743fe6951ca3bfa954ac0c19fad6c0e63",
+    "routerMlx": "30052188d546059520443b0e55952abf8f98931bb4ec7aa246789798023ef4f9",
+    "scheduler": "4699073664ef21ff0a7e0491816d829285b230df1e1a9f3f2249c717a9582eb6",
+    "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
-    "webFallbackCatalog": "568b68a6dc870b1d71ffaed00ff62cd3628576862c90d3a599463f8f6584a08f",
+    "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
     "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
     "webImageRequest": "55d0130e36d1c2b1192dcada746ae4b0e035ad1d07d779b801bb453564833680",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
@@ -44,14 +44,14 @@
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
-    "workerAudioDispatch": "3d93819cd7fa4e178c832e7cd022b72141edb4ee90d85a136220e1f60947bd31",
-    "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
-    "workerEngineTable": "4825fabdb24e205e416af55a5ed8df3b9aaaa4b45b0643c5a8ac27466c3ab5df",
-    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "56984788cba46b4091ae6a62b6a323827d94a45f09f89552717320b42c55d097",
-    "workerImageKreaImported": "44a5b7b2b7fa95be565597186aabd80f811b64919149856b497757685f0cfe35",
-    "workerImageMageFinetuned": "da5a75e976782f92c6561ad3b7f9e364bb03c74d12e7f77a8658727d8ae85d80",
-    "workerImagePulid": "f2ffa16632abb63110c1250412e8517b1e3c3b38f5dde0efb6847e09a2954cdc",
+    "workerAudioDispatch": "63e767345ed22edfb96c3bb41b77052f34daf24a1b51f0d3103651b73fec465a",
+    "workerDispatch": "8fd57d43086d08780c5ba8c8ad1be59b4c9c87b3560e56a00bb4e373980b5221",
+    "workerEngineTable": "bffcc754d5280fdf7b79097076f8b2b3e9111240a03ccbb52a57e473ff4259c9",
+    "workerGpuCapabilities": "60f023305dd3f747963241518df69f1895140553f21116932e0550b69d2a8cde",
+    "workerImageDispatch": "1efc4627ba915e7407927dd07866c45544284dd31ca8368ab77e51a112e82d65",
+    "workerImageKreaImported": "4bdd99836ab3d5303e5c9e7bca204ca9aaa2aef76c880552ff9252557474c58c",
+    "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
+    "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "bf16d4523f109501da068a548a649ab1b319f3e59f948a5a305b35cce6d36f68"
+    "workerVideoWan": "d494c35738b69831a1df9c682e6325daf2a7ded714f972125cf37f319d0548de"
   },
   "models": [
     {
@@ -1585,21 +1585,37 @@
       "operationAndMode": [
         {
           "capability": "prompt_enhancement",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
           "mlx": false,
           "candle": false
         },
         {
-          "capability": "text_to_image",
+          "capability": "reference",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "referenceRgba",
           "mlx": false,
           "candle": false
         }
       ],
-      "conditioningShape": [],
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
@@ -1607,12 +1623,40 @@
           "candle": false
         }
       ],
-      "precisionTier": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "fp8r",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
-        "candle": null
+        "mlx": false,
+        "candle": false
       }
     },
     {
@@ -1651,7 +1695,25 @@
           "candle": false
         }
       ],
-      "precisionTier": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "fp8r",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
@@ -4733,6 +4795,90 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "qwen_image_2_1_turbo",
+      "family": "qwen-image-2-1",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
       }
     },
     {

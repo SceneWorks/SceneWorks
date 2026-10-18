@@ -109,6 +109,19 @@ export const QWEN_IMAGE_2_1_MODEL_ID = "qwen_image_2_1";
 export const QWEN_REWRITE_T2I_MODEL_ID = "qwen_image_2_1_pe_t2i";
 export const QWEN_REWRITE_I2I_MODEL_ID = "qwen_image_2_1_pe_i2i";
 
+// The rewrite TARGETS: base 2.1 and its distilled Turbo sibling (sc-25908, epic 25899) — one prompt
+// format, one template. A mirror of `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`, the
+// exact set the worker serves a rewrite for (`qwen_prompt_rewrite::is_rewrite_target_model`);
+// `qwenImage21Turbo.test.jsx` reads the Rust list and holds this one to it. Keyed on the id, NOT
+// the family: an imported custom checkpoint can carry family `qwen-image-2-1` and the worker
+// refuses a rewrite targeting it.
+export const QWEN_IMAGE_2_1_MODEL_IDS = Object.freeze([QWEN_IMAGE_2_1_MODEL_ID, "qwen_image_2_1_turbo"]);
+
+// Whether the official Qwen rewriters apply to the selected generation model.
+export function qwenRewriterAppliesTo(model) {
+  return QWEN_IMAGE_2_1_MODEL_IDS.includes(model?.id);
+}
+
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
 // 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never
@@ -279,6 +292,52 @@ const seededFallbackModels = [
       promptGuide: {
         title: "Qwen Image 2.1 Prompt Guide",
         path: "/prompt-guides/qwen-image-2-1.md",
+      },
+    },
+  },
+  {
+    // Qwen Image 2.1 Turbo (epic 25899) — the distilled few-step sibling of `qwen_image_2_1`. The
+    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (4, from the sc-25909 step sweep), the
+    // default step count (8) and the prompt guide differ. Kept in step with its manifest entry for
+    // the same reason as the base seed above: every `limits` key drives a pre-catalog control.
+    id: "qwen_image_2_1_turbo",
+    name: "Qwen Image 2.1 Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    supportsAlphaOutput: true,
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 4,
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 8,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 Turbo few-step text-to-image and reference editing (research licence).",
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Turbo Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1-turbo.md",
       },
     },
   },

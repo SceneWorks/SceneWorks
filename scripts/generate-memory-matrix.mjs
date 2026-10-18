@@ -137,6 +137,9 @@ export const MODEL_STORIES = {
   // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
   // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
   qwen_image_2_1: { mlx: 24108, candle: 24109 },
+  // Qwen-Image 2.1 Turbo (epic 25899): the distilled sibling's own engine id, ported to MLX by
+  // sc-25900 and to Candle/CUDA by sc-25901 — the same per-backend split base's lanes follow.
+  qwen_image_2_1_turbo: { mlx: 25900, candle: 25901 },
   // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
   // backend's cells are owned by the story that brought that lane through SceneWorks.
   iris_3b: { mlx: 25679, candle: 25680 },
@@ -1270,7 +1273,7 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
       (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
     )
     .map((download) => download.variant)
-    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
+    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|fp8r|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
   // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment

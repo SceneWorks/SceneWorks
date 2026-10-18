@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -19,6 +19,7 @@
     "flux2_klein_9b": "flux2_klein_9b",
     "flux2_klein_9b_kv": "flux2_klein_9b",
     "flux2_klein_9b_true_v2": "flux2_klein_9b",
+    "flux3_klein": "flux3_klein",
     "flux_dev": "flux1_dev",
     "flux_schnell": "flux1_schnell",
     "ideogram_4": "ideogram_4",
@@ -39,6 +40,7 @@
     "mage_flow_turbo": "mage_flow_turbo",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
+    "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
     "qwen_image_edit": "qwen_image_edit",
     "qwen_image_edit_2509": "qwen_image_edit",
     "qwen_image_edit_2511": "qwen_image_edit",
@@ -375,6 +377,8 @@
     "dataset_face_analysis",
     "dataset_upscale",
     "face_likeness_compare",
+    "flux3_nvfp4",
+    "fp8r",
     "gpu",
     "image_depth",
     "image_detail",
@@ -420,6 +424,8 @@
       "flux1_dev",
       "flux2_klein_9b",
       "flux2_dev",
+      "flux3_klein",
+      "flux3_klein_base",
       "ideogram_4",
       "ideogram_4_turbo",
       "iris_3b",
@@ -1001,6 +1007,58 @@
           "beta57",
           "flow_match_euler"
         ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux3_klein",
+        "family": "flux3",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8",
+          "fp8r",
+          "nvfp4"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux3_klein_base",
+        "family": "flux3",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8",
+          "fp8r",
+          "nvfp4"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [],
         "supported_guidance_methods": []
       },
       {
@@ -2291,6 +2349,7 @@
     ],
     "trainer_ids": [
       "anima_base",
+      "flux3_klein_base",
       "iris_3b",
       "iris_3b_depth",
       "iris_3b_restore",
@@ -2332,6 +2391,30 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "flux3_klein_base",
+        "family": "flux3",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false,
+        "max_reference_images": 1,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

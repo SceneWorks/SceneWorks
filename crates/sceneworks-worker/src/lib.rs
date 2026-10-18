@@ -85,6 +85,108 @@ pub fn flux3_runtime_bundle_check(
     Ok(())
 }
 
+/// Check one snapshot member by its canonical path. File symlinks may target this HF repository's
+/// own blob store; directory links must stay inside the snapshot. Nothing from a sibling repo or
+/// arbitrary caller path may certify a bundled component.
+pub(crate) fn flux3_snapshot_member(
+    root: &Path,
+    path: &Path,
+    directory: bool,
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let allowed = if directory {
+        target.starts_with(&canonical_root)
+    } else {
+        gen_core::safetensors_shards::snapshot_shard_roots(root)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|allowed| target.starts_with(allowed))
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} resolves outside the pinned snapshot (or its own blob store): {}",
+            path.display(),
+            target.display()
+        ))
+    }
+}
+
+/// Validate the runtime resources for a publisher FLUX 3 tier contained in a whole snapshot.
+/// Whole-repository download completion is separate: a dense bundle alone cannot certify FP8R or
+/// NVFP4. No tensors or accelerator are loaded.
+pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> Result<(), String> {
+    if !matches!(tier, "fp8r" | "nvfp4") {
+        return flux3_runtime_bundle_check(root, model);
+    }
+    let package = root.join("variants").join(tier);
+    flux3_snapshot_member(root, &package, true)?;
+    for name in ["config.json", "model.safetensors"] {
+        flux3_snapshot_member(root, &package.join(name), false)?;
+    }
+    let config = gen_core::flux3::Flux3Config::from_dir(&package).map_err(|e| e.to_string())?;
+    let storage = gen_core::flux3::artifacts::NativeDitStorage::from_package(&package)
+        .map_err(|e| e.to_string())?;
+    if storage.key().map_err(|e| e.to_string())? != tier {
+        return Err(format!(
+            "{} is not the selected {tier} package",
+            package.display()
+        ));
+    }
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(package))
+        .with_component(
+            gen_core::flux3::TEXT_ENCODER_COMPONENT,
+            gen_core::WeightsSource::Dir(te),
+        )
+        .with_component(
+            gen_core::flux3::AUTOENCODER_COMPONENT,
+            gen_core::WeightsSource::File(ae),
+        );
+    gen_core::flux3::GenerationResources::from_spec(&spec, &config, model)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Check the complete inventory of a locally converted FLUX 3 package: owned outputs and external
+/// encoder/autoencoder files by their conversion receipt, plus the encoder shard set. This is an
+/// integrity check, not a GPU load or memory measurement.
+pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
+    use gen_core::flux3::conversion::ComponentRole;
+    let config = gen_core::flux3::Flux3Config::from_dir(package).map_err(|e| e.to_string())?;
+    let receipt =
+        gen_core::flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let prefix = format!("{}/", config.text_encoder.path);
+    receipt
+        .verify_external_with(|role, path| match role {
+            ComponentRole::TextEncoder => path
+                .strip_prefix(&prefix)
+                .map(|rest| te.join(rest))
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(format!("unrecognized encoder path {path}"))
+                }),
+            ComponentRole::Autoencoder if path == config.vae.path => Ok(ae.clone()),
+            other => Err(gen_core::Error::Unsupported(format!(
+                "unexpected external {other:?}: {path}"
+            ))),
+        })
+        .map_err(|e| e.to_string())?;
+    let roots =
+        gen_core::safetensors_shards::snapshot_shard_roots(&te).map_err(|e| e.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(&te, "model", &roots)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
 // candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow

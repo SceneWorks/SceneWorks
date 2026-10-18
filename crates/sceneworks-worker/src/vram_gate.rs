@@ -3998,6 +3998,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(96.0),
@@ -6045,69 +6046,76 @@ mod tests {
                 .1,
         ))
         .expect("builtin.models.jsonc parses");
-        let entry = obj(manifest["models"]
-            .as_array()
-            .expect("models array")
+        // sc-25907: Turbo holds its bf16 VAE at the Candle compute width exactly as base holds its
+        // f32 one, so its DERIVED Candle floors are the same arithmetic over the same inputs.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
             .iter()
-            .find(|model| model["id"] == "qwen_image_2_1")
-            .expect("qwen_image_2_1 is in the shipped catalog")
-            .clone());
+            .copied()
+        {
+            let entry = obj(manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|model| model["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is in the shipped catalog"))
+                .clone());
 
-        // Each installable tier resolves its OWN derived floor, with no headroom added on top —
-        // these are already-padded floors, and padding them again is the double-charge that makes
-        // a per-tier floor read as a measured peak. The rule is recomputed from the derived
-        // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
-        // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
-        // rather than restated.
-        for (tier, peak_gib) in [
-            ("bf16", 28.61 + 6.92),
-            ("q8", 16.33 + 6.92),
-            ("q4", 9.78 + 6.92),
-        ] {
-            let floor = (peak_gib * 1.25_f64).ceil();
-            assert_eq!(
-                predicted_peak_gb(&entry, tier),
-                Some(floor),
-                "{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
-            );
-        }
-        // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
-        // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
-        // under-prediction admits a load that OOMs.
-        assert_eq!(
-            predicted_peak_gb(&entry, NVFP4_TIER),
-            predicted_peak_gb(&entry, "bf16")
-        );
-        assert!(
-            entry["candle"].get("vramGbByTier").is_none(),
-            "these floors are DERIVED from parameter counts, not measured — a vramGbByTier row \
-             here would be an unmeasured claim wearing an evidence flag"
-        );
-
-        // The armed consequence, as the decision the gate actually returns, against realistic
-        // (total, free) GiB reports.
-        for (card, total_gb, free_gb, bf16, q8, q4) in [
-            ("24 GB card", 23.99, 22.5, false, false, true),
-            ("RTX 5090", 31.84, 30.5, false, true, true),
-            ("A100-40GB", 39.5, 38.5, false, true, true),
-            ("48 GB card", 47.99, 46.5, true, true, true),
-            ("H100-80GB", 79.2, 78.0, true, true, true),
-        ] {
-            let budget = VramBudget { total_gb, free_gb };
-            for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
+            // Each installable tier resolves its OWN derived floor, with no headroom added on top —
+            // these are already-padded floors, and padding them again is the double-charge that makes
+            // a per-tier floor read as a measured peak. The rule is recomputed from the derived
+            // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
+            // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
+            // rather than restated.
+            for (tier, peak_gib) in [
+                ("bf16", 28.61 + 6.92),
+                ("q8", 16.33 + 6.92),
+                ("q4", 9.78 + 6.92),
+            ] {
+                let floor = (peak_gib * 1.25_f64).ceil();
                 assert_eq!(
-                    matches!(
-                        fit_decision(predicted_peak_gb(&entry, tier), Some(budget)),
-                        FitDecision::Fits
-                    ),
-                    admitted,
-                    "{card} ({free_gb} GiB free) must {} the {tier} install",
-                    if admitted {
-                        "be admitted for"
-                    } else {
-                        "be refused"
-                    }
+                    predicted_peak_gb(&entry, tier),
+                    Some(floor),
+                    "{id}/{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
                 );
+            }
+            // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
+            // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
+            // under-prediction admits a load that OOMs.
+            assert_eq!(
+                predicted_peak_gb(&entry, NVFP4_TIER),
+                predicted_peak_gb(&entry, "bf16")
+            );
+            assert!(
+                entry["candle"].get("vramGbByTier").is_none(),
+                "these floors are DERIVED from parameter counts, not measured — a vramGbByTier row \
+                 here would be an unmeasured claim wearing an evidence flag"
+            );
+
+            // The armed consequence, as the decision the gate actually returns, against realistic
+            // (total, free) GiB reports.
+            for (card, total_gb, free_gb, bf16, q8, q4) in [
+                ("24 GB card", 23.99, 22.5, false, false, true),
+                ("RTX 5090", 31.84, 30.5, false, true, true),
+                ("A100-40GB", 39.5, 38.5, false, true, true),
+                ("48 GB card", 47.99, 46.5, true, true, true),
+                ("H100-80GB", 79.2, 78.0, true, true, true),
+            ] {
+                let budget = VramBudget { total_gb, free_gb };
+                for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
+                    assert_eq!(
+                        matches!(
+                            fit_decision(predicted_peak_gb(&entry, tier), Some(budget)),
+                            FitDecision::Fits
+                        ),
+                        admitted,
+                        "{card} ({free_gb} GiB free) must {} the {tier} install",
+                        if admitted {
+                            "be admitted for"
+                        } else {
+                            "be refused"
+                        }
+                    );
+                }
             }
         }
     }

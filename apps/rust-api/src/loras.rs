@@ -3932,8 +3932,9 @@ mod base_model_gating_tests {
 
     // ---- Qwen-Image 2.1 vs 2512 (sc-24156, epic 24107 E10) ----------------------------------
 
-    /// The two SHIPPED Qwen rows, read out of the embedded `builtin.models.jsonc` — the exact
-    /// bytes the API seeds and serves — so the test fails if either advertisement drifts.
+    /// The SHIPPED Qwen rows — 2512, 2.1 and its Turbo sibling (sc-25907) — read out of the
+    /// embedded `builtin.models.jsonc`, the exact bytes the API seeds and serves, so the test fails
+    /// if any advertisement drifts.
     fn shipped_qwen_models() -> Vec<Value> {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -3950,12 +3951,12 @@ mod base_model_gating_tests {
             .filter(|model| {
                 matches!(
                     model["id"].as_str(),
-                    Some("qwen_image") | Some("qwen_image_2_1")
+                    Some("qwen_image") | Some("qwen_image_2_1") | Some("qwen_image_2_1_turbo")
                 )
             })
             .cloned()
             .collect();
-        assert_eq!(models.len(), 2, "both shipped Qwen rows are present");
+        assert_eq!(models.len(), 3, "every shipped Qwen row is present");
         models
     }
 
@@ -3974,9 +3975,11 @@ mod base_model_gating_tests {
             json!(["qwen-image-2-1"])
         );
 
-        // Declared-family path (no file header).
+        // Declared-family path (no file header). sc-25907: Turbo shares 2.1's family (E9), so a
+        // 2512 adapter is refused on it with the same two-family message.
         for (lora_family, model_id, model_family) in [
             ("qwen-image", "qwen_image_2_1", "qwen-image-2-1"),
+            ("qwen-image", "qwen_image_2_1_turbo", "qwen-image-2-1"),
             ("qwen-image-2-1", "qwen_image", "qwen-image"),
         ] {
             let lora = json!({
@@ -4000,6 +4003,12 @@ mod base_model_gating_tests {
                 "Qwen-Image-2512",
                 "qwen-image",
                 "qwen_image_2_1",
+                "qwen-image-2-1",
+            ),
+            (
+                "Qwen-Image-2512",
+                "qwen-image",
+                "qwen_image_2_1_turbo",
                 "qwen-image-2-1",
             ),
             (
@@ -4034,9 +4043,11 @@ mod base_model_gating_tests {
             );
         }
 
-        // Same-version adapters still pass on both models.
+        // Same-version adapters still pass on every model of their family — a 2.1 adapter on the
+        // distilled Turbo checkpoint included (sc-25907, E9).
         for (family, model_id) in [
             ("qwen-image-2-1", "qwen_image_2_1"),
+            ("qwen-image-2-1", "qwen_image_2_1_turbo"),
             ("qwen-image", "qwen_image"),
         ] {
             let lora = json!({

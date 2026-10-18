@@ -5,6 +5,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
+use crate::image_request::image_quant_tier_refusal;
 use crate::jobs_store::routing::candle::{
     candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
     image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
@@ -999,12 +1000,26 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             &format!(
                 "FLUX 3 Image Klein base and distilled checkpoints serve text_to_image on both \
                  native backends, including exact-identity compatible LoRA. References, boxes, \
-                 controls, quantized checkpoints and hires fix are not supported by this route. \
-                 Re-submit without those carriers, use an explicit adapter id for each selected \
-                 LoRA, and select the model's pinned checkpoint. Adapter base_model/base_revision \
-                 must match that checkpoint.{also}"
+                 controls and hires fix are not supported by this route. Select one installed \
+                 package: bf16, q4 or q8 on both backends, or publisher fp8r / nvfp4 on Candle. \
+                 Use an explicit adapter id for each LoRA and select the model's pinned checkpoint. \
+                 Adapter base_model/base_revision must match that checkpoint.{also}"
             ),
             Some("sc-26239"),
+        ),
+        CandleImageRefusal::Fp8rTier => UnsupportedReason::new(
+            Some(model),
+            "fp8r quant tier request this model cannot load",
+            &format!(
+                "{reason}. Candle refuses rather than silently rendering at a precision the \
+                 request did not name.{also}",
+                reason = payload
+                    .get("advanced")
+                    .and_then(Value::as_object)
+                    .and_then(|advanced| image_quant_tier_refusal(model, advanced))
+                    .unwrap_or_else(|| "advanced.quantTier \"fp8r\" is not loadable here".to_owned()),
+            ),
+            Some("sc-26241"),
         ),
         CandleImageRefusal::IrisSurface => UnsupportedReason::new(
             Some(model),
@@ -1140,7 +1155,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         //
         // An over-cap or empty conditioning set never reaches here: the API refuses it at enqueue
         // with a message that names the cap.
-        "qwen_image_2_1" => UnsupportedReason::new(
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => UnsupportedReason::new(
             Some(model),
             "pose / strict-control conditioning",
             "Qwen Image 2.1 takes up to 10 ordered reference images, but no pose or ControlNet input — it has no strict-control tier. To constrain an edit, draw the marking into the reference image itself, or attach a mask as another reference and name it in the prompt (\"use the second image as a mask\").",

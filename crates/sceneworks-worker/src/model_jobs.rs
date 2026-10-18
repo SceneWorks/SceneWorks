@@ -285,14 +285,40 @@ pub(crate) async fn run_model_download_job(
         .contains_key(crate::local_derivation::PAYLOAD_KEY)
     {
         let original = repo_dir.join("snapshots").join(&snapshot_revision);
-        crate::local_derivation::derive_local_tier(
-            api,
-            settings,
-            job,
-            &original,
-            crate::inference_runtime::prepare_audio_snapshot,
-        )
-        .await?;
+        // sc-26241: a FLUX 3 conversion runs the image provider's own converter; every other
+        // derivation is the audio lane's preparer.
+        let flux3 = job
+            .payload
+            .get(crate::local_derivation::PAYLOAD_KEY)
+            .and_then(|block| block.get("conversion"))
+            .and_then(Value::as_str)
+            .and_then(crate::local_derivation::Flux3Conversion::from_id);
+        match flux3 {
+            Some(conversion) => {
+                crate::local_derivation::derive_local_tier(
+                    api,
+                    settings,
+                    job,
+                    &original,
+                    crate::local_derivation::flux3_preparer(
+                        conversion,
+                        repo.to_owned(),
+                        snapshot_revision.clone(),
+                    ),
+                )
+                .await?;
+            }
+            None => {
+                crate::local_derivation::derive_local_tier(
+                    api,
+                    settings,
+                    job,
+                    &original,
+                    crate::inference_runtime::prepare_audio_snapshot,
+                )
+                .await?;
+            }
+        }
     }
 
     complete_hf_cache_download(
@@ -2064,6 +2090,272 @@ fn confined_renamed_hf_single_file(
         [source] => Some(source.to_path_buf()),
         _ => None,
     })
+}
+
+/// Resolve the exact pinned snapshot for a tier row, first materializing it cache-only from an
+/// exact SUPERSEDED revision when the shared core declares one for this row
+/// ([`sceneworks_core::hf_revision_supersessions`]).
+///
+/// The tier loaders read ONLY `snapshots/<pinned sha>/`, so bumping a re-host pin to a commit that
+/// merely adds a small file (sc-25909: Qwen-Image 2.1's q8/q4 republished to add each tier's
+/// NOTICE) would otherwise strand every install made at the previous commit — the Model Manager
+/// still sees the tier on disk while a render fails "not installed". Rows without a declaration
+/// resolve exactly as [`huggingface_pinned_snapshot_dir`] always has.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn huggingface_pinned_tier_snapshot_dir(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> Option<PathBuf> {
+    if let Some(supersession) =
+        sceneworks_core::hf_revision_supersessions::exact_huggingface_revision_supersession(
+            repo, revision, files,
+        )
+    {
+        // The result is advisory: on success the pinned snapshot below now holds the tier; on a
+        // refusal the cache is untouched and the ordinary pinned lookup decides, as before.
+        let _ = materialize_superseded_hf_revision(data_dir, supersession);
+    }
+    huggingface_pinned_snapshot_dir(data_dir, repo, revision)
+}
+
+/// Build the superseding revision's tier inside the HF cache from the exact legacy snapshot, the
+/// cache-only sibling of [`resolve_renamed_hf_single_file`]. Every carried entry is linked to the
+/// legacy snapshot's own validated blob (a relative `../../blobs/<etag>` symlink — the layout HF
+/// and our downloader write — on Unix, a hardlink on Windows or for a non-blob plain entry), so no
+/// weight byte is copied or fetched. Each added file's declared content is written once as its
+/// own blob, named by its Hub git oid, and linked the same way. Nothing is written unless the
+/// legacy snapshot first proves every carried file at its exact size; a partial legacy tier is
+/// refused and left alone. Idempotent: a complete superseding tier returns at once, and an
+/// interrupted run only fills the entries that are still missing. Returns the canonical current
+/// snapshot when it holds the complete tier.
+fn materialize_superseded_hf_revision(
+    data_dir: &Path,
+    supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
+) -> Option<PathBuf> {
+    use sceneworks_core::hf_revision_supersessions::{
+        validate_superseded_legacy_snapshot, validate_superseding_current_snapshot,
+    };
+    let hub_cache_root = huggingface_hub_cache_dir(data_dir);
+    let repo_root = huggingface_repo_cache_path(data_dir, supersession.repo)?;
+    let snapshots = repo_root.join("snapshots");
+    let current_snapshot = safe_join(&snapshots, supersession.current_revision).ok()?;
+    if let Some(snapshot) = validate_superseding_current_snapshot(
+        &hub_cache_root,
+        &repo_root,
+        &current_snapshot,
+        supersession,
+    ) {
+        return Some(snapshot);
+    }
+    let legacy_snapshot = safe_join(&snapshots, supersession.legacy_revision).ok()?;
+    if !legacy_snapshot.is_dir() {
+        return None;
+    }
+    let Some((_, sources)) = validate_superseded_legacy_snapshot(
+        &hub_cache_root,
+        &repo_root,
+        &legacy_snapshot,
+        supersession,
+    ) else {
+        tracing::info!(
+            event = "hf_superseded_revision_cache_refused",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            "the superseded snapshot does not hold the complete carried tier; leaving the cache untouched"
+        );
+        return None;
+    };
+
+    let materialized = (|| {
+        let canonical_hub_root = std::fs::canonicalize(&hub_cache_root).ok()?;
+        let canonical_root = std::fs::canonicalize(&repo_root).ok()?;
+        if !canonical_root.starts_with(&canonical_hub_root) {
+            return None;
+        }
+        let current = ensure_confined_subdirectory(
+            &canonical_root,
+            &Path::new("snapshots").join(supersession.current_revision),
+        )?;
+        for (file, source) in supersession.carried.iter().zip(&sources) {
+            link_superseded_snapshot_entry(&canonical_root, &current, file.path, source)?;
+        }
+        for added in supersession.added {
+            let blobs = ensure_confined_subdirectory(&canonical_root, Path::new("blobs"))?;
+            let blob = write_declared_blob(&blobs, added)?;
+            link_superseded_snapshot_entry(&canonical_root, &current, added.path, &blob)?;
+        }
+        validate_superseding_current_snapshot(
+            &hub_cache_root,
+            &repo_root,
+            &current_snapshot,
+            supersession,
+        )
+    })();
+    match &materialized {
+        Some(snapshot) => tracing::info!(
+            event = "hf_superseded_revision_cache_relinked",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            snapshot = %snapshot.display(),
+            "materialized a superseding Hugging Face revision from the existing cache"
+        ),
+        None => tracing::info!(
+            event = "hf_superseded_revision_cache_unavailable",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            "could not materialize the superseding Hugging Face revision from the existing cache"
+        ),
+    }
+    materialized
+}
+
+/// Link one superseding snapshot entry to an already-validated, repo-confined source. A
+/// pre-existing entry is left for the final whole-tier validation to accept or reject; it is never
+/// traversed or replaced here.
+fn link_superseded_snapshot_entry(
+    canonical_root: &Path,
+    snapshot: &Path,
+    relative: &str,
+    source: &Path,
+) -> Option<()> {
+    let relative = Path::new(relative);
+    let parent = ensure_confined_subdirectory(snapshot, relative.parent()?)?;
+    let destination = parent.join(relative.file_name()?);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => return Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let linked = match source.strip_prefix(canonical_root.join("blobs")) {
+        #[cfg(unix)]
+        Ok(blob) => {
+            // `snapshots/<rev>/q8/processor/x` → `../../../../blobs/<etag>`: one `..` per component
+            // between the repository root and the entry's parent, exactly as the downloader writes.
+            let depth = parent
+                .strip_prefix(canonical_root)
+                .ok()?
+                .components()
+                .count();
+            let mut target = PathBuf::new();
+            for _ in 0..depth {
+                target.push("..");
+            }
+            target.push("blobs");
+            target.push(blob);
+            std::os::unix::fs::symlink(&target, &destination)
+        }
+        _ => std::fs::hard_link(source, &destination),
+    };
+    match linked {
+        Ok(()) => Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Some(()),
+        Err(_) => None,
+    }
+}
+
+/// Write a declared added file's content as its repo-local blob (once), returning the blob path.
+/// An existing blob of that name is accepted only when it holds exactly the declared bytes.
+fn write_declared_blob(
+    blobs: &Path,
+    added: &sceneworks_core::hf_revision_supersessions::AddedRevisionFile,
+) -> Option<PathBuf> {
+    if format!("{:x}", Sha256::digest(added.contents)) != added.sha256 {
+        return None;
+    }
+    let blob = safe_join(blobs, added.blob).ok()?;
+    match std::fs::symlink_metadata(&blob) {
+        Ok(metadata) => {
+            return (metadata.is_file() && std::fs::read(&blob).ok()? == added.contents)
+                .then_some(blob);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let temporary = blobs.join(format!(
+        "{}.sceneworks-{}.incomplete",
+        added.blob,
+        std::process::id()
+    ));
+    std::fs::write(&temporary, added.contents).ok()?;
+    if std::fs::rename(&temporary, &blob).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return (std::fs::read(&blob).ok()? == added.contents).then_some(blob);
+    }
+    Some(blob)
+}
+
+/// Stage a superseded legacy tier in the Hugging Face cache layout: every carried file at its
+/// exact declared size (sparse, so multi-GB weights cost no disk), either as `../blobs/<id>`
+/// symlinks (`symlinked`) or as plain snapshot files. `contents` overrides the leading bytes of
+/// named files (padded with spaces to the declared size) so a loader probe can read them.
+#[cfg(all(test, unix))]
+pub(crate) fn stage_superseded_legacy_tier_for_test(
+    data_dir: &Path,
+    supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
+    symlinked: bool,
+    contents: &[(&str, &[u8])],
+) -> PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, supersession.repo).expect("repo cache");
+    let snapshot = repo_root
+        .join("snapshots")
+        .join(supersession.legacy_revision);
+    let blobs = repo_root.join("blobs");
+    std::fs::create_dir_all(&blobs).expect("blobs dir");
+    for (index, file) in supersession.carried.iter().enumerate() {
+        let entry = snapshot.join(file.path);
+        let parent = entry.parent().expect("entry parent");
+        std::fs::create_dir_all(parent).expect("snapshot dirs");
+        let blob_name = format!("legacy-blob-{index:02}-{}", file.path.replace('/', "-"));
+        let target = if symlinked {
+            blobs.join(&blob_name)
+        } else {
+            entry.clone()
+        };
+        let mut bytes = contents
+            .iter()
+            .find(|(path, _)| *path == file.path)
+            .map(|(_, bytes)| bytes.to_vec())
+            .unwrap_or_default();
+        assert!(
+            bytes.len() as u64 <= file.size,
+            "{} override too large",
+            file.path
+        );
+        if file.size <= 1 << 20 {
+            bytes.resize(file.size as usize, b' ');
+        }
+        std::fs::write(&target, &bytes).expect("write staged blob");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .and_then(|handle| handle.set_len(file.size))
+            .expect("size staged blob");
+        if symlinked {
+            let depth = parent
+                .strip_prefix(&repo_root)
+                .expect("under repo")
+                .components()
+                .count();
+            let mut relative = PathBuf::new();
+            for _ in 0..depth {
+                relative.push("..");
+            }
+            std::os::unix::fs::symlink(relative.join("blobs").join(&blob_name), &entry)
+                .expect("snapshot symlink");
+        }
+    }
+    snapshot
 }
 
 /// Resolve a model's **caller-provisioned components** (epic 13657, sc-13679) — the generic worker
@@ -8637,6 +8929,209 @@ mod co_requisite_tests {
                  load, got: {message}"
             );
         }
+    }
+
+    /// sc-25909 — a v0.9.0 install of the Qwen-Image 2.1 re-host (pinned at the superseded
+    /// `1691de01…`) is carried to the republished `ef03535e…` cache-only: every carried entry is a
+    /// relative link to the SAME legacy blob (no copy, no fetch), the added NOTICE is written from
+    /// its declared bytes as its own git-oid blob, and only the requested tier is touched.
+    ///
+    /// *Mutation that reds this:* `huggingface_pinned_tier_snapshot_dir` skipping
+    /// `materialize_superseded_hf_revision` (the tier stays stranded at the old revision).
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_builds_the_new_snapshot_from_the_legacy_cache() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let legacy = stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+        let files = vec!["q8/*".to_owned()];
+        assert!(
+            huggingface_pinned_snapshot_dir(
+                data.path(),
+                supersession.repo,
+                supersession.current_revision
+            )
+            .is_none(),
+            "precondition: nothing is cached at the current pin"
+        );
+
+        let snapshot = huggingface_pinned_tier_snapshot_dir(
+            data.path(),
+            supersession.repo,
+            supersession.current_revision,
+            &files,
+        )
+        .expect("the superseded install is carried to the current pin");
+        assert!(snapshot.ends_with(supersession.current_revision));
+        for file in supersession.carried {
+            let entry = snapshot.join(file.path);
+            assert_eq!(
+                std::fs::read_link(&entry).expect("carried entry is a snapshot symlink"),
+                std::fs::read_link(legacy.join(file.path)).expect("legacy symlink"),
+                "{}: links the same relative blob the legacy snapshot does",
+                file.path
+            );
+            assert_eq!(
+                std::fs::metadata(&entry).unwrap().ino(),
+                std::fs::metadata(legacy.join(file.path)).unwrap().ino(),
+                "{}: no copy",
+                file.path
+            );
+        }
+        let notice = snapshot.join("q8/NOTICE");
+        assert_eq!(
+            std::fs::read(&notice).unwrap(),
+            supersession.added[0].contents
+        );
+        assert_eq!(
+            std::fs::read_link(&notice).unwrap(),
+            Path::new("../../../blobs").join(supersession.added[0].blob)
+        );
+        assert!(
+            !snapshot.join("q4").exists(),
+            "only the requested tier is materialized"
+        );
+        assert!(
+            legacy.join("q8/model_index.json").is_file(),
+            "the legacy snapshot is intact"
+        );
+    }
+
+    /// Re-running is a no-op on a complete tier, and an interrupted run (entries missing from the
+    /// new snapshot) is completed rather than duplicated.
+    ///
+    /// *Mutation that reds this:* `link_superseded_snapshot_entry` replacing an existing entry, or
+    /// `write_declared_blob` rejecting the blob it already wrote.
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_is_idempotent_and_completes_an_interrupted_run() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
+        stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+        let files = vec!["q4/*".to_owned()];
+        let resolve = || {
+            huggingface_pinned_tier_snapshot_dir(
+                data.path(),
+                supersession.repo,
+                supersession.current_revision,
+                &files,
+            )
+            .expect("resolves")
+        };
+        let first = resolve();
+        let blobs = huggingface_repo_cache_path(data.path(), supersession.repo)
+            .unwrap()
+            .join("blobs");
+        let blob_count = || std::fs::read_dir(&blobs).unwrap().count();
+        let before = blob_count();
+        let link_before = std::fs::read_link(first.join("q4/vae/config.json")).unwrap();
+        assert_eq!(resolve(), first);
+        assert_eq!(
+            blob_count(),
+            before,
+            "no second NOTICE blob, no temp left behind"
+        );
+        assert_eq!(
+            std::fs::read_link(first.join("q4/vae/config.json")).unwrap(),
+            link_before
+        );
+
+        std::fs::remove_file(first.join("q4/NOTICE")).unwrap();
+        std::fs::remove_file(first.join("q4/transformer/model.safetensors")).unwrap();
+        assert_eq!(resolve(), first);
+        assert!(
+            sceneworks_core::hf_revision_supersessions::validate_superseding_current_snapshot(
+                &huggingface_hub_cache_dir(data.path()),
+                &huggingface_repo_cache_path(data.path(), supersession.repo).unwrap(),
+                &first,
+                &supersession,
+            )
+            .is_some()
+        );
+        assert_eq!(blob_count(), before);
+    }
+
+    /// A legacy tier missing any carried file — or holding one at the wrong size (a torn blob) — is
+    /// refused, and nothing is written at the current pin.
+    ///
+    /// *Mutation that reds this:* `validate_superseded_legacy_snapshot` accepting a subset (or
+    /// dropping the size check).
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_refuses_a_partial_legacy_snapshot() {
+        let _env = isolate_hf_cache();
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let files = vec!["q8/*".to_owned()];
+        for damage in ["missing", "truncated"] {
+            let data = tempfile::tempdir().expect("temp data dir");
+            let legacy =
+                stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+            let victim = legacy.join("q8/processor/vocab.json");
+            match damage {
+                "missing" => std::fs::remove_file(&victim).unwrap(),
+                _ => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&victim)
+                    .unwrap()
+                    .set_len(10)
+                    .unwrap(),
+            }
+            assert!(
+                huggingface_pinned_tier_snapshot_dir(
+                    data.path(),
+                    supersession.repo,
+                    supersession.current_revision,
+                    &files,
+                )
+                .is_none(),
+                "{damage}: a partial legacy tier is not carried forward"
+            );
+            assert!(
+                !huggingface_repo_cache_path(data.path(), supersession.repo)
+                    .unwrap()
+                    .join("snapshots")
+                    .join(supersession.current_revision)
+                    .exists(),
+                "{damage}: nothing is written at the current pin"
+            );
+        }
+    }
+
+    /// A legacy cache whose entries are plain files (the Windows hardlink layout our downloader
+    /// writes) is carried by hard link, never by copy.
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_hard_links_plain_legacy_entries() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let legacy = stage_superseded_legacy_tier_for_test(data.path(), &supersession, false, &[]);
+        let snapshot = huggingface_pinned_tier_snapshot_dir(
+            data.path(),
+            supersession.repo,
+            supersession.current_revision,
+            &["q8/*".to_owned()],
+        )
+        .expect("resolves");
+        let entry = snapshot.join("q8/text_encoder/model.safetensors");
+        assert!(!std::fs::symlink_metadata(&entry)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&entry).unwrap().ino(),
+            std::fs::metadata(legacy.join("q8/text_encoder/model.safetensors"))
+                .unwrap()
+                .ino()
+        );
     }
 }
 

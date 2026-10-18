@@ -1,0 +1,248 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "Qwen/Qwen-Image-2.1-Turbo",
+        "resolvedRevision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+      "capturedAt": "2026-10-15T17:35:31Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:qwen-image-2-1-turbo-shared-ladder",
+        "blockers": [
+          "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope (registered_begin_request) but exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 31182802856
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 32957262540
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 34421379492
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 34396538284
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 41065606058
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 34421379492
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 31182802856
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 688427589
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 34421559460
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 31182802856
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 75
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "qwen-image-2-1-turbo-mlx-bf16-2048-seed22732-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c6b508ce5832fb4975ff",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "Qwen/Qwen-Image-2.1-Turbo@fc13ba1986fcb905854dc8de2f52eee395f49b5b:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-f0ba23a8b17df055db70",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 32957262540,
+          "allocatorBytes": 34731485704,
+          "reclaimableBytes": 1774223164
+        },
+        "decode": {
+          "activeBytes": 34396538284,
+          "allocatorBytes": 34401306028,
+          "reclaimableBytes": 4767744
+        },
+        "denoise": {
+          "activeBytes": 34421379492,
+          "allocatorBytes": 41065606058,
+          "reclaimableBytes": 6644226566
+        },
+        "overall": {
+          "activeBytes": 34421379492,
+          "allocatorBytes": 41065606058,
+          "reclaimableBytes": 6644226566
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 36507222016,
+        "decode": 36171677696,
+        "denoise": 43150999552,
+        "overall": 43150999552
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "4db2c8cb0f9672380ceaf861d156a5a1264ce4868b0c4fcd7f97f650c4739cef",
+          "dirty": false,
+          "revision": "488bb762603b091b58ce218e18ddee07f16780fe"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:92eefcd0b38901bb7bdda96f50a2c6161ebe9e8b1341f2654ad907c071d3d81a",
+          "revision": "b103c0794ec6dbecee25c2d8b0af45179ca0330e"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 43150999552,
+          "name": "exact_fit",
+          "predictedBytes": 43150999552,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope (registered_begin_request) but exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope (registered_begin_request) but exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope (registered_begin_request) but exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Qwen-Image 2.1 Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 2048,
+          "width": 2048
+        },
+        "mode": "text_to_image",
+        "modelId": "qwen_image_2_1_turbo",
+        "overlay": "none",
+        "provider": "qwen_image_2_1_turbo",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

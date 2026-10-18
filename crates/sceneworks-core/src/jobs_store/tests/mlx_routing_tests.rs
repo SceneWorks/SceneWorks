@@ -2188,6 +2188,13 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
         assert!(MLX_ROUTED_MODELS.contains(&model));
         let eligible = |payload: Value| image_request_mlx_eligible(model, &object(payload));
         assert!(eligible(json!({"model":model,"mode":"text_to_image"})));
+        // Native capabilities are shared, but absent production base q4/q8 artifact pins are
+        // independently refused at catalog/readiness boundaries (never a dense fallback).
+        for bits in [0, 4, 8] {
+            assert!(eligible(
+                json!({"model":model,"advanced":{"mlxQuantize":bits}})
+            ));
+        }
         for weight in [0.0, 0.375, -0.25] {
             assert!(eligible(
                 json!({"model":model,"loras":[{"id":"compatible-file","weight":weight}]})
@@ -2200,7 +2207,7 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
             json!({"maskAssetId":"a"}),
             json!({"controls":[{}]}),
             json!({"advanced":{"poses":[{}]}}),
-            json!({"advanced":{"mlxQuantize":8}}),
+            json!({"advanced":{"mlxQuantize":6}}),
             json!({"advanced":{"quantTier":"nvfp4"}}),
             json!({"hiresFix":{"enabled":true}}),
             json!({"loras":{"id":"not-an-array"}}),

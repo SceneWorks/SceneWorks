@@ -1134,6 +1134,21 @@ pub(crate) async fn canonicalize_image_model_payload(
         )));
     }
 
+    // Tier capability does not certify an installable artifact. This check is shared by create,
+    // retry and duplicate after resolving the authoritative catalog (never caller metadata).
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+        &model_id,
+        advanced,
+        &model_manifest_entry,
+    ) {
+        return Err(ApiError::bad_request(reason));
+    }
+
     // Overwrite rather than merge. The selected id was path-confined above; imported/custom
     // workers independently confine the authoritative entry's `modelPath` / `paths.model` before
     // opening it, preserving the established two-boundary defense.
@@ -1385,6 +1400,11 @@ async fn validate_raw_job_payload(
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        // sc-25907: a base that is deliberately not trainable (the distilled Qwen-Image 2.1 Turbo)
+        // is a 400 that says to train on base, before any licence question is asked about it.
+        if let Some(error) = crate::training::raw_training_payload_base_error(payload) {
+            return Err(error);
+        }
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }

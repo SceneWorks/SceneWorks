@@ -484,6 +484,7 @@ fn sensenova_memory_context(
             frames: 1,
             reference_count: shape.reference_count,
         },
+        reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes,
@@ -1533,6 +1534,8 @@ fn write_interleaved_document(
     let resolution = format!("{width}x{height}");
     // Flat telemetry mirroring the Python `raw_settings` (advanced overlay + resolved knobs).
     let mut raw_settings = request.advanced.clone();
+    // Worker-owned (epic 25899): SenseNova prices no prefix cache, so a replayed record is false.
+    raw_settings.remove(crate::image_jobs::PREFIX_KV_CACHE_RESULT_KEY);
     raw_settings.insert("realModelInference".to_owned(), Value::Bool(true));
     raw_settings.insert("repo".to_owned(), Value::String(model_repo_for(&request)));
     raw_settings.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -3005,5 +3008,62 @@ mod tests {
             .expect("object")
             .clone();
         assert_eq!(sensenova_mlx_tier_key(&request, root), "bf16");
+    }
+
+    /// Epic 25899 (sc-25909): SenseNova prices no prefix KV cache, so a replayed
+    /// `advanced.prefixKvCache` must not reach its image assets as a "which path ran" record.
+    ///
+    /// *Mutation that reds this:* dropping the removal from `write_interleaved_document`.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn a_forged_prefix_kv_cache_never_reaches_an_interleaved_image_asset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_path = dir.path().join("project");
+        std::fs::create_dir_all(&project_path).expect("project dir");
+        let payload = json!({
+            "projectId": "p",
+            "model": "sensenova_u1_8b",
+            "prompt": "a fox",
+            "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
+        });
+        let request = ImageRequest::from_payload(payload.as_object().expect("payload object"));
+        let job: JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
+                .expect("job snapshot deserializes");
+        let result = write_interleaved_document(
+            request,
+            job,
+            None,
+            project_path,
+            "a fox".to_owned(),
+            "sensenova_u1_8b".to_owned(),
+            7,
+            1,
+            4,
+            4,
+            8,
+            4.0,
+            1.0,
+            3.0,
+            64,
+            false,
+            "a fox <image>",
+            vec![Image {
+                width: 4,
+                height: 4,
+                pixels: vec![0; 4 * 4 * 3],
+            }],
+        )
+        .expect("the document writes");
+        for write in result["assetWrites"].as_array().expect("asset writes") {
+            let settings = &write["rawAdapterSettings"];
+            assert!(
+                settings
+                    .get(crate::image_jobs::PREFIX_KV_CACHE_RESULT_KEY)
+                    .is_none(),
+                "{settings}"
+            );
+            assert_eq!(settings["sampler"], "euler", "other advanced keys are kept");
+        }
     }
 }

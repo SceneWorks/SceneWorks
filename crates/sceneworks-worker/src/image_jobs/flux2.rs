@@ -421,6 +421,7 @@ fn flux2_dev_edit_memory_context(
         // Multi-reference is request geometry, not a distinct overlay identity. Encoding the count
         // here would violate the provider's opaque identity-axis contract; the provider reads the
         // exact count from `geometry.reference_count`.
+        reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes: bytes(total_gb),
@@ -877,6 +878,8 @@ async fn generate_flux2_edit_stream(
         reference_count: provider_reference_count,
         use_pid,
         has_phases: false,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         engine_id,
@@ -1455,6 +1458,8 @@ async fn generate_flux2_dev_control_stream(
         reference_count: 1,
         use_pid: false,
         has_phases: false,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
@@ -1730,6 +1735,7 @@ mod flux2_dev_admission_tests {
             context,
             decode_quality_decisions: Vec::new(),
             process_limit_bytes: None,
+            prefix_kv_cache: None,
         }
     }
 

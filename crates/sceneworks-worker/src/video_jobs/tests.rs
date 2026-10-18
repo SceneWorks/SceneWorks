@@ -1211,6 +1211,7 @@ fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::Memo
             frames: 121,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes: 64 * 1024 * 1024 * 1024,
@@ -12001,7 +12002,7 @@ fn wan_5b_timing() {
             dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
         }
         Progress::Loading(_) => {}
-        Progress::Upsampling { .. } => {}
+        Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
     };
     let decoded = run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");
     let end = Instant::now();

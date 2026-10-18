@@ -49,11 +49,32 @@ PRs. Omitted/default profile retains existing catalog behavior.
 ## What runs and what counts
 
 The bounded reusable workflow builds the exact source Release rust-api, verifies
-Metal, and starts only its isolated API and standalone native MLX worker. State,
+Metal, and starts only its isolated API (with the shipped desktop topology's
+in-process CPU utility worker, which is the only kind that claims `model_download`)
+and a standalone native MLX worker. State,
 config, credentials, jobs DB, build target and evidence are isolated under the
-attempt's RUNNER_TEMP directory; port 17921 must be free. Only owned process
-groups are terminated. The controller has a 150-minute bound, workflow 180;
-these are safety bounds, not measured runtime estimates.
+attempt's RUNNER_TEMP directory. A cryptorandom per-attempt nonce binds the state
+paths and worker ID. The API binds loopback port zero; its exclusively created,
+private JSON log announces the actual bound port. Before launching the worker
+and before every API request, the controller requires its own API child alive,
+readiness `ready`, and exact canonical data/config/projects/jobs-DB paths from
+health. Foreign healthy endpoints are refused before registration or any POST.
+API exit aborts pending requests and terminates only owned process groups. The
+controller has a 150-minute bound, workflow 180; these are safety bounds, not
+measured runtime estimates.
+
+Before the release build, and again before posting the download, it measures free
+disk on the weights and output volumes (`statfs`). It refuses unless they can hold the
+part of the 43,317,649,602 declared repository bytes not already in the hub's blobs, plus
+fixed safety margins (32 GiB for the build target, 16 GiB for state, xet staging and
+logs; margins, not measurements). Run 39143131468 instead crashed its runner with
+"No space left on device" mid-installation.
+
+Before posting the download it requires one of the attempt's own nonce-bound
+utility workers to be registered, idle and `model_download`-capable. Any ordinary
+job still unclaimed after 300 seconds fails immediately instead of consuming the
+installation or generation budget (run 39116882752 waited a full hour on a
+download no worker could claim).
 
 Using the ordinary model-library relocation and model-download API, it installs
 (or re-verifies) the catalog's upstream package at revision
@@ -81,12 +102,12 @@ saved 1024² PNG. There is no manual image upload/registration: the worker write
 media and reports facts; the API's production asset persistence registers them.
 
 The artifact `flux3-image-klein-mlx-app-<run>-<attempt>` retains `receipt.json`,
-`saved-asset.png`, its sidecar, and owned build/API/worker/Metal logs for 30 days.
-It excludes weights, databases, credentials, build trees and private raw logs.
-Subprocess logs are written outside the uploaded tree, then promoted only after
-owned cleanup with raw/URL-encoded known credentials redacted; hard cancellation
-cannot upload the private logs. A passed preflight
-receipt says **phase=preflight** and is not completed-job evidence. An accepted
+`saved-asset.png`, and its redacted persisted sidecar for 30 days. The upload
+allowlist excludes weights, HF caches, config, databases, credentials, build
+trees and all logs. Subprocess logs stay private outside the uploaded tree;
+neither raw nor redacted logs are promoted, including on failure/cancellation.
+The receipt and sidecar redact raw/URL-encoded known credentials. A passed
+preflight receipt says **phase=preflight** and is not completed-job evidence. An accepted
 full receipt must say `status=passed`, `phase=lifecycle`, contain the completed
 job, indexed library asset, saved-file hash, exact source/inference/model and
 runner/run identities, and successful owned-process cleanup. Failures retain a

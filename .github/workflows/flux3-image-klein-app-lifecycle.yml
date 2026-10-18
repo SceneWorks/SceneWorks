@@ -67,11 +67,14 @@ jobs:
         run: node scripts/flux3-image-klein-app-lifecycle.mjs
         env:
           FLUX3_APP_OUTPUT: ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Retain exact identities, job/library receipt, saved image and owned logs
+      - name: Retain redacted receipt, generated image and sidecar only
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-image-klein-mlx-app-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          path: |
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/receipt.json
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/saved-asset.png
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/saved-asset.sceneworks.json
           if-no-files-found: error
           retention-days: 30

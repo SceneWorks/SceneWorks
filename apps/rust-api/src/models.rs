@@ -7086,6 +7086,106 @@ mod download_receipt_tests {
             serde_json::to_vec(&json!({"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
     }
 
+    fn assert_flux3_primary_and_optional_pup(model: &Value) -> &Value {
+        let base = model["id"] == "flux3_klein_base";
+        let repo = if base {
+            "black-forest-labs/flux-3-image-klein-base"
+        } else {
+            "black-forest-labs/flux-3-image-klein"
+        };
+        let revision = if base {
+            "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"
+        } else {
+            "8454017f9ebaada30c998fccd9f67a80c7580f68"
+        };
+        let downloads = model["downloads"].as_array().unwrap();
+        let primary: Vec<_> = downloads
+            .iter()
+            .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .collect();
+        assert!(!primary.is_empty(), "at least the dense primary package");
+        for row in &primary {
+            assert_eq!(row["repo"], repo);
+            assert_eq!(
+                row["files"],
+                json!([]),
+                "every tier fetches the whole original"
+            );
+        }
+        let primary_count = primary.len();
+        let primary = primary
+            .into_iter()
+            .find(|row| row["default"] == true)
+            .unwrap();
+        assert_eq!(primary["provider"], "huggingface");
+        assert_eq!(primary["repo"], repo);
+        assert_eq!(primary["revision"], revision);
+        assert_eq!(primary["default"], true);
+        assert_eq!(
+            primary["files"],
+            json!([]),
+            "whole primary repository required"
+        );
+        assert!(primary
+            .get("required")
+            .is_none_or(|value| value.as_bool() == Some(true)));
+        let optional = model_co_requisite_downloads(model);
+        assert!(
+            optional.len() <= 1,
+            "only the exact soft PUP may accompany the primary"
+        );
+        assert_eq!(
+            downloads.len(),
+            primary_count + optional.len(),
+            "tier rows plus the one optional component"
+        );
+        for row in optional {
+            assert_eq!(row["provider"], "huggingface");
+            assert_eq!(row["repo"], "black-forest-labs/flux-3-image-klein-pup");
+            assert_eq!(row["revision"], "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed");
+            assert_eq!(row["componentId"], "prompt_upsampler");
+            assert_eq!(row["required"], "soft", "no required external components");
+            assert_eq!(row["files"], json!([]));
+            assert_ne!(row.get("default").and_then(Value::as_bool), Some(true));
+        }
+        primary
+    }
+
+    #[test]
+    fn flux3_package_fixture_rejects_required_or_wrong_optional_components() {
+        let model = builtin_models_entry("flux3_klein");
+        let index = model["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|row| row["coRequisite"] == true)
+            .expect("combined catalog exposes the soft PUP");
+        for (field, value) in [
+            ("required", json!(true)),
+            ("repo", json!("not-the-pinned-source")),
+            ("revision", json!("0".repeat(40))),
+            ("componentId", json!("text_encoder")),
+            ("files", json!(["model.safetensors"])),
+            ("coRequisite", json!(false)),
+        ] {
+            let mut invalid = model.clone();
+            invalid["downloads"][index][field] = value;
+            assert!(
+                std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&invalid))
+                    .is_err(),
+                "{field} must not weaken the exact primary/soft-PUP fixture"
+            );
+        }
+        let mut duplicate = model.clone();
+        duplicate["downloads"]
+            .as_array_mut()
+            .unwrap()
+            .push(model["downloads"][index].clone());
+        assert!(
+            std::panic::catch_unwind(|| assert_flux3_primary_and_optional_pup(&duplicate)).is_err()
+        );
+    }
+
     #[test]
     fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_component() {
         for (id, repo, revision, size) in [
@@ -7119,30 +7219,9 @@ mod download_receipt_tests {
             .unwrap();
         let data_dir = temp.path();
         let model = builtin_models_entry(id);
-        let downloads = model["downloads"].as_array().unwrap();
-        assert_eq!(
-            downloads
-                .iter()
-                .filter(|download| !download
-                    .get("coRequisite")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false))
-                .count(),
-            1,
-            "one primary whole-repo bundle"
-        );
-        assert!(
-            model_co_requisite_downloads(&model)
-                .iter()
-                .all(
-                    |download| download.get("componentId").and_then(Value::as_str)
-                        == Some("prompt_upsampler")
-                        && download.get("required").and_then(Value::as_str) == Some("soft")
-                ),
-            "AE/TE stay bundled; optional PUP is separate"
-        );
+        let primary = assert_flux3_primary_and_optional_pup(&model);
         assert!(model.get("component").is_none());
-        let revision = downloads[0]["revision"].as_str().unwrap();
+        let revision = primary["revision"].as_str().unwrap();
         assert_eq!(revision, expected_revision);
         let context = model_download_context(&model).unwrap().unwrap();
         assert_eq!(context.repo, expected_repo);
@@ -7313,9 +7392,10 @@ mod download_receipt_tests {
             current.installed,
             "an exact managed receipt plus the complete canonical runtime bundle is usable"
         );
-        assert_eq!(
-            current.installed_path.as_deref(),
-            Some(managed.to_string_lossy().as_ref())
+        let selected_path = PathBuf::from(current.installed_path.as_ref().expect("installed path"));
+        assert!(
+            selected_path == managed || selected_path.ends_with(revision),
+            "variant aggregation retains the selected snapshot or the managed root: {selected_path:?}"
         );
         assert!(model_variant_states(&model, temp.path())[0].installed);
         std::fs::remove_file(managed.join("text_encoder/model-00002-of-00002.safetensors"))
@@ -7403,16 +7483,7 @@ mod download_receipt_tests {
                 "{os}"
             );
             retain_downloads_for_os(&mut model, os);
-            assert!(
-                model_co_requisite_downloads(&model)
-                    .iter()
-                    .all(
-                        |download| download.get("componentId").and_then(Value::as_str)
-                            == Some("prompt_upsampler")
-                            && download.get("required").and_then(Value::as_str) == Some("soft")
-                    ),
-                "{os}: no split AE/TE; soft PUP is allowed"
-            );
+            assert_flux3_primary_and_optional_pup(&model);
             let context = model_download_context(&model).unwrap().unwrap();
             assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein", "{os}");
         }
@@ -7972,8 +8043,27 @@ fn model_cache_health_for_download(
             missing_files: vec![format!("snapshots/{revision}")],
         });
     }
+    if let Some(tier @ ("fp8r" | "nvfp4")) = download
+        .and_then(|row| row.get("variant"))
+        .and_then(Value::as_str)
+    {
+        if !snapshot.join("variants").join(tier).exists() {
+            return Some(HuggingFaceCacheHealth {
+                installed: false,
+                incomplete: false,
+                missing_files: vec![format!("variants/{tier}")],
+            });
+        }
+    }
     Some(
-        match sceneworks_worker::flux3_runtime_bundle_check(&snapshot, model_id) {
+        match sceneworks_worker::flux3_runtime_tier_bundle_check(
+            &snapshot,
+            download
+                .and_then(|d| d.get("variant"))
+                .and_then(Value::as_str)
+                .unwrap_or("bf16"),
+            model_id,
+        ) {
             Ok(()) => HuggingFaceCacheHealth::installed(),
             Err(error) => HuggingFaceCacheHealth::missing(vec![error]),
         },
@@ -7998,7 +8088,15 @@ fn flux3_managed_bundle_is_current(
                 .is_none_or(|id| id == model_id)
     });
     identity_matches
-        && sceneworks_worker::flux3_runtime_bundle_check(managed_path, model_id).is_ok()
+        && sceneworks_worker::flux3_runtime_tier_bundle_check(
+            managed_path,
+            download
+                .and_then(|d| d.get("variant"))
+                .and_then(Value::as_str)
+                .unwrap_or("bf16"),
+            model_id,
+        )
+        .is_ok()
 }
 
 fn install_state_for(
@@ -8443,6 +8541,74 @@ fn exact_rename_side_cache_health(
     }
 }
 
+/// Install-state health for a tier whose pinned revision SUPERSEDES an exact older one
+/// ([`sceneworks_core::hf_revision_supersessions`]) while the tier exists ONLY at that older
+/// revision — the v0.9.0 install of the Qwen-Image 2.1 q8/q4 re-host after sc-25909 republished it
+/// to add each tier's NOTICE. The worker carries such a tier to the current pin cache-only at load
+/// time, but only when the legacy snapshot holds every carried file at its exact size; the coarse
+/// revision-agnostic probe would otherwise call a partial legacy tier installed and the render would
+/// fail "not installed". Like the rename seam, serving the catalog never mutates the cache.
+///
+/// `None` (the ordinary probe decides) for every row without a declaration, and whenever the tier
+/// is already present at the current pin.
+fn superseded_revision_tier_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    use sceneworks_core::hf_revision_supersessions::{
+        exact_huggingface_revision_supersession, supersession_tier,
+        validate_superseded_legacy_snapshot,
+    };
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let revision = download.get("revision").and_then(Value::as_str)?;
+    let supersession = exact_huggingface_revision_supersession(repo, revision, files)?;
+    let tier = supersession_tier(supersession)?;
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return None;
+    }
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshots = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?;
+    let legacy_snapshot = snapshots.join(supersession.legacy_revision);
+    if snapshots
+        .join(supersession.current_revision)
+        .join(tier)
+        .exists()
+        || !legacy_snapshot.join(tier).exists()
+    {
+        return None;
+    }
+    if validate_superseded_legacy_snapshot(
+        library.root(),
+        &repo_root,
+        &legacy_snapshot,
+        supersession,
+    )
+    .is_some()
+    {
+        return Some(HuggingFaceCacheHealth::installed());
+    }
+    let missing = supersession
+        .carried
+        .iter()
+        .filter(|file| {
+            std::fs::metadata(legacy_snapshot.join(file.path)).map_or(true, |metadata| {
+                !metadata.is_file() || metadata.len() != file.size
+            })
+        })
+        .map(|file| file.path.to_owned())
+        .collect::<Vec<_>>();
+    Some(HuggingFaceCacheHealth::missing(if missing.is_empty() {
+        // Every entry reads at its size yet confinement failed (an escaping link): name the tier.
+        vec![format!("{tier}/*")]
+    } else {
+        missing
+    }))
+}
+
 // Per-variant install state (sc-8508, epic 8506): a single downloadable tier of a quant-matrix
 // model. `install_state_for` reports the DEFAULT variant's install state (back-compat single-variant
 // contract); `model_variants` reports one of these per declared download entry so the catalog knows
@@ -8632,14 +8798,17 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 .to_owned();
             let files = string_array_field(entry, "files");
             let cache_path = huggingface_repo_cache_path(data_dir, &repo);
-            let cache_health = model_cache_health_for_download(
-                model_id,
-                &repo,
-                Some(entry),
-                cache_path.as_deref(),
-                &files,
-                data_dir,
-            );
+            let cache_health = superseded_revision_tier_cache_health(data_dir, entry, &files)
+                .or_else(|| {
+                    model_cache_health_for_download(
+                        model_id,
+                        &repo,
+                        Some(entry),
+                        cache_path.as_deref(),
+                        &files,
+                        data_dir,
+                    )
+                });
             let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
             let mut cache_incomplete = cache_health
                 .as_ref()
@@ -8721,8 +8890,11 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     missing_required_files.push(format!("derived {variant} snapshot: {why}"));
                 }
                 // The companion check below still applies to a verified derived tier.
-                installed = verified;
-                derivation_pending = Some(!verified);
+                installed = verified && (model_id != "flux3_klein" || cache_installed || managed_installed);
+                if verified && !installed {
+                    missing_required_files.push("FLUX 3 derived tier requires its complete pinned original text encoder and autoencoder".to_owned());
+                }
+                derivation_pending = Some(!installed);
                 derived_path = located
                     .filter(|_| derived_exists)
                     .map(|(dir, _)| dir.display().to_string());

@@ -4,6 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
+use crate::image_request::Flux3Tier;
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
     MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
@@ -52,6 +53,20 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// API projects the same provider facts into imported catalog affordances, while
 /// [`model_mac_support`] remains the builtin-default probe.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    // sc-26241: no MLX descriptor advertises the publisher FP8 rowwise tier (it is a CUDA format),
+    // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
+    // reaching a per-family predicate that might not read `quantTier` and render dense instead. A
+    // malformed named-tier request is refused here too, before any family predicate sees it.
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| {
+            crate::image_request::requests_fp8r_tier(advanced)
+                || crate::image_request::image_quant_tier_refusal(model, advanced).is_some()
+        })
+    {
+        return false;
+    }
     if !MLX_ROUTED_MODELS.contains(&model) {
         // Exact imported-provider fallback for a novel id outside the builtin table (sc-14109,
         // refined by sc-18312). The stamped manifest family is necessary but insufficient: the
@@ -66,7 +81,8 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
-        "qwen_image_2_1" => qwen_image_2_1_mlx_eligible(payload),
+        // Turbo (sc-25907): the distilled checkpoint under its own engine id, same request shape.
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => qwen_image_2_1_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
@@ -487,14 +503,38 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
-/// FLUX 3 Image Klein, distilled (sc-26234) is plain text-to-image in S1: the `flux3_klein` engine
-/// takes no source, reference, mask, control or pose (references and boxes are sc-26236/7), no
-/// quant tier (sc-26241). S6 admits exact-identity LoRA stacks on base and distilled;
-/// `LoadSpec::quantize` by name — and an enabled hires fix is refused for the same reason as Iris
-/// (its second pass is an img2img refinement the engine refuses). Any such carrier keeps the job
-/// off MLX (an `mlx_unsupported` affordance) instead of reaching an engine that would refuse it.
+/// FLUX 3 Image Klein base and distilled: text-to-image on the native MLX provider in one of the
+/// packages it serves — bf16, or the locally converted MLX affine q4/q8 (sc-26241). The publisher
+/// FP8R/NVFP4 packages are CUDA formats the MLX descriptor does not advertise, so they keep the
+/// job off MLX. Every other carrier is judged by [`flux3_surface_eligible`].
 pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    iris_mlx_eligible(payload)
+    flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_mlx)
+        && flux3_surface_eligible(payload)
+}
+
+/// The FLUX 3 package a payload names ([`crate::image_request::flux3_requested_tier`]); an absent
+/// `advanced` is the dense package, a non-object one is malformed.
+pub(crate) fn flux3_payload_tier(payload: &Map<String, Value>) -> Result<Flux3Tier, String> {
+    match payload.get("advanced") {
+        None | Some(Value::Null) => Ok(Flux3Tier::Bf16),
+        Some(Value::Object(advanced)) => crate::image_request::flux3_requested_tier(advanced),
+        Some(other) => Err(format!("advanced must be an object, not {other}")),
+    }
+}
+
+/// The FLUX 3 request surface other than precision, shared by both lanes: the `flux3_klein`
+/// engine takes no source, reference, mask, control or pose on this route (references and boxes
+/// are sc-26236/7), admits identity-checked LoRA (sc-26239), and refuses hires fix like
+/// Iris (its second pass is an img2img refinement the engine refuses). Judged with the precision
+/// carriers removed, since [`flux3_payload_tier`] owns them.
+pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
+    let mut surface = payload.clone();
+    if let Some(advanced) = surface.get_mut("advanced").and_then(Value::as_object_mut) {
+        for carrier in crate::image_request::FLUX3_PRECISION_CARRIERS {
+            advanced.remove(*carrier);
+        }
+    }
+    iris_mlx_eligible(&surface)
         && payload.get("loras").is_none_or(|value| {
             value.is_null()
                 || value.as_array().is_some_and(|loras| {

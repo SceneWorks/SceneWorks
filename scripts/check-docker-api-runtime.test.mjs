@@ -23,18 +23,22 @@ test("waitForHealth retries after a single request stalls", async (t) => {
   });
 
   const { port } = server.address();
+  // The request timeout also bounds the HEALTHY retry, so a 50 ms one aborted that too whenever a
+  // loaded runner was slow to answer, and the count read 4 instead of 2.
+  const requestTimeoutMs = 1_000;
+  const readinessTimeoutMs = 10_000;
   const startedAt = Date.now();
   await waitForHealth({
     url: `http://127.0.0.1:${port}/api/v1/health`,
-    readinessTimeoutMs: 500,
-    requestTimeoutMs: 50,
+    readinessTimeoutMs,
+    requestTimeoutMs,
     retryDelayMs: 10,
   });
   const elapsedMs = Date.now() - startedAt;
 
   assert.equal(requests, 2, "stalled request was aborted and retried");
-  assert.ok(elapsedMs >= 40, `first request did not stall (${elapsedMs}ms)`);
-  assert.ok(elapsedMs < 500, `retry escaped the readiness deadline (${elapsedMs}ms)`);
+  assert.ok(elapsedMs >= requestTimeoutMs - 10, `first request did not stall (${elapsedMs}ms)`);
+  assert.ok(elapsedMs < readinessTimeoutMs, `retry escaped the readiness deadline (${elapsedMs}ms)`);
 });
 
 test("waitForHealth enforces its deadline when a request never responds", async (t) => {

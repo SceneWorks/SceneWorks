@@ -921,6 +921,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // this provider is published in the engine capability dumps, so it landed with the epic's
     // terminal pin bump and re-dump, sc-24163, rather than here — see `memory_route_registry`.)
     ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the distilled checkpoint, registered by the SAME
+    // two provider crates under its own engine id `qwen_image_2_1_turbo` beside the base id. One
+    // descriptor under a second id — the same conditioning, the same `supported_quants: [Q4, Q8]`
+    // tier select on both lanes, the same LoRA/LoKr on dense and packed tiers — so its row is the
+    // base row's columns verbatim, for the base row's reasons above. No trainer is registered under
+    // this id, so it appears in no training-target list below.
+    ModelCaps::new("qwen_image_2_1_turbo", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -1161,10 +1168,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // (`iris_mlx_eligible`).
     ModelCaps::new("iris_3b", true, true, false, true, false),
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
-    // MLX and Candle/CUDA. Neither lane advertises quant tiers or adapters; the Candle surface
-    // delegates to the MLX predicate so unsupported carriers are never silently discarded.
-    ModelCaps::new("flux3_klein", true, true, false, true, false),
-    ModelCaps::new("flux3_klein_base", true, true, false, true, false),
+    // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
+    // native precision packages. Missing base converted pins never become a dense fallback.
+    ModelCaps::new("flux3_klein", true, true, true, true, true),
+    ModelCaps::new("flux3_klein_base", true, true, true, true, true),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2373,6 +2380,7 @@ mod tests {
         "flux_dev",
         "qwen_image",
         "qwen_image_2_1",
+        "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_edit_2509",
         "qwen_image_edit_2511",
@@ -2447,6 +2455,8 @@ mod tests {
         // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
         // 2512 row it shares nothing with.
         "qwen_image_2_1",
+        // sc-25907: its distilled Turbo sibling, registered by the same Candle crate.
+        "qwen_image_2_1_turbo",
         "lens",
         "lens_turbo",
         // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
@@ -2505,6 +2515,8 @@ mod tests {
         "qwen_image",
         // sc-24158: the candle 2.1 provider applies LoRA/LoKr on dense AND packed tiers.
         "qwen_image_2_1",
+        // sc-25907: the same adapter path under the Turbo id.
+        "qwen_image_2_1_turbo",
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
@@ -2557,6 +2569,9 @@ mod tests {
         "sensenova_u1_8b_infographic_v2_fast",
         "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_infographic_v3_fast",
+        // sc-26241: FLUX 3 Image Klein's locally converted GGML q4/q8 packages (its publisher
+        // FP8R/NVFP4 ride `quantTier`, judged by the FLUX 3 surface predicate).
+        "flux3_klein",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle

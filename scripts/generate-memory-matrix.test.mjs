@@ -1601,6 +1601,25 @@ test("the staged column tells structural truth apart from undelivered work (sc-2
   assert.match(row("svd", "candle"), /Missing/);
 });
 
+function assertPackagedMatrixPair(matrix, markdown) {
+  assert.equal(markdown, renderMarkdown(matrix));
+}
+
+test("packaged matrix provenance rejects source-revision and markdown mutations", async () => {
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  const markdown = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
+  assertPackagedMatrixPair(matrix, markdown);
+  const changedSource = structuredClone(matrix);
+  changedSource.generatedFrom.sceneWorksRevision = `source-tree:${"0".repeat(64)}`;
+  assert.notEqual(changedSource.generatedFrom.sceneWorksRevision, matrix.generatedFrom.sceneWorksRevision);
+  assert.throws(() => assertPackagedMatrixPair(changedSource, markdown), { code: "ERR_ASSERTION" });
+  const changedMarkdown = markdown.replace(matrix.generatedFrom.sceneWorksRevision, "mutated-provenance");
+  assert.notEqual(changedMarkdown, markdown);
+  assert.throws(() => assertPackagedMatrixPair(matrix, changedMarkdown), { code: "ERR_ASSERTION" });
+});
+
 test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", async () => {
   const matrix = await buildMatrix();
   const row = (markdown, id, backend) =>
@@ -1656,9 +1675,14 @@ test("an Anchored rollup carries (stale) exactly when every anchor behind it is 
         ),
     );
   assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
-  // The shipped artifact agrees with the renderer.
+  // Packaged artifacts must agree with each other, not with the live source-tree revision:
+  // later code/pin changes may leave historical matrix provenance stale without demanding a
+  // measurement refresh. The controlled currency cases above exercise the live renderer.
+  const shippedMatrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
   const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  assert.equal(shipped, renderMarkdown(matrix));
+  assertPackagedMatrixPair(shippedMatrix, shipped);
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────

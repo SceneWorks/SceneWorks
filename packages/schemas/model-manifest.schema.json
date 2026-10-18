@@ -395,8 +395,8 @@
     },
     "quantVariantKey": {
       "type": "string",
-      "enum": ["bf16", "q8", "q4", "int8-convrot", "training"],
-      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; training selects the dedicated Lens training artifact."
+      "enum": ["bf16", "q8", "q4", "int8-convrot", "nvfp4", "fp8r", "training"],
+      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; nvfp4/fp8r are publisher NVFP4 / FP8-rowwise packages a provider loads as shipped on CUDA (sc-26241: FLUX 3 Image Klein's `variants/<tier>`); training selects the dedicated Lens training artifact."
     },
     "variantFootprint": {
       "type": "object",

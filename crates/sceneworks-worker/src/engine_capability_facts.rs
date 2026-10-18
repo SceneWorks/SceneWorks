@@ -629,6 +629,7 @@ fn quant_label(quant: gen_core::Quant) -> &'static str {
         gen_core::Quant::Q4 => "q4",
         gen_core::Quant::Q8 => "q8",
         gen_core::Quant::Nvfp4 => "nvfp4",
+        gen_core::Quant::Fp8Rowwise => "fp8r",
     }
 }
 
@@ -881,6 +882,7 @@ fn memory_selector_fact(
         gen_core::MemoryContractSurfaceTier::Q4 => "q4",
         gen_core::MemoryContractSurfaceTier::Q8 => "q8",
         gen_core::MemoryContractSurfaceTier::Nvfp4 => "nvfp4",
+        gen_core::MemoryContractSurfaceTier::Fp8Rowwise => "fp8r",
     };
     let offload_policy = match selector.offload_policy {
         gen_core::OffloadPolicy::Resident => "resident",

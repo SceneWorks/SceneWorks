@@ -36,8 +36,8 @@ ARG CARGO_BUILD_JOBS
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
-# Cargo resolves the GTK3 safety patch even for server-only builds.
-COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
+# Cargo resolves all workspace patches even for server-only builds.
+COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
@@ -114,6 +114,7 @@ COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/calibration/sc-24114/ ./docs/calibration/sc-24114/
 COPY docs/calibration/sc-25690/ ./docs/calibration/sc-25690/
+COPY docs/calibration/sc-25909/ ./docs/calibration/sc-25909/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
@@ -218,8 +219,8 @@ WORKDIR /app
 # entrypoints, then `cargo fetch` so the candle dependency tree (candle-gen +
 # candle/cudarc, all public git deps) caches independently of source edits.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
-# Cargo resolves the GTK3 safety patch even for server-only builds.
-COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
+# Cargo resolves all workspace patches even for server-only builds.
+COPY vendor ./vendor
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
@@ -264,6 +265,7 @@ COPY docs/calibration/sc-15859/ ./docs/calibration/sc-15859/
 COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/calibration/sc-24114/ ./docs/calibration/sc-24114/
 COPY docs/calibration/sc-25690/ ./docs/calibration/sc-25690/
+COPY docs/calibration/sc-25909/ ./docs/calibration/sc-25909/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 

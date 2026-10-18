@@ -67,6 +67,10 @@
       "candle": true,
       "mlx": true
     },
+    "flux3_klein": {
+      "candle": false,
+      "mlx": false
+    },
     "flux_dev": {
       "candle": true,
       "mlx": true
@@ -166,6 +170,10 @@
       "mlx": true
     },
     "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
       "candle": false,
       "mlx": false
     },

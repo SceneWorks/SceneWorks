@@ -427,6 +427,7 @@ fn context(
         use_pid: false,
         has_phases: false,
         geometry,
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,

@@ -3302,25 +3302,34 @@
         // embeds these bytes; re-hosting them on the Hub is not embedding them in a build.
         //
         // PUBLISHED (sc-24114) at revision `1691de01c24a070131e0a28bf4c065fd027f4fe9` (q8 landed in
-        // 2f5ad8bb…, q4 in 1691de01…). The sc-24112 null-SHA placeholder and its `pendingArtifact`
+        // 2f5ad8bb…, q4 in 1691de01…), and REPUBLISHED (sc-25909, epic 25899) at
+        // `ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, which adds ONLY `q8/NOTICE` and `q4/NOTICE`
+        // (148 B each — the verbatim §3 attribution notice as its own file, as the Turbo re-host
+        // ships it); every other blob, `SHA256SUMS` included, is unchanged, and `SHA256SUMS` does
+        // not list NOTICE. An install made at 1691de01… (v0.9.0) is carried to ef03535e… cache-only
+        // at load time — every carried entry relinked to its existing blob, NOTICE written from its
+        // declared bytes — by the exact declaration in `sceneworks_core::hf_revision_supersessions`,
+        // which pins that file list; the Model Manager reads the same declaration. The sc-24112
+        // null-SHA placeholder and its `pendingArtifact`
         // flag are gone together, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
         // keeps rigid (a null SHA without the flag, or the flag with a real SHA, fails the audit),
         // and `default` sits on q4, the lightest installable tier — the catalog convention
         // `qwen_image` / `qwen_image_edit_2511` above follow, and what
         // `test_qwen_image_2_1_defaults_to_its_lightest_installable_tier` demands.
         //
-        // `estimatedSizeBytes` is MEASURED from the published blobs at 1691de01…: the EXACT sum of
+        // `estimatedSizeBytes` is MEASURED from the published blobs at ef03535e…: the EXACT sum of
         // every file under the tier's subdir as the Hub API reports it (`model_info(...,
-        // files_metadata=True)`), the same way the bf16 row's total was obtained:
+        // files_metadata=True)`), the same way the bf16 row's total was obtained (the 1691de01…
+        // totals plus the one 148 B NOTICE):
         //
-        //   q8 = 19_949_564_007 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
+        //   q8 = 19_949_564_155 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
         //                                       + VAE 1_350_989_512 + small files
-        //   q4 = 12_919_123_211 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
+        //   q4 = 12_919_123_359 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
         //                                       + VAE 1_350_989_512 + small files
         //
         // Cross-check against the sc-24112 derivation (bf16 tree total with the DiT's 232 and the
         // tower's 252 group-64 Linears swapped from bf16 to packed width, the arithmetic of the
-        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_325 B and q4 3_311_185 B
+        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_177 B and q4 3_311_037 B
         // BELOW the derived number — ~3.31 MB each, within 860 B of one another, so the packed-weight
         // arithmetic holds and the residue is the non-weight files the re-host carries instead of
         // upstream's.
@@ -3331,21 +3340,21 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19949564007,
-          "footprint": { "diskSizeBytes": 19949564007, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19949564155,
+          "footprint": { "diskSizeBytes": 19949564155, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 12919123211,
-          "footprint": { "diskSizeBytes": 12919123211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 12919123359,
+          "footprint": { "diskSizeBytes": 12919123359, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3732,6 +3741,289 @@
           "title": "Qwen Image 2.1 Prompt Guide",
           "path": "/prompt-guides/qwen-image-2-1.md",
           "sources": [
+            { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
+            { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
+          ]
+        }
+      }
+    },
+    {
+      // Qwen-Image 2.1 Turbo (sc-25907, epic 25899) — the DISTILLED sibling of `qwen_image_2_1`
+      // above, under its OWN catalog id and its own engine id. `Qwen/Qwen-Image-2.1-Turbo` @
+      // fc13ba19 is the same architecture as the base snapshot (same ~7.1B single-stream DiT
+      // config and shard sizes, same ~7.6B Qwen3-VL tower, same seven presets, same Qwen RESEARCH
+      // LICENSE — the LICENSE file is byte-identical, sha256 8dc973f0…), distilled to an 8-step
+      // schedule. It differs from base in exactly what this entry declares differently:
+      //
+      // * THE SCHEDULE. The snapshot's `model_index.json` saves 8 `sample_sigmas`; the engine
+      //   renders over that saved curve at 8 steps, and any OTHER step count is a RESAMPLE of the
+      //   saved curve, not a re-shifted base schedule. A curated non-`default` scheduler name
+      //   REPLACES the distilled sigmas with that scheduler's own unshifted curve — legal (both
+      //   menus are the base menu, verbatim), but it is no longer the distilled schedule.
+      // * THE DEFAULTS. 8 steps and guidance 1.0 (true-CFG off by default: the distilled model is
+      //   meant to run CFG-free; the scale still engages once a negative prompt is supplied).
+      // * THE VAE. Turbo ships its autoencoder in bf16 where the base ships f32. On MLX that halves
+      //   the resident VAE (675,480,808 B vs 1,350,961,616 B) and is the ONLY derived memory
+      //   difference from base there; Candle holds both VAEs at its compute width, so the two ids
+      //   price alike on Candle. Every number below is DERIVED from the engine's
+      //   `memory_strategy::derived` `*_for(Variant::Turbo, …)` functions under Turbo's OWN
+      //   calibration fingerprints — none is copied from base, and nothing is measured (E10).
+      // * NO TRAINER. The engine registers no trainer under the Turbo id, so no training target
+      //   names it as a base and the API refuses one; the LoRA FAMILY is shared with base
+      //   (`qwen-image-2-1`), because the transformer is the same architecture (E9).
+      //
+      // Each engine id refuses the other's snapshot with a typed refusal (the Turbo snapshot is
+      // recognised by its saved `sample_sigmas`), and an error reached through this id names
+      // `qwen_image_2_1_turbo`. Native on BOTH backends exactly as base is: MLX
+      // (`mlx-gen-qwen-image-2-1`) and Candle/CUDA (`candle-gen-qwen-image-2-1`) both register
+      // `qwen_image_2_1_turbo`, and the routing catalog routes it on both.
+      "id": "qwen_image_2_1_turbo",
+      "name": "Qwen Image 2.1 Turbo",
+      "family": "qwen-image-2-1",
+      "type": "image",
+      // Its own recipe stamp (`RecipeAdapter::QwenImage21Turbo`): a replayed asset must say which
+      // checkpoint produced it, and the distilled weights are not the base weights.
+      "adapter": "qwen_image_2_1_turbo",
+      // The base entry's three operations, for the base entry's reasons: one upstream pipeline,
+      // text-to-image with no condition images and editing / multi-reference with 1-10 ORDERED
+      // condition images. No `image_inpaint` (no mask tensor), no `character_image`.
+      "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+      // The same four-channel VAE decode as base (`Capabilities::supports_alpha_output`): the
+      // transparency toggle is backed by the engine, and the prompt decides whether the fourth
+      // channel holds a cut-out.
+      "supportsAlphaOutput": true,
+      "downloads": [
+        // The UPSTREAM diffusers snapshot, pulled directly and whole, as base's bf16 tier is:
+        // `Qwen/Qwen-Image-2.1-Turbo` is public and UNGATED, and SceneWorks redistributes no
+        // weights from it. An empty `files` list is the whole-repo snapshot convention.
+        //
+        // `estimatedSizeBytes` is the EXACT byte total of the pinned revision's tree, summed from
+        // the Hub API's resolved blob sizes for fc13ba19 (`/api/models/…/revision/<sha>?blobs=true`,
+        // 32 files, 32,493,327,348 B = 30.26 GiB): the text encoder (17.53 GB, one file here), the
+        // two transformer shards (14.23 GB), the bf16 VAE (0.68 GB), the tokenizer/processor
+        // corpus, the model card's preview images and the small configs. Smaller than base's
+        // 33,134,949,212 B mostly by the halved VAE.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` are null: nothing has been measured for Turbo,
+        // and base's figures are not Turbo's. NO `platforms` key, for base's reason (both backends
+        // load this tree).
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-Turbo",
+          "revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+          "variant": "bf16",
+          "files": [],
+          "estimatedSizeBytes": 32493327348,
+          "footprint": { "diskSizeBytes": 32493327348, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ── The SceneWorks re-host: q8 and q4, one complete standalone snapshot per subdir ───────
+        //
+        // `SceneWorks/qwen-image-2-1-turbo-mlx` with `q8/` and `q4/` subdirs, named and laid out
+        // exactly as base's `SceneWorks/qwen-image-2-1-mlx`: each a complete standalone tree whose
+        // DiT and tower are affine-quantized at group 64, produced by the inference converter over
+        // the Turbo snapshot (`QWEN21_SRC=<turbo snapshot> QWEN21_TIER=q8|q4 cargo run --release
+        // --example qwen_image_2_1_prequant -p mlx-gen-qwen-image-2-1`). The converter reads which
+        // checkpoint it re-packs off the source, so a Turbo tier keeps the saved `sample_sigmas`,
+        // the static scheduler config and the bf16 VAE byte for byte. Each tier dir carries the
+        // §3 licence record — LICENSE, README.md, CHANGES.md, SHA256SUMS and the attribution
+        // NOTICE — beside model_index.json + processor/ + scheduler/ + text_encoder/ +
+        // transformer/ + vae/ (17 files per tier; the repo-root README.md is outside both scopes).
+        //
+        // PUBLISHED (sc-25909, the epic's terminal story) at revision
+        // `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`. The 40-zero placeholder and its
+        // `pendingArtifact` flag left together, as `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
+        // requires, and `default` moved from bf16 to q4 — the lightest installable tier, base's
+        // convention, which `test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier`
+        // demands.
+        //
+        // `estimatedSizeBytes` is MEASURED from the published blobs at 9095dfbb…: the EXACT sum of
+        // every file under the tier's subdir as the Hub API reports it (`/api/models/…/revision/
+        // <sha>?blobs=true`), as base's tiers were measured:
+        //
+        //   q8 = 19_269_638_211 B (17.95 GiB)
+        //   q4 = 12_239_197_415 B (11.40 GiB)
+        //
+        // Cross-check against the derivation these rows carried while pending (the engine's
+        // `derived::tier_tree_bytes(Variant::Turbo, tier).weight_bytes()` plus base's published
+        // non-weight files): both tiers land EXACTLY 4_446_036 B below it — the same residue on
+        // both, so the packed-weight arithmetic is exact and only the non-weight files differ
+        // from base's.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` stay null on every tier: the epic-end memory
+        // campaign fills the measured rows, and the per-tier derived ladder lives in the
+        // `mlx`/`candle` blocks below where it is labelled derived.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19269638211,
+          "footprint": { "diskSizeBytes": 19269638211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 12239197415,
+          "footprint": { "diskSizeBytes": 12239197415, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-Turbo"
+      },
+      // The SAME credential-free licence gate as base: the Hub repo is public (no token), and
+      // `requiresLicenseAcknowledgment` blocks every tier's download behind an in-app accept that
+      // surfaces `licenseNotice`. The accept is per MODEL — accepting base's notice does not
+      // accept this one, because the two are separate catalog entries (E8).
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/fc13ba1986fcb905854dc8de2f52eee395f49b5b/LICENSE",
+      // Base's notice, adapted to name Turbo and its NOTICE file: the LICENSE beside the pinned
+      // Turbo weights is byte-identical to base's (sha256 8dc973f0…), so every clause cited holds.
+      "licenseNotice": "Qwen-Image 2.1 Turbo's weights are governed (the same Agreement, byte for byte, as the base Qwen Image 2.1 model's) by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own Qwen-Image-2.1-Turbo repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above (also as a NOTICE file) inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs), as base's does.
+      "nonCommercial": true,
+      "defaults": {
+        // The distilled schedule's own operating point: 8 steps (the snapshot's saved
+        // `sample_sigmas`), guidance 1.0 (true-CFG off until a negative prompt is supplied), the
+        // engine's 1:1 preset, one image, and the `default` sampler/scheduler — `default` is what
+        // keeps the saved distilled sigmas; a curated scheduler name replaces them.
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Base's request envelope, verbatim — the descriptor is base's under a second id: the
+        // seven presets in engine order, count up to 8, the [32, 2752] ÷32 free-size envelope
+        // (enforced at enqueue because all three keys are declared), and 1-10 ordered references
+        // counted over the flattened list.
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ],
+        "count": [1, 2, 4, 8],
+        "minDimension": 32,
+        "maxDimension": 2752,
+        "requiresDimensionsMultipleOf": 32,
+        "maxReferenceAssets": 10,
+        // A PRODUCT floor of 4 steps, set from the epic's terminal step sweep on real weights
+        // (sc-25909): 4, 6, 8, 12 and 16 steps all rendered coherent, so 4 is the lowest count
+        // MEASURED to hold up. The engine itself would accept 1 (a distilled curve resampled to
+        // one step is still a legal schedule), but nothing below 4 was swept, and the floor is
+        // never set below evidence. Step counts other than 8 are a resample of the saved
+        // distilled curve.
+        "hardMinSteps": 4,
+        // Base's curated solver menu, verbatim (both providers publish the same menu under the
+        // Turbo id). ⚠️ On this id a non-`default` SCHEDULER replaces the distilled sigmas with
+        // that scheduler's own unshifted curve; `default` keeps them.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      // The SAME LoRA family as base (E9): the distilled transformer is the base architecture, so a
+      // `qwen-image-2-1` adapter loads on it, and a 2512 `qwen-image` adapter is refused with a 400
+      // naming both families, exactly as on base.
+      "loraCompatibility": {
+        "families": ["qwen-image-2-1"],
+        "types": ["style", "enhance", "character"]
+      },
+      // Base's admission envelope, verbatim: the joint-sequence geometry is a property of the
+      // architecture and the reference fit, both shared (`admission_geometry()` is one function
+      // for both ids). See the base entry for the derivation of each number.
+      "admissionGeometry": {
+        "maxSide": 2752,
+        "maxPresetArea": 4300800,
+        "maxTargetImageTokens": 16800,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 4096,
+        "maxJointTokens": 58016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8
+      },
+      // ── THE DERIVED MEMORY LADDER — Turbo's OWN derived numbers (E10) ──────────────────────────
+      //
+      // Same rule as base, applied to Turbo's derivation: floor = ceil(peak GiB x 1.25), the peak
+      // being `derived::default_path_peak_max_bytes_for(Variant::Turbo, tier)` on MLX. The ONLY
+      // input that differs from base on MLX is the resident VAE (bf16, 0.63 GiB where base's f32
+      // VAE is 1.26 GiB); every activation term is base's, unchanged (the engine deliberately
+      // claims no bf16-decode saving until the terminal campaign measures one):
+      //
+      //   tier | resident | default-path peak max | floor
+      //   bf16 |  27.98   |  34.35              |  43
+      //   q8   |  15.70   |  22.08              |  28
+      //   q4   |   9.15   |  15.53              |  20
+      //
+      // `qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source` pins these to the
+      // linked accessor on macOS. No `calibrations`, no measured row on either lane; Turbo's
+      // calibration fingerprints (`TURBO_MEMORY_CALIBRATION_FINGERPRINT`, a different value on
+      // each lane) key the hand-authored request-owned contracts below, so a record built for one
+      // id can never satisfy the other's handshake. The terminal campaign owns the anchors.
+      "mlx": {
+        "minMemoryGb": 43,
+        "minMemoryGbByTier": { "bf16": 43, "q8": 28, "q4": 20 },
+        // Base's default-tier declaration (an app-wide q8 default; no `minQualityTier`).
+        "quantize": 8,
+        // Base's request-owned MLX declaration under Turbo's provider id and fingerprint: Resident
+        // and BoundedDecode (decode tiles 768/640/512/384/256 at overlap 64), every public mode on
+        // the provider's one `text_to_image` memory mode with 0..=10 ordered references, and
+        // deliberately NO `staged_residency` row (base's reason: an MLX staged row stages every
+        // request unconditionally).
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1_turbo",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      // The off-Mac lane. Candle holds the bf16 Turbo VAE at its compute width exactly as it holds
+      // base's f32 VAE (`memory_strategy::compute_width()`), so Turbo's DERIVED Candle floors are
+      // base's arithmetic over the same inputs — resident + the 3-map untiled decode tail at
+      // 2400x1792, x1.25 — and land on the same integers. They are stated here as Turbo's own
+      // derivation, not copied as evidence: `binding` for `vram_gate::predicted_peak_gb`, the
+      // scalar the densest tier's floor, and no measured key.
+      //   bf16 45 — 28.61 + 6.92 = 35.53 GiB x1.25 = 44.41
+      //   q8   30 — 16.33 + 6.92 = 23.25 GiB x1.25 = 29.07
+      //   q4   21 —  9.78 + 6.92 = 16.70 GiB x1.25 = 20.88
+      "candle": {
+        "minMemoryGb": 45,
+        "minMemoryGbByTier": { "bf16": 45, "q8": 30, "q4": 21 },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1_turbo",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Turbo",
+        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. Three precision tiers — bf16, Q8 and Q4: bf16 runs on both backends, and the Q8 and Q4 tiers are verified on Apple Silicon (MLX); they have not yet been run on an NVIDIA card. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
+        "recommendedFor": ["text_to_image", "edit_image"],
+        // Base's multi-reference editor surface; the picker's ceiling is `limits.maxReferenceAssets`.
+        "multiReference": true,
+        // Turbo's own guide (sc-25908): base's prompt format and ordered-reference conventions,
+        // plus what differs here — the 8-step distilled schedule, CFG-free defaults, no training
+        // base, the 4-step floor. It reaches the generic refiner as the selected model's guide.
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Turbo Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1-turbo.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-Turbo model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo" },
             { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
             { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
           ]
@@ -5876,7 +6168,14 @@
       // shards), and the engine reads all three from the package root
       // (`gen_core::flux3::GenerationResources`): no separate component install. Download the WHOLE
       // pinned repo, including variants, diffusers layout, configs, licenses and gallery assets.
-      // Fetching those files does not advertise unsupported quantized tiers (sc-26241 owns tiers).
+      //
+      // TIERS (sc-26241) — five packages, every one a distinct artifact, never a load-time
+      // transform of another: bf16 (the dense root package, both backends); q4 / q8 converted ON
+      // THIS MACHINE from the dense package by the backend's own inference converter (Candle GGML
+      // Q4_1 / Q8_0 off-Mac, MLX affine W4/W8 group 64 on macOS — the `localDerivation` rows); and
+      // the publisher fp8r / nvfp4 packages shipped inside the same snapshot at `variants/<tier>`,
+      // Candle on CUDA past their device floor (sm_89 / sm_120). A request names exactly one; an
+      // absent tier is bf16, never the app-wide q8 default.
       //
       // CONTROL SURFACE (E6) — exactly what the engine honours in S1: prompt, size on a 16-px grid
       // (64..=2048 here; the engine admits up to 4096), count <= 8 (rendered one after another from
@@ -5885,7 +6184,7 @@
       // map: NO classifier-free guidance and NO negative prompt — the engine refuses any guidance
       // and any negative prompt by name (`supportsGuidance` /
       // `supportsNegativePrompt` false, the z_image_turbo shape). References / boxes (sc-26236/7),
-      // the base checkpoint + LoRA (sc-26239) and quantized tiers (sc-26241) are later stories.
+      // Base checkpoint + identity-checked LoRA are integrated by sc-26239; tiers by sc-26241.
       // Prompt upsampling uses the separate optional component below (sc-26238).
       "id": "flux3_klein",
       "loraCompatibility": { "families": ["flux3"], "types": ["style", "enhance", "character"], "baseModel": "black-forest-labs/flux-3-image-klein", "baseRevision": "8454017f9ebaada30c998fccd9f67a80c7580f68", "adapterKinds": ["lora"] },
@@ -5912,10 +6211,126 @@
           "provider": "huggingface",
           "repo": "black-forest-labs/flux-3-image-klein",
           "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "bf16",
           "default": true,
           "files": [],
           "estimatedSizeBytes": 43317649602,
           "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher FP8 rowwise package. It ships INSIDE the same pinned snapshot
+          // (`variants/fp8r/`: config.json, hf_quant_config.json, manifest.json and a
+          // 6,270,949,144-byte model.safetensors, by the unauthenticated Hub tree listing), so this
+          // tier row is the SAME whole-repository download as the bf16 row: installing either
+          // installs both. Loaded as shipped by the Candle provider (`Quant::Fp8Rowwise`) on CUDA
+          // past the sm_89 floor, with the root `text_encoder/` and `ae.safetensors` as explicit
+          // components. MLX advertises no FP8R tier, so the row is Windows/Linux only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "fp8r",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher NVFP4 package (`variants/nvfp4/`, a 5,277,674,144-byte
+          // model.safetensors), the same whole-repository download. Candle on CUDA past the sm_120
+          // floor only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "nvfp4",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q8_0, CONVERTED ON THIS MACHINE from the dense bf16 package by the
+          // inference converter (`candle_gen_flux3::convert::convert_ggml`) — the FLUX Kommunity
+          // License weights are never re-hosted. The pins are the converter's deterministic output
+          // for this exact source (`local_derivation::tests::flux3_conversions_reproduce_the_catalog_pins`).
+          // The derived package owns only its DiT, config, licence files and receipt; the text
+          // encoder and autoencoder stay the snapshot's own (receipt-verified external components).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q8_0-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567555584,
+            "weightsSha256": "60d8c4b83a04741168d8bb17992e772e105d735db82b6c796d787007ab09e34f",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885249611, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q4_1, converted locally exactly like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q4_1-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4453626272,
+            "weightsSha256": "037e023c665c44bd35bc979512f8b5e2a25b21dff6a5b59ac24ffcde2ab5b7ba",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47771320299, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W8A16 (group 64), converted locally by the backend-neutral inference
+          // packer (`gen_core::flux3::native_convert::convert_affine`) for MLX's `quantized_matmul`.
+          // Deterministic and CPU-only, so its pins are reproduced on any host; only LOADING it needs
+          // Apple Silicon. A Candle GGML package and this one are different artifacts: no
+          // cross-backend reuse.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q8-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567607528,
+            "weightsSha256": "2ca6f2dbd2f921b3b561c89a8d1b0e327691405260278bc070b59d35fc2b314b",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885301565, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W4A16 (group 64), converted locally like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q4-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4151688144,
+            "weightsSha256": "114ab4381c7a129dda73641ecac090b2d8705d717ba6e3986b20cf48f88c8e87",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47469382181, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
@@ -5958,18 +6373,37 @@
         // Conservative DECLARED floor (no measurement campaign): bf16 DiT (11.1 GB) + bf16 Qwen3-VL-4B
         // tower (8.9 GB) + f32 autoencoder (0.34 GB) resident plus the 1024² attention and decoder
         // activations. Replaced by measured evidence at the epic-end campaign (sc-26243).
-        "minMemoryGb": 32
+        //
+        // Per-tier floors (sc-26241), DERIVED with one rule on both lanes: the dense floor with its
+        // DiT term replaced by the tier's DiT as the provider's own memory contract prices it
+        // (`native_dit_bytes` over the package's tensor headers — packed targets at stored bytes,
+        // everything else as the dense path holds it), rounded UP:
+        //   floor = ceil(32 - (dense DiT GiB - tier DiT GiB)); dense DiT = 10.335 GiB
+        //   MLX affine (W4/W8 + bf16 scales/biases, no packed transient):
+        //     q8 6.116 GiB -> ceil(27.78) = 28    q4 3.866 GiB -> ceil(25.53) = 26
+        // Advisory on MLX (the MLX fit gate admits from the provider's own memory model). Measured
+        // rows from sc-26243 replace every derived floor.
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 28, "q4": 26 }
       },
       "candle": {
         // Declared conservative resident floor, not measured: dense bf16 transformer and encoder,
         // f32 autoencoder, activation scratch and allocator reserve. Terminal sc-26243 owns fitting.
+        //
+        // Per-tier floors (sc-26241), the same rule as the MLX block above, over the Candle
+        // provider's `native_dit_bytes` (which also charges the 256 MiB packed-GEMM transient once):
+        //   q8 GGML Q8_0 6.366 GiB -> ceil(28.03) = 29    q4 GGML Q4_1 4.398 GiB -> ceil(26.06) = 27
+        //   fp8r 6.090 GiB -> ceil(27.76) = 28            nvfp4 5.165 GiB -> ceil(26.83) = 27
+        // (fp8r/nvfp4 from the publisher packages' own headers, staged scales included). The
+        // scalar stays the densest tier's floor, the conservative fallback for any unlisted key.
         "measured": false,
-        "minMemoryGb": 32
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 29, "q4": 27, "fp8r": 28, "nvfp4": 27 }
       },
       "ui": {
         "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
-        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); declared unmeasured resident floor ~32 GB at 1024 square.",
+        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
@@ -5983,7 +6417,10 @@
       }
     },
     // S6 (sc-26239): separate frozen CFG checkpoint, not an alias of the distilled flow map.
-    // Whole pinned repository download; the dense native loader uses only the root checkpoint.
+    // Whole pinned repository download. Publisher variants stay in the same pinned source.
+    // q4/q8 derivation rows are intentionally absent until REAL base conversions supply output
+    // sizes and SHA-256 pins (base file access is HTTP 403). Never reuse distilled pins or
+    // advertise these as installed/runnable; shared native tier plumbing refuses missing rows.
     // Declared 32 GB weight/reserve floor, not a measured peak; source-derived two-row
     // conditioning/denoise activations and optional VLM are accounted separately.
     {
@@ -6011,7 +6448,42 @@
             "diskSizeBytes": 43229093855,
             "residentMemoryBytes": null,
             "peakMemoryBytes": null
-          }
+          },
+          "variant": "bf16"
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          },
+          "variant": "fp8r",
+          "platforms": [
+            "windows",
+            "linux"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          },
+          "variant": "nvfp4",
+          "platforms": [
+            "windows",
+            "linux"
+          ]
         },
         {
           "provider": "huggingface",
@@ -6063,15 +6535,27 @@
         ]
       },
       "mlx": {
-        "minMemoryGb": 32
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": {
+          "bf16": 32,
+          "q8": 29,
+          "q4": 27
+        }
       },
       "candle": {
         "measured": false,
-        "minMemoryGb": 32
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": {
+          "bf16": 32,
+          "q8": 29,
+          "q4": 27,
+          "fp8r": 28,
+          "nvfp4": 27
+        }
       },
       "ui": {
         "label": "FLUX 3 Image Klein Base",
-        "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately.",
+        "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately. Base q4/q8 local conversion installation awaits verified output size/SHA pins after base repository access is granted; no dense substitution.",
         "recommendedFor": [
           "text_to_image"
         ],
