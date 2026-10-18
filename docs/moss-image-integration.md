@@ -31,6 +31,18 @@ The primary Base/SFT transformer and required SFT text encoder/tokenizer/VAE/sch
 
 Before loading tensors, the worker authenticates the frozen repository, revision, relative path, physical size and SHA-256 of each selected file. Cache identities include mode, precision, components and content pins. Admission prices the selected execution closure and request workspace; cached unselected optional packages do not increase it. Warm admission credits only the current generator's actual owned residency, bounded by current committed device memory. Normal worker progress, heartbeats, cancellation and artifact writes surround the native provider.
 
+## Native capability facts capture
+
+After the permanent inference-main pin, committed preflight pass and coordinator push, the existing Windows workflow can capture the real Candle registry descriptors without running GPU or runtime tests:
+
+```sh
+gh workflow run windows-candle.yml --ref story/sc-26325-epic-26321-moss-image-evaluation -f capability_facts_only=true
+```
+
+This optional input defaults to false. The explicit profile hides CUDA devices, compiles both test suites with `--no-run`, retains the sidecar/memory-adapter checks and Clippy, and runs the native weights-free descriptor dumper with all three strict content comparisons. It uploads the actual `backend-capability-facts-candle` artifact on successful capture or comparison mismatch; a mismatch still fails the job. Mixed provisioning/runtime profiles are refused, and terminal `always()` steps and separate GPU jobs cannot run under this profile. Normal CI and default manual runtime tests remain enabled.
+
+This is CPU descriptor capture, not required CI GPU-test coverage or native model acceptance. The coordinator must still run the normal required checks and separately admitted real product campaign.
+
 ## Small terminal product acceptance
 
 The ignored test below calls `run_image_generate_job`, including normal route selection, asset preparation, admission, serialized cache, default native loader, progress consumption and PNG/recipe writing. It does not inject a generator. Run it alone only after the coordinator admits the device and provisions the exact frozen snapshots; source compilation does not prove native execution.
