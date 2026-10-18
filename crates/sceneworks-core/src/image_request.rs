@@ -393,6 +393,66 @@ fn ordered_image_reference_strength_error(model: &str, payload: &JsonObject) -> 
     None
 }
 
+/// The `advanced.quantTier` label of the publisher FP8 rowwise package (sc-26241): the inference
+/// `Quant::Fp8Rowwise` tier, wire key `fp8r`. It is a tier IDENTITY, never a point on the
+/// `mlxQuantize` bits ladder — aliasing it to q8 would load different numerics than the request
+/// named.
+pub const FP8R_QUANT_TIER: &str = "fp8r";
+
+/// The image models that ship a publisher FP8R package. FLUX 3 Image Klein (distilled) carries it
+/// at `variants/fp8r` inside its single pinned repository; no other model has one, so a request
+/// naming the tier anywhere else is refused rather than run at some other precision.
+pub const FP8R_IMAGE_MODEL_IDS: &[&str] = &["flux3_klein"];
+
+/// Whether `advanced.quantTier` names the FP8R tier (trimmed, ASCII case-insensitive — the same
+/// normalization every other named-tier reader applies).
+pub fn requests_fp8r_tier(advanced: &JsonObject) -> bool {
+    advanced
+        .get("quantTier")
+        .and_then(Value::as_str)
+        .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(FP8R_QUANT_TIER))
+}
+
+/// The request-shape rule for the FP8R tier, shared by the API (typed 400) and the worker trust
+/// boundary (raw queue writes, stored jobs). `None` = acceptable; `Some(reason)` = refuse.
+///
+/// * Only an [`FP8R_IMAGE_MODEL_IDS`] model has the package.
+/// * FP8R is a stored publisher format, so it never combines with a second precision carrier — an
+///   `mlxQuantize` bit width or the Krea ConvRot tier would name two different weight sets.
+///
+/// Backend capability (CUDA only, compute-capability floor) is NOT judged here: routing refuses
+/// the MLX lane, and the worker checks the linked provider's advertised quants before load.
+pub fn fp8r_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<String> {
+    if !requests_fp8r_tier(advanced) {
+        return None;
+    }
+    if !FP8R_IMAGE_MODEL_IDS.contains(&model) {
+        return Some(format!(
+            "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
+             {model} ships none (only {FP8R_IMAGE_MODEL_IDS:?} do)"
+        ));
+    }
+    if advanced
+        .get("mlxQuantize")
+        .is_some_and(|bits| !bits.is_null())
+    {
+        return Some(format!(
+            "{model}: advanced.quantTier \"{FP8R_QUANT_TIER}\" cannot be combined with \
+             advanced.mlxQuantize — the FP8R package is loaded as shipped, not re-quantized"
+        ));
+    }
+    if advanced
+        .get("convRot")
+        .is_some_and(|convrot| !matches!(convrot, Value::Null | Value::Bool(false)))
+    {
+        return Some(format!(
+            "{model}: advanced.quantTier \"{FP8R_QUANT_TIER}\" cannot be combined with \
+             advanced.convRot"
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +667,58 @@ mod tests {
         // A plain text-to-image request is untouched.
         assert_eq!(check(json!({ "mode": "text_to_image" })), None);
         assert_eq!(check(json!({ "advanced": { "strength": 0.4 } })), None);
+    }
+    #[test]
+    fn fp8r_quant_tier_is_flux3_only_and_never_combines_with_another_precision() {
+        let advanced = |value: Value| value.as_object().cloned().unwrap();
+        // Absent / other tiers are not this rule's business.
+        assert_eq!(
+            fp8r_quant_tier_refusal("z_image", &advanced(json!({}))),
+            None
+        );
+        assert_eq!(
+            fp8r_quant_tier_refusal("z_image", &advanced(json!({"quantTier": "nvfp4"}))),
+            None
+        );
+        // The one model with the package accepts the canonical request and its normalized spelling.
+        assert!(requests_fp8r_tier(&advanced(json!({"quantTier": "fp8r"}))));
+        assert!(requests_fp8r_tier(&advanced(
+            json!({"quantTier": " FP8R "})
+        )));
+        assert_eq!(
+            fp8r_quant_tier_refusal("flux3_klein", &advanced(json!({"quantTier": "fp8r"}))),
+            None
+        );
+        assert_eq!(
+            fp8r_quant_tier_refusal(
+                "flux3_klein",
+                &advanced(json!({"quantTier": "fp8r", "mlxQuantize": null, "convRot": false}))
+            ),
+            None
+        );
+        // Every other model is refused by name — never silently run at another precision.
+        for model in [
+            "flux3_klein_base",
+            "flux2_klein_9b",
+            "krea_2_turbo",
+            "z_image",
+        ] {
+            let reason = fp8r_quant_tier_refusal(model, &advanced(json!({"quantTier": "fp8r"})))
+                .expect("non-FLUX3 fp8r must be refused");
+            assert!(reason.contains(model), "{reason}");
+        }
+        // A second precision carrier is refused instead of one silently winning.
+        for extra in [
+            json!({"mlxQuantize": 8}),
+            json!({"mlxQuantize": 0}),
+            json!({"convRot": true}),
+        ] {
+            let mut value = extra.as_object().cloned().unwrap();
+            value.insert("quantTier".into(), json!("fp8r"));
+            assert!(
+                fp8r_quant_tier_refusal("flux3_klein", &value).is_some(),
+                "{value:?} must be refused"
+            );
+        }
     }
 }

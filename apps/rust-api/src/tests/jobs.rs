@@ -16695,3 +16695,40 @@ fn h3_empty_last_frame_is_not_a_keyframe_input() {
         assert!(crate::validate_video_job(&payload).is_err());
     }
 }
+
+/// sc-26241: the publisher FP8R tier is accepted only for the model that ships the package and
+/// never alongside a second precision carrier; everything else is a typed 400, not a silent
+/// re-interpretation at another precision.
+#[test]
+fn image_job_fp8r_quant_tier_is_flux3_only() {
+    let job = |model: &str, advanced: serde_json::Value| -> crate::dto::ImageJobRequest {
+        serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": model,
+            "prompt": "a lighthouse",
+            "mode": "text_to_image",
+            "advanced": advanced,
+        }))
+        .expect("image job request parses")
+    };
+    assert!(crate::validate_image_job(&job("flux3_klein", json!({"quantTier": "fp8r"}))).is_ok());
+    assert!(crate::validate_image_job(&job("flux3_klein", json!({}))).is_ok());
+    for (model, advanced) in [
+        ("z_image_turbo", json!({"quantTier": "fp8r"})),
+        ("flux3_klein_base", json!({"quantTier": "fp8r"})),
+        (
+            "flux3_klein",
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        ),
+        ("flux3_klein", json!({"quantTier": "fp8r", "convRot": true})),
+    ] {
+        let error =
+            crate::validate_image_job(&job(model, advanced.clone())).expect_err("fp8r refusal");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{model} {advanced}");
+        assert!(
+            error.detail.contains("fp8r"),
+            "{model} {advanced}: {}",
+            error.detail
+        );
+    }
+}

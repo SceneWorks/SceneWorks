@@ -3899,10 +3899,13 @@ fn candle_certified_artifact_path(
 /// chosen.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
-    if matches!(engine_id, "iris_3b" | "flux3_klein") {
-        "bf16"
-    } else {
-        gate_tier
+    match engine_id {
+        "iris_3b" => "bf16",
+        // FLUX 3 has two real packages (sc-26241): the FP8R load must be selected as FP8R — a bf16
+        // selection would not match the loaded tier — and anything else is the dense package.
+        "flux3_klein" if gate_tier == sceneworks_core::image_request::FP8R_QUANT_TIER => gate_tier,
+        "flux3_klein" => "bf16",
+        _ => gate_tier,
     }
 }
 
@@ -5474,19 +5477,31 @@ pub(super) fn mlx_load_quant_for_resolved_artifact(
     }
 }
 
-/// Fixed converted artifacts whose resolved precision is independent of a request preference.
+/// Fixed artifacts whose resolved precision is independent of a request preference.
 /// Returning `Some` lets callers skip tier reconciliation entirely, avoiding both a false recipe
 /// identity and a false downgrade event before the provider sees the load.
+///
+/// Distilled FLUX 3 (sc-26241) loads its dense bf16 package on MLX: its descriptor advertises
+/// q4/q8, but no FLUX 3 MLX tier is selectable yet (routing refuses every quant carrier on this
+/// lane), so the generic resolver's `q8` default must not turn a plain request into an on-load
+/// re-quantization the user never asked for.
+#[cfg(target_os = "macos")]
+const FIXED_DENSE_MLX_ARTIFACT_MODELS: &[&str] = &["flux2_klein_9b_true_v2", "flux3_klein"];
+
 #[cfg(target_os = "macos")]
 pub(super) fn fixed_mlx_artifact_quant(
     model_id: &str,
 ) -> Option<(Option<Quant>, Option<i64>)> {
-    (model_id == "flux2_klein_9b_true_v2").then_some((None, None))
+    FIXED_DENSE_MLX_ARTIFACT_MODELS
+        .contains(&model_id)
+        .then_some((None, None))
 }
 
 #[cfg(target_os = "macos")]
 fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
-    (model_id == "flux2_klein_9b_true_v2").then_some("bf16")
+    FIXED_DENSE_MLX_ARTIFACT_MODELS
+        .contains(&model_id)
+        .then_some("bf16")
 }
 
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
@@ -12063,6 +12078,17 @@ mod candle_resolved_tier_contract_tests {
         "mage_flow_edit_turbo",
     ];
 
+    /// sc-26241: the shared selector binds FLUX 3 to the package that LOADS — FP8R as FP8R, never
+    /// relabelled bf16 — and to bf16 for the dense package whatever bits key the gate derived.
+    #[test]
+    fn flux3_shared_memory_tier_is_the_loaded_package() {
+        assert_eq!(candle_shared_memory_tier("flux3_klein", "fp8r"), "fp8r");
+        assert_eq!(candle_shared_memory_tier("flux3_klein", "bf16"), "bf16");
+        assert_eq!(candle_shared_memory_tier("flux3_klein", "q8"), "bf16");
+        assert_eq!(candle_shared_memory_tier("iris_3b", "fp8r"), "bf16");
+        assert_eq!(candle_shared_memory_tier("z_image", "q4"), "q4");
+    }
+
     fn request(bits: i64) -> ImageRequest {
         ImageRequest::from_payload(
             json!({
@@ -12664,6 +12690,24 @@ async fn generate_candle_stream_using(
             WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
         })?
     };
+    // sc-26241: distilled FLUX 3 selects its package by the request alone — dense bf16 at the
+    // snapshot root, or the publisher FP8R package at `variants/fp8r` with the root's bundled
+    // encoder/autoencoder as explicit components. `None` for every other model.
+    let flux3_precision =
+        flux3_precision::flux3_requested_precision(&request.model, &request.advanced)?;
+    let mut flux3_fp8r_package = None;
+    if let Some(precision) = flux3_precision {
+        flux3_precision::require_advertised_flux3_precision(
+            &request.model,
+            precision,
+            model.descriptor.capabilities.supported_quants,
+        )?;
+        if precision == flux3_precision::Flux3Precision::Fp8Rowwise {
+            let package = flux3_precision::resolve_flux3_fp8r_package(&weights_dir)?;
+            weights_dir = package.package_dir.clone();
+            flux3_fp8r_package = Some(package);
+        }
+    }
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
@@ -12934,6 +12978,11 @@ async fn generate_candle_stream_using(
     if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
         tier = "bf16";
     }
+    // FLUX 3's tier is the request-named package identity: neither the snapshot basename nor the
+    // bits-ladder `q8` default the generic key derives for an unrecognized directory.
+    if let Some(precision) = flux3_precision {
+        tier = precision.tier();
+    }
     validate_candle_tier_memory_evidence(&request.model, &request.model_manifest_entry, tier)?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
@@ -12991,7 +13040,9 @@ async fn generate_candle_stream_using(
             .get("mlxQuantizeExplicit")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    if convrot.is_none() && !explicit_pick {
+    // FLUX 3's package is request-named (bf16 or fp8r) and has no installed tier ladder to step
+    // down: it is gated as named and rejected before load if it does not fit, never downtiered.
+    if convrot.is_none() && !explicit_pick && flux3_precision.is_none() {
         let floor = capability_downtier_floor(
             krea_turbo_ladder,
             tier,
@@ -13174,13 +13225,18 @@ async fn generate_candle_stream_using(
     // resolved artifact drives recipe bits, MemoryNumericTier, active component floors, and the
     // provider begin-request check. `LoadSpec.quantize` remains descriptor-governed: in particular,
     // FLUX.1 packed-detects q4/q8 and therefore receives `None` while its receipt keeps the tier bits.
-    let (quant, quant_bits) = candle_quant_for_resolved_tier(
-        request,
-        tier,
-        &weights_dir,
-        model.supports_quant(),
-        convrot.is_some() || is_anima_model(&request.model),
-    );
+    let (quant, quant_bits) = match flux3_precision {
+        // FP8R is a tier identity with no honest bit count on the q4/q8 ladder, so the recipe's
+        // `mlxQuantize` bits stay empty and the load quant alone carries `Fp8Rowwise`.
+        Some(precision) => (precision.quant(), None),
+        None => candle_quant_for_resolved_tier(
+            request,
+            tier,
+            &weights_dir,
+            model.supports_quant(),
+            convrot.is_some() || is_anima_model(&request.model),
+        ),
+    };
     let mut raw_settings =
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
@@ -13268,6 +13324,10 @@ async fn generate_candle_stream_using(
         settings,
     )?;
     shared_contract_spec = attach_prompt_upsampler(shared_contract_spec, engine_id, request, settings)?;
+    if let Some(package) = flux3_fp8r_package.as_ref() {
+        shared_contract_spec =
+            flux3_precision::attach_flux3_fp8r_components(shared_contract_spec, package);
+    }
     if let Some((_, convrot_dit)) = convrot.as_ref() {
         shared_contract_spec = shared_contract_spec.with_component(
             gen_core::KREA_CONVROT_DIT_COMPONENT,
@@ -17971,6 +18031,11 @@ mod quant_tier_reconcile_tests {
             ),
             Some("bf16"),
             "the converted root is not a tier subdirectory, so its fixed BF16 tier must be explicit"
+        );
+        assert_eq!(
+            fixed_mlx_artifact_quant("flux3_klein"),
+            Some((None, None)),
+            "distilled FLUX 3 loads its dense package on MLX, never the q8 bits default"
         );
         assert_eq!(
             fixed_mlx_artifact_quant("flux2_klein_9b"),

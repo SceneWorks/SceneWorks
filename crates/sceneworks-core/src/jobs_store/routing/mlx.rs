@@ -52,6 +52,16 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// API projects the same provider facts into imported catalog affordances, while
 /// [`model_mac_support`] remains the builtin-default probe.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    // sc-26241: no MLX descriptor advertises the publisher FP8 rowwise tier (it is a CUDA format),
+    // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
+    // reaching a per-family predicate that might not read `quantTier` and render dense instead.
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(crate::image_request::requests_fp8r_tier)
+    {
+        return false;
+    }
     if !MLX_ROUTED_MODELS.contains(&model) {
         // Exact imported-provider fallback for a novel id outside the builtin table (sc-14109,
         // refined by sc-18312). The stamped manifest family is necessary but insufficient: the

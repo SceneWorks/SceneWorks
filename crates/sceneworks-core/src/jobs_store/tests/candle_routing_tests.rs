@@ -5798,6 +5798,63 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
     );
 }
 
+/// sc-26241: the publisher FP8R package is the one precision carrier distilled FLUX 3 admits, and
+/// only on Candle (the CUDA provider advertises `Fp8Rowwise`; MLX advertises no such tier). The
+/// label on any other model, or beside a second precision carrier, is refused by name on both
+/// lanes instead of rendering at a precision the request did not name.
+#[test]
+fn flux3_fp8r_routes_to_candle_only_and_is_refused_everywhere_else() {
+    let flux3 = |advanced: Value| {
+        object(json!({
+            "model": "flux3_klein", "mode": "text_to_image", "prompt": "a red lighthouse",
+            "sourceAssetId": null, "referenceAssetId": null, "maskAssetId": null,
+            "advanced": advanced
+        }))
+    };
+    let fp8r = flux3(json!({"quantTier": "fp8r"}));
+    assert!(image_request_candle_eligible("flux3_klein", &fp8r));
+    assert!(!image_request_mlx_eligible("flux3_klein", &fp8r));
+    // The rest of the FLUX 3 surface is still judged with the tier present.
+    let mut with_controls = fp8r.clone();
+    with_controls.insert("controls".into(), json!([{}]));
+    assert_eq!(
+        candle_image_first_refusal("flux3_klein", &with_controls),
+        Some(CandleImageRefusal::Flux3Surface)
+    );
+    for advanced in [
+        json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        json!({"quantTier": "fp8r", "convRot": true}),
+    ] {
+        let payload = flux3(advanced.clone());
+        assert!(
+            !image_request_candle_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+        assert!(
+            !image_request_mlx_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+    }
+    // Off FLUX 3 the label names a package the model does not ship: refused on both lanes, with a
+    // typed reason that names the tier, rather than the dense family running silently.
+    let other = object(json!({
+        "model": "z_image_turbo", "mode": "text_to_image", "prompt": "a red lighthouse",
+        "advanced": {"quantTier": "fp8r"}
+    }));
+    assert_eq!(
+        candle_image_first_refusal("z_image_turbo", &other),
+        Some(CandleImageRefusal::Fp8rTier)
+    );
+    assert!(!image_request_mlx_eligible("z_image_turbo", &other));
+    let reason = classify_candle_image_gap(&other);
+    assert!(reason.detail.contains("fp8r"), "{reason:?}");
+    assert!(reason.detail.contains("z_image_turbo"), "{reason:?}");
+    // Without the label nothing changes for either model.
+    let mut plain = other.clone();
+    plain.remove("advanced");
+    assert!(image_request_candle_eligible("z_image_turbo", &plain));
+}
+
 /// sc-26235: one public request contract, two native lanes. Removing either the Candle catalog
 /// row or its family-specific refusal must fail this test.
 #[test]

@@ -4,7 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
-use crate::image_request::MAX_JOB_POSES;
+use crate::image_request::{fp8r_quant_tier_refusal, requests_fp8r_tier, MAX_JOB_POSES};
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
     CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
@@ -400,6 +400,9 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
+    /// `advanced.quantTier: "fp8r"` (sc-26241) on a model that ships no publisher FP8 rowwise
+    /// package, or combined with a second precision carrier.
+    Fp8rTier,
     /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
     /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
     /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
@@ -425,6 +428,7 @@ impl CandleImageRefusal {
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
+            Self::Fp8rTier => "an advanced.quantTier fp8r this model cannot load",
             Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
             Self::Flux3Surface => {
                 "a carrier outside distilled FLUX 3's plain text-to-image surface"
@@ -467,6 +471,7 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+    (CandleImageRefusal::Fp8rTier, candle_refuses_fp8r_tier),
     (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
     (
         CandleImageRefusal::Flux3Surface,
@@ -484,8 +489,35 @@ fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> boo
     model == "iris_3b" && !iris_mlx_eligible(payload)
 }
 
+/// Distilled FLUX 3 shares the MLX arm's text-to-image surface with ONE Candle-only addition
+/// (sc-26241): the publisher FP8 rowwise package, `advanced.quantTier: "fp8r"`. The Candle FLUX 3
+/// provider loads it as shipped on CUDA (`Quant::Fp8Rowwise`); MLX advertises no such tier, so the
+/// MLX predicate keeps refusing it. Every other carrier — including `mlxQuantize`, another named
+/// tier, or fp8r combined with a second precision carrier — is judged by the shared predicate.
 fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "flux3_klein" && !flux3_mlx_eligible(payload)
+    model == "flux3_klein" && !flux3_mlx_eligible(&without_candle_fp8r_tier(model, payload))
+}
+
+/// `payload` with a well-formed FP8R tier label removed, so the shared FLUX 3 surface predicate
+/// judges every OTHER carrier. A label the FP8R rule refuses is left in place and keeps refusing.
+fn without_candle_fp8r_tier(model: &str, payload: &Map<String, Value>) -> Map<String, Value> {
+    let mut payload = payload.clone();
+    if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
+        if requests_fp8r_tier(advanced) && fp8r_quant_tier_refusal(model, advanced).is_none() {
+            advanced.remove("quantTier");
+        }
+    }
+    payload
+}
+
+/// An FP8R tier label the model cannot load is refused, never run at another precision: the
+/// generic lane reads only `mlxQuantize`, so without this a `quantTier: "fp8r"` on a dense family
+/// would silently render dense.
+fn candle_refuses_fp8r_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| fp8r_quant_tier_refusal(model, advanced).is_some())
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
