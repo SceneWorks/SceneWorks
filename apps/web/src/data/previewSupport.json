@@ -148,6 +148,12 @@
     "mmaudio_small_16k": {
       "candle": false
     },
+    "moss_image_base": {
+      "mlx": false
+    },
+    "moss_image_sft": {
+      "mlx": false
+    },
     "moss_sfx_v2": {
       "candle": false
     },

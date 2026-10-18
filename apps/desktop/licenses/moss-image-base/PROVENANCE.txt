@@ -1,0 +1,31 @@
+MOSS-Image model and native architecture attribution (SceneWorks record)
+
+Official MOSS-Image-Base and MOSS-Image-SFT: OpenMOSS-Team.
+Base: https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/tree/1ceede80badddd6a7812069619edaa5633587192
+SFT: https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/tree/fc5de0d56fc910cbca6f6625a70f5f582b26deb1
+Both frozen snapshots publish LICENSE containing the Apache License 2.0.
+Their LICENSE bytes are identical, SHA-256:
+cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+The bundled Apache-2.0.txt is an unmodified copy of that published file,
+including its unfilled appendix template; SceneWorks does not invent a copyright line.
+
+The SFT snapshot also supplies the shared text encoder, tokenizer, scheduler and
+small VAE used with either official transformer. Its pipeline_moss_image.py
+(SHA-256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31)
+is the frozen architectural reference. SceneWorks independently implements its
+DiT, scheduling, conditioning and decoding behavior in native Rust/MLX and
+Rust/Candle; no upstream Python runtime is bundled or invoked for production.
+Existing Qwen and FLUX.2 component attributions continue to apply to reused code.
+
+Optional MOSS-Image-SFT-8-steps-dmd: lodestones, based on OpenMOSS-Team's SFT.
+https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd/tree/5ff314b4c1470876b114b810146085db8a181a6e
+The frozen README metadata declares license: apache-2.0. The published package
+has no separate LICENSE file. DMD-LICENSE-DECLARATION.txt records that exact
+metadata and its source; the Apache license text displayed for this package is
+the declared standard, not a claim that lodestones published a LICENSE file.
+The declaration covers the optional LoRA, FP32 replacements, dataspace and
+published full-FP32 distilled transformer package. Installing or caching it does
+not enable acceleration; the user explicitly selects the 8-step mode.
+
+This provenance record is authored by SceneWorks; it is not an upstream NOTICE.
+No separate MIT source-license claim is made by this record.

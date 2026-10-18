@@ -55,6 +55,7 @@ crates/media/candle-gen/candle-gen-ltx
 crates/media/candle-gen/candle-gen-mage
 crates/media/candle-gen/candle-gen-minimax-h3
 crates/media/candle-gen/candle-gen-mochi
+crates/media/candle-gen/candle-gen-moss-image
 crates/media/candle-gen/candle-gen-perceptual
 crates/media/candle-gen/candle-gen-pid
 crates/media/candle-gen/candle-gen-pulid
@@ -97,6 +98,7 @@ crates/media/mlx-gen/mlx-gen-ltx
 crates/media/mlx-gen/mlx-gen-mage
 crates/media/mlx-gen/mlx-gen-minimax-h3
 crates/media/mlx-gen/mlx-gen-mochi
+crates/media/mlx-gen/mlx-gen-moss-image
 crates/media/mlx-gen/mlx-gen-perceptual
 crates/media/mlx-gen/mlx-gen-pid
 crates/media/mlx-gen/mlx-gen-pulid
