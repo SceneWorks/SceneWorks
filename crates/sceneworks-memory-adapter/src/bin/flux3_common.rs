@@ -510,6 +510,7 @@ pub(super) fn fragment(
 
 #[cfg(test)]
 mod tests {
+    use super::core::LoadPhase;
     use super::*;
 
     fn request(lane: &str, tier: &str) -> Value {

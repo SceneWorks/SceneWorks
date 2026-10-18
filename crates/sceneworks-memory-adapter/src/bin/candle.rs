@@ -5,7 +5,7 @@ use candle_gen::testkit::{StableIdleConfig, VramProbe};
 use runtime_cuda::gen_core::{
     adapter_stack_identity, AdapterKind, AdapterSpec, Capabilities, ComponentPrecisionFloor,
     Conditioning, GenerationMemory, GenerationOutput, GenerationRequest, Generator, Image,
-    LoadPhase, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
+    LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryMode,
     MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRequestScope,
     MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, ModelDescriptor, OffloadPolicy, Precision, Progress, Quant,
