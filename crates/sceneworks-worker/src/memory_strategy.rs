@@ -32,6 +32,45 @@ use sceneworks_core::memory_calibration::StrategyRung;
 
 use crate::ladder_margin_policy::{admission_allowance, AdmissionSubject};
 
+/// Provider-owned reference demand, resolved BEFORE derive/fit and recomputed on warm cache hits.
+/// No-reference callers preserve the legacy zero surcharge without probing a provider or its files.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn reference_workspace_bytes(
+    provider_id: &str,
+    spec: &gen_core::LoadSpec,
+    resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+) -> crate::WorkerResult<u64> {
+    if resources.is_none() {
+        return Ok(0);
+    }
+    reference_workspace_bytes_using(
+        crate::inference_runtime::media(),
+        provider_id,
+        spec,
+        resources,
+    )
+}
+
+// The pure MLX selector also compiles in the no-backend worker and CPU tests.
+pub(crate) fn reference_workspace_bytes_using(
+    registry: &gen_core::ProviderRegistry,
+    provider_id: &str,
+    spec: &gen_core::LoadSpec,
+    resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+) -> crate::WorkerResult<u64> {
+    let Some(resources) = resources else {
+        return Ok(0);
+    };
+    registry
+        .reference_workspace_bytes(provider_id, spec, Some(resources))
+        .map_err(|error| crate::WorkerError::InvalidPayload(format!(
+            "{provider_id}: cannot price the owned reference workload before admission: {error}"
+        )))?
+        .ok_or_else(|| crate::WorkerError::InvalidPayload(format!(
+            "{provider_id}: this native provider has no reference-workspace pricer. Upgrade the worker or choose a model with reference-memory pricing; unpriced references cannot be admitted."
+        )))
+}
+
 /// Bridge a calibration receipt's persisted materialization shape to the gen-core contract type.
 /// The two enums are the same axis; `sceneworks-core` keeps its own spelling because it
 /// deliberately has no gen-core dependency.
@@ -969,6 +1008,119 @@ mod tests {
         MemoryStrategyPrerequisite, MemoryWindowMaterialization, Precision, Quant,
     };
     use std::sync::{Arc, Mutex};
+
+    mod reference_pricing {
+        use super::*;
+
+        fn descriptor() -> gen_core::ModelDescriptor {
+            gen_core::ModelDescriptor {
+                id: "reference_pricing_test",
+                family: "test",
+                backend: "candle",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+                required_components: &[],
+                control_kinds: None,
+            }
+        }
+
+        fn no_load(_: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
+            panic!("reference admission pricing must not load a generator")
+        }
+
+        fn provider_price(
+            _: &gen_core::LoadSpec,
+            facts: &gen_core::MemoryReferenceResourceFacts,
+        ) -> gen_core::Result<u64> {
+            if facts.conditioning_tokens != 16 || facts.prepared_canvases != [(64, 64)] {
+                return Err(gen_core::Error::Unsupported(
+                    "test provider received inconsistent reference facts".to_owned(),
+                ));
+            }
+            Ok(8 * 1024 * 1024 * 1024)
+        }
+
+        fn registry(priced: bool) -> gen_core::ProviderRegistry {
+            let builder = gen_core::ProviderRegistryBuilder::new().register_generator(
+                gen_core::ModelRegistration {
+                    descriptor,
+                    load: no_load,
+                    footprint: None,
+                },
+            );
+            let builder = if priced {
+                builder.register_reference_workspace(gen_core::ReferenceWorkspaceRegistration {
+                    provider_id: "reference_pricing_test",
+                    reference_workspace_bytes: provider_price,
+                })
+            } else {
+                builder
+            };
+            builder.build().unwrap()
+        }
+
+        #[test]
+        fn absent_facts_are_zero_without_provider_or_file_access() {
+            let spec =
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir("must-not-be-opened".into()));
+            assert_eq!(
+                reference_workspace_bytes("not_registered", &spec, None).unwrap(),
+                0
+            );
+            assert_eq!(
+                reference_workspace_bytes_using(
+                    &registry(true),
+                    "reference_pricing_test",
+                    &spec,
+                    None
+                )
+                .unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn owned_facts_reach_the_pricer_and_unpriced_or_invalid_references_fail_closed() {
+            let spec =
+                gen_core::LoadSpec::new(gen_core::WeightsSource::Dir("must-not-be-opened".into()));
+            let facts = gen_core::MemoryReferenceResourceFacts {
+                conditioning_tokens: 16,
+                prepared_canvases: vec![(64, 64)],
+            };
+            assert_eq!(
+                reference_workspace_bytes_using(
+                    &registry(true),
+                    "reference_pricing_test",
+                    &spec,
+                    Some(&facts)
+                )
+                .unwrap(),
+                8 * 1024 * 1024 * 1024
+            );
+            let error = reference_workspace_bytes_using(
+                &registry(false),
+                "reference_pricing_test",
+                &spec,
+                Some(&facts),
+            )
+            .unwrap_err();
+            assert!(matches!(error, crate::WorkerError::InvalidPayload(_)));
+            assert!(error.to_string().contains("no reference-workspace pricer"));
+            let invalid = gen_core::MemoryReferenceResourceFacts {
+                conditioning_tokens: 1,
+                ..facts
+            };
+            assert!(reference_workspace_bytes_using(
+                &registry(true),
+                "reference_pricing_test",
+                &spec,
+                Some(&invalid)
+            )
+            .is_err());
+        }
+    }
 
     const FP: &str = "provider-formula-v1";
     const SW: &str = "sc-15449-contract-v1";

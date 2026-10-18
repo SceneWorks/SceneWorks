@@ -700,6 +700,8 @@ enum CandleImageRoute {
     /// it as plain text-to-image and silently drop every reference. Uses the same generic registry
     /// stream once the ordered conditioning list is resolved.
     QwenImage21Edit,
+    /// Ordered FLUX.3 reference conditioning through the ordinary registered generator.
+    Flux3Reference,
     /// Krea 2 Kontext-style dual-conditioned image-edit — `krea_2_raw` + `edit_image` + a source, with
     /// the required `krea2_identity_edit` LoRA (epic 10871).
     KreaEdit,
@@ -1014,7 +1016,9 @@ impl CandleImageRoute {
             // LoadSpec whenever the model supports adapters), so it consumes the stack exactly when
             // the plain arm does. Omitting it refused every LoRA/LoKr on a 2.1 edit (the CUDA
             // real-weight evidence run caught it).
-            CandleImageRoute::CandleTxt2Img | CandleImageRoute::QwenImage21Edit => {
+            CandleImageRoute::CandleTxt2Img
+            | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::Flux3Reference => {
                 mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,
@@ -1112,6 +1116,7 @@ impl CandleImageRoute {
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
             CandleImageRoute::MageEdit
             | CandleImageRoute::QwenImage21Edit
+            | CandleImageRoute::Flux3Reference
             | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
     }
@@ -1214,6 +1219,12 @@ fn resolve_candle_image_route_with_prepared_availability(
             .is_some_and(|id| !id.trim().is_empty())
     {
         Some(CandleImageRoute::MageEdit)
+    } else if request.flux3_reference_request.as_ref().is_some_and(|authored| {
+        !authored.as_ref().is_ok_and(|references| references.asset_ids.is_empty())
+    }) {
+        // Also claim malformed stored reference jobs so the single trusted resolver refuses them
+        // before load, rather than a missing/invalid slot falling through to a T2I or stub path.
+        Some(CandleImageRoute::Flux3Reference)
     } else if is_qwen_image_2_1_edit(request) {
         // Qwen-Image 2.1 reference / local editing (sc-24110), named by the resolver for the same
         // reason Mage Edit is: the id is a candle txt2img id, so a conditioned request that fell
@@ -7540,6 +7551,9 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// is an ordinary RGB reference. An entry that carries one is sent as
     /// `Conditioning::ReferenceRgba`, UN-flattened, because the VAE encodes all four channels.
     pub(crate) multi_reference_alpha: &'a [Option<image::GrayImage>],
+    /// The one trusted FLUX.3 owned-asset resolution used for admission and rendering. Its
+    /// original RGB/RGBA carriers and optional size intent must not pass through img2img slots.
+    pub(crate) flux3_references: Option<&'a flux3_references::ResolvedReferences>,
     /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
     /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
     pub(crate) output_channels: gen_core::OutputChannels,
@@ -7654,12 +7668,21 @@ fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
-    let conditioning = build_lane_conditioning_with_alpha(
-        reference,
-        multi_references,
-        surface.multi_reference_alpha,
-        edit_mask,
-    );
+    let conditioning = if let Some(references) = surface.flux3_references {
+        if reference.is_some() || !multi_references.is_empty() || edit_mask.is_some() {
+            return Err(WorkerError::InvalidPayload(
+                "FLUX.3 references must use the owned ordered conditioning list, not img2img or mask slots".to_owned(),
+            ));
+        }
+        references.conditioning.clone()
+    } else {
+        build_lane_conditioning_with_alpha(
+            reference,
+            multi_references,
+            surface.multi_reference_alpha,
+            edit_mask,
+        )
+    };
     // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
     let (prompt, prompt_batch, count) = match surface.prompt_batch {
         Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
@@ -7684,6 +7707,7 @@ fn render_on_surface(
         text_style_gain,
         memory,
         conditioning,
+        flux3_reference_output: surface.flux3_references.map(|references| references.output_size),
         output_channels: surface.output_channels,
         cfg_interval: surface.controls.cfg_interval,
         caption_overflow: surface.controls.caption_overflow,
@@ -8048,6 +8072,7 @@ fn generate_one_with_hires_on_surface(
     // would produce two reports for one image and could feed two different prompts into one recipe.
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
+        flux3_references: surface.flux3_references,
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls,
         warnings: surface.warnings,
@@ -8108,6 +8133,7 @@ fn generate_one_with_hires_on_surface(
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
+        flux3_references: None,
         output_channels: surface.output_channels,
         controls: surface.controls,
         warnings: surface.warnings,
@@ -9927,7 +9953,21 @@ async fn generate_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
-    let request = &plan.request;
+    let flux3_references = flux3_references::resolve_owned_references(
+        &plan.request,
+        &settings.data_dir,
+        project_path,
+    )?;
+    let flux3_reference_count = flux3_references
+        .as_ref()
+        .map_or(0, |references| references.conditioning.len());
+    let mut resolved_request = plan.request.clone();
+    if let Some(references) = &flux3_references {
+        (resolved_request.width, resolved_request.height) = references.plan.output.canvas;
+        // Only numeric admission geometry is normalized. Preserve the authored UI mode and the
+        // original optional-size intent; the memory route alone is derived from the references.
+    }
+    let request = &resolved_request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
     // Hoisted (also used at the load-spec seam below): the registered engine id, the sc-10733
@@ -10089,7 +10129,7 @@ async fn generate_stream_using(
             ("hires fix", hires_fix.is_some()),
             (
                 "a reference image",
-                identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some(),
+                flux3_reference_count > 0 || identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some(),
             ),
             ("prompt enhancement", enhance.enabled),
         ],
@@ -10176,6 +10216,7 @@ async fn generate_stream_using(
         spec = spec.with_resolved_route(request.model.clone());
         let plain_text_to_image =
             matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+                && flux3_references.is_none()
                 && identity_init.is_none()
                 && edit_refs.is_empty()
                 && ideogram_edit_mask.is_none()
@@ -10197,13 +10238,14 @@ async fn generate_stream_using(
         } else {
             lane_reference_count(
                 identity_init.is_some(),
-                edit_refs.len(),
+                edit_refs.len().max(flux3_reference_count),
                 ideogram_edit_mask.is_some(),
             )
         };
+        let reference_memory_mode = if flux3_references.is_some() { "edit_image" } else { &request.mode };
         let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_mlx_request(
             engine_id,
-            &request.mode,
+            reference_memory_mode,
         );
         let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
             mode: declaration_mode
@@ -10262,7 +10304,7 @@ async fn generate_stream_using(
             mlx_request_plan
         };
         let has_request_reference =
-            identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
+            flux3_reference_count > 0 || identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
         // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
         // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
         // first hires pass renders at the base size with the caller's own conditioning and gets its own
@@ -10270,7 +10312,7 @@ async fn generate_stream_using(
         let reference_count = declaration_reference_count;
         let mut memory_overlays = Vec::new();
         if has_request_reference {
-            memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
+            memory_overlays.push(format!("references:{}", edit_refs.len().max(flux3_reference_count).max(1)));
         }
         if ideogram_edit_mask.is_some() {
             memory_overlays.push("mask".to_owned());
@@ -10300,7 +10342,7 @@ async fn generate_stream_using(
             width: memory_width,
             height: memory_height,
             count: request.count,
-            mode: request.mode.clone(),
+            mode: reference_memory_mode.to_owned(),
             overlay: provider_overlay,
             adapter_count,
             has_reference: reference_count > 0,
@@ -10322,6 +10364,7 @@ async fn generate_stream_using(
             // own references and re-resolved CFG, and a native prompt batch renders one prefix per
             // prompt in one pass: the cache is priced for neither render.
             prefix_kv_cache_eligible: hires_fix.is_none() && native_batch.is_none(),
+            reference_resources: flux3_references.as_ref().map(|references| references.resources.clone()),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -10509,6 +10552,9 @@ async fn generate_stream_using(
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
+    // Keep the exact selected spec across the cache callback. Cache warm policy may change
+    // residency, not the artifact/precision identity; reference demand is repriced on every fit.
+    let reference_pricing_spec = flux3_references.as_ref().map(|_| spec.clone());
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
@@ -10567,7 +10613,7 @@ async fn generate_stream_using(
                     seeds[0],
                     batch.images() as usize,
                     |preview, on_progress| {
-                        let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                        let memory_evaluation = if let Some(reference_spec) = reference_pricing_spec.as_ref() { crate::mlx_fit_gate::evaluate_request_with_reference_spec(
                             generator,
                             &mlx_request_plan,
                             &mlx_request_inputs,
@@ -10575,7 +10621,15 @@ async fn generate_stream_using(
                             loaded_policy.offload_policy,
                             warm_policy.take(),
                             request_external_committed_bytes,
-                        )?;
+                         reference_spec, ) } else { crate::mlx_fit_gate::evaluate_request(
+                            generator,
+                            &mlx_request_plan,
+                            &mlx_request_inputs,
+                            cache_state,
+                            loaded_policy.offload_policy,
+                            warm_policy.take(),
+                            request_external_committed_bytes,
+                        ) }?;
                         let _request_memory_limit = memory_evaluation
                             .process_limit_bytes
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
@@ -10607,6 +10661,7 @@ async fn generate_stream_using(
                             preview,
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &[],
+                                flux3_references: None,
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -10633,7 +10688,7 @@ async fn generate_stream_using(
                 tx,
                 seeds,
                 move |_index, seed, preview, prompt_enhancement, on_progress| {
-                    let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    let memory_evaluation = if let Some(reference_spec) = reference_pricing_spec.as_ref() { crate::mlx_fit_gate::evaluate_request_with_reference_spec(
                         generator,
                         &mlx_request_plan,
                         &mlx_request_inputs,
@@ -10641,7 +10696,15 @@ async fn generate_stream_using(
                         loaded_policy.offload_policy,
                         warm_policy.take(),
                         request_external_committed_bytes,
-                    )?;
+                     reference_spec, ) } else { crate::mlx_fit_gate::evaluate_request(
+                        generator,
+                        &mlx_request_plan,
+                        &mlx_request_inputs,
+                        cache_state,
+                        loaded_policy.offload_policy,
+                        warm_policy.take(),
+                        request_external_committed_bytes,
+                    ) }?;
                     // Exact promoted MLX evidence may tighten the soft process limit for this request.
                     // The RAII guard restores the process-global/user limit after all retries and never
                     // touches the wired limit (#1947).
@@ -10682,6 +10745,7 @@ async fn generate_stream_using(
                             prompt_enhancement.for_prompt(&prompt),
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &edit_ref_alpha,
+                                flux3_references: flux3_references.as_ref(),
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -10722,7 +10786,7 @@ async fn generate_stream_using(
                     });
                     // The image's provenance facts (sc-25681): engine warnings, and each adapter's
                     // identity joined with the engine's own applied/skipped report.
-                    if let Some(facts) = lane_controls::image_facts(
+                    let mut facts = lane_controls::image_facts(
                         &warnings.take(),
                         &adapter_identities,
                         &generator.adapter_apply_reports(),
@@ -10730,7 +10794,11 @@ async fn generate_stream_using(
                             memory_evaluation.prefix_kv_cache,
                             prefix_kv_cache_report.take().as_ref(),
                         ),
-                    ) {
+                    ).unwrap_or_default();
+                    if let Some(references) = flux3_references.as_ref() {
+                        facts.insert("flux3ReferenceEditing".to_owned(), references.image_fact((out_w, out_h)));
+                    }
+                    if !facts.is_empty() {
                         prompt_enhancement.send_image_facts(facts);
                     }
                     Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
@@ -12578,7 +12646,21 @@ async fn generate_candle_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
-    let request = &plan.request;
+    let flux3_references = flux3_references::resolve_owned_references(
+        &plan.request,
+        &settings.data_dir,
+        project_path,
+    )?;
+    let flux3_reference_count = flux3_references
+        .as_ref()
+        .map_or(0, |references| references.conditioning.len());
+    let mut resolved_request = plan.request.clone();
+    if let Some(references) = &flux3_references {
+        (resolved_request.width, resolved_request.height) = references.plan.output.canvas;
+        // Only numeric admission geometry is normalized. Preserve the authored UI mode and the
+        // original optional-size intent; the memory route alone is derived from the references.
+    }
+    let request = &resolved_request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
     // `None` means the candle provider crate for this id wasn't linked/registered — fail loud rather
@@ -13283,7 +13365,10 @@ async fn generate_candle_stream_using(
         settings,
     )?;
     let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
-    let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    let shared_request_mode = candle_base_memory_request_mode(
+        engine_id,
+        if flux3_references.is_some() { "edit_image" } else { &request.mode },
+    );
     // The numeric tier the shared selector binds this request to — the tier the provider LOADS,
     // which for a single-artifact dense route is not the gate's bits-derived key (see
     // `candle_shared_memory_tier`).
@@ -13315,11 +13400,11 @@ async fn generate_candle_stream_using(
     );
     let first_pass_reference_count = lane_reference_count(
         edit_reference.is_some() || img2img_reference.is_some(),
-        edit_refs.len(),
+        edit_refs.len().max(flux3_reference_count),
         edit_mask.is_some(),
     );
     let reference_count = shared_image_reference_count(
-        edit_refs.len(),
+        edit_refs.len().max(flux3_reference_count),
         edit_reference.is_some() || img2img_reference.is_some(),
         edit_mask.is_some(),
         hires_fix.is_some(),
@@ -13358,45 +13443,93 @@ async fn generate_candle_stream_using(
         // `MlxRequestInputs::prefix_kv_cache_eligible`).
         hires_fix.is_none() && native_batch.is_none(),
     );
-    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(
-        engine_id,
-        &request.model,
-        &shared_contract_spec,
-        artifact_is_certified,
-        &request.model_manifest_entry,
-        shared_tier,
-        shared_admission_mode,
-        (adapter_count > 0).then_some("lora"),
-        gen_core::MemoryGeometry {
-            width: memory_width,
-            height: memory_height,
-            // A native prompt batch (sc-25681) is ONE provider call over `prompts × count`
-            // images, so that is the batch the request is admitted at — the provider's request
-            // scope bounds the images it will render by exactly this figure (`candle-gen-iris`
-            // refuses `prompts × count > MemoryGeometry::batch`). The batch's memory is charged
-            // once, by the declared activation overlay above; the selector does not scale the
-            // same activations by this batch again (`candle_memory_strategy::law_geometry`).
-            batch: native_batch
-                .as_ref()
-                .map_or(1, lane_controls::NativePromptBatch::images),
-            frames: 1,
-            reference_count,
-        },
-        reference_count > 0,
-        use_pid && hires_fix.is_none(),
-        hires_fix.is_some(),
-        hires_fix.is_some(),
-        budget,
-        shared_reserve_gb,
-        shared_predicted_peak_gb,
-        shared_runtime_overlay_bytes,
-        if reclaimable_gb > 0.0 {
-            gen_core::MemoryCacheState::Warm
-        } else {
-            gen_core::MemoryCacheState::Cold
-        },
-        prefix_kv_cache_surcharge,
-    )?;
+    let shared_memory = if let Some(references) = flux3_references.as_ref() {
+        crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(
+            engine_id,
+            &request.model,
+            &shared_contract_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            shared_tier,
+            shared_admission_mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width: memory_width,
+                height: memory_height,
+                // A native prompt batch (sc-25681) is ONE provider call over `prompts × count`
+                // images, so that is the batch the request is admitted at — the provider's request
+                // scope bounds the images it will render by exactly this figure (`candle-gen-iris`
+                // refuses `prompts × count > MemoryGeometry::batch`). The batch's memory is charged
+                // once, by the declared activation overlay above; the selector does not scale the
+                // same activations by this batch again (`candle_memory_strategy::law_geometry`).
+                batch: native_batch
+                    .as_ref()
+                    .map_or(1, lane_controls::NativePromptBatch::images),
+                frames: 1,
+                reference_count,
+            },
+            reference_count > 0,
+            use_pid && hires_fix.is_none(),
+            hires_fix.is_some(),
+            hires_fix.is_some(),
+            budget,
+            shared_reserve_gb,
+            shared_predicted_peak_gb,
+            shared_runtime_overlay_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+            prefix_kv_cache_surcharge,
+            Some(&references.resources),
+        )
+    } else {
+        crate::candle_memory_strategy::evaluate_shared_image_priced(
+            engine_id,
+            &request.model,
+            &shared_contract_spec,
+            artifact_is_certified,
+            &request.model_manifest_entry,
+            shared_tier,
+            shared_admission_mode,
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width: memory_width,
+                height: memory_height,
+                // A native prompt batch (sc-25681) is ONE provider call over `prompts × count`
+                // images, so that is the batch the request is admitted at — the provider's request
+                // scope bounds the images it will render by exactly this figure (`candle-gen-iris`
+                // refuses `prompts × count > MemoryGeometry::batch`). The batch's memory is charged
+                // once, by the declared activation overlay above; the selector does not scale the
+                // same activations by this batch again (`candle_memory_strategy::law_geometry`).
+                batch: native_batch
+                    .as_ref()
+                    .map_or(1, lane_controls::NativePromptBatch::images),
+                frames: 1,
+                reference_count,
+            },
+            reference_count > 0,
+            use_pid && hires_fix.is_none(),
+            hires_fix.is_some(),
+            hires_fix.is_some(),
+            budget,
+            shared_reserve_gb,
+            shared_predicted_peak_gb,
+            shared_runtime_overlay_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+            prefix_kv_cache_surcharge,
+        )
+    }?;
+    if flux3_references.is_some() && shared_memory.is_none() {
+        return Err(WorkerError::InvalidPayload(
+            "FLUX.3 references require a matching provider memory contract and an available device budget; this request cannot use legacy unpriced admission".to_owned(),
+        ));
+    }
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
             engine_id,
@@ -14325,6 +14458,7 @@ async fn generate_candle_stream_using(
                             preview,
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &[],
+                                flux3_references: None,
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -14399,6 +14533,7 @@ async fn generate_candle_stream_using(
                         prompt_enhancement.for_prompt(&prompt),
                         &LaneRgbaSurface {
                             multi_reference_alpha: &edit_ref_alpha,
+                            flux3_references: flux3_references.as_ref(),
                             output_channels: rgba_output_channels,
                             controls: lane_controls,
                             warnings: Some(&warnings),
@@ -14437,7 +14572,7 @@ async fn generate_candle_stream_using(
                 });
                 // The image's provenance facts (sc-25681): engine warnings, and each adapter's
                 // identity joined with the engine's own applied/skipped report.
-                if let Some(facts) = lane_controls::image_facts(
+                let mut facts = lane_controls::image_facts(
                     &warnings.take(),
                     &adapter_identities,
                     &generator.adapter_apply_reports(),
@@ -14445,7 +14580,11 @@ async fn generate_candle_stream_using(
                         prefix_kv_cache_plan,
                         prefix_kv_cache_report.take().as_ref(),
                     ),
-                ) {
+                ).unwrap_or_default();
+                if let Some(references) = flux3_references.as_ref() {
+                    facts.insert("flux3ReferenceEditing".to_owned(), references.image_fact((out_w, out_h)));
+                }
+                if !facts.is_empty() {
                     prompt_enhancement.send_image_facts(facts);
                 }
                 Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))

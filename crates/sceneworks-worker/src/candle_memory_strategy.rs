@@ -1913,6 +1913,58 @@ pub(crate) fn evaluate_shared_image_priced(
     cache_state: MemoryCacheState,
     prefix_kv_cache_surcharge: Option<u64>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_priced_with_resources(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        prefix_kv_cache_surcharge,
+        None,
+    )
+}
+
+/// Reference-aware admission; facts originate only in the owned-asset resolver.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_image_priced_with_resources(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    // Resolve the backend-owned bound before contract derivation or any fit decision. A provider
+    // with references but no pricer is a typed refusal, never a zero-priced legacy fallthrough.
+    let reference_workspace_bytes =
+        crate::memory_strategy::reference_workspace_bytes(engine_id, spec, reference_resources)?;
     evaluate_shared_image_dispatch(
         engine_id,
         model_id,
@@ -1933,6 +1985,8 @@ pub(crate) fn evaluate_shared_image_priced(
         runtime_overlay_bytes,
         cache_state,
         prefix_kv_cache_surcharge,
+        reference_resources,
+        reference_workspace_bytes,
     )
 }
 
@@ -1977,6 +2031,8 @@ pub(crate) fn evaluate_shared_image(
         runtime_overlay_bytes,
         cache_state,
         None,
+        None,
+        0,
     )
 }
 
@@ -2001,6 +2057,8 @@ fn evaluate_shared_image_dispatch(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
     prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    reference_workspace_bytes: u64,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let (contract_override, provider_overlay_override, provider_mode_override) =
         if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Eligible {
@@ -2064,7 +2122,7 @@ fn evaluate_shared_image_dispatch(
         .then(|| sdxl_provider_overlay(spec))
         .flatten();
     let provider_overlay = exact_sdxl_overlay.as_deref().or(provider_overlay);
-    evaluate_shared_image_inner_priced(
+    evaluate_shared_image_inner_priced_with_resources(
         engine_id,
         model_id,
         spec,
@@ -2089,6 +2147,8 @@ fn evaluate_shared_image_dispatch(
         None,
         None,
         prefix_kv_cache_surcharge,
+        reference_resources,
+        reference_workspace_bytes,
     )
 }
 
@@ -2328,6 +2388,65 @@ fn evaluate_shared_image_inner_priced(
     request_evidence_revision_override: Option<&'static str>,
     ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
     prefix_kv_cache_surcharge: Option<u64>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_inner_priced_with_resources(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        provider_overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        worker_multipass,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        provider_mode_override,
+        contract_override,
+        request_evidence_revision_override,
+        ladder_anchors_override,
+        prefix_kv_cache_surcharge,
+        None,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shared_image_inner_priced_with_resources(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    provider_overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    worker_multipass: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    provider_mode_override: Option<&str>,
+    contract_override: Option<gen_core::MemoryProviderContract>,
+    request_evidence_revision_override: Option<&'static str>,
+    ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
+    prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    reference_workspace_bytes: u64,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
@@ -2583,7 +2702,7 @@ fn evaluate_shared_image_inner_priced(
     // recoverable does not make a wrong prediction safe. An uncertified artifact therefore keeps
     // its resident-estimate-only behavior, byte-for-byte as before this story. The sibling control
     // lane gates its floors the same way (`krea_control_fit.rs`, `runtime_verified`).
-    let synthesized = if artifact_is_certified {
+    let mut synthesized = if artifact_is_certified {
         synthesize_estimate_floors(
             engine_id,
             model_id,
@@ -2602,6 +2721,21 @@ fn evaluate_shared_image_inner_priced(
     } else {
         Vec::new()
     };
+    // This is a separate request demand, NOT an adapter overlay or a text-token hint. Charge
+    // every complete candidate exactly once, after receipt overlay normalization and phase-law
+    // synthesis but BEFORE selector grading. Keeping the source evidence objects charged also
+    // keeps selected-context and warm-alternative peak reporting identical to the demand graded.
+    account_for_runtime_overlay_bytes(
+        std::slice::from_mut(&mut resident),
+        reference_workspace_bytes,
+    );
+    account_for_runtime_overlay_bytes(&mut verified, reference_workspace_bytes);
+    for candidate in &mut synthesized {
+        account_for_runtime_overlay_bytes(
+            std::slice::from_mut(&mut candidate.evidence),
+            reference_workspace_bytes,
+        );
+    }
     let capacity = verified.len() + synthesized.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
@@ -2798,6 +2932,7 @@ fn evaluate_shared_image_inner_priced(
             use_pid,
             has_phases: request_has_phases,
             geometry,
+            reference_resources: reference_resources.cloned(),
             overlay: provider_overlay.map(str::to_owned),
             budget: gen_core::MemoryBudget {
                 total_bytes: to_bytes(budget.total_gb),
@@ -6335,6 +6470,160 @@ mod tests {
             Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
+    }
+
+    #[test]
+    fn reference_workspace_is_charged_before_candle_fit_and_none_matches_the_legacy_path() {
+        fn descriptor() -> gen_core::ModelDescriptor {
+            gen_core::ModelDescriptor {
+                id: "z_image_turbo",
+                family: "test",
+                backend: "candle",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+                required_components: &[],
+                control_kinds: None,
+            }
+        }
+        fn no_load(_: &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
+            panic!("pricing may not load weights")
+        }
+        fn price(
+            _: &LoadSpec,
+            facts: &gen_core::MemoryReferenceResourceFacts,
+        ) -> gen_core::Result<u64> {
+            assert_eq!(facts.conditioning_tokens, 16);
+            assert_eq!(facts.prepared_canvases, [(64, 64)]);
+            Ok((16.0 * BYTES_PER_GIB) as u64)
+        }
+        let registry = gen_core::ProviderRegistryBuilder::new()
+            .register_generator(gen_core::ModelRegistration {
+                descriptor,
+                load: no_load,
+                footprint: None,
+            })
+            .register_reference_workspace(gen_core::ReferenceWorkspaceRegistration {
+                provider_id: "z_image_turbo",
+                reference_workspace_bytes: price,
+            })
+            .build()
+            .unwrap();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("must-not-be-opened")));
+        let facts = gen_core::MemoryReferenceResourceFacts {
+            conditioning_tokens: 16,
+            prepared_canvases: vec![(64, 64)],
+        };
+        let bytes = crate::memory_strategy::reference_workspace_bytes_using(
+            &registry,
+            "z_image_turbo",
+            &spec,
+            Some(&facts),
+        )
+        .unwrap();
+        let evaluate = |budget: VramBudget,
+                        cache_state: MemoryCacheState,
+                        resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+                        bytes: u64| {
+            evaluate_shared_image_inner_priced_with_resources(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &z_image_fixture_manifest(),
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    reference_count: u32::from(resources.is_some()),
+                    ..Z_IMAGE_FIXTURE_GEOMETRY
+                },
+                resources.is_some(),
+                false,
+                false,
+                false,
+                Some(budget),
+                reserve_for(Some(budget)),
+                Some(18.4 + crate::vram_gate::HEADROOM_GB),
+                0,
+                cache_state,
+                None,
+                Some(z_image_fixture_contract()),
+                None,
+                None,
+                None,
+                resources,
+                bytes,
+            )
+        };
+        for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+            let budget = VramBudget {
+                free_gb: 128.0,
+                total_gb: 128.0,
+            };
+            let legacy = evaluate_shared_image_inner_priced(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &z_image_fixture_manifest(),
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                Z_IMAGE_FIXTURE_GEOMETRY,
+                false,
+                false,
+                false,
+                false,
+                Some(budget),
+                reserve_for(Some(budget)),
+                Some(18.4 + crate::vram_gate::HEADROOM_GB),
+                0,
+                cache_state,
+                None,
+                Some(z_image_fixture_contract()),
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let none = evaluate(budget, cache_state, None, 0).unwrap().unwrap();
+            assert_eq!(
+                format!("{:?}", legacy.context),
+                format!("{:?}", none.context)
+            );
+            let priced = evaluate(budget, cache_state, Some(&facts), bytes)
+                .unwrap()
+                .unwrap();
+            assert!(priced.context.predicted_peak_bytes > none.context.predicted_peak_bytes);
+            assert_eq!(priced.context.reference_resources, Some(facts.clone()));
+            let mut rejected_only_with_references = 0;
+            for free in 8..40 {
+                let budget = VramBudget {
+                    free_gb: f64::from(free),
+                    total_gb: 96.0,
+                };
+                if evaluate(budget, cache_state, None, 0)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    && evaluate(budget, cache_state, Some(&facts), bytes)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                {
+                    rejected_only_with_references += 1;
+                }
+            }
+            assert!(
+                rejected_only_with_references > 0,
+                "reference workspace never changed Candle fit"
+            );
+        }
     }
 
     /// The whole shared-image entry point, as `generate_candle_stream` reaches it for

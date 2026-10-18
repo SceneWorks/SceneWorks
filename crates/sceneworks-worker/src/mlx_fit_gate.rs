@@ -1285,6 +1285,9 @@ pub(crate) struct MlxRequestInputs {
     pub adapter_count: usize,
     pub has_reference: bool,
     pub reference_count: u32,
+    /// Actual owned reference geometry/tokens, never a client numeric memory hint. The selected
+    /// backend prices these from the current candidate LoadSpec before every probe/fit decision.
+    pub reference_resources: Option<gen_core::MemoryReferenceResourceFacts>,
     pub use_pid: bool,
     pub has_phases: bool,
     /// Conservative count of CLIP windows for the actual positive/negative prompt pair.
@@ -1301,6 +1304,19 @@ pub(crate) struct MlxRequestInputs {
     /// references and re-resolved CFG, under the same block) and on every lane that never reaches
     /// a cache provider.
     pub prefix_kv_cache_eligible: bool,
+}
+
+/// A live pricing context, not a cached request cost: every tier probe binds its actual spec.
+#[derive(Clone, Copy)]
+struct ReferencePricing<'a> {
+    spec: &'a LoadSpec,
+    registry: &'a gen_core::ProviderRegistry,
+}
+
+fn missing_reference_pricing(engine_id: &str) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{engine_id}: owned reference resources require the reference-aware memory admission entry point and its resolved LoadSpec; unpriced references cannot be admitted"
+    ))
 }
 
 pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
@@ -3557,6 +3573,7 @@ fn evaluate_request_with_budget(
         total_peak_bytes,
         external_committed_bytes,
         additional_evidence,
+        None,
     )
 }
 
@@ -3573,6 +3590,7 @@ fn evaluate_request_with_budget_and_warm_policy(
     total_peak_bytes: u64,
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestEvaluation> {
     evaluate_request_with_budget_using_bundle(
         generator,
@@ -3586,6 +3604,7 @@ fn evaluate_request_with_budget_and_warm_policy(
         external_committed_bytes,
         additional_evidence,
         None,
+        reference_pricing,
     )
 }
 
@@ -3602,6 +3621,7 @@ fn evaluate_request_with_budget_using_bundle(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
     evidence_bundle: Option<&EvidenceBundle>,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestEvaluation> {
     select_request_with_budget_using_bundle(
         MlxAdmissionPhase::Generation,
@@ -3639,6 +3659,7 @@ fn evaluate_request_with_budget_using_bundle(
         external_committed_bytes,
         additional_evidence,
         evidence_bundle,
+        reference_pricing,
     )?
     .into_evaluation()
 }
@@ -3739,8 +3760,30 @@ fn select_request_with_budget_using_bundle(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
     evidence_bundle: Option<&EvidenceBundle>,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestAdmission> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
+
+    let reference_workspace_bytes = if let Some(resources) = &inputs.reference_resources {
+        if !inputs.has_reference
+            || usize::try_from(inputs.reference_count).ok()
+                != Some(resources.prepared_canvases.len())
+        {
+            return Err(WorkerError::InvalidPayload(
+                "reference resource slots do not match the admitted ordered reference count"
+                    .to_owned(),
+            ));
+        }
+        let pricing = reference_pricing.ok_or_else(|| missing_reference_pricing(plan.engine_id))?;
+        crate::memory_strategy::reference_workspace_bytes_using(
+            pricing.registry,
+            plan.engine_id,
+            pricing.spec,
+            Some(resources),
+        )?
+    } else {
+        0
+    };
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity
@@ -4204,7 +4247,11 @@ fn select_request_with_budget_using_bundle(
             // measured peak exactly, as the selector does (sc-22738: no widening for a moved
             // closure).
             if candidate_budget.effective_gb().is_some_and(|available| {
-                exact.predicted_peak_bytes as f64 / BYTES_PER_GIB <= available
+                exact
+                    .predicted_peak_bytes
+                    .saturating_add(reference_workspace_bytes) as f64
+                    / BYTES_PER_GIB
+                    <= available
             }) {
                 selections.push(MemorySelection {
                     strategy: exact.key.strategy,
@@ -4345,10 +4392,11 @@ fn select_request_with_budget_using_bundle(
             } else {
                 0
             };
-            (shortfall > 0).then(|| {
+            let request_extra = shortfall.saturating_add(reference_workspace_bytes);
+            (request_extra > 0).then(|| {
                 let mut corrected = (*evidence).clone();
                 corrected.predicted_peak_bytes =
-                    corrected.predicted_peak_bytes.saturating_add(shortfall);
+                    corrected.predicted_peak_bytes.saturating_add(request_extra);
                 (corrected, shortfall)
             })
         })
@@ -4679,6 +4727,7 @@ fn select_request_with_budget_using_bundle(
         };
         needed_gb = evidence
             .predicted_peak_bytes
+            .saturating_add(reference_workspace_bytes)
             .saturating_add(prefix_kv_cache_extra)
             .saturating_add(reserve) as f64
             / BYTES_PER_GIB;
@@ -4686,7 +4735,9 @@ fn select_request_with_budget_using_bundle(
         budget.reserved_headroom_bytes = reserve;
         process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
         selected_record_id = Some(candidate.record_id.clone());
-        evidence.predicted_peak_bytes
+        evidence
+            .predicted_peak_bytes
+            .saturating_add(reference_workspace_bytes)
     } else if selection == resident_selection
         || synthesized_estimates
             .iter()
@@ -4698,11 +4749,12 @@ fn select_request_with_budget_using_bundle(
         candidates
             .iter()
             .find(|candidate| candidate.selection == selection)
-            .map_or(predicted_peak_bytes, |candidate| {
-                candidate.evidence.predicted_peak_bytes
-            })
+            .map_or(
+                predicted_peak_bytes.saturating_add(reference_workspace_bytes),
+                |candidate| candidate.evidence.predicted_peak_bytes,
+            )
     } else {
-        predicted_peak_bytes
+        predicted_peak_bytes.saturating_add(reference_workspace_bytes)
     };
     // The demand the admission approved: a cached selection was graded at its (corrected) shed
     // peak + the cache surcharge (`prefix_kv_cache_extra`).
@@ -4759,6 +4811,7 @@ fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
+            reference_resources: inputs.reference_resources.clone(),
             overlay: inputs.overlay.clone(),
             budget,
             predicted_peak_bytes,
@@ -4869,7 +4922,17 @@ pub(crate) fn preflight_request(
         .map_err(|error| {
             crate::classify_engine_error("MLX pre-load memory contract failed", error)
         })?;
-    preflight_request_with_contract(contract.as_ref(), spec.offload_policy, plan, inputs, budget)
+    preflight_request_with_contract(
+        contract.as_ref(),
+        spec.offload_policy,
+        plan,
+        inputs,
+        budget,
+        Some(ReferencePricing {
+            spec,
+            registry: crate::inference_runtime::media(),
+        }),
+    )
 }
 
 /// [`preflight_request`] once the registry contract is resolved — split out so the tier probe's
@@ -4881,6 +4944,7 @@ fn preflight_request_with_contract(
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
     budget: MemoryBudget,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestAdmission> {
     select_request_with_budget_using_bundle(
         MlxAdmissionPhase::TierProbe,
@@ -4913,6 +4977,7 @@ fn preflight_request_with_contract(
         0,
         &[],
         None,
+        reference_pricing,
     )
 }
 
@@ -4926,6 +4991,40 @@ pub(crate) fn evaluate_request(
     load_policy: OffloadPolicy,
     warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
+) -> WorkerResult<MlxRequestEvaluation> {
+    if inputs.reference_resources.is_some() {
+        return Err(missing_reference_pricing(plan.engine_id));
+    }
+    let geometry = request_geometry(inputs);
+    let budget = live_request_budget(plan.engine_id)?;
+    let total_peak_bytes = request_total_peak_bytes(plan, geometry);
+    evaluate_request_with_budget_and_warm_policy(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        warm_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        &[],
+        None,
+    )
+}
+
+/// Loaded FLUX.3 reference request: price against the same resolved spec used for this cache lookup.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_request_with_reference_spec(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    external_committed_bytes: u64,
+    reference_spec: &LoadSpec,
 ) -> WorkerResult<MlxRequestEvaluation> {
     let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
@@ -4941,6 +5040,10 @@ pub(crate) fn evaluate_request(
         total_peak_bytes,
         external_committed_bytes,
         &[],
+        Some(ReferencePricing {
+            spec: reference_spec,
+            registry: crate::inference_runtime::media(),
+        }),
     )
 }
 
@@ -8521,6 +8624,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         }
     }
 
@@ -8541,6 +8645,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         let (mode, mode_key) = request_mode(&plain.mode);
         assert_eq!(mode, MemoryMode::TextToImage);
@@ -8702,6 +8807,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         for provider in ["flux1_schnell", "flux1_dev"] {
             for mode in ["text_to_image", "style_variations"] {
@@ -8991,6 +9097,173 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions() {
+        fn descriptor() -> gen_core::ModelDescriptor {
+            fixture_generator().descriptor
+        }
+        fn no_load(_: &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
+            panic!("reference fit must not load a generator")
+        }
+        fn price(
+            spec: &LoadSpec,
+            facts: &gen_core::MemoryReferenceResourceFacts,
+        ) -> gen_core::Result<u64> {
+            if facts.conditioning_tokens != 16 || facts.prepared_canvases != [(64, 64)] {
+                return Err(gen_core::Error::Unsupported(
+                    "invalid fixture reference facts".to_owned(),
+                ));
+            }
+            let WeightsSource::Dir(path) = &spec.weights else {
+                panic!("fixture directory")
+            };
+            Ok(if path.ends_with("q4") {
+                gib_to_bytes(4.0)
+            } else {
+                gib_to_bytes(16.0)
+            })
+        }
+        let registry = |priced: bool| {
+            let builder = gen_core::ProviderRegistryBuilder::new().register_generator(
+                gen_core::ModelRegistration {
+                    descriptor,
+                    load: no_load,
+                    footprint: None,
+                },
+            );
+            let builder = if priced {
+                builder.register_reference_workspace(gen_core::ReferenceWorkspaceRegistration {
+                    provider_id: "fixture_provider",
+                    reference_workspace_bytes: price,
+                })
+            } else {
+                builder
+            };
+            builder.build().unwrap()
+        };
+        let registry = registry(true);
+        let mut generator = fixture_generator();
+        for capability in &mut generator.contract.as_mut().unwrap().strategies {
+            if capability.strategy != MemoryStrategy::Resident {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        let plan = MlxRequestPlan {
+            calibration: MlxCalibrationConfig::Absent,
+            ..fixture_plan()
+        };
+        let q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("q4")));
+        let bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("bf16")));
+        let plain = fixture_inputs(1024, 1024);
+        let facts = gen_core::MemoryReferenceResourceFacts {
+            conditioning_tokens: 16,
+            prepared_canvases: vec![(64, 64)],
+        };
+        let mut referenced = plain.clone();
+        referenced.has_reference = true;
+        referenced.reference_count = 1;
+        referenced.reference_resources = Some(facts.clone());
+        let mut reference_legacy = referenced.clone();
+        reference_legacy.reference_resources = None;
+        let run = |inputs: &MlxRequestInputs,
+                   spec: Option<&LoadSpec>,
+                   total: f64,
+                   phase: MlxAdmissionPhase| {
+            select_request_with_budget_using_bundle(
+                phase,
+                generator.descriptor.capabilities.component_precision_floors,
+                generator.contract.as_ref(),
+                None,
+                &|_| None,
+                |base| {
+                    generator
+                        .contract
+                        .as_ref()
+                        .unwrap()
+                        .predicted_peak_from_base(base)
+                },
+                &plan,
+                inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                fixture_budget(total),
+                request_total_peak_bytes(&plan, request_geometry(inputs)),
+                0,
+                &[],
+                None,
+                spec.map(|spec| ReferencePricing {
+                    spec,
+                    registry: &registry,
+                }),
+            )
+        };
+        for phase in [MlxAdmissionPhase::Generation, MlxAdmissionPhase::TierProbe] {
+            let without = run(&plain, None, 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let with_unused_spec = run(&plain, Some(&q4), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            assert_eq!(
+                format!("{:?}", without.context),
+                format!("{:?}", with_unused_spec.context)
+            );
+            let base = run(&reference_legacy, None, 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let small = run(&referenced, Some(&q4), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let large = run(&referenced, Some(&bf16), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            assert_eq!(
+                small.context.predicted_peak_bytes,
+                base.context.predicted_peak_bytes + gib_to_bytes(4.0)
+            );
+            assert_eq!(
+                large.context.predicted_peak_bytes,
+                base.context.predicted_peak_bytes + gib_to_bytes(16.0)
+            );
+            assert_eq!(small.context.reference_resources, Some(facts.clone()));
+            let mut rejected_only_with_references = 0;
+            for total in 8..40 {
+                let without = run(&plain, None, f64::from(total), phase).unwrap();
+                let with = run(&referenced, Some(&bf16), f64::from(total), phase).unwrap();
+                if matches!(without, MlxRequestAdmission::Admitted(_))
+                    && matches!(with, MlxRequestAdmission::Rejected(_))
+                {
+                    rejected_only_with_references += 1;
+                }
+            }
+            assert!(
+                rejected_only_with_references > 0,
+                "reference cost never changed the fit decision"
+            );
+        }
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &referenced,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            request_total_peak_bytes(&plan, request_geometry(&referenced)),
+            0,
+            &[],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reference-aware memory admission"));
+    }
+
     /// `None` when the packaged bundle cannot supply this fixture — see the note beside the
     /// selection below. The caller withholds its question rather than reddening.
     fn packaged_krea_plan() -> Option<MlxRequestPlan> {
@@ -9216,6 +9489,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         }
     }
 
@@ -9691,6 +9965,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect_err("the 6 GiB high record plus its 3 GiB foreign reserve must refuse");
         let message = error.to_string();
@@ -9752,6 +10027,7 @@ mod tests {
                 0,
                 &[],
                 Some(&packaged_bundle()),
+                None,
             )
         };
 
@@ -9824,6 +10100,7 @@ mod tests {
             0,
             &[],
             Some(&packaged_bundle()),
+            None,
         )
         .expect("the exact 896 cell fits once its 128 GiB-host reserve is normalized to 83 GiB");
         assert_eq!(
@@ -10357,6 +10634,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         assert_eq!(
             provider_request_mode("flux2_klein_9b", &public_base),
@@ -10455,6 +10733,7 @@ mod tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -10506,6 +10785,7 @@ mod tests {
                 conditioning_windows: None,
                 negative_branch: false,
                 prefix_kv_cache_eligible: false,
+                reference_resources: None,
             };
             let mut refused = plan.clone();
             refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
@@ -10639,6 +10919,7 @@ mod tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -11194,6 +11475,7 @@ mod tests {
                 gib_to_bytes(46.0),
                 0,
                 &[],
+                None,
             )
         }
     }
@@ -13964,6 +14246,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("selected exact candidate");
         assert_eq!(evaluated.process_limit_bytes, Some(gib_to_bytes(5.0)));
@@ -13984,6 +14267,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
         let unfit = unfit.to_string();
@@ -14018,6 +14302,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("a mixed-precision provider falls back to its conservative resident estimate");
 
@@ -14060,6 +14345,7 @@ mod tests {
                 gib_to_bytes(4.0),
                 0,
                 &[],
+                None,
                 None,
             )
             .unwrap_or_else(|error| panic!("{label} provider binding failed: {error}"));
@@ -14199,6 +14485,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a load-shape mismatch must degrade to the estimate ladder, not refuse the request",
@@ -14293,6 +14580,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the matching-shape cell is admitted");
         assert!(
@@ -14354,6 +14642,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the resident cell is admitted");
         assert_eq!(
@@ -14422,6 +14711,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a measured cell on a rung the loaded contract does not implement must degrade to the \
@@ -14597,6 +14887,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("a composition drift must degrade to the estimate ladder, not refuse the request");
         assert_eq!(
@@ -14632,6 +14923,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the agreeing resident sibling is admitted");
         assert_eq!(
@@ -14703,6 +14995,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a parameter-range narrowing must degrade to the estimate ladder, not refuse the \
@@ -14737,6 +15030,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the still-valid resident sibling is admitted");
         assert_eq!(
@@ -16356,6 +16650,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
         };
         let admitted_moved = evaluate(&moved_plan, &inputs, 8.5, 4.0)
@@ -16467,6 +16762,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .expect("the exact covered request must select its verified rung")
         };
@@ -16509,6 +16805,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .unwrap_or_else(|error| panic!("{total_gib} GiB ladder failed: {error}"));
             assert_eq!(evaluation.context.selection.strategy, expected);
@@ -16646,6 +16943,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .unwrap_or_else(|error| panic!("{total_gib} GiB Krea route failed: {error}"));
             assert_eq!(evaluation.context.selection.strategy, expected);
@@ -16682,6 +16980,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the bounded-decode candidate's own 5+2 GiB boundary fits");
         assert_eq!(
@@ -17706,6 +18005,7 @@ mod tests {
                 committed,
                 &[],
                 None,
+                None,
             )
             .expect("the fixture request is structurally admissible")
         };
@@ -17868,6 +18168,7 @@ mod tests {
                 plan.generic_total_peak_bytes(request_geometry(inputs)),
                 0,
                 &[],
+                None,
                 None,
             )
             .expect("a roomy budget admits the request")
@@ -18083,6 +18384,7 @@ mod tests {
                     committed,
                     &[],
                     None,
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18097,6 +18399,7 @@ mod tests {
                 total_peak,
                 committed,
                 &[],
+                None,
                 None,
             ) {
                 Ok(evaluation) => MlxRequestAdmission::Admitted(Box::new(evaluation)),
@@ -18117,6 +18420,7 @@ mod tests {
                     &plan,
                     &inputs,
                     budget(committed),
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18138,6 +18442,7 @@ mod tests {
                     0,
                     &[],
                     None,
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18153,6 +18458,7 @@ mod tests {
                     probe_total_peak,
                     0,
                     &[],
+                    None,
                     None,
                 )
                 .is_ok()
@@ -18383,6 +18689,7 @@ mod tests {
                 plan.generic_total_peak_bytes(geometry),
                 0,
                 &[],
+                None,
                 None,
             )
             .expect("structurally admissible")
@@ -22426,6 +22733,7 @@ mod declared_sequential_release_artifact_tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 preflight_request(candidate, &plan, &inputs, budget).unwrap()
             };

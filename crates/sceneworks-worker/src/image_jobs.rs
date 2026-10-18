@@ -52,6 +52,8 @@ use gen_core::{
 // These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
 // this same implementation without pulling in an accelerator runtime bundle.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod flux3_references;
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod prompt_upsampling;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use prompt_upsampling::{
@@ -382,14 +384,17 @@ fn validate_prompt_enhancement_route(
     settings: &Settings,
 ) -> WorkerResult<()> {
     let mode = request.mode.as_str();
+    let flux3 = sceneworks_core::image_request::flux3::is_model(&request.model);
 
     #[cfg(target_os = "macos")]
     {
         let _ = settings;
-        if !matches!(
-            mode,
-            "text_to_image" | "edit_image" | "character_image" | "style_variations"
-        ) {
+        if !flux3
+            && !matches!(
+                mode,
+                "text_to_image" | "edit_image" | "character_image" | "style_variations"
+            )
+        {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on MLX does not support image mode {mode}"
             )));
@@ -404,7 +409,7 @@ fn validate_prompt_enhancement_route(
                     .to_owned(),
             ));
         }
-        if !matches!(mode, "text_to_image" | "edit_image") {
+        if !flux3 && !matches!(mode, "text_to_image" | "edit_image") {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
             )));
@@ -416,7 +421,7 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     {
-        let _ = (mode, settings);
+        let _ = (mode, settings, flux3);
         Err(WorkerError::InvalidPayload(
             "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
         ))
@@ -427,13 +432,11 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     {
-        if matches!(request.model.as_str(), "flux3_klein" | "flux3_klein_base")
-            && mode != "text_to_image"
-        {
-            return Err(WorkerError::InvalidPayload(
-                "FLUX 3 prompt enhancement currently requires the native text_to_image route"
-                    .to_owned(),
-            ));
+        if flux3 {
+            // The renderer receives the same immutable original references as PUP. Validate the
+            // live slot identity and source size intent here without decoding or loading weights.
+            let _ = flux3_references::validated_request(request)?;
+            return Ok(());
         }
         if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
             return Err(WorkerError::InvalidPayload(

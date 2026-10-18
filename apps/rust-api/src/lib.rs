@@ -5017,16 +5017,9 @@ fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiErro
         payload.get("model").and_then(Value::as_str),
         Some("flux3_klein" | "flux3_klein_base")
     ) {
-        if mode != "text_to_image" {
-            return Err(ApiError::bad_request(
-                "FLUX 3 prompt enhancement currently requires the native text_to_image route",
-            ));
-        }
-        if prompt_enhancement_payload_references(payload)
-            || prompt_enhancement_payload_string(payload, "sourceAssetId")
-        {
-            return Err(ApiError::bad_request("advanced.enhancePrompt text_to_image cannot include source or reference image assets"));
-        }
+        // Generation references are AE-only conditioning; the existing separate PUP consumes the
+        // ORIGINAL ordered images. The same pure shape policy validates both modes before enqueue.
+        sceneworks_core::image_request::flux3::parse(payload).map_err(ApiError::bad_request)?;
         return Ok(());
     }
 
@@ -5087,8 +5080,8 @@ fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiErro
 
 /// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
 /// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
-/// while Candle owns only base and its bespoke `edit_image` lane. FLUX 3 Image Klein adds native
-/// text_to_image with its separate optional upsampler; FLUX.2-Klein remains unsupported. Neither
+/// while Candle owns only base and its bespoke `edit_image` lane. FLUX 3 Image Klein uses the same
+/// optional upsampler for text or ordered reference conditioning; FLUX.2-Klein remains unsupported. Neither
 /// grants enhancement to strict control or backendless builds,
 /// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
 /// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.

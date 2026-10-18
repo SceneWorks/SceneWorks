@@ -879,6 +879,7 @@ async fn generate_flux2_edit_stream(
         has_phases: false,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         engine_id,
@@ -1459,6 +1460,7 @@ async fn generate_flux2_dev_control_stream(
         has_phases: false,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
