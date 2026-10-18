@@ -7,8 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
-      "audioInferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9"
+      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9"
     },
     "mlx": {
       "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9"
@@ -159,9 +158,11 @@
       "candle": false
     },
     "moss_image_base": {
+      "candle": false,
       "mlx": false
     },
     "moss_image_sft": {
+      "candle": false,
       "mlx": false
     },
     "moss_sfx_v2": {
