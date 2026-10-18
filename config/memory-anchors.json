@@ -12451,6 +12451,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux3_klein:candle:fp8r",
+      "modelId": "flux3_klein",
+      "modelFamily": "flux3",
+      "route": "flux3_klein",
+      "backend": "candle",
+      "tier": "fp8r",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:flux3_klein:candle:nvfp4",
       "modelId": "flux3_klein",
       "modelFamily": "flux3",
@@ -12490,6 +12501,17 @@
       "route": "flux3_klein",
       "backend": "mlx",
       "tier": "bf16",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux3_klein:mlx:fp8r",
+      "modelId": "flux3_klein",
+      "modelFamily": "flux3",
+      "route": "flux3_klein",
+      "backend": "mlx",
+      "tier": "fp8r",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:1f74d35ad0bca7fa4b4a7c224ca14ab91ee37c2e8e5c228401be978cb6842a95",
+    "sceneWorksRevision": "source-tree:b255efd0a1e43d9b3a418c8482d2f0b0e2d3a2b9b75ec9da6b34f41f9a076323",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "de2129a80afe3b310fa15d23d08c6746f980a5b3a3fceda0daf51a0c945cb0fe"
+        "sha256": "5512c736a62eb1dd9275c03f4ff018ae06753f44bd9070a02e8b6f1ff6699d07"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "7862983b8fd617be78336709c1d6640613e4a69e8e76f11c8e4ef2ea42634fac"
+        "sha256": "6fbf0d81c90ef1a205da5f84e12fb39b8c4a4553319ef36abf0a677704492ea3"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -137,12 +137,12 @@
       "image": 57,
       "video": 11
     },
-    "cells": 9810,
+    "cells": 9820,
     "publishedCells": 3986,
-    "elidedCells": 5824,
+    "elidedCells": 5834,
     "elidedByState": {
-      "Implemented": 1244,
-      "Missing": 4580
+      "Implemented": 1247,
+      "Missing": 4587
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 51,
@@ -175,7 +175,7 @@
       }
     ],
     "anchors": 258,
-    "analyticOnlyCells": 101,
+    "analyticOnlyCells": 109,
     "anchoredCells": 3986,
     "staleAnchors": 258,
     "attestedAnchors": 0,
@@ -1413,6 +1413,7 @@
         "mlx": {
           "tiers": [
             "bf16",
+            "fp8r",
             "nvfp4",
             "q4",
             "q8"
@@ -1434,6 +1435,7 @@
         "candle": {
           "tiers": [
             "bf16",
+            "fp8r",
             "nvfp4",
             "q4",
             "q8"
@@ -12739,120 +12741,120 @@
       "modelId": "flux3_klein",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
-      "implemented": 4,
+      "elided": 5,
+      "implemented": 5,
       "states": {
-        "Implemented": 4
+        "Implemented": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
+      "elided": 5,
       "implemented": 0,
       "states": {
-        "Missing": 4
+        "Missing": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
-      "implemented": 4,
+      "elided": 5,
+      "implemented": 5,
       "states": {
-        "Implemented": 4
+        "Implemented": 5
       }
     },
     {
       "modelId": "flux3_klein",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 4,
+      "coordinates": 5,
       "published": 0,
-      "elided": 4,
-      "implemented": 4,
+      "elided": 5,
+      "implemented": 5,
       "states": {
-        "Implemented": 4
+        "Implemented": 5
       }
     },
     {

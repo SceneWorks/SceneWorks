@@ -870,7 +870,10 @@ mod tests {
             Flux3Tier::Fp8Rowwise.required_worker_capability(),
             Some("fp8r")
         );
-        assert_eq!(Flux3Tier::Nvfp4.required_worker_capability(), Some("nvfp4"));
+        assert_eq!(
+            Flux3Tier::Nvfp4.required_worker_capability(),
+            Some("flux3_nvfp4")
+        );
         assert_eq!(Flux3Tier::Q8.required_worker_capability(), None);
         let mlx: Vec<_> = Flux3Tier::ALL
             .into_iter()

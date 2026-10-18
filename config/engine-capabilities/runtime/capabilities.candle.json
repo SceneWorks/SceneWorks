@@ -377,6 +377,7 @@
     "dataset_face_analysis",
     "dataset_upscale",
     "face_likeness_compare",
+    "flux3_nvfp4",
     "fp8r",
     "gpu",
     "image_depth",
