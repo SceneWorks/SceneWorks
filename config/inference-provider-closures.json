@@ -221,6 +221,29 @@
       "sharedContractFileCount": 164,
       "lockedPackageCount": 250
     },
+    "candle:flux3_klein": {
+      "crate": "crates/media/candle-gen/candle-gen-flux3",
+      "digest": "4edee7b7455afd8b9a5dbaca89b915d58d1f10265f46c61e91b6145ee10e086e",
+      "sharedContractDigest": "cfac89dc2f9e83fe9d818103c6abd6892330f57b0c696c24475cd448df7eff80",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/kernels/candle-quant-kernels",
+        "crates/llm/candle-llm",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-flux3",
+        "crates/media/candle-gen/vendor/candle-core",
+        "crates/media/candle-gen/vendor/candle-kernels",
+        "crates/media/candle-gen/vendor/candle-metal-kernels"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 319,
+      "sharedContractFileCount": 164,
+      "lockedPackageCount": 241
+    },
     "candle:ideogram_4": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
       "digest": "bab04992ea185cd4440d9adde70f8920581b39c2a4d9db347d83f1c455c40607",
@@ -1542,6 +1565,25 @@
       "sourceFileCount": 192,
       "sharedContractFileCount": 164,
       "lockedPackageCount": 188
+    },
+    "mlx:flux3_klein": {
+      "crate": "crates/media/mlx-gen/mlx-gen-flux3",
+      "digest": "41e9da4b8a9e488e7a8b668e623ad292ecd7985128a1f765374a9a0521211205",
+      "sharedContractDigest": "cfac89dc2f9e83fe9d818103c6abd6892330f57b0c696c24475cd448df7eff80",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/llm/mlx-llm",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-flux3"
+      ],
+      "universalCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core"
+      ],
+      "sourceFileCount": 155,
+      "sharedContractFileCount": 164,
+      "lockedPackageCount": 187
     },
     "mlx:ideogram_4": {
       "crate": "crates/media/mlx-gen/mlx-gen-ideogram",
