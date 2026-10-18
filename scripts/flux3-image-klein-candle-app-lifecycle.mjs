@@ -18,6 +18,15 @@ export function candleChildSpawnOptions(env, logFd) {
   return { cwd: root, env, windowsHide: true, stdio: [Object.hasOwn(env, 'SCENEWORKS_WORKER_CHILD') ? 'pipe' : 'ignore', logFd, logFd] };
 }
 
+// JobSnapshot.backend has carried backend_label(settings.gpu_id) since June 2026.
+// The device identity differs from the tensor backend; Candle is proven by its adapter.
+export function candleSavedAssetContext(worker, { projectId, workerId }) {
+  assert.equal(worker.id, workerId, 'owned worker identity mismatch');
+  assert.equal(worker.gpuId, '1', 'this admission is physical GPU1 only');
+  assert(worker.capabilities.includes('candle') && worker.capabilities.includes('gpu'));
+  return { projectId, workerId, backend: worker.gpuId, adapter: 'candle_flux3' };
+}
+
 export async function runCandleAppLifecycle(env = process.env) {
 assert.equal(process.platform, 'win32', 'Windows Candle controller required');
 const source = env.FLUX3_APP_SOURCE_SHA;
@@ -95,7 +104,8 @@ try {
   assert.equal(receipt.identity.actual_worker_gpu_uuid,gpu[1]);
   const assets=await endpoint.call('GET',`/api/v1/projects/${project.id}/assets`);const asset=assets.find(a=>a.id===job.result?.assetIds?.[0]);assert(asset,'completed asset absent from library');
   const media=path.join(project.path,asset.file.path),sidecarFile=media.replace(/\.png$/,'.sceneworks.json');const sidecar=JSON.parse(await readFile(sidecarFile,'utf8'));
-  receipt.saved_asset=assertSavedAsset(job,asset,sidecar,{projectId:project.id,workerId,backend:'candle',adapter:'candle_flux3'});
+  receipt.completed_job=job;receipt.library_asset=asset;
+  receipt.saved_asset=assertSavedAsset(job,asset,sidecar,candleSavedAssetContext(receipt.worker,{projectId:project.id,workerId}));
   const served=await endpoint.served(`/api/v1/projects/${project.id}/files/${asset.file.path}`);const saved=await readFile(media);assertServedPng(served.bytes,saved,body.width,body.height);
   await copyFile(media,path.join(evidence,'saved-asset.png'));await copyFile(sidecarFile,path.join(evidence,'saved-asset.sceneworks.json'));
   receipt.completed_job=job;receipt.library_asset=asset;receipt.saved_asset={...receipt.saved_asset,sha256:createHash('sha256').update(saved).digest('hex'),bytes:saved.length,width:body.width,height:body.height,api_status:served.status,saved_path:media};receipt.timings_seconds.total=(Date.now()-started)/1000;receipt.status='passed';
@@ -113,6 +123,80 @@ console.log(JSON.stringify({status:receipt.status,evidence,asset:receipt.saved_a
 return receipt;
 }
 
+// Resume evidence collection ONLY: this mode has no worker launch, POST or generation path.
+export async function readbackCandleAppLifecycle(receiptFile, env = process.env) {
+  assert.equal(process.platform, 'win32');
+  const evidence = path.dirname(path.resolve(receiptFile));
+  const original = JSON.parse(await readFile(receiptFile, 'utf8'));
+  const state = path.dirname(original.health.directories.data);
+  const source = env.FLUX3_APP_SOURCE_SHA;
+  assert.equal((await execFile('git', ['rev-parse', 'HEAD'], { cwd: root })).stdout.trim(), source);
+  await execFile('git', ['diff', '--exit-code', 'HEAD', '--'], { cwd: root });
+  const delta = (await execFile('git', ['diff', '--name-only', original.identity.binary_compiled_source_sha, source, '--', '*.rs', 'Cargo.toml', 'Cargo.lock', '**/Cargo.toml'], { cwd: root })).stdout.split(String.fromCharCode(10)).map(f => f.trim()).filter(Boolean);
+  assert(delta.every(f => f.includes('/tests/') && f.endsWith('.rs')), 'readback binary inputs changed');
+  const binary = path.resolve(env.FLUX3_CANDLE_APP_BINARY || path.join(root, '.local/sc26235-app-target/release/sceneworks-rust-api.exe'));
+  assert.equal(await hashReadbackFile(binary), original.identity.binary_sha256);
+  assert.equal(original.identity.actual_worker_gpu_uuid, original.identity.physical_gpu_uuid);
+  assert.equal(original.identity.physical_gpu_id, '1');
+  const receipt = structuredClone(original);
+  receipt.original_controller_error = receipt.error; delete receipt.error;
+  receipt.status = 'running';
+  receipt.readback = { source_sha: source, started_at: new Date().toISOString(), api_only: true, new_generation: false, binary_input_delta: delta, requests: [] };
+  const secrets = Object.entries(env).filter(([k,v]) => /TOKEN|SECRET|PASSWORD|API_KEY/i.test(k) && v?.length >= 8).map(([,v]) => v);
+  const save = () => writeFile(path.join(evidence, 'receipt.final.json'), redactSensitiveText(JSON.stringify(receipt, null, 2) + '\n', secrets));
+  const childEnv = { ...env };
+  for (const key of Object.keys(childEnv)) if (key.startsWith('SCENEWORKS_') || /TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key)) delete childEnv[key];
+  Object.assign(childEnv, { HF_HOME: 'E:/huggingface', HF_HUB_CACHE: 'E:/huggingface/hub', HUGGINGFACE_HUB_CACHE: 'E:/huggingface/hub', HF_HUB_OFFLINE: '1', CUDA_VISIBLE_DEVICES: '-1', SCENEWORKS_GPU_ID: 'cpu', SCENEWORKS_BACKEND_CANDLE_ENABLED: 'false', SCENEWORKS_BACKEND_MLX_ENABLED: 'false', SCENEWORKS_CANDLE_REQUIRED: '0' });
+  Object.assign(childEnv, bindOwnedEnv(childEnv, { state, workerId: original.identity.worker_id }), { SCENEWORKS_API_PORT: '17935' });
+  const privateLog = path.join(path.dirname(evidence), 'private-logs', 'readback-api.log');
+  const log = await open(privateLog, 'wx');
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(new Error('readback deadline exceeded')), 5 * 60_000);
+  let api, endpoint;
+  const started = Date.now();
+  try {
+    const socket = createServer(); await new Promise((resolve,reject) => { socket.once('error',reject); socket.listen({ host:'127.0.0.1', port:17935, exclusive:true },resolve); }); await new Promise(resolve => socket.close(resolve));
+    api = spawn(binary, [], candleChildSpawnOptions(childEnv, log.fd));
+    const done = new Promise((resolve,reject) => { api.once('error',reject); api.once('exit',(code,signal) => resolve({code,signal})); }); done.catch(() => {});
+    const alive = () => { if (controller.signal.aborted) throw controller.signal.reason; assert(api.exitCode === null && api.signalCode === null, 'owned readback API exited'); };
+    const wait = async (fn) => { const end = Date.now() + 180_000; while (Date.now() < end) { alive(); const value = await fn(); if (value) return value; await new Promise(resolve => setTimeout(resolve,500)); } throw new Error('readback readiness timed out'); };
+    const url = await wait(async () => boundApiUrl(await readFile(privateLog,'utf8')));
+    endpoint = ownedApiController({ url, state, api, controller });
+    receipt.readback.health = await wait(async () => { try { return await endpoint.verify(); } catch { alive(); return false; } });
+    const get = async route => { receipt.readback.requests.push({ method:'GET', route }); return endpoint.call('GET',route); };
+    const job = await get(`/api/v1/jobs/${original.accepted_job.id}`);
+    assert.equal(job.id,original.accepted_job.id); assert.equal(job.projectId,original.request.projectId);
+    const project = await get(`/api/v1/projects/${job.projectId}`);
+    assert(path.relative(await realpath(state),await realpath(project.path)).startsWith('data' + path.sep), 'readback project escaped original state');
+    const assets = await get(`/api/v1/projects/${project.id}/assets`);
+    const asset = assets.find(a => a.id === job.result?.assetIds?.[0]); assert(asset,'original job asset missing');
+    const media = path.join(project.path,asset.file.path), sidecarFile = media.replace(/\.png$/,'.sceneworks.json');
+    const sidecar = JSON.parse(await readFile(sidecarFile,'utf8'));
+    receipt.saved_asset = assertSavedAsset(job,asset,sidecar,candleSavedAssetContext(original.worker,{projectId:project.id,workerId:original.identity.worker_id}));
+    const route = `/api/v1/projects/${project.id}/files/${asset.file.path}`;
+    receipt.readback.requests.push({method:'GET',route});
+    const served = await endpoint.served(route), saved = await readFile(media);
+    assertServedPng(served.bytes,saved,original.request.width,original.request.height);
+    await copyFile(media,path.join(evidence,'saved-asset.png')); await copyFile(sidecarFile,path.join(evidence,'saved-asset.sceneworks.json'));
+    receipt.saved_asset = { ...receipt.saved_asset, tensor_backend:'candle', sha256:createHash('sha256').update(saved).digest('hex'), bytes:saved.length, width:original.request.width, height:original.request.height, api_status:served.status, saved_path:media };
+    receipt.completed_job = job; receipt.library_asset = asset; receipt.status = 'passed';
+  } catch (error) { receipt.status = 'failed'; receipt.error = error.message; process.exitCode = 1; }
+  finally {
+    clearTimeout(deadline); endpoint?.close();
+    if (api) { let forced=false; if(api.exitCode===null&&api.signalCode===null) { api.stdin?.end(); let timer; const exited=await Promise.race([onceReadbackExit(api).then(()=>true),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),20000);})]);clearTimeout(timer);if(!exited){forced=true;api.kill('SIGKILL');await onceReadbackExit(api);} } receipt.readback.cleanup = { pid:api.pid, exited:api.exitCode!==null||api.signalCode!==null, exit_code:api.exitCode, signal:api.signalCode, forced, owned_api_only:true }; }
+    await log.close();
+    await writeFile(path.join(evidence,'readback-api.log'),redactSensitiveText(await readFile(privateLog,'utf8'),secrets));
+    receipt.readback.finished_at = new Date().toISOString(); receipt.readback.elapsed_seconds = (Date.now()-started)/1000;
+    await save();
+  }
+  console.log(JSON.stringify({ status:receipt.status, receipt:path.join(evidence,'receipt.final.json'), asset:receipt.saved_asset, error:receipt.error }));
+  return receipt;
+}
+async function hashReadbackFile(file) { const h=createHash('sha256'); for await(const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
+async function onceReadbackExit(child) { if(child.exitCode!==null||child.signalCode!==null)return; await new Promise(resolve => child.once('exit',resolve)); }
+
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  runCandleAppLifecycle().catch(error => { console.error(error.message); process.exitCode = 1; });
+  const args = process.argv.slice(2);
+  const task = args.length === 0 ? runCandleAppLifecycle() : args.length === 2 && args[0] === '--readback' ? readbackCandleAppLifecycle(args[1]) : Promise.reject(new Error('expected no args or --readback <original receipt>'));
+  task.catch(error => { console.error(error.message); process.exitCode = 1; });
 }
