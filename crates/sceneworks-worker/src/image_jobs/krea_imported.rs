@@ -1294,7 +1294,7 @@ fn imported_model_quant(
     let bits = match selected {
         Some(Quant::Q4) => Some(4),
         Some(Quant::Q8) => Some(8),
-        Some(Quant::Nvfp4) | None => None,
+        Some(Quant::Nvfp4 | Quant::Fp8Rowwise) | None => None,
     };
     Ok((selected, bits))
 }

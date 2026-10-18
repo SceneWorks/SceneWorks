@@ -54,6 +54,8 @@ impl MemoryRouteTier {
             Some(Quant::Q4) => Some(Self::Q4),
             Some(Quant::Q8) => Some(Self::Q8),
             Some(Quant::Nvfp4) => Some(Self::Nvfp4),
+            // No SceneWorks memory route is registered for FP8 rowwise yet.
+            Some(Quant::Fp8Rowwise) => None,
         }
     }
 

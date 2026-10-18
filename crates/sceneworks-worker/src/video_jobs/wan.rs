@@ -2638,6 +2638,7 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
         Some(Quant::Q4) => (Some("q4".to_owned()), Some(4)),
         Some(Quant::Q8) => (Some("q8".to_owned()), Some(8)),
         Some(Quant::Nvfp4) => (Some("nvfp4".to_owned()), None),
+        Some(Quant::Fp8Rowwise) => (Some("fp8r".to_owned()), None),
         None => (Some("bf16".to_owned()), None),
     }
 }

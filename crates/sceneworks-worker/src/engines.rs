@@ -1561,6 +1561,7 @@ mod tests {
                         gen_core::Quant::Q4 => "q4",
                         gen_core::Quant::Q8 => "q8",
                         gen_core::Quant::Nvfp4 => "nvfp4",
+                        gen_core::Quant::Fp8Rowwise => "fp8r",
                     };
                     (
                         floor.component.as_str(),
