@@ -44,12 +44,12 @@
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
-    "workerAudioDispatch": "3d93819cd7fa4e178c832e7cd022b72141edb4ee90d85a136220e1f60947bd31",
+    "workerAudioDispatch": "63e767345ed22edfb96c3bb41b77052f34daf24a1b51f0d3103651b73fec465a",
     "workerDispatch": "8fd57d43086d08780c5ba8c8ad1be59b4c9c87b3560e56a00bb4e373980b5221",
     "workerEngineTable": "4ce6753ba6b66eaa90154dabd684d883205fa4272cff1909714c4ea099bc663f",
     "workerGpuCapabilities": "60f023305dd3f747963241518df69f1895140553f21116932e0550b69d2a8cde",
-    "workerImageDispatch": "28528dcb71f63c08272d5d3b266054520cb9653dd363a73b28e26fadd32d38eb",
-    "workerImageKreaImported": "52a835948e6dc7f8e7212b9d8de86e400f59c94fd451fbde5ba5296cef6946fb",
+    "workerImageDispatch": "ace72587c025dabb08c71c1f0ea114ce58a2ba1953cdecfae413a11238a36ef8",
+    "workerImageKreaImported": "4bdd99836ab3d5303e5c9e7bca204ca9aaa2aef76c880552ff9252557474c58c",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "2e08f5ab0eacc9a09bd667adfb344a7db13f2cdfca24b4fad81d527aec218084"
+    "workerVideoWan": "d494c35738b69831a1df9c682e6325daf2a7ded714f972125cf37f319d0548de"
   },
   "models": [
     {
