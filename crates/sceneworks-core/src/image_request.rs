@@ -22,6 +22,8 @@
 //! `shipped_image_geometry_is_within_the_pinned_engine_envelope`. So the manifest may
 //! only advertise buckets the engine honors, and no app-layer refit is needed or wanted.
 
+pub mod flux3;
+
 use serde_json::Value;
 
 use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
@@ -167,6 +169,9 @@ pub struct ImageRequest {
     /// singular `reference_asset_id`; the FLUX.2-dev multi-image Image-Studio picker sends these.
     /// Empty for every single-reference / character flow (which keeps using `reference_asset_id`).
     pub reference_asset_ids: Vec<String>,
+    /// Family-local raw carrier validation and authored dimension intent, captured before tolerant
+    /// parsing/defaults can erase malformed slots or make an omitted dimension look explicit.
+    pub flux3_reference_request: Option<Result<flux3::ReferenceRequest, String>>,
     pub mask_asset_id: Option<String>,
     /// One of crop/pad/outpaint/stretch (default crop).
     pub fit_mode: String,
@@ -259,6 +264,12 @@ impl ImageRequest {
             source_asset_id: optional_id(payload, "sourceAssetId"),
             reference_asset_id: optional_id(payload, "referenceAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
+            flux3_reference_request: flux3::is_model(&nonempty_string_or(
+                payload,
+                "model",
+                DEFAULT_MODEL,
+            ))
+            .then(|| flux3::parse(payload)),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry,
@@ -308,6 +319,20 @@ pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
 /// why the order is semantic rather than bookkeeping.
 pub use crate::jobs_store::qwen_image_2_1_reference_ids as ordered_image_reference_ids;
 
+/// The family-specific flattened list. FLUX.3 retains duplicate slots and refuses masks; the
+/// historical Qwen helper deliberately deduplicates and treats a mask as an ordinary reference.
+/// These policies must not be shared merely because both engines consume an ordered list.
+pub fn ordered_image_reference_ids_for_model(
+    model: &str,
+    payload: &JsonObject,
+) -> Option<Vec<String>> {
+    if flux3::is_model(model) {
+        flux3::reference_ids(payload).ok()
+    } else {
+        ordered_image_reference_ids(payload)
+    }
+}
+
 /// Reject an `edit_image` / `character_image` request for a model whose route is ONE ordered
 /// conditioning list, or `None` when the request is admissible (sc-24110).
 ///
@@ -334,6 +359,9 @@ pub fn ordered_image_reference_error(
     payload: &JsonObject,
     model_manifest_entry: &JsonObject,
 ) -> Option<String> {
+    if flux3::is_model(model) {
+        return flux3::parse(payload).err();
+    }
     let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is

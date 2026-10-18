@@ -76,6 +76,8 @@ pub(crate) enum CandleImageLane {
     /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
     /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
     QwenImage21Edit,
+    /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
+    Flux3Reference,
     BooguImg2Img,
     KreaEdit,
     BerniniEdit,
@@ -212,6 +214,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     // so this lane's shape predicate is literally the MLX one — one request contract, one gate, two
     // backends. Placed with the other registry editors, above the generic txt2img fall-through,
     // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
+    CandleImageRoute {
+        lane: CandleImageLane::Flux3Reference,
+        models: ModelMatch::Family(crate::image_request::flux3::is_model),
+        shape: crate::jobs_store::routing::mlx::flux3_reference_mlx_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
         // Turbo (sc-25907) is the same request contract under a second engine id.

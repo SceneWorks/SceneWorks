@@ -2178,12 +2178,10 @@ fn iris_routes_plain_text_to_image_only() {
     assert!(!support.features.edit && !support.features.reference && !support.features.pose);
 }
 
-/// sc-26234: the distilled FLUX 3 Image Klein route is plain text-to-image in S1 — every carrier
-/// the `flux3_klein` engine has no input for yet (source/reference/mask/control/pose, adapters, a
-/// quant tier, hires fix) keeps the job off the lane instead of reaching an engine that refuses it
-/// by name.
+/// sc-26236 adds ordered references to the existing text route. Masks, controls, pose, hires and
+/// the separately owned adapter/precision policy remain unchanged by reference eligibility.
 #[test]
-fn flux3_routes_plain_text_to_image_only() {
+fn flux3_routes_text_and_ordered_references_without_widening_other_controls() {
     assert!(MLX_ROUTED_MODELS.contains(&"flux3_klein"));
     let eligible = |payload: Value| image_request_mlx_eligible("flux3_klein", &object(payload));
     assert!(eligible(
@@ -2193,10 +2191,16 @@ fn flux3_routes_plain_text_to_image_only() {
         "model": "flux3_klein",
         "advanced": { "steps": 16, "resolution": "1024x1024", "sampler": "euler" }
     })));
-    for refused in [
+    for accepted in [
         json!({ "mode": "edit_image", "sourceAssetId": "a" }),
         json!({ "referenceAssetId": "a" }),
         json!({ "referenceAssetIds": ["a"] }),
+    ] {
+        assert!(eligible(accepted.clone()), "{accepted}");
+    }
+    for refused in [
+        json!({ "mode": "edit_image" }),
+        json!({ "referenceAssetIds": vec!["same"; 11] }),
         json!({ "maskAssetId": "a" }),
         json!({ "controls": [{}] }),
         json!({ "advanced": { "poses": [{}] } }),
@@ -2210,7 +2214,7 @@ fn flux3_routes_plain_text_to_image_only() {
     }
     let support = model_mac_support("flux3_klein", "image", Some("flux3"));
     assert!(support.supported);
-    assert!(!support.features.edit && !support.features.reference && !support.features.pose);
+    assert!(support.features.edit && support.features.reference && !support.features.pose);
 }
 
 /// sc-2126: `dataset_subject_mask` has no capability of its own — it requires the SAM3

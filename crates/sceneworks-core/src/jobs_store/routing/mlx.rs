@@ -98,7 +98,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
             mage_flow_edit_mlx_eligible(payload)
         }
         "iris_3b" => iris_mlx_eligible(payload),
-        "flux3_klein" => flux3_mlx_eligible(payload),
+        "flux3_klein" => flux3_mlx_eligible(payload) || flux3_reference_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -496,6 +496,29 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// off MLX (an `mlx_unsupported` affordance) instead of reaching an engine that would refuse it.
 pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
     iris_mlx_eligible(payload) && !has_nonempty_or_malformed_array(payload, "loras")
+}
+
+/// Reference editing is an additive face of the same registered generator, not img2img init.
+/// Remove ONLY validated reference carriers to reuse the existing non-reference control/LoRA/
+/// precision policy. In particular this does not widen that policy or deduplicate attachment ids.
+pub(crate) fn flux3_reference_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let Ok(references) = crate::image_request::flux3::parse(payload) else {
+        return false;
+    };
+    if references.asset_ids.is_empty() {
+        return false;
+    }
+    let mut unconditioned = payload.clone();
+    for key in [
+        "sourceAssetId",
+        "referenceAssetId",
+        "referenceAssetIds",
+        "maskAssetId",
+    ] {
+        unconditioned.remove(key);
+    }
+    unconditioned.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
+    flux3_mlx_eligible(&unconditioned)
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

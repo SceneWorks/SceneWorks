@@ -10,6 +10,37 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 #[test]
+fn flux3_ordered_references_have_an_explicit_native_lane_without_widening_controls() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for count in [1, 10] {
+            let payload = json!({"model":model,"mode":"edit_image","referenceAssetIds":vec!["same-owned-asset";count]});
+            assert_eq!(
+                image_job_candle_lane(&image_edit_job(payload.clone())),
+                Some(CandleImageLane::Flux3Reference)
+            );
+            assert!(flux3_reference_mlx_eligible(&object(payload)));
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"maskAssetId":"mask"}),
+            json!({"advanced":{"referenceStrength":1.0}}),
+            json!({"advanced":{"poses":[{"assetId":"pose"}]}}),
+            json!({"hiresFix":{"enabled":true}}),
+        ] {
+            let mut payload =
+                object(json!({"model":model,"mode":"edit_image","referenceAssetId":"ref"}));
+            payload.extend(object(extra));
+            assert!(!flux3_reference_mlx_eligible(&payload), "{payload:?}");
+            assert_ne!(
+                image_job_candle_lane(&image_edit_job(Value::Object(payload))),
+                Some(CandleImageLane::Flux3Reference)
+            );
+        }
+    }
+}
+
+#[test]
 fn minimax_h3_candle_surface_is_user_routed_per_partition() {
     assert!(video_request_candle_eligible(
         "minimax_h3",
@@ -177,6 +208,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
             CandleImageLane::MageEdit,
+            CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
@@ -262,6 +294,8 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
         // txt2img id, so both the edit shape and the Character-Studio reference shape must be
         // claimed by this bespoke lane before the generic gate can refuse them.
+        (edit("flux3_klein"), CandleImageLane::Flux3Reference),
+        (edit("flux3_klein_base"), CandleImageLane::Flux3Reference),
         (edit("qwen_image_2_1"), CandleImageLane::QwenImage21Edit),
         (
             character("qwen_image_2_1"),
@@ -5811,8 +5845,6 @@ fn flux3_candle_routes_the_same_plain_request_and_refuses_unsupported_carriers()
     assert!(image_request_candle_eligible("flux3_klein", &request));
     assert!(image_request_mlx_eligible("flux3_klein", &request));
     for extra in [
-        json!({"mode": "edit_image", "sourceAssetId": "source"}),
-        json!({"referenceAssetIds": ["one", "two"]}),
         json!({"controls": [{}]}),
         json!({"loras": [{"id": "adapter", "weight": 0.8}]}),
         json!({"advanced": {"mlxQuantize": 4}}),
