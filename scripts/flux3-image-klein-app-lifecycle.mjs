@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, cp, mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, lstat, mkdir, open, readdir, readFile, realpath, rename, stat, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -22,6 +22,46 @@ export function assertCheckoutIdentity({ source, inference, dispatch, head, dirt
   fact(/^[a-f0-9]{40}$/.test(source ?? "") && /^[a-f0-9]{40}$/.test(inference ?? ""), "exact 40-hex source_sha and inference_sha required; branch names are refused");
   fact(source === dispatch && source === head && dirty === "", "dispatch SHA, clean checkout HEAD and supplied source_sha must agree");
 }
+// Declared whole-repository bytes of the pinned primary package (catalog estimatedSizeBytes and
+// footprint.diskSizeBytes, from the authenticated recursive HF tree). Disk accounting only.
+export const DECLARED_REPO_BYTES = 43_317_649_602;
+const GIB = 1024 ** 3;
+// Safety margins, NOT measurements: the release build target this run creates under its own
+// output directory, and attempt state + xet staging + logs + the generated image.
+export const BUILD_HEADROOM_BYTES = 32 * GIB;
+export const STATE_HEADROOM_BYTES = 16 * GIB;
+
+// Pure disk budget. Weights live in the persistent task-owned hub; the build target and state
+// live under this attempt's output directory. When both are on one volume their needs add up.
+export function assertDiskBudget({ weightsFreeBytes, outputFreeBytes, sameVolume, presentRepoBytes, includeBuild }) {
+  const remaining = Math.max(0, DECLARED_REPO_BYTES - Math.max(0, presentRepoBytes));
+  const outputNeed = STATE_HEADROOM_BYTES + (includeBuild ? BUILD_HEADROOM_BYTES : 0);
+  const gb = (bytes) => `${(bytes / 1e9).toFixed(1)} GB`;
+  const checks = sameVolume
+    ? [["weights+output volume", weightsFreeBytes, remaining + outputNeed]]
+    : [["weights volume", weightsFreeBytes, remaining], ["output volume", outputFreeBytes, outputNeed]];
+  for (const [label, free, need] of checks) {
+    fact(Number.isFinite(free) && free >= need, `insufficient free disk on the ${label}: ${gb(free)} free, ${gb(need)} required (${gb(remaining)} of the ${gb(DECLARED_REPO_BYTES)} pinned repository not yet present${includeBuild ? ` + ${gb(BUILD_HEADROOM_BYTES)} build` : ""} + ${gb(STATE_HEADROOM_BYTES)} state headroom). Free space on this runner before re-dispatch; refusing before ${includeBuild ? "build or download" : "download"}.`);
+  }
+  return { remaining, checks: checks.map(([label, free, need]) => ({ label, free_bytes: free, required_bytes: need })) };
+}
+
+// Bytes of the pinned repository already in the hub (complete and partial blobs). Symlinks
+// (snapshot entries) are not counted; only physical blob files are.
+export async function presentRepoBytes(hub) {
+  const blobs = path.join(hub, "models--black-forest-labs--flux-3-image-klein", "blobs");
+  let entries; try { entries = await readdir(blobs); } catch { return 0; }
+  let total = 0;
+  for (const name of entries) { const info = await lstat(path.join(blobs, name)); if (info.isFile()) total += info.size; }
+  return total;
+}
+
+export async function measureDisk({ weights, output, hub, includeBuild }) {
+  const free = async (dir) => { const fs = await statfs(dir, { bigint: true }); return Number(fs.bavail * fs.bsize); };
+  const [weightsStat, outputStat] = await Promise.all([stat(weights), stat(output)]);
+  return assertDiskBudget({ weightsFreeBytes: await free(weights), outputFreeBytes: await free(output), sameVolume: weightsStat.dev === outputStat.dev, presentRepoBytes: await presentRepoBytes(hub), includeBuild });
+}
+
 export function assertModel(model) {
   fact(model?.id === "flux3_klein" && model.family === "flux3" && model.capabilities?.includes("text_to_image"), "select the native FLUX3 distilled T2I catalog entry");
   fact(model.gated === true && model.credentialHost === "huggingface.co" && /^https:\/\/huggingface\.co\/black-forest-labs\/flux-3-image-klein\/blob\/(main|8454017f9ebaada30c998fccd9f67a80c7580f68)\/LICENSE\.md$/.test(model.licenseUrl ?? ""), "frozen upstream FLUX Kommunity license and gated HF credential declaration required; no rehost");
@@ -35,6 +75,7 @@ export function assertModel(model) {
   // Fetch every file at the pinned authority. Required component/index/SHA validation below
   // remains independent of this download policy; an allow-list must not under-fetch the package.
   fact(Array.isArray(downloads[0].files) && downloads[0].files.length === 0, "whole pinned repository download required (files: []), not a selective allow-list");
+  fact(downloads[0].estimatedSizeBytes === DECLARED_REPO_BYTES && downloads[0].footprint?.diskSizeBytes === DECLARED_REPO_BYTES, "catalog declared repository bytes must match the disk-budget constant");
 }
 export function assertDownload(job) {
   fact(job?.type === "model_download" && job.payload?.modelId === "flux3_klein" && job.payload.repo === MODEL_REPO && job.payload.revision === MODEL_REVISION, "ordinary download job must retain exact model/repository/revision identity");
@@ -274,6 +315,7 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     // Ordinary native downloader receives the runner login only in its environment.
     // Its online fetch installs the manifest-selected pinned package, not a fixture.
     delete childEnv.HF_HUB_OFFLINE; delete childEnv.TRANSFORMERS_OFFLINE; childEnv.HF_TOKEN = token; token = undefined;
+    receipt.disk = { before_build: await measureDisk({ weights, output, hub, includeBuild: true }) }; await save();
     const target = path.join(output, "target");
     await checked("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api"], { ...env, CARGO_TARGET_DIR: target }, "build");
     fact(await git("status", "--porcelain") === "", "build changed the exact pinned checkout");
@@ -293,6 +335,7 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     fact(relocation.adopted === true && relocation.hfHome === weights && relocation.libraryRoot === hub, "API must adopt the exact task-owned library");
     const getModel = async () => (await must("GET", "/api/v1/models")).find((m) => m.id === "flux3_klein");
     const model = await getModel(); assertModel(model); receipt.catalog_model = model;
+    receipt.disk.before_download = await measureDisk({ weights, output, hub, includeBuild: false }); await save();
     assertDownloadWorker(await must("GET", "/api/v1/workers"), workerId); // re-check immediately before posting
     const download = await must("POST", "/api/v1/models/flux3_klein/download", { licenseAcknowledged: true }); assertDownload(download); receipt.download_job_id = download.id; await save();
     const getJob = (id) => must("GET", `/api/v1/jobs/${id}`);
