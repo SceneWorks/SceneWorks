@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:912eddbae5e46e88894c7aad71ea36949ccbeceafc1a5487479fd650e30dd81f",
+    "sceneWorksRevision": "source-tree:094481eb601bdedc28dfd42d694b171bdf6122530b10f08ce38463306ba11ac1",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "04c56da960b9e96dedc6d6f704dc1439300b6168aa580dc3d74a1e4f15672a69"
+        "sha256": "cd2b7f348f52ec8ba47018a9b6bd13ab9accd896a2e39220ee211d3abce36d76"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "e88bef1d65c9da269ca9027021091ed3bf6cd50141553bbaa906be03b306f73a"
+        "sha256": "aa286db7efc728ebc517a6f3c5b9f064e7bfa1d32ed257cadc677508b1d29880"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
