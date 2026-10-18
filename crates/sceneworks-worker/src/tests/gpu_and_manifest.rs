@@ -3586,7 +3586,6 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
 #[test]
 fn flux3_klein_tier_floors_are_derived_from_the_provider_dit_pricing() {
     let entry = builtin_model_entry("flux3_klein");
-    let object = entry.as_object().expect("entry object");
     // ceil(32 - (10.335 - tier DiT GiB)), DiT per provider `native_dit_bytes`.
     let candle = [("bf16", 32), ("q8", 29), ("q4", 27), ("fp8r", 28), ("nvfp4", 27)];
     for (tier, floor) in candle {
@@ -3594,8 +3593,9 @@ fn flux3_klein_tier_floors_are_derived_from_the_provider_dit_pricing() {
             entry["candle"]["minMemoryGbByTier"][tier], floor,
             "candle/{tier}: changing a floor changes which cards are refused"
         );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         assert_eq!(
-            crate::vram_gate::predicted_peak_gb(object, tier),
+            crate::vram_gate::predicted_peak_gb(entry.as_object().unwrap(), tier),
             Some(floor as f64),
             "candle/{tier}: the gate reads the derived per-tier floor, not the dense scalar"
         );
