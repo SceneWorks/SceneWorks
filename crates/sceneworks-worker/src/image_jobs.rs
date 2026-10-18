@@ -2986,7 +2986,9 @@ pub(crate) fn write_image_asset(
         "height": height,
         "normalizedWidth": request.width,
         "normalizedHeight": request.height,
-        "count": plan.image_count,
+        // MOSS records the whole native prompt batch in the recipe. Its replay count is
+        // images per prompt; the generation set and expectedCount retain the total.
+        "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
         "family": plan.family,
         "seed": seed,
         "index": index,

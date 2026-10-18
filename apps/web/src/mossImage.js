@@ -11,6 +11,16 @@ export function mossWireOptions(options) {
   }
   return value;
 }
+// Hydrate inactive ordinary controls through the same state setters/snapshots as
+// active controls, so selecting None restores the author's previous settings.
+export function mossPresetWithOrdinarySettings(preset) {
+  const ordinary = preset?.defaults?.mossOrdinarySettings;
+  if (!ordinary) return preset;
+  const { options, ...controls } = ordinary;
+  return { ...preset, defaults: { ...preset.defaults, ...controls,
+    mossImage: { ...options, acceleration: preset.defaults.mossImage?.acceleration ?? "off" },
+  } };
+}
 export function mossComponentPurpose(options) {
   return mossAccelerated(options) ? `moss_dmd_${options.acceleration}` : null;
 }

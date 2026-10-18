@@ -1260,7 +1260,11 @@ pub(crate) async fn create_conditional_components_download_jobs(
     let mut components = Vec::new();
     for row in &rows {
         let component_id = row.get("componentId").cloned().unwrap_or(Value::Null);
-        let presence = co_requisite_presence(&state.settings.data_dir, row);
+        let presence = if model_id.starts_with("moss_image_") {
+            pinned_component_presence(&state.settings.data_dir, row)
+        } else {
+            co_requisite_presence(&state.settings.data_dir, row)
+        };
         if presence == CoRequisitePresence::Installed {
             components.push(json!({
                 "componentId": component_id,

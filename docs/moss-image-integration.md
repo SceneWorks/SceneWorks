@@ -21,7 +21,7 @@ Typed `POST /api/v1/image/jobs`, MCP `generate_image`, presets, retry and duplic
 
 Generic steps, guidance, negative prompt and schedule shift retain their ordinary wire fields. `advanced.mossImage` accepts the native strict options object: acceleration, context, `uncond_skip_layers`, `training_shift` and `slg` (layers, scale, start and stop). For unconditional skip layers, null/omission means the author's `[22]`; `[]` disables skipping. An empty SLG layer list remains empty. CFG 0 retains its negative prompt. Accelerated requests refuse explicit incompatible controls instead of discarding them. The studio disables those controls and retains ordinary choices locally for switching OFF.
 
-Prompt text is preserved, including multilingual prose, tags and authored JSON. Native prompt batches preserve order; outputs are prompt-major and image-minor. Frozen advanced tensor inputs remain available through the native contract, without a product tensor-upload endpoint.
+Prompt text is preserved, including multilingual prose, tags and authored JSON. Native prompt batches preserve order; outputs are prompt-major and image-minor. Batch recipes retain images per prompt, while generation-set counts report the total output count. Frozen advanced tensor inputs remain available through the native contract, without a product tensor-upload endpoint.
 
 Requested options persist through studio state, saved presets, recipes and image history. PNG workflow exports preserve canonical options and a validated actual execution receipt, replacing any local adapter path with its frozen filename. Imported receipts are display metadata. Generation scrubs supplied or replayed reports and reads a new report only after successful, uncanceled provider execution while holding the serialized generator transaction.
 
@@ -51,6 +51,6 @@ The separate native backend acceptance retains advanced tensor and cancellation 
 
 ## Web bundle evidence
 
-The feature keeps every initial, raw and route limit enabled. Against the clean `875666c7c` web baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 465,936 / 143,132 / 122,586. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
+The feature keeps every initial, raw and route limit enabled. Against the clean `875666c7c` web baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 465,936 / 143,123 / 122,561. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
 
-Total JavaScript changes from 2,888,178 / 859,234 / 733,239 to 2,894,510 / 861,383 / 735,294 bytes. The compressed total limits add exactly the positive measured feature deltas, 2,149 gzip and 2,055 Brotli bytes: 862,149 and 737,055. This preserves the previous baseline headroom of 766 and 1,761 bytes. The raw total limit and all coverage checks remain unchanged.
+Total JavaScript changes from 2,888,178 / 859,234 / 733,239 to 2,894,715 / 861,430 / 735,478 bytes. The compressed total limits add exactly the positive measured feature deltas, 2,196 gzip and 2,239 Brotli bytes: 862,196 and 737,239. This preserves the previous baseline headroom of 766 and 1,761 bytes. The raw total limit and all coverage checks remain unchanged.

@@ -12,6 +12,55 @@ fn setup(temp: &tempfile::TempDir) {
     .unwrap();
 }
 #[tokio::test]
+async fn moss_component_download_repairs_wrong_revision_and_skips_exact_cached_revision() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let selected = json!({"repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","files":["dataspace.safetensors"]});
+    let mut sibling = selected.clone();
+    sibling["revision"] = json!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    super::yue2_catalog::seed_snapshot(&temp, &sibling);
+    let app = create_app(test_settings(&temp)).unwrap();
+    for mode in ["unmerged_bf16", "full_fp32"] {
+        let route = format!(
+            "/api/v1/models/moss_image_sft/conditional-components/moss_dmd_{mode}/download"
+        );
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &route,
+            json!({"licenseAcknowledged":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        let jobs = response["jobs"].as_array().unwrap();
+        assert_eq!(jobs.len(), 1, "{response}");
+        for key in ["repo", "revision", "files"] {
+            assert_eq!(jobs[0]["payload"][key], selected[key], "{response}");
+        }
+        assert_eq!(response["components"][0]["status"], "queued");
+    }
+    super::yue2_catalog::seed_snapshot(&temp, &selected);
+    for mode in ["unmerged_bf16", "full_fp32"] {
+        let route = format!(
+            "/api/v1/models/moss_image_sft/conditional-components/moss_dmd_{mode}/download"
+        );
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &route,
+            json!({"licenseAcknowledged":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert!(
+            response["jobs"].as_array().unwrap().is_empty(),
+            "{response}"
+        );
+        assert_eq!(response["components"][0]["status"], "installed");
+    }
+}
+#[tokio::test]
 async fn moss_typed_enqueue_defaults_off_preserves_prompt_and_scrubs_reports() {
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();

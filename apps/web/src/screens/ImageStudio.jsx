@@ -1,5 +1,5 @@
 import { apiFetch } from "../api.js";
-import { isMossImage, mossDefaults, mossWireOptions, mossAccelerated, mossComponentState } from "../mossImage.js";
+import { isMossImage, mossDefaults, mossWireOptions, mossAccelerated, mossComponentState, mossPresetWithOrdinarySettings } from "../mossImage.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
@@ -2204,7 +2204,8 @@ export function ImageStudio() {
     handleSaveAsPreset,
   } = useSavePreset({
     saved,
-    selectedPreset,
+    selectedPreset: moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset,
+    presetApplicationId: isMossImage(launchRequest?.presetModel) && launchRequest?.presetId ? launchRequest.id : null,
     setSelectedPresetId,
     presets,
     mode,
@@ -2249,11 +2250,6 @@ export function ImageStudio() {
       ["hiresFixDenoisingStrength", setHiresFixDenoisingStrength],
       ["hiresFixUpscaleBy", setHiresFixUpscaleBy],
       ["hiresFixCfgScale", setHiresFixCfgScale],
-      ["mossOrdinarySettings", (value) => {
-        if (!isMossImage(model) || !value) return;
-        setMossImage((current) => ({ ...value.options, acceleration: current.acceleration }));
-        setStepsOverride(value.steps ?? ""); setGuidanceOverride(value.guidanceScale ?? ""); setNegativePrompt(value.negativePrompt ?? ""); setSchedulerShift(value.schedulerShift ?? null);
-      }],
     ],
     // Restore the saved sub-mode ("type"). Edit presets only surface in edit mode, so
     // this only ever flips between text/character within one workflow.

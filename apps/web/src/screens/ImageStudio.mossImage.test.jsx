@@ -26,6 +26,8 @@ import { apiFetch } from "../api.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
 const manifestModels = JSON5.parse(readFileSync(MANIFEST_PATH, "utf8")).models;
+// Rust's real worker -> ProjectStore regression verifies this persisted recipe projection.
+const BATCH_RECIPE = JSON.parse(readFileSync(resolve(HERE, "../../../../tests/fixtures/moss-batch-recipe.json"), "utf8"));
 const installed = (id) => ({
   ...manifestModels.find((model) => model.id === id),
   installState: "installed",
@@ -129,6 +131,35 @@ describe("MOSS Image Studio", () => {
  });
  it("persists acceleration choice across a studio remount",async()=>{
   await render();await click(field(container,"8-step acceleration"));await unmountRoot(root,container);({root,container}=mountRoot());await render();expect(field(container,"8-step acceleration").checked).toBe(true);
+ });
+ it("saves, selects and deselects a DMD preset without losing authored ordinary controls",async()=>{
+  const options={acceleration:"off",max_sequence_length:1536,training_shift:2,uncond_skip_layers:[],slg:{layers:[],scale:0.375,start:0.123,stop:0.777}};
+  const recipe={mode:"text_to_image",model:TURBO.id,prompt:"a cup",negativePrompt:"saved negative",loras:[],normalizedSettings:{count:2},rawAdapterSettings:{mossImage:options,steps:70,guidanceScale:4.5,schedulerShift:6}};
+  const ctx=await render(baseContext({studioLaunch:{id:"saved-authored",view:"Image",recipe}}));await advanced();await click(field(container,"8-step acceleration"));
+  await act(async()=>setInput(container.querySelector('input[aria-label="Preset name"]'),"Moss authored"));await click(buttonWithText("Save as preset"));await click([...container.querySelectorAll(".save-preset-scope-picker .compact-selector-item")].find(b=>b.textContent.includes("This project")));
+  const preset=ctx.createPreset.mock.calls[0][0];
+  await render({...ctx,presets:[preset]});await click(container.querySelector(".preset-chips button"));
+  const previous={...recipe,negativePrompt:"previous negative",rawAdapterSettings:{mossImage:{acceleration:"off",max_sequence_length:512,uncond_skip_layers:[3]},steps:60,guidanceScale:2,schedulerShift:4}};
+  await render({...ctx,presets:[preset],studioLaunch:{id:"previous-authored",view:"Image",recipe:previous}});
+  await click(buttonWithText("Moss authored"));expect(field(container,"8-step acceleration").checked).toBe(true);expect(field(container,"Context limit").value).toBe("1536");expect(field(container,"Training shift").value).toBe("2");expect(field(container,"Unconditional skip layers").value).toBe("[]");expect(field(container,"SLG layers").value).toBe("[]");
+  await click(container.querySelector(".preset-chips button"));expect(field(container,"8-step acceleration").checked).toBe(false);expect(field(container,"Context limit").value).toBe("512");expect(field(container,"Steps").value).toBe("60");expect(field(container,"Guidance").value).toBe("2");expect(field(container,"Schedule shift").value).toBe("4");expect(field(container,"Negative prompt").value).toBe("previous negative");expect(field(container,"Unconditional skip layers").value).toBe("[3]");
+  await click(buttonWithText("Moss authored"));await click(field(container,"8-step acceleration"));expect(field(container,"Steps").value).toBe("70");expect(field(container,"Guidance").value).toBe("4.5");expect(field(container,"Schedule shift").value).toBe("6");expect(field(container,"Negative prompt").value).toBe("saved negative");
+  await click(generateButton());expect(ctx.createImageJob.mock.calls.at(-1)[0].advanced.mossImage).toEqual(options);
+  await act(async()=>setSelect(field(container,"Model"),BASE.id));
+  await render({...ctx,presets:[preset],studioLaunch:{id:"cross-model-preset",view:"Image",presetId:preset.id,presetModel:TURBO.id,presetMode:"text_to_image"}});
+  expect(field(container,"Model").value).toBe(TURBO.id);expect(field(container,"8-step acceleration").checked).toBe(true);expect(field(container,"Context limit").value).toBe("1536");
+  await click(generateButton());expect(ctx.createImageJob.mock.calls.at(-1)[0].advanced).toMatchObject({steps:8,mossImage:{acceleration:"unmerged_bf16",max_sequence_length:1536}});
+  await act(async()=>setSelect(field(container,"Model"),BASE.id));await act(async()=>setSelect(field(container,"Model"),TURBO.id));expect(field(container,"8-step acceleration").checked).toBe(false);
+  await render({...ctx,presets:[preset],studioLaunch:{id:"recipe-after-preset",view:"Image",recipe:previous}});expect(field(container,"8-step acceleration").checked).toBe(false);expect(field(container,"Context limit").value).toBe("512");expect(field(container,"Steps").value).toBe("60");
+ });
+ it.each([2,6])("replays a persisted two-image-per-prompt recipe and splits %i prompts without multiplying variations",async(size)=>{
+  const ctx=await render(baseContext({studioLaunch:{id:"worker-batch",view:"Image",recipe:BATCH_RECIPE}}));
+  expect(field(container,"Variations").value).toBe("2");
+  const prompts=size===2?BATCH_RECIPE.rawAdapterSettings.promptBatch:Array.from({length:size},(_,i)=>`prompt ${i}`);
+  if(size>2) await act(async()=>{const input=container.querySelector('textarea[aria-label="Batch prompts"]');Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,"value").set.call(input,prompts.join("\n"));input.dispatchEvent(new window.Event("input",{bubbles:true}));});
+  await click(buttonWithText("Run batch"));if(container.querySelector(".batch-confirm .prompt-cta")) await click(container.querySelector(".batch-confirm .prompt-cta"));
+  await vi.waitFor(()=>expect(ctx.createImageJob).toHaveBeenCalledTimes(size===2?1:2));
+  const jobs=ctx.createImageJob.mock.calls.map(([job])=>job);expect(jobs.map(job=>job.count)).toEqual(size===2?[2]:[2,2]);expect(jobs.flatMap(job=>job.prompts)).toEqual(prompts);expect(jobs.map(job=>job.count*job.prompts.length)).toEqual(size===2?[4]:[8,4]);
  });
  it("gates optional precision packages and reports download errors",async()=>{
   await render(); await click(field(container,"8-step acceleration")); await advanced(); await act(async()=>setSelect(field(container,"Acceleration precision"),"full_fp32"));

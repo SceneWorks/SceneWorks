@@ -388,6 +388,150 @@ mod moss_consumer_tests {
     use super::*;
     use gen_core::moss_image::*;
     use std::cell::{Cell, RefCell};
+    #[test]
+    fn full_prepared_consumer_config_reaches_native_shared_preparation_without_ordinary_dit() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let root = |repo: &str, revision: &str| {
+            hub.join(format!("models--{}", repo.replace('/', "--")))
+                .join("snapshots")
+                .join(revision)
+        };
+        let ordinary = root(SFT_REPO, SFT_REVISION);
+        let full = root(DMD_REPO, DMD_REVISION);
+        std::fs::create_dir_all(ordinary.join("transformer")).unwrap();
+        std::fs::create_dir_all(full.join("transformer")).unwrap();
+        std::fs::write(
+            ordinary.join("transformer/config.json"),
+            b"unused ordinary config must not be consumed",
+        )
+        .unwrap();
+        std::fs::write(
+            full.join("transformer/config.json"),
+            include_bytes!("../../../../tests/fixtures/moss-transformer-config.json"),
+        )
+        .unwrap();
+        let mode = MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32);
+        let mut spec = LoadSpec::new(WeightsSource::Dir(ordinary))
+            .with_resolved_route("moss_image_sft:full_fp32")
+            .with_component(DMD_TRANSFORMER_COMPONENT, WeightsSource::Dir(full.clone()))
+            .with_component(DMD_DATASPACE_COMPONENT, WeightsSource::Dir(full.clone()));
+        // A projection containing the real frozen selected config, deliberately missing shared
+        // weights. Successful admission/execution requires real weights and remains terminal-only.
+        let entry = json!({"downloads":[
+            {"repo":SFT_REPO,"revision":SFT_REVISION,"files":["transformer/config.json"]},
+            {"repo":DMD_REPO,"revision":DMD_REVISION,"files":["transformer/config.json"]}
+        ]})
+        .as_object()
+        .unwrap()
+        .clone();
+        moss_pin_spec(
+            &mut spec,
+            &entry,
+            &Settings::for_test(temp.path().join("data")),
+            mode,
+        )
+        .unwrap();
+        assert_eq!(spec.prepared_file_pins().len(), 1);
+        #[cfg(target_os = "macos")]
+        let error = moss_memory::selected_asset_facts(MossImageVariant::Sft, &spec, mode)
+            .unwrap_err()
+            .to_string();
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let error = moss_memory::selected_preload_estimate(
+            MossImageVariant::Sft,
+            &spec,
+            &GenerationRequest {
+                moss_image: Some(MossImageOptions {
+                    acceleration: mode,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            MossImageAdvancedInputs::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("text_encoder/config.json"), "{error}");
+        assert!(!error.contains("transformer/config.json"), "{error}");
+        // The macOS normal registry constructor prepares sources before device/tensor work.
+        // CUDA factory execution is covered by the separately admitted native worker campaign.
+        #[cfg(target_os = "macos")]
+        {
+            let error = crate::inference_runtime::load("moss_image_sft", &spec)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("text_encoder/config.json"), "{error}");
+            assert!(!error.contains("transformer/config.json"), "{error}");
+        }
+    }
+    #[test]
+    fn moss_worker_persisted_batch_recipe_keeps_per_prompt_count_and_total_generation_metadata() {
+        // The Studio regression consumes this projection of a real persisted recipe.
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/moss-batch-recipe.json"
+        ))
+        .unwrap();
+        let prompts = fixture["rawAdapterSettings"]["promptBatch"].clone();
+        let payload = json!({"model":"moss_image_sft","mode":"text_to_image","prompt":prompts[0],"prompts":prompts,"count":2,"width":16,"height":16,"modelManifestEntry":{"limits":{"minDimension":16}},"advanced":{"mossImage":{"acceleration":"off"}}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let plan = ImagePlan::with_count_and_adapter(&request, 4, "mlx_moss_image_sft", None);
+        assert_eq!(plan.generation_set["count"], 4);
+        assert_eq!(streaming_result(&plan, &[])["expectedCount"], 4);
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().to_path_buf(), "test");
+        let project = store.create_project("MOSS batch recipe").unwrap();
+        for index in 0..4 {
+            let fact = write_image_asset(
+                &plan,
+                index,
+                173,
+                16,
+                16,
+                vec![0; 16 * 16 * 3],
+                "mlx_moss_image_sft",
+                request.advanced.clone(),
+                Path::new(&project.path),
+            )
+            .unwrap();
+            let asset = store
+                .persist_generated_asset(
+                    &project.id,
+                    "job-moss",
+                    &plan.genset_id,
+                    &Value::Object(fact.clone()),
+                )
+                .unwrap();
+            let path = Path::new(&project.path)
+                .join("recipes")
+                .join(format!("{}.recipe.json", fact["assetId"].as_str().unwrap()));
+            let recipe: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(recipe, asset["recipe"]);
+            for pointer in [
+                "/mode",
+                "/model",
+                "/negativePrompt",
+                "/normalizedSettings/width",
+                "/normalizedSettings/height",
+                "/normalizedSettings/count",
+                "/rawAdapterSettings/mossImage",
+                "/rawAdapterSettings/promptBatch",
+            ] {
+                assert_eq!(
+                    recipe.pointer(pointer),
+                    fixture.pointer(pointer),
+                    "{pointer}: {recipe}"
+                );
+            }
+            assert_eq!(recipe["prompt"], prompts[index / request.count as usize]);
+        }
+    }
     fn completed_receipt(req: &GenerationRequest) -> MossImageExecutionReport {
         let resolved = MossImageResolved::resolve(MossImageVariant::Sft, req).unwrap();
         let hash = "a".repeat(64);
