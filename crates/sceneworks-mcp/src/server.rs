@@ -250,6 +250,17 @@ pub struct GenerateImageArgs {
         description = "A native prompt batch: 2+ prompts rendered together in ONE pass, prompts × count <= the model's imageControls.maxPromptBatchImages (Iris-3B: 8). `prompt` must equal prompts[0]. Image k renders prompts[k % len] on seed seed + k. Only for a model declaring maxPromptBatchImages; omit otherwise."
     )]
     pub prompts: Option<Vec<String>>,
+    #[schemars(
+        description = "MOSS-Image controls, passed as advanced.mossImage. Canonical keys: acceleration (off default, unmerged_bf16, full_fp32; SFT only), max_sequence_length (1–4096), uncond_skip_layers (null author default [22], [] disables), training_shift, slg {layers,scale,start,stop}. DMD steps select prefix 1–8 (default 8); omit guidance/negative/sampler/scheduler/shift/SLG when accelerated. Text-to-image only; tag and JSON prompts are preserved."
+    )]
+    #[schemars(schema_with = "moss_image_options_schema")]
+    pub moss_image: Option<Value>,
+}
+
+fn moss_image_options_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    sceneworks_core::moss_image::options_schema()
+        .try_into()
+        .expect("MOSS options schema object")
 }
 
 /// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
@@ -508,7 +519,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, any licence-required attribution string, and for a trained model its trainedCheckpoint {task, engineModel, baseModel} (task \"generation\" → use the id as generate_image's model; \"depth\" / \"restoration\" → estimate_depth's / restore_image's irisModel). An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages; MOSS Base/SFT accepts mossImage with acceleration default off; only SFT offers unmerged_bf16/full_fp32 acceleration; see generate_image schema), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, any licence-required attribution string, and for a trained model its trainedCheckpoint {task, engineModel, baseModel} (task \"generation\" → use the id as generate_image's model; \"depth\" / \"restoration\" → estimate_depth's / restore_image's irisModel). An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -1355,6 +1366,7 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
         }
     }
     let advanced: Map<String, Value> = [
+        ("mossImage", args.moss_image.clone()),
         ("steps", args.steps.map(|v| json!(v))),
         ("guidanceScale", args.guidance_scale.map(|v| json!(v))),
         ("sampler", args.sampler.as_ref().map(|v| json!(v))),
@@ -2020,6 +2032,13 @@ pub(crate) fn compact_models(models: &Value) -> Value {
                 out.insert(key.to_owned(), value.clone());
             }
         }
+        if model
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+        {
+            out.insert("mossImageControls".to_owned(), json!({"defaultAcceleration":"off","accelerationAvailable":model["id"] == "moss_image_sft","optionsSchema":sceneworks_core::moss_image::options_schema(),"conditionalPurposes":model.get("conditionalPurposes")}));
+        }
         // Licence-required UI attribution (sc-17227 §IV.2 / sc-17161). An MCP client renders the
         // model it used in ITS OWN interface, so the string has to travel with the catalog entry
         // rather than living only on SceneWorks' own screens.
@@ -2298,6 +2317,54 @@ mod tests {
     // -----------------------------------------------------------------------
     // generate_image (sc-10234): args → ImageJobRequest mapping.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn moss_image_options_reach_advanced_losslessly() {
+        for mode in ["off", "unmerged_bf16", "full_fp32"] {
+            let options = json!({"acceleration": mode, "max_sequence_length": 1024, "uncond_skip_layers": []});
+            let args = args_from(
+                json!({"projectId":"p","prompt":"日本語 <tag> {\"items\":[]}","model":"moss_image_sft","mossImage":options}),
+            );
+            let body = image_job_body(&args).unwrap();
+            assert_eq!(body["advanced"]["mossImage"], options);
+            assert_eq!(body["prompt"], args.prompt);
+        }
+    }
+
+    #[test]
+    fn bare_moss_mcp_modes_do_not_inject_ordinary_defaults_and_reject_explicit_conflicts() {
+        for mode in ["unmerged_bf16", "full_fp32"] {
+            let args = args_from(
+                json!({"projectId":"p","prompt":"日本語 <tag>","model":"moss_image_sft","mossImage":{"acceleration":mode}}),
+            );
+            let body = image_job_body(&args).unwrap();
+            let native = sceneworks_core::moss_image::native_request(
+                body.as_object().unwrap(),
+                &Default::default(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(native.steps.is_none());
+            assert!(native.guidance.is_none());
+            assert!(native.scheduler_shift.is_none());
+            assert!(native.negative_prompt.as_deref().is_none_or(str::is_empty));
+            assert_eq!(
+                native.moss_image.unwrap().acceleration,
+                sceneworks_core::moss_image::options(body["advanced"].as_object().unwrap())
+                    .unwrap()
+                    .acceleration
+            );
+            for (key, value) in [("guidanceScale", json!(3)), ("schedulerShift", json!(5))] {
+                let mut conflict = body.clone();
+                conflict["advanced"][key] = value;
+                assert!(sceneworks_core::moss_image::native_request(
+                    conflict.as_object().unwrap(),
+                    &Default::default()
+                )
+                .is_err());
+            }
+        }
+    }
 
     fn args_from(value: Value) -> GenerateImageArgs {
         serde_json::from_value(value).expect("args deserialize")

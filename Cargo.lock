@@ -6912,6 +6912,7 @@ dependencies = [
  "png 0.18.1",
  "remove_dir_all",
  "rusqlite",
+ "sceneworks-gen-core",
  "rustix",
  "serde",
  "serde_json",

@@ -190,7 +190,14 @@ impl ImageRequest {
         if self.prompts.is_empty() {
             &self.prompt
         } else {
-            &self.prompts[index % self.prompts.len()]
+            // MOSS repeats each prompt's images together (prompt-major); other providers use
+            // the historical prompt-minor convention.
+            let prompt_index = if crate::moss_image::is_moss(&self.model) {
+                index / self.count.max(1) as usize
+            } else {
+                index % self.prompts.len()
+            };
+            &self.prompts[prompt_index % self.prompts.len()]
         }
     }
 

@@ -1261,6 +1261,10 @@ pub enum AdvancedShape {
     /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
     /// H3 validator refuses malformed values or unknown fields.
     H3VedaSettings,
+    /// Canonical MOSS request options, validated by gen-core.
+    MossImageOptions,
+    /// Provider receipt with local adapter paths reduced to their frozen relative filename.
+    MossImageReport,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
@@ -1349,6 +1353,9 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
+    deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
+    allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
     allow(
         "resolution",
         AdvancedShape::Scalar,
@@ -2976,6 +2983,8 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
+            AdvancedShape::MossImageOptions => sanitize_moss_options(value),
+            AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
             AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
@@ -2983,6 +2992,31 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
         }
     }
     out
+}
+
+fn sanitize_moss_options(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::{MossImageOptions, MossImageResolved, MossImageVariant};
+    let options: MossImageOptions = serde_json::from_value(value.clone()).ok()?;
+    MossImageResolved::resolve(
+        MossImageVariant::Sft,
+        &gen_core::GenerationRequest {
+            moss_image: Some(options.clone()),
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    serde_json::to_value(options).ok()
+}
+/// Keep the native validated receipt while excluding this machine's optional adapter location.
+/// The source receipt still identifies the exact upstream adapter bytes by repository/revision/hash.
+pub fn sanitize_moss_execution_report(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::MossImageExecutionReport;
+    let report: MossImageExecutionReport = serde_json::from_value(value.clone()).ok()?;
+    let mut data = report.into_data();
+    for adapter in &mut data.adapter_reports {
+        adapter.adapter_path = std::path::PathBuf::from("lora.safetensors");
+    }
+    serde_json::to_value(MossImageExecutionReport::new(data).ok()?).ok()
 }
 
 /// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire

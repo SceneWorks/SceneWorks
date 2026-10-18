@@ -6184,6 +6184,12 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
             crate::classify_engine_error("MLX residency source validation failed", error)
         })?;
     }
+    // MOSS's generic stream admits the authenticated SELECTED precision closure plus request
+    // workspace inside the cache transaction. The generic source sum includes the unselected SFT
+    // transformer during full-FP32 acceleration and must not choose a different load policy.
+    if sceneworks_core::moss_image::is_moss(engine_id) {
+        return Ok(spec);
+    }
     // Respect an offload policy already chosen upstream (defensive: the MLX cache seam normally sees
     // the default `Resident`, but never downgrade a `Sequential` set by another gate).
     if spec.offload_policy == OffloadPolicy::Sequential {

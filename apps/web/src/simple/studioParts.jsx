@@ -2,7 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetDisplayUrl, assetUrl } from "../components/assetMedia.jsx";
 import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { yue2AssetFilename } from "../yue2Policy.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";

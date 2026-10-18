@@ -698,6 +698,20 @@ pub(crate) fn normalize_recipe_preset_for_write(
     }
     validate_recipe_preset_order(object.get("order"))?;
     validate_recipe_preset_defaults(object.get("defaults"))?;
+    if let Some(moss) = object.get("defaults").and_then(|d| d.get("mossImage")) {
+        if !object
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+        {
+            return Err(ApiError::bad_request(
+                "mossImage preset requires a MOSS-Image model",
+            ));
+        }
+        let advanced = json!({ "mossImage": moss });
+        sceneworks_core::moss_image::options(advanced.as_object().expect("object"))
+            .map_err(ApiError::bad_request)?;
+    }
     validate_recipe_preset_prompt(object.get("prompt"))?;
     Ok(preset)
 }

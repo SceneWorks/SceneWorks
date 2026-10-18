@@ -1319,7 +1319,15 @@ fn apply_conditional_component_state(object: &mut JsonObject, data_dir: &FsPath)
     let mut purposes: std::collections::BTreeMap<String, (bool, bool, bool)> =
         std::collections::BTreeMap::new();
     for row in rows.iter_mut() {
-        let presence = co_requisite_presence(data_dir, row);
+        let presence = if row
+            .get("componentId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("moss-dmd-"))
+        {
+            pinned_component_presence(data_dir, row)
+        } else {
+            co_requisite_presence(data_dir, row)
+        };
         let blocked = row.get("blocked").is_some();
         let state = match presence {
             CoRequisitePresence::Installed => "installed",
@@ -7827,6 +7835,36 @@ fn installed_co_requisite_choices(model: &Value, data_dir: &FsPath) -> Option<Va
 }
 
 /// [`co_requisite_cache_health`] as the three-way presence choice-group gating reads (sc-22998).
+/// Exact-revision availability for MOSS request-selected components. A sibling cached snapshot
+/// cannot make the selected package installed. Hash authentication remains the native load gate.
+pub(crate) fn pinned_component_presence(
+    data_dir: &FsPath,
+    download: &Value,
+) -> sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return CoRequisitePresence::Absent;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return CoRequisitePresence::Absent;
+    };
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+        return CoRequisitePresence::Absent;
+    };
+    let files = string_array_field(download, "files");
+    let health = huggingface_filtered_cache_health(&[snapshot], &files);
+    if health.installed {
+        CoRequisitePresence::Installed
+    } else if health.incomplete {
+        CoRequisitePresence::Incomplete
+    } else {
+        CoRequisitePresence::Absent
+    }
+}
+
 fn co_requisite_presence(
     data_dir: &FsPath,
     download: &Value,
