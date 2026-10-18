@@ -49,7 +49,9 @@ PRs. Omitted/default profile retains existing catalog behavior.
 ## What runs and what counts
 
 The bounded reusable workflow builds the exact source Release rust-api, verifies
-Metal, and starts only its isolated API and standalone native MLX worker. State,
+Metal, and starts only its isolated API (with the shipped desktop topology's
+in-process CPU utility worker, which is the only kind that claims `model_download`)
+and a standalone native MLX worker. State,
 config, credentials, jobs DB, build target and evidence are isolated under the
 attempt's RUNNER_TEMP directory. A cryptorandom per-attempt nonce binds the state
 paths and worker ID. The API binds loopback port zero; its exclusively created,
@@ -60,6 +62,12 @@ health. Foreign healthy endpoints are refused before registration or any POST.
 API exit aborts pending requests and terminates only owned process groups. The
 controller has a 150-minute bound, workflow 180; these are safety bounds, not
 measured runtime estimates.
+
+Before posting the download it requires one of the attempt's own nonce-bound
+utility workers to be registered, idle and `model_download`-capable. Any ordinary
+job still unclaimed after 300 seconds fails immediately instead of consuming the
+installation or generation budget (run 39116882752 waited a full hour on a
+download no worker could claim).
 
 Using the ordinary model-library relocation and model-download API, it installs
 (or re-verifies) the catalog's upstream package at revision
