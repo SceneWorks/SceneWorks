@@ -4,9 +4,9 @@
   "summary": {
     "modelCount": 139,
     "importedFamilyCount": 4,
-    "cellCount": 1075,
+    "cellCount": 1082,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 82,
+    "candleOnlyCellCount": 83,
     "exceptionCount": 10
   },
   "sources": {
@@ -15,9 +15,9 @@
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
     "apiValidation": "2a1122f13ad5bcd2646d7868abceb48dd731d5ab35641c50dc96de2413fe0db1",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "5f0907044bdcb30cc9753142d8c2a553e5ebc8b86684eaf1f10e4cdc02a29ae9",
-    "descriptorCandleFacts": "ca2de02ec93e153743df864eae1be91af6fc85ebc06585c66737dab2fbb0524b",
-    "descriptorCandleRuntime": "1a04e585df89f5ffec8a7f1864a78581a931e9401f64f0c242f437ed5d534084",
+    "descriptorAudioFacts": "a4cc9cb485e049bb92960664a70d1914bad689308a7e3b77bc0def52f8df1733",
+    "descriptorCandleFacts": "704fcf439c71d3c2e2644fdda041501bdaabffae50fb969f3ad1c5300b24e40c",
+    "descriptorCandleRuntime": "9b087d4a638e67006126867b5d8e32d386a99ba1849ec2fce8591855897b4a57",
     "descriptorMlxFacts": "5a839cc93975a8f437138c8e0045398b9c198139ee21913a1c04c9f29c189839",
     "descriptorMlxRuntime": "147f839823d066573f48134a598fea239e07955910511e7ec98c43cf81c6e351",
     "descriptorPreviewFacts": "22e1b3c69efb5478d2b060a7224bdcef1791d0e1a8dfa6ab3a596361db01ebae",
@@ -1594,7 +1594,23 @@
           "candle": true
         }
       ],
-      "conditioningShape": [],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": false,
+          "candle": false
+        }
+      ],
       "userAdapters": [
         {
           "capability": "lora",
@@ -1612,6 +1628,27 @@
           "capability": "bf16",
           "mlx": true,
           "candle": true
+        },
+        {
+          "capability": "fp8r",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "q4",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "q8",
+          "mlx": false,
+          "candle": false
         }
       ],
       "guidanceMethod": [],
