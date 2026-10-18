@@ -12002,7 +12002,7 @@ fn wan_5b_timing() {
             dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
         }
         Progress::Loading(_) => {}
-        Progress::Upsampling { .. } => {}
+        Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
     };
     let decoded = run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");
     let end = Instant::now();
