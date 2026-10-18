@@ -112,11 +112,43 @@ export function attemptIdentity(output) {
 export function bindOwnedEnv(childEnv, { state, workerId }, url) {
   // Bind AFTER the shared helper scrubs ambient SCENEWORKS_* values and overwrite
   // its historical fixed port. Keep the runner's HF_TOKEN only in the child env.
-  const bound = { ...childEnv, SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: url ? new URL(url).port : "0", SCENEWORKS_LOG_FORMAT: "json", SCENEWORKS_RUN_UTILITY_INPROCESS: "0", RUST_LOG: "info" };
+  const bound = { ...childEnv, SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: url ? new URL(url).port : "0", SCENEWORKS_LOG_FORMAT: "json", RUST_LOG: "info" };
   // The API derives its own internal self-call URL from its actual port-zero
   // listener. Only the separately launched worker gets the discovered URL.
   if (url) bound.SCENEWORKS_API_URL = url; else delete bound.SCENEWORKS_API_URL;
+  if (url) {
+    // The separately launched MLX worker: GPU identity only, never utility loops.
+    Object.assign(bound, { SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_RUN_UTILITY_INPROCESS: "0" });
+    delete bound.SCENEWORKS_RUST_WORKER_GPU_ID;
+  } else {
+    // The owned API runs the shipped desktop topology's in-process CPU utility worker
+    // (apps/desktop setup.rs: SCENEWORKS_RUN_UTILITY_INPROCESS=true). Only a CPU utility
+    // worker advertises model_download, so without it the ordinary download job is never
+    // claimed. Its loops call this API's own loopback listener, and get a distinct
+    // nonce-bound id so they never collide with the MLX worker's registration.
+    Object.assign(bound, { SCENEWORKS_WORKER_ID: utilityWorkerId(workerId), SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu" });
+  }
   return bound;
+}
+
+export function utilityWorkerId(workerId) { return `${workerId}-utility`; }
+
+// Installation precheck: refuse to post the download unless one of THIS attempt's
+// in-process utility workers is registered, idle and able to claim model_download.
+export function assertDownloadWorker(workers, workerId) {
+  const base = utilityWorkerId(workerId);
+  const owned = (Array.isArray(workers) ? workers : []).filter((w) => w?.id === base || w?.id?.startsWith(`${base}-`));
+  const capable = owned.find((w) => w.status === "idle" && w.gpuId === "cpu" && w.capabilities?.includes("model_download"));
+  fact(capable, "no owned idle CPU utility worker can claim model_download (the MLX GPU worker never does); refusing to post the installation");
+  return capable;
+}
+
+// A queued job that no worker claims never progresses. Fail within the claim window
+// instead of spending the whole installation/generation budget waiting.
+export const CLAIM_WINDOW_SECONDS = 300;
+export function assertClaimedWithin(job, firstSeenMs, nowMs, windowSeconds = CLAIM_WINDOW_SECONDS) {
+  const unclaimed = job?.status === "queued" && !job.workerId;
+  fact(!unclaimed || nowMs - firstSeenMs <= windowSeconds * 1000, `ordinary job ${job?.id} still unclaimed after ${windowSeconds}s; no registered owned worker can claim ${job?.type}`);
 }
 
 // Field names are the API's serialized camelCase HealthResponse/DirectoriesResponse
@@ -256,13 +288,16 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     await endpoint.startWorker(() => launch(binary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker", true));
     const must = (...args) => endpoint.call(...args);
     receipt.worker = await wait(async () => { const w = (await must("GET", "/api/v1/workers")).find((w) => w.id === workerId); if (!w || w.status !== "idle") return false; fact(w.gpuId === "mlx" && w.gpuName === "Apple Silicon (MLX)" && w.capabilities?.includes("gpu") && !w.capabilities.some((c) => ["cpu", "candle", "nvidia"].includes(c)), "owned native MLX worker required"); return w; }, 180, "owned MLX worker registration");
+    receipt.download_worker = await wait(async () => { try { return assertDownloadWorker(await must("GET", "/api/v1/workers"), workerId); } catch (error) { alive(); if (/owned API/.test(error.message)) throw error; return false; } }, 180, "owned in-process utility worker able to claim model_download");
     const relocation = await must("POST", "/api/v1/model-library/relocate", { path: weights });
     fact(relocation.adopted === true && relocation.hfHome === weights && relocation.libraryRoot === hub, "API must adopt the exact task-owned library");
     const getModel = async () => (await must("GET", "/api/v1/models")).find((m) => m.id === "flux3_klein");
     const model = await getModel(); assertModel(model); receipt.catalog_model = model;
+    assertDownloadWorker(await must("GET", "/api/v1/workers"), workerId); // re-check immediately before posting
     const download = await must("POST", "/api/v1/models/flux3_klein/download", { licenseAcknowledged: true }); assertDownload(download); receipt.download_job_id = download.id; await save();
     const getJob = (id) => must("GET", `/api/v1/jobs/${id}`);
-    const completedJob = async (id) => { const j = await getJob(id); fact(!["failed", "canceled"].includes(j.status), `ordinary job ${id} ${j.status}; inspect owned worker log (HF 401/403 requires this Mac account's gate acceptance)`); const event = { job_id: id, status: j.status, stage: j.stage, backend: j.backend, worker_id: j.workerId }; if (JSON.stringify(receipt.events.at(-1)) !== JSON.stringify(event)) { receipt.events.push(event); await save(); } return j.status === "completed" && j; };
+    const firstSeen = new Map();
+    const completedJob = async (id) => { const j = await getJob(id); if (!firstSeen.has(id)) firstSeen.set(id, Date.now()); assertClaimedWithin(j, firstSeen.get(id), Date.now()); fact(!["failed", "canceled"].includes(j.status), `ordinary job ${id} ${j.status}; inspect owned worker log (HF 401/403 requires this Mac account's gate acceptance)`); const event = { job_id: id, status: j.status, stage: j.stage, backend: j.backend, worker_id: j.workerId }; if (JSON.stringify(receipt.events.at(-1)) !== JSON.stringify(event)) { receipt.events.push(event); await save(); } return j.status === "completed" && j; };
     receipt.download = await wait(() => completedJob(download.id), 60 * 60, "ordinary pinned installation"); assertDownload(receipt.download);
     const installed = await getModel(); assertModel(installed);
     const snapshot = path.join(hub, "models--black-forest-labs--flux-3-image-klein", "snapshots", MODEL_REVISION);

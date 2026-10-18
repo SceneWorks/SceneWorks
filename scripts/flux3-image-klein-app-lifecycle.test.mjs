@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { EventEmitter } from "node:events";
 import { createServer } from "node:http";
-import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, assertOwnedHealth, bindOwnedEnv, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
+import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, assertClaimedWithin, assertDownloadWorker, assertOwnedHealth, bindOwnedEnv, CLAIM_WINDOW_SECONDS, utilityWorkerId, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), inference = "b".repeat(40);
 const revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
@@ -202,6 +202,55 @@ test('attempt cryptographic nonce binds all owned state and worker identity afte
   assert.equal(env.HF_TOKEN, token); assert.equal(env.SCENEWORKS_API_PORT, '0');
   for (const key of ['SCENEWORKS_DATA_DIR', 'SCENEWORKS_CONFIG_DIR', 'SCENEWORKS_JOBS_DB_PATH', 'SCENEWORKS_WORKER_ID']) assert.ok(env[key].includes(a.nonce), key);
   assert.equal(bindOwnedEnv(env, a, 'http://127.0.0.1:49152').SCENEWORKS_API_PORT, '49152');
+});
+
+test('owned API runs the in-process CPU utility worker; the MLX worker never does', () => {
+  const a = attemptIdentity(path.resolve('output'));
+  const apiEnv = bindOwnedEnv({ SCENEWORKS_RUN_UTILITY_INPROCESS: '0', SCENEWORKS_RUST_WORKER_GPU_ID: 'mlx' }, a);
+  assert.equal(apiEnv.SCENEWORKS_RUN_UTILITY_INPROCESS, '1');
+  assert.equal(apiEnv.SCENEWORKS_RUST_WORKER_GPU_ID, 'cpu');
+  assert.equal(apiEnv.SCENEWORKS_WORKER_ID, utilityWorkerId(a.workerId));
+  assert.notEqual(apiEnv.SCENEWORKS_WORKER_ID, a.workerId); assert.ok(apiEnv.SCENEWORKS_WORKER_ID.includes(a.nonce));
+  const workerEnv = bindOwnedEnv(apiEnv, a, 'http://127.0.0.1:49152');
+  assert.equal(workerEnv.SCENEWORKS_RUN_UTILITY_INPROCESS, '0');
+  assert.equal(workerEnv.SCENEWORKS_WORKER_ID, a.workerId);
+  assert.equal(workerEnv.SCENEWORKS_RUST_WORKER_GPU_ID, undefined);
+});
+
+test('installation precheck requires an owned idle CPU utility worker that claims model_download', () => {
+  const workerId = 'flux3-app-' + 'c'.repeat(48), utility = utilityWorkerId(workerId);
+  // The exact MLX worker shape run 39116882752 registered: GPU capabilities, no model_download.
+  const mlx = { id: workerId, gpuId: 'mlx', gpuName: 'Apple Silicon (MLX)', status: 'idle', capabilities: ['gpu', 'image_generate', 'prompt_refine'] };
+  const cpu = (id, extra = {}) => ({ id, gpuId: 'cpu', status: 'idle', capabilities: ['cpu', 'model_download', 'model_import'], ...extra });
+  assert.throws(() => assertDownloadWorker([mlx], workerId), /no owned idle CPU utility worker can claim model_download/);
+  assert.throws(() => assertDownloadWorker([], workerId), /model_download/);
+  assert.throws(() => assertDownloadWorker([mlx, cpu('rust-utility-worker')], workerId), /model_download/, 'foreign utility worker');
+  assert.throws(() => assertDownloadWorker([mlx, cpu(utility, { status: 'busy' })], workerId), /model_download/);
+  assert.throws(() => assertDownloadWorker([mlx, cpu(utility, { capabilities: ['cpu'] })], workerId), /model_download/);
+  assert.throws(() => assertDownloadWorker([mlx, cpu(utility, { gpuId: 'mlx' })], workerId), /model_download/);
+  assert.equal(assertDownloadWorker([mlx, cpu(utility)], workerId).id, utility);
+  assert.equal(assertDownloadWorker([mlx, cpu(`${utility}-1`)], workerId).id, `${utility}-1`);
+});
+
+test('a job no worker claims fails within the claim window, not after the whole budget', () => {
+  const queued = { id: 'job_x', type: 'model_download', status: 'queued', workerId: null };
+  const t0 = 1_000_000, limit = CLAIM_WINDOW_SECONDS * 1000;
+  assert.equal(CLAIM_WINDOW_SECONDS, 300);
+  assert.doesNotThrow(() => assertClaimedWithin(queued, t0, t0 + limit));
+  assert.throws(() => assertClaimedWithin(queued, t0, t0 + limit + 1), /job_x still unclaimed after 300s; no registered owned worker can claim model_download/);
+  assert.doesNotThrow(() => assertClaimedWithin({ ...queued, workerId: 'w' }, t0, t0 + 10 * limit));
+  assert.doesNotThrow(() => assertClaimedWithin({ ...queued, status: 'running', workerId: 'w' }, t0, t0 + 10 * limit));
+});
+
+test('lifecycle wires the utility precheck before posting the download and the claim window into every job wait', async () => {
+  const source = await readFile(new URL('./flux3-image-klein-app-lifecycle.mjs', import.meta.url), 'utf8');
+  const run = source.slice(source.indexOf('export async function runLifecycle'));
+  const lines = run.split('\n'), post = lines.findIndex((line) => line.includes('"/api/v1/models/flux3_klein/download"'));
+  assert.ok(post > 0);
+  // The statement immediately before the POST is the standalone precheck, not the earlier wait.
+  assert.match(lines[post - 1], /^\s+assertDownloadWorker\(await must\("GET", "\/api\/v1\/workers"\), workerId\);/);
+  assert.ok(lines.slice(0, post - 1).some((line) => line.includes('receipt.download_worker = await wait(') && line.includes('assertDownloadWorker(')));
+  assert.match(run, /const completedJob = async \(id\) => \{ const j = await getJob\(id\); if \(!firstSeen\.has\(id\)\) firstSeen\.set\(id, Date\.now\(\)\); assertClaimedWithin\(j, firstSeen\.get\(id\), Date\.now\(\)\);/);
 });
 
 test('discover only existing structured owned listener event with actual loopback port', () => {
