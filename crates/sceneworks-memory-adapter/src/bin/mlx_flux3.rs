@@ -71,14 +71,16 @@ mod tests {
     #[test]
     fn flux3_mlx_fingerprints_bind_the_native_engine() {
         use runtime_macos::providers::flux3::memory_strategy as engine;
-        for tier in ["bf16", "q4", "q8"] {
+        // Capture uses loaded-package identities: its native affine conversion
+        // receipts fix group64, while dense storage has no quantization group.
+        for (tier, group) in [("bf16", None), ("q4", Some(64)), ("q8", Some(64))] {
             assert_eq!(
                 common::fingerprint("mlx", tier).unwrap(),
                 engine::tier_fingerprint(
                     engine::MEMORY_CALIBRATION_FINGERPRINT,
-                    common::quant("mlx", tier).unwrap()
+                    common::quant("mlx", tier).unwrap(),
+                    group,
                 )
-                .unwrap()
             );
         }
     }
