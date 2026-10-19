@@ -4746,19 +4746,11 @@ function MossOrdinaryControls({ options, disabled, onChange }) {
 const mossLayerText = (value) => value == null ? "" : typeof value === "string" ? value : JSON.stringify(value);
 
 function MossLayerInput({ value, onChange, emptyValue = null, ...props }) {
-  const [draft, setDraft] = useState(() => mossLayerText(value));
-  const lastValue = useRef(value);
-  useEffect(() => {
-    if (value !== lastValue.current) setDraft(mossLayerText(value));
-    lastValue.current = value;
-  }, [value]);
-  return <input {...props} value={draft} onChange={(event) => {
+  return <input {...props} value={mossLayerText(value)} onChange={(event) => {
     const text = event.target.value;
-    let next;
+    let next = text;
     try { next = text.trim() === "" ? emptyValue : JSON.parse(text) ?? emptyValue; }
-    catch { next = text; }
-    lastValue.current = next;
-    setDraft(text);
+    catch { /* Keep incomplete JSON editable until it becomes a valid layer list. */ }
     onChange(next);
   }} />;
 }
