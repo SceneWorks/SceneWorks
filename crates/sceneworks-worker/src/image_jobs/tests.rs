@@ -22007,6 +22007,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
         // admission gate. Structurally the SenseNova case, not the ControlNet case.
         "QwenImage21Edit",
+        // FLUX.3 references use the base autoencoder, not an additional conditioning network.
+        "Flux3Reference",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic
@@ -22046,6 +22048,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // them. Their companion snapshot's transformer is replaced by the primary File and must not be
     // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "Flux3Reference",
+            "base.rs",
+            include_str!("base.rs"),
+            "evaluate_shared_image_priced_with_resources(",
+        ),
         (
             "SdxlEdit",
             "sdxl_edit_candle.rs",
@@ -28037,9 +28045,19 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
     assert!(!detail.contains("packed/request-quantized detail is not supported"));
     assert!(base.contains("context.mode = if reference_count == 0"));
-    assert!(base.contains(
-        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
-    ));
+    let mode_call = base
+        .split_once("let shared_request_mode = candle_base_memory_request_mode(")
+        .expect("shared mode must use the family-specific mode mapper")
+        .1
+        .split_once(");")
+        .expect("shared mode mapper call must terminate")
+        .0;
+    assert!(mode_call.contains("engine_id,"));
+    assert!(mode_call.contains("if flux3_references.is_some() { \"edit_image\" }"));
+    assert!(
+        mode_call.contains("else { &request.mode }"),
+        "all other families must preserve their authored mode"
+    );
     assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
     assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
     assert!(base.contains("| \"sdxl\""));

@@ -1333,8 +1333,8 @@ mod tests {
     }
 
     // Guard 1 (was `test_character_image_capability_implies_engine_or_tuning_declaration`, sc-2018): every
-    // builtin that advertises `character_image` must have EITHER a worker identity engine (IP-Adapter /
-    // InstantID / PuLID-FLUX) OR a `ui.variationStrength` declaration. Otherwise the capability flag is
+    // builtin that advertises `character_image` must have a worker identity engine (IP-Adapter /
+    // InstantID / PuLID-FLUX), a native reference-edit route, or a `ui.variationStrength` declaration. Otherwise the capability flag is
     // dishonest — the picker shows the model in "With character" mode but the worker silently ignores the
     // reference (the shape of z_image_turbo's pre-sc-2005 bug). The cross-backbone guard: a future
     // character_image backbone added without engine wiring fails here before it ever reaches a user.
@@ -1355,15 +1355,22 @@ mod tests {
                 .get("ui")
                 .and_then(|ui| ui.get("variationStrength"))
                 .is_some_and(|v| !v.is_null());
-            if !(has_engine || has_variation_ui) {
+            // FLUX.3's native AE-only reference route needs neither an identity overlay nor
+            // an img2img strength control. Bind this category to the live route, not a UI flag.
+            let has_native_reference = sceneworks_core::image_request::flux3::is_model(id) && {
+                let support =
+                    sceneworks_core::jobs_store::model_mac_support(id, "image", Some("flux3"));
+                support.features.reference && support.features.edit
+            };
+            if !(has_engine || has_variation_ui || has_native_reference) {
                 misleading.push(id.to_owned());
             }
         }
         assert!(
             misleading.is_empty(),
             "Models advertise `character_image` without an identity engine (IP-Adapter / InstantID / \
-             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING) or a `ui.variationStrength` declaration: {misleading:?}. \
-             Wire an identity engine for a reference/face-ID backbone, or declare `ui.variationStrength` \
+             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING), a native reference-edit route, or a `ui.variationStrength` declaration: {misleading:?}. \
+             Wire a native reference/identity engine, or declare `ui.variationStrength` \
              for an edit-style backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
         );
     }
