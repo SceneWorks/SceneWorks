@@ -533,7 +533,7 @@ fn resolve_pinned_native_package(
     model: &str,
     explicit: Option<&std::path::Path>,
 ) -> WorkerResult<PathBuf> {
-    let pinned = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(data_dir, repo, revision, Some(model), None)
+    let pinned = crate::flux3_receipted_snapshot(data_dir, repo, revision, model)
         .ok_or_else(|| WorkerError::InvalidPayload(format!("{model} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized credential. Unpinned cache snapshots are not a fallback")))?;
     crate::flux3_runtime_bundle_check(&pinned, model).map_err(|error| {
         WorkerError::InvalidPayload(format!(
@@ -1992,22 +1992,7 @@ fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String
     test
 ))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
-    for key in ["installedPath", "sourcePath", "path"] {
-        if let Some(value) = lora
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(PathBuf::from(value));
-        }
-    }
-    lora.get("source")
-        .and_then(|source| source.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    sceneworks_core::lora_family::adapter_record_path(lora)
 }
 
 /// The exact adapter filename a manifest declares when its LoRA path is a directory.
@@ -2017,12 +2002,7 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     test
 ))]
 pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
-    lora.get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    sceneworks_core::lora_family::declared_adapter_file(lora)
 }
 
 /// Resolve the exact adapter file inference will load. Attribution calls this same function before
@@ -2032,20 +2012,21 @@ pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
     all(not(target_os = "macos"), feature = "backend-candle"),
     test
 ))]
-fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathBuf> {
+fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> WorkerResult<PathBuf> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let file = if path.is_dir() {
-        crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
+    let file = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &path,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            path.display()
+        ))
+    })?;
     if !file.exists() {
         return Err(WorkerError::InvalidPayload(format!(
             "LoRA file is missing: {}",
@@ -2065,21 +2046,22 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,
+    model: &str,
 ) -> WorkerResult<gen_core::PinnedWeightsFile> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let candidate = if confined.is_dir() {
-        let directory = confined;
-        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                directory.display()
-            ))
-        })?
-    } else {
-        raw
-    };
+    let candidate = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &confined,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            confined.display()
+        ))
+    })?;
     crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
 
@@ -2294,7 +2276,7 @@ async fn trusted_loras_for_share(
     let mut used_names = std::collections::HashSet::new();
     let mut loras = Vec::with_capacity(request.loras.len());
     for raw in &request.loras {
-        let file = match resolve_adapter_file(raw, settings) {
+        let file = match resolve_adapter_file(raw, settings, &request.model) {
             Ok(file) => file,
             Err(error) => {
                 tracing::warn!(%error, "LoRA attribution could not resolve the inference file");

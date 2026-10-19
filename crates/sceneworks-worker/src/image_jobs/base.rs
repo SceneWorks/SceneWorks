@@ -5350,7 +5350,7 @@ fn resolve_prepared_adapters(
     let mut specs = Vec::with_capacity(request.loras.len());
     let mut pins = BTreeMap::<PathBuf, gen_core::PinnedWeightsFile>::new();
     for lora in &request.loras {
-        let pin = resolve_prepared_adapter_file(lora, settings)?;
+        let pin = resolve_prepared_adapter_file(lora, settings, &request.model)?;
         let kind = classify_prepared_adapter(&pin)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(pin.loader_path().to_path_buf(), scale, kind));
@@ -5376,7 +5376,7 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
     }
     let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
-        let file = resolve_adapter_file(lora, settings)?;
+        let file = resolve_adapter_file(lora, settings, &request.model)?;
         let kind = classify_adapter(&file)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(file, scale, kind));

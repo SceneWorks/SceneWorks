@@ -37,8 +37,7 @@ use sceneworks_core::lora_family::{
 use sceneworks_core::lora_family::read_safetensors_header;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
@@ -56,6 +55,31 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
+
+/// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
+/// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
+/// from an arbitrary cache directory, and never repairs an existing corrupt tree stamp.
+pub fn flux3_receipted_snapshot(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+) -> Option<PathBuf> {
+    // All these catalog rows download the SAME original whole repository. Derived q4/q8
+    // receipts never authorize an original, and the generic resolver's exact identity policy
+    // stays unchanged (including its legacy `None` => `default` interpretation).
+    ["bf16", "default", "fp8r", "nvfp4"]
+        .into_iter()
+        .find_map(|variant| {
+            model_jobs::huggingface_receipt_weights_dir_at_revision(
+                data_dir,
+                repo,
+                revision,
+                Some(model),
+                Some(variant),
+            )
+        })
+}
 
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.
 /// This is filesystem/index integrity, not whole-repository download completion or a weights

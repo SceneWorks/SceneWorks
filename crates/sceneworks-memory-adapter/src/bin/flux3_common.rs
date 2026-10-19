@@ -22,7 +22,7 @@ pub(super) struct Checkpoint {
     pub revision: &'static str,
     pub label: &'static str,
     pub steps: u32,
-    pub guidance: f32,
+    pub guidance: Option<f32>,
 }
 
 fn checkpoint(provider: &str) -> Result<Checkpoint, String> {
@@ -33,7 +33,7 @@ fn checkpoint(provider: &str) -> Result<Checkpoint, String> {
             revision: REVISION,
             label: "flux3-klein",
             steps: STEPS,
-            guidance: 1.0,
+            guidance: None,
         }),
         BASE_PROVIDER => Ok(Checkpoint {
             provider: BASE_PROVIDER,
@@ -41,7 +41,7 @@ fn checkpoint(provider: &str) -> Result<Checkpoint, String> {
             revision: BASE_REVISION,
             label: "flux3-klein-base",
             steps: 50,
-            guidance: 3.5,
+            guidance: Some(3.5),
         }),
         other => Err(format!("{other}: not a native FLUX3 checkpoint")),
     }
@@ -384,22 +384,26 @@ pub(super) fn boundary(
     Ok(Some(next))
 }
 
-pub(super) fn render(
-    plan: &Plan,
-    generator: &dyn Generator,
-    context: &MemoryRunContext,
-    observed: &mut dyn FnMut(protocol::ReferencePhase),
-) -> Result<(), String> {
-    let mut request = GenerationRequest {
+fn generation_request(plan: &Plan) -> GenerationRequest {
+    GenerationRequest {
         prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
         width: 1024,
         height: 1024,
         count: 1,
         seed: Some(SEED),
         steps: Some(plan.checkpoint.steps),
-        guidance: Some(plan.checkpoint.guidance),
+        guidance: plan.checkpoint.guidance,
         ..Default::default()
-    };
+    }
+}
+
+pub(super) fn render(
+    plan: &Plan,
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    observed: &mut dyn FnMut(protocol::ReferencePhase),
+) -> Result<(), String> {
+    let mut request = generation_request(plan);
     let mut scope = generator
         .begin_memory_strategy_request(context)
         .map_err(|error| format!("begin FLUX3 memory request: {error}"))?
@@ -835,6 +839,79 @@ mod tests {
     }
 
     #[test]
+    fn flux3_both_constructed_requests_satisfy_the_real_native_parameter_contract() {
+        use super::core::flux3::{
+            DitConfig, Flux3Config, GenerationParams, SamplerConfig, TextEncoderConfig, VaeConfig,
+        };
+        for lane in ["candle", "mlx"] {
+            for provider in [PROVIDER, BASE_PROVIDER] {
+                let mut value = request(lane, "bf16");
+                let checkpoint = checkpoint(provider).unwrap();
+                value["planned"]["target"]["provider"] = json!(provider);
+                value["planned"]["target"]["modelId"] = json!(provider);
+                value["planned"]["calibrationFingerprint"] =
+                    json!(fingerprint_for(lane, "bf16", provider).unwrap());
+                value["planned"]["fixture"] = json!(format!(
+                    "{}-{lane}-bf16-1024-seed26243-step{}",
+                    checkpoint.label, checkpoint.steps
+                ));
+                let plan = plan(&value, lane).unwrap();
+                let req = generation_request(&plan);
+                let flow_map = provider == PROVIDER;
+                let config = Flux3Config {
+                    format_version: 1,
+                    model: provider.into(),
+                    quantization: None,
+                    torch_dtype: "bfloat16".into(),
+                    dit: DitConfig {
+                        hidden: 3072,
+                        heads: 24,
+                        depth: 6,
+                        depth_single: 24,
+                        mlp_ratio: 4.,
+                        axes_dim: vec![32, 48, 48],
+                        theta: 10000.,
+                        image_in_channels: 64,
+                        image_cond_in_channels: 64,
+                        text_in_channels: 10240,
+                        out_modes: vec!["image".into()],
+                        vec_in_dim: None,
+                        image_rope_scale: 1.,
+                        flow_map,
+                    },
+                    text_encoder: TextEncoderConfig {
+                        path: "text_encoder".into(),
+                        tokenizer: "text_encoder".into(),
+                        layers: vec![9, 18, 27],
+                        pad_multiple: 32,
+                        max_tokens: 8192,
+                        dtype: "bfloat16".into(),
+                    },
+                    vae: VaeConfig {
+                        path: "ae.safetensors".into(),
+                        dtype: "bfloat16".into(),
+                    },
+                    sampler: SamplerConfig {
+                        steps: checkpoint.steps,
+                        guidance: checkpoint.guidance.map(f64::from),
+                        alpha: f64::from(core::flux3::DEFAULT_ALPHA),
+                        size: [1024, 1024],
+                    },
+                };
+                let resolved = GenerationParams::resolve(&req, SEED, &config).unwrap();
+                assert_eq!(req.guidance, if flow_map { None } else { Some(3.5) });
+                assert_eq!(resolved.guidance, req.guidance);
+                assert_eq!(resolved.steps, checkpoint.steps);
+                if flow_map {
+                    let mut invalid = req;
+                    invalid.guidance = Some(1.0);
+                    assert!(GenerationParams::resolve(&invalid, SEED, &config).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn flux3_base_producer_uses_its_own_identity_sampling_and_calibration() {
         for lane in ["candle", "mlx"] {
             let mut value = request(lane, "bf16");
@@ -856,7 +933,7 @@ mod tests {
                 "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"
             );
             assert_eq!(plan.checkpoint.steps, 50);
-            assert_eq!(plan.checkpoint.guidance, 3.5);
+            assert_eq!(plan.checkpoint.guidance, Some(3.5));
             assert_ne!(plan.fingerprint, fingerprint(lane, "bf16").unwrap());
             let generator = ScriptedGenerator::new(
                 vec![

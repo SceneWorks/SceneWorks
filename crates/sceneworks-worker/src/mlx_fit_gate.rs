@@ -20173,6 +20173,7 @@ mod tests {
             "iris_3b",
             // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
             "flux3_klein",
+            "flux3_klein_base",
             "z_image",
             "z_image_control",
             "z_image_turbo",

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9c21def2f9290bd735b12b69c45b3b4377caa5598d16f587cc304431f5c58de5",
+    "sceneWorksRevision": "source-tree:5d6b0597a579f1be440d0b0659843b0d28924f23f02541b7d28987f5e6532c43",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "1515de587673a09719d62e14cce772831b3227e7418f6eec58e10b597746319b"
+        "sha256": "d7af3efcbfbbf204ed74b91b0b00acbda4f801b8c7abad16a2e94535614aa1e1"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "a3448349882c8321a227bf90ac4b335fbe4f40396cce78b79da95b7dcde7ac62"
+        "sha256": "9ead08456a9efb3052ae8c4383028bbe3a78259f52f45dcc7273da5e88e76186"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "0b707ddd3f453d9dac13874f61a0b3ae59acc28329c467de2f4d85e8b3c6d886"
+        "sha256": "220b15278f3889f1276e9aef7f9de126f2c77ea613957e11d01f03221ba28d11"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -141,11 +141,11 @@
     "publishedCells": 3986,
     "elidedCells": 5944,
     "elidedByState": {
-      "Implemented": 1274,
-      "Missing": 4670
+      "Implemented": 1280,
+      "Missing": 4664
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 51,
+    "mlxStagedStaticCoverage": 52,
     "mlxStagedStaticCoverageDenominator": 58,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
@@ -12923,9 +12923,9 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 6,
       "states": {
-        "Missing": 6
+        "Implemented": 6
       }
     },
     {

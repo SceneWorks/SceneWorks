@@ -7086,6 +7086,25 @@ mod download_receipt_tests {
             serde_json::to_vec(&json!({"weight_map":{"a":"model-00001-of-00002.safetensors","b":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
     }
 
+    // A source-produced v2 fixture receipt; runtime files alone never mint this trust identity.
+    fn seed_flux3_exact_receipt(data_dir: &FsPath, model: &Value) -> PathBuf {
+        let row = &model["downloads"][0];
+        let managed = data_dir
+            .join("models")
+            .join(safe_download_dir(row["repo"].as_str().unwrap()));
+        std::fs::create_dir_all(&managed).unwrap();
+        let path = managed.join(".sceneworks-download-complete.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&json!({"schemaVersion":2,
+            "repo":row["repo"],"modelId":model["id"],"variant":"bf16",
+            "snapshotRevision":row["revision"],"resolvedFiles":["model.safetensors"]}))
+            .unwrap(),
+        )
+        .unwrap();
+        path
+    }
+
     fn assert_flux3_primary_and_optional_pup(model: &Value) -> &Value {
         let base = model["id"] == "flux3_klein_base";
         let repo = if base {
@@ -7251,6 +7270,18 @@ mod download_receipt_tests {
         );
         assert!(!model_variant_states(&model, data_dir)[0].installed);
         seed_flux3_runtime_bundle(&snapshot);
+        let unverified = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !unverified.installed
+                && model_variant_states(&model, data_dir)
+                    .iter()
+                    .all(|row| !row.installed)
+        );
+        assert!(unverified
+            .missing_required_files
+            .iter()
+            .any(|message| message.contains("install verification required")));
+        seed_flux3_exact_receipt(data_dir, &model);
         for required in [
             "model.safetensors",
             "ae.safetensors",
@@ -7299,8 +7330,8 @@ mod download_receipt_tests {
             .join("models")
             .join(safe_download_dir(&context.repo));
         assert!(
-            !managed.join(".sceneworks-download-complete.json").exists(),
-            "usable runtime files must not mint whole-repo download completion"
+            managed.join(".sceneworks-download-complete.json").exists(),
+            "the explicit source fixture receipt, not arbitrary cache completeness, authorizes readiness"
         );
     }
 
@@ -7372,6 +7403,11 @@ mod download_receipt_tests {
                 .join(revision);
             seed_flux3_runtime_bundle(&root);
             assert!(
+                !q8(&model).installed,
+                "derived bytes + unreceipted original remain unavailable"
+            );
+            seed_flux3_exact_receipt(temp.path(), &model);
+            assert!(
                 q8(&model).installed,
                 "{id}: correct original plus pinned derived bytes"
             );
@@ -7405,73 +7441,74 @@ mod download_receipt_tests {
                 .unwrap()
                 .join("8454017f9ebaada30c998fccd9f67a80c7580f68"),
         );
+        seed_flux3_exact_receipt(temp.path(), &distilled);
         assert!(install_state_for(Some(distilled_context), &distilled, temp.path()).installed);
         assert!(!install_state_for(Some(base_context), &base, temp.path()).installed);
     }
 
     fn assert_flux3_runtime_authority(id: &str, expected_repo: &str, expected_revision: &str) {
         let _env = isolate_hf_cache();
-        let temp = tempfile::Builder::new()
-            .prefix(&format!("flux3-authority-{}-", std::process::id()))
-            .tempdir()
-            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let model = builtin_models_entry(id);
         let context = model_download_context(&model).unwrap().unwrap();
-        let revision = expected_revision;
-        let old_revision = "b".repeat(40);
         assert_eq!(context.repo, expected_repo);
         let library = sceneworks_core::hf_home::model_source_library(temp.path());
-        let repo_root = library.repository_root(&context.repo).unwrap();
-        seed_flux3_runtime_bundle(
-            &library
-                .snapshots_root_from_repository_root(&repo_root)
-                .unwrap()
-                .join(&old_revision),
-        );
+        let repo_root = library.repository_root(expected_repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&repo_root)
+            .unwrap()
+            .join(expected_revision);
+        seed_flux3_runtime_bundle(&snapshot);
+        let ready = || install_state_for(Some(context.clone()), &model, temp.path());
+        let worker = || {
+            sceneworks_worker::flux3_receipted_snapshot(
+                temp.path(),
+                expected_repo,
+                expected_revision,
+                id,
+            )
+        };
         assert!(
-            !install_state_for(Some(context.clone()), &model, temp.path()).installed,
-            "an unrelated complete snapshot cannot certify the selected revision"
+            !ready().installed && worker().is_none(),
+            "complete pinned cache is not an authorized install"
         );
-        let managed = temp
-            .path()
-            .join("models")
-            .join(safe_download_dir(&context.repo));
-        seed_flux3_runtime_bundle(&managed);
-        let receipt_path = managed.join(".sceneworks-download-complete.json");
-        let receipt = json!({"repo":context.repo,"modelId":id,"snapshotRevision":revision,"resolvedFiles":["model.safetensors"]});
+        assert!(model_variant_states(&model, temp.path())
+            .iter()
+            .all(|state| !state.installed));
+        let marker = seed_flux3_exact_receipt(temp.path(), &model);
+        assert!(
+            ready().installed && worker().is_some(),
+            "same source receipt must authorize API and worker"
+        );
+        assert!(model_variant_states(&model, temp.path())[0].installed);
+        let valid = std::fs::read(&marker).unwrap();
         for (key, wrong) in [
-            ("snapshotRevision", old_revision.as_str()),
-            ("repo", "unrelated/repository"),
-            ("modelId", "unrelated_model"),
+            ("snapshotRevision", "b".repeat(40)),
+            ("repo", "wrong/repository".into()),
+            ("modelId", "wrong_model".into()),
         ] {
-            let mut invalid = receipt.clone();
-            invalid[key] = json!(wrong);
-            std::fs::write(&receipt_path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            let mut bad: Value = serde_json::from_slice(&valid).unwrap();
+            bad[key] = json!(wrong);
+            std::fs::write(&marker, serde_json::to_vec(&bad).unwrap()).unwrap();
             assert!(
-                !install_state_for(Some(context.clone()), &model, temp.path()).installed,
-                "wrong {key} receipt must not rescue readiness"
+                !ready().installed && worker().is_none(),
+                "{id}: wrong {key}"
             );
             assert!(!model_variant_states(&model, temp.path())[0].installed);
         }
-        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
-        let current = install_state_for(Some(context.clone()), &model, temp.path());
+        std::fs::write(&marker, b"corrupt receipt").unwrap();
+        assert!(!ready().installed && worker().is_none());
+        std::fs::write(&marker, &valid).unwrap();
+        assert!(ready().installed);
+        std::fs::write(
+            snapshot.join("model.safetensors"),
+            b"corrupt after the trusted tree stamp",
+        )
+        .unwrap();
         assert!(
-            current.installed,
-            "an exact managed receipt plus the complete canonical runtime bundle is usable"
+            !ready().installed && worker().is_none(),
+            "tree stamp drift is never repaired from current bytes"
         );
-        let selected_path = PathBuf::from(current.installed_path.as_ref().expect("installed path"));
-        assert!(
-            selected_path == managed || selected_path.ends_with(revision),
-            "variant aggregation retains the selected snapshot or the managed root: {selected_path:?}"
-        );
-        assert!(model_variant_states(&model, temp.path())[0].installed);
-        std::fs::remove_file(managed.join("text_encoder/model-00002-of-00002.safetensors"))
-            .unwrap();
-        assert!(
-            !install_state_for(Some(context.clone()), &model, temp.path()).installed,
-            "an exact receipt cannot hide a torn runtime bundle"
-        );
-        assert!(!model_variant_states(&model, temp.path())[0].installed);
     }
 
     #[cfg(unix)]
@@ -7492,6 +7529,7 @@ mod download_receipt_tests {
         let blob = repo_root.join("blobs/fixture-shard");
         std::fs::rename(&shard, &blob).unwrap();
         std::os::unix::fs::symlink(&blob, &shard).unwrap();
+        seed_flux3_exact_receipt(temp.path(), &model);
         assert!(
             install_state_for(Some(context), &model, temp.path()).installed,
             "authorized same-repository blob links are not path traversal"
@@ -8065,17 +8103,12 @@ fn flux3_selected_revision<'a>(download: Option<&'a Value>, repo: &str) -> Optio
 
 fn flux3_selected_snapshot(
     data_dir: &FsPath,
-    repo_root: &FsPath,
     repo: &str,
     download: Option<&Value>,
+    model_id: &str,
 ) -> Option<PathBuf> {
     let revision = flux3_selected_revision(download, repo)?;
-    // Use the same typed source-library boundary as other exact-revision API consumers; do not
-    // synthesize a model root or authorize a repository outside this selected source library.
-    sceneworks_core::hf_home::model_source_library(data_dir)
-        .snapshots_root_from_repository_root(repo_root)
-        .ok()
-        .map(|snapshots| snapshots.join(revision))
+    sceneworks_worker::flux3_receipted_snapshot(data_dir, repo, revision, model_id)
 }
 
 // Runtime readiness is separate from whole-repository download completion. A readable DiT is
@@ -8089,18 +8122,17 @@ fn model_cache_health_for_download(
     files: &[String],
     data_dir: &FsPath,
 ) -> Option<HuggingFaceCacheHealth> {
-    let root = cache_path?;
     if !is_flux3_runtime_model(model_id) {
-        return Some(huggingface_cache_health(root, files));
+        return cache_path.map(|root| huggingface_cache_health(root, files));
     }
     let Some(revision) = flux3_selected_revision(download, repo) else {
         return Some(HuggingFaceCacheHealth::missing(vec![
             "FLUX 3 requires its selected immutable repository revision".to_owned(),
         ]));
     };
-    let Some(snapshot) = flux3_selected_snapshot(data_dir, root, repo, download) else {
+    let Some(snapshot) = flux3_selected_snapshot(data_dir, repo, download, model_id) else {
         return Some(HuggingFaceCacheHealth::missing(vec![
-            "FLUX 3 repository is outside its selected source library".to_owned(),
+            "FLUX 3 install verification required: no trusted exact-revision install receipt. Install or verify this pinned package through the downloader; complete cache files alone are not selectable.".to_owned(),
         ]));
     };
     if !snapshot.is_dir() {
@@ -8135,35 +8167,6 @@ fn model_cache_health_for_download(
             Err(error) => HuggingFaceCacheHealth::missing(vec![error]),
         },
     )
-}
-
-fn flux3_managed_bundle_is_current(
-    managed_path: &FsPath,
-    model_id: &str,
-    repo: &str,
-    download: Option<&Value>,
-) -> bool {
-    let Some(revision) = flux3_selected_revision(download, repo) else {
-        return false;
-    };
-    let identity_matches = receipt_entries(managed_path).iter().any(|entry| {
-        entry.get("repo").and_then(Value::as_str) == Some(repo)
-            && entry.get("snapshotRevision").and_then(Value::as_str) == Some(revision)
-            && entry
-                .get("modelId")
-                .and_then(Value::as_str)
-                .is_none_or(|id| id == model_id)
-    });
-    identity_matches
-        && sceneworks_worker::flux3_runtime_tier_bundle_check(
-            managed_path,
-            download
-                .and_then(|d| d.get("variant"))
-                .and_then(Value::as_str)
-                .unwrap_or("bf16"),
-            model_id,
-        )
-        .is_ok()
 }
 
 fn install_state_for(
@@ -8260,20 +8263,17 @@ fn install_state_for(
         // sc-20526: drop any receipt a pre-fix backfill minted over a partially downloaded tier
         // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
         // manual delete — and so the backfill below can re-record the tier honestly.
-        repair_torn_backfilled_receipts(&managed_path, data_dir);
-        repair_missing_snapshot_revisions(&managed_path, model, data_dir);
+        if !is_flux3_runtime_model(model_id) {
+            repair_torn_backfilled_receipts(&managed_path, data_dir);
+            repair_missing_snapshot_revisions(&managed_path, model, data_dir);
+        }
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
             model.get("id").and_then(Value::as_str),
         );
         let managed_installed = if is_flux3_runtime_model(model_id) {
-            flux3_managed_bundle_is_current(
-                &managed_path,
-                model_id,
-                &download_context.repo,
-                selected_download.as_ref(),
-            )
+            false // The shared receipt-resolved cache health already covers managed snapshots.
         } else {
             !model_has_variant_matrix(model)
                 && receipt_file_sets.is_empty()
@@ -8320,14 +8320,12 @@ fn install_state_for(
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if is_flux3_runtime_model(model_id) {
             if cache_installed || (cache_incomplete && !managed_installed) {
-                cache_path.as_ref().and_then(|root| {
-                    flux3_selected_snapshot(
-                        data_dir,
-                        root,
-                        &download_context.repo,
-                        selected_download.as_ref(),
-                    )
-                })
+                flux3_selected_snapshot(
+                    data_dir,
+                    &download_context.repo,
+                    selected_download.as_ref(),
+                    model_id,
+                )
             } else if managed_installed {
                 Some(managed_path.clone())
             } else {
@@ -8892,7 +8890,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
             let managed_installed = if is_flux3_runtime_model(model_id) {
-                flux3_managed_bundle_is_current(&managed_path, model_id, &repo, Some(entry))
+                false // The shared receipt resolver already judged this root.
             } else {
                 managed_tier_installed(&managed_path, &files)
             };
@@ -9009,9 +9007,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
 
             let installed_path = if is_flux3_runtime_model(model_id) {
                 if cache_installed || (cache_incomplete && !managed_installed) {
-                    cache_path.as_ref().and_then(|root| {
-                        flux3_selected_snapshot(data_dir, root, &repo, Some(entry))
-                    })
+                    flux3_selected_snapshot(data_dir, &repo, Some(entry), model_id)
                 } else if managed_installed {
                     Some(managed_path.clone())
                 } else {

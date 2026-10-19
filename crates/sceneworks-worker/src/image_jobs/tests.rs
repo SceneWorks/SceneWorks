@@ -2530,6 +2530,54 @@ fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
 }
 
 #[test]
+fn flux3_worker_adapter_selection_is_declared_and_confined() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&temp.path().join("config"));
+    settings.data_dir = temp.path().join("data");
+    let dir = settings.data_dir.join("loras/selected");
+    std::fs::create_dir_all(&dir).unwrap();
+    let selected = dir.join("final.safetensors");
+    std::fs::write(&selected, b"selected file").unwrap();
+    std::fs::write(dir.join("other.safetensors"), b"wrong sibling").unwrap();
+    for model in ["flux3_klein_base", "flux3_klein"] {
+        let record = json!({"installedPath":dir,"files":["final.safetensors"]});
+        let file = resolve_adapter_file(&record, &settings, model).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(file).unwrap(),
+            std::fs::canonicalize(&selected).unwrap()
+        );
+        for name in [
+            "../outside.safetensors".to_owned(),
+            selected.canonicalize().unwrap().display().to_string(),
+            "missing.safetensors".into(),
+        ] {
+            let invalid = json!({"installedPath":dir,"files":[name]});
+            assert!(
+                resolve_adapter_file(&invalid, &settings, model).is_err(),
+                "{model}/{name}"
+            );
+        }
+    }
+    let external = temp.path().join("outside.safetensors");
+    std::fs::write(&external, b"outside adapter root").unwrap();
+    let link = dir.join("link.safetensors");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&external, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&external, &link);
+    if linked.is_ok() {
+        for model in ["flux3_klein_base", "flux3_klein"] {
+            assert!(resolve_adapter_file(
+                &json!({"installedPath":dir,"files":["link.safetensors"]}),
+                &settings,
+                model
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
 fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = settings_with_config_dir(&dir.path().join("config"));
@@ -2547,7 +2595,7 @@ fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     });
     assert_eq!(lora_weight(&raw), 0.7);
     assert_eq!(
-        resolve_adapter_file(&raw, &settings).unwrap(),
+        resolve_adapter_file(&raw, &settings, "test").unwrap(),
         std::fs::canonicalize(final_file).unwrap(),
         "attribution and inference must choose the same manifest-declared adapter"
     );

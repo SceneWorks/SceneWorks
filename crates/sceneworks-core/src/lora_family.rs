@@ -181,6 +181,30 @@ fn has_safetensors_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
+/// The worker and API inspect the same first usable record path and declared filename.
+pub fn adapter_record_path(lora: &Value) -> Option<PathBuf> {
+    ["installedPath", "sourcePath", "path"]
+        .into_iter()
+        .filter_map(|key| lora.get(key).and_then(Value::as_str))
+        .chain(
+            lora.get("source")
+                .and_then(|source| source.get("path"))
+                .and_then(Value::as_str),
+        )
+        .map(str::trim)
+        .find(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+pub fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Resolves the adapter file to load from a LoRA record `dir`, preferring `declared`
 /// (the plain filename the record's manifest `files` list names) when it exists,
 /// otherwise falling back to [`first_safetensors_path`] (sc-10221).
@@ -210,6 +234,62 @@ pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<Path
         }
     }
     first_safetensors_path(dir)
+}
+
+/// Exact FLUX3 file selection shared by API inspection and worker loading. Other families keep
+/// their existing selector. A selected file may stay in its adapter directory or its own HF
+/// repository blob store, never a sibling repository or arbitrary symlink destination.
+pub fn resolve_adapter_for_model(
+    path: &Path,
+    declared: Option<&str>,
+    model: &str,
+) -> Option<PathBuf> {
+    if !matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return if path.is_dir() {
+            resolve_adapter_in_dir(path, declared)
+        } else {
+            path.is_file().then(|| path.to_path_buf())
+        };
+    }
+    if let Some(name) = declared {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+            || !is_safetensors_file(Path::new(name))
+        {
+            return None;
+        }
+    }
+    if path.is_dir() && declared.is_some_and(|name| !path.join(name).is_file()) {
+        return None; // Exact FLUX3 declarations never fall back to another training checkpoint.
+    }
+    let candidate = if path.is_dir() {
+        resolve_adapter_in_dir(path, declared)?
+    } else {
+        // HF file links normalize to extensionless blob names in the worker. The actual
+        // safetensors header/identity is re-read by both consumers, not inferred from suffix.
+        if !path.is_file() || is_hidden_file(path) {
+            return None;
+        }
+        path.to_path_buf()
+    };
+    let root = if path.is_dir() { path } else { path.parent()? };
+    let target = candidate.canonicalize().ok()?;
+    let within_dir = target.starts_with(root.canonicalize().ok()?);
+    let own_hf_blob = root
+        .ancestors()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "snapshots"))
+        .filter_map(Path::parent)
+        .filter(|repo| {
+            repo.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("models--"))
+        })
+        .filter_map(|repo| repo.join("blobs").canonicalize().ok())
+        .any(|blobs| target.starts_with(blobs));
+    (within_dir || own_hf_blob).then_some(candidate)
 }
 
 /// Returns the detected family for a base model directory or file.
