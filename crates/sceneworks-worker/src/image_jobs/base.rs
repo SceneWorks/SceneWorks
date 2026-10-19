@@ -1673,13 +1673,18 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
+    model_repo_with_default(request, model.default_repo())
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String {
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(model.default_repo())
+        .unwrap_or(default_repo)
         .to_owned()
 }
 
@@ -2006,6 +2011,21 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    // Canonical FLUX3 identities must be proved by the worker-owned exact-revision receipt.
+    // Never let an arbitrary cache HEAD, a distilled snapshot, or a modelPath override impersonate
+    // the training base an adapter declares. Other families retain their historical resolution.
+    let flux3_identity = match request.model.as_str() {
+        "flux3_klein" => Some(("black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68")),
+        "flux3_klein_base" => Some(("black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4")),
+        _ => None,
+    };
+    if let Some((repo, revision)) = flux3_identity {
+        if model_repo_with_default(request, repo) != repo {
+            return Err(WorkerError::InvalidPayload(format!("{} requires pinned {repo}@{revision}; a different repo is not this checkpoint", request.model)));
+        }
+        let explicit = model_path_override(request).map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath")).transpose()?;
+        return Ok(Some(resolve_pinned_native_package(&settings.data_dir, repo, revision, &request.model, explicit.as_deref())?));
+    }
     if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
@@ -3910,10 +3930,11 @@ fn candle_certified_artifact_path(
 /// chosen.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
-    if matches!(engine_id, "iris_3b" | "flux3_klein") {
-        "bf16"
-    } else {
-        gate_tier
+    match engine_id {
+        "iris_3b" => "bf16",
+        // FLUX 3's gate tier IS its loaded package (sc-26241: `Flux3LoadPlan` names it by
+        // identity), so the selection binds the package that loads — FP8R as FP8R, never bf16.
+        _ => gate_tier,
     }
 }
 
@@ -5340,7 +5361,7 @@ fn resolve_prepared_adapters(
     let mut specs = Vec::with_capacity(request.loras.len());
     let mut pins = BTreeMap::<PathBuf, gen_core::PinnedWeightsFile>::new();
     for lora in &request.loras {
-        let pin = resolve_prepared_adapter_file(lora, settings)?;
+        let pin = resolve_prepared_adapter_file(lora, settings, &request.model)?;
         let kind = classify_prepared_adapter(&pin)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(pin.loader_path().to_path_buf(), scale, kind));
@@ -5366,7 +5387,7 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
     }
     let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
-        let file = resolve_adapter_file(lora, settings)?;
+        let file = resolve_adapter_file(lora, settings, &request.model)?;
         let kind = classify_adapter(&file)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(file, scale, kind));
@@ -5988,6 +6009,7 @@ mod candle_image_load_shape_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: 24,
@@ -8066,6 +8088,7 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
@@ -8129,6 +8152,7 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
@@ -9981,6 +10005,18 @@ async fn generate_stream_using(
     ensure_ideogram_tier_present(api, settings, job, request).await?;
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
+    // sc-26241: distilled FLUX 3 loads the package the request names — the dense bf16 snapshot
+    // root or a locally converted MLX affine q4/q8 — never the generic resolver's q8 default and
+    // never a request-time quantization of the dense package. `None` for every other model.
+    let flux3_plan = flux3_precision::mlx_flux3_plan(
+        request,
+        settings,
+        &weights_dir,
+        model.descriptor.capabilities.supported_quants,
+    )?;
+    let weights_dir = flux3_plan
+        .as_ref()
+        .map_or(weights_dir, |plan| plan.weights_dir.clone());
     let adapters = resolve_adapters(request, settings)?;
     // Each adapter's identity (request id, path, sha256, scale, kind) for the image provenance,
     // joined after the render with the engine's own apply report (sc-25681).
@@ -10167,10 +10203,17 @@ async fn generate_stream_using(
     let prepare = |weights_dir: PathBuf,
                    prefer_resident: bool|
      -> WorkerResult<PreparedMlxImageTier> {
-        let (quant, quant_bits) = mlx_candidate_quant(request, &model, &weights_dir);
+        let (quant, quant_bits) = match flux3_plan.as_ref() {
+            Some(plan) => plan.quant_and_bits(),
+            None => mlx_candidate_quant(request, &model, &weights_dir),
+        };
         // A split-repo snapshot root (sc-24112's `qwen_image_2_1` bf16) names its tier only
-        // through the catalog, so ask for it first; `None` for every other family.
-        let effective_tier = split_repo_root_tier_key(&request.model_manifest_entry, &weights_dir)
+        // through the catalog, so ask for it first; `None` for every other family. A FLUX 3
+        // package names its tier by identity (sc-26241).
+        let effective_tier = flux3_plan
+            .as_ref()
+            .map(|plan| plan.tier.key())
+            .or_else(|| split_repo_root_tier_key(&request.model_manifest_entry, &weights_dir))
             .or_else(|| {
                 resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits)
             });
@@ -10207,6 +10250,9 @@ async fn generate_stream_using(
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
         spec = attach_prompt_upsampler(spec, engine_id, request, settings)?;
+        if let Some(plan) = flux3_plan.as_ref() {
+            spec = plan.attach_components(spec);
+        }
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
         // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;
@@ -10475,7 +10521,10 @@ async fn generate_stream_using(
     // has no packed tier matrix: fixing the pair before reconciliation means neither the historical
     // catalog default nor a crafted advanced preference can emit a false tier-change event or
     // relabel the declaration, fit, recipe, and provider identities.
-    let fixed_artifact_quant = fixed_mlx_artifact_quant(&request.model);
+    let fixed_artifact_quant = flux3_plan
+        .as_ref()
+        .map(|plan| plan.quant_and_bits())
+        .or_else(|| fixed_mlx_artifact_quant(&request.model));
     let (quant, quant_bits) = if let Some(fixed) = fixed_artifact_quant {
         fixed
     } else if model.supports_quant() {
@@ -10864,7 +10913,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1" => "candle_qwen_2_1",
         // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
-        "flux3_klein" => "candle_flux3",
+        "flux3_klein" | "flux3_klein_base" => "candle_flux3",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -12130,6 +12179,19 @@ mod candle_resolved_tier_contract_tests {
         "mage_flow_edit_turbo",
     ];
 
+    /// sc-26241: the shared selector binds FLUX 3 to the package that LOADS — the plan's tier
+    /// identity, FP8R as FP8R — never relabelled bf16.
+    #[test]
+    fn flux3_shared_memory_tier_is_the_loaded_package() {
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+                assert_eq!(candle_shared_memory_tier(model, tier), tier, "{model}/{tier}");
+            }
+        }
+        assert_eq!(candle_shared_memory_tier("iris_3b", "fp8r"), "bf16");
+        assert_eq!(candle_shared_memory_tier("z_image", "q4"), "q4");
+    }
+
     fn request(bits: i64) -> ImageRequest {
         ImageRequest::from_payload(
             json!({
@@ -12745,6 +12807,19 @@ async fn generate_candle_stream_using(
             WorkerError::InvalidPayload(format!("candle weights snapshot not found for {repo}"))
         })?
     };
+    // sc-26241: distilled FLUX 3 selects its package by the request alone — dense bf16 at the
+    // snapshot root, a locally converted GGML q4/q8, or the publisher FP8R/NVFP4 at
+    // `variants/<tier>` — with the root's bundled encoder/autoencoder as explicit components for
+    // every non-dense package. `None` for every other model.
+    let flux3_plan = flux3_precision::candle_flux3_plan(
+        request,
+        settings,
+        &weights_dir,
+        model.descriptor.capabilities.supported_quants,
+    )?;
+    if let Some(plan) = flux3_plan.as_ref() {
+        weights_dir = plan.weights_dir.clone();
+    }
 
     // Descriptor-derived denoise/guidance surface (distilled families → no guidance/negative; guided
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
@@ -13015,6 +13090,11 @@ async fn generate_candle_stream_using(
     if matches!(engine_id, "sana_1600m" | "sana_sprint_1600m") {
         tier = "bf16";
     }
+    // FLUX 3's tier is the request-named package identity: neither the snapshot basename nor the
+    // bits-ladder `q8` default the generic key derives for an unrecognized directory.
+    if let Some(plan) = flux3_plan.as_ref() {
+        tier = plan.tier.key();
+    }
     validate_candle_tier_memory_evidence(&request.model, &request.model_manifest_entry, tier)?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
@@ -13072,7 +13152,9 @@ async fn generate_candle_stream_using(
             .get("mlxQuantizeExplicit")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    if convrot.is_none() && !explicit_pick {
+    // FLUX 3's package is request-named and is gated as named: rejected before load if it does
+    // not fit, never downtiered to a package the request did not choose.
+    if convrot.is_none() && !explicit_pick && flux3_plan.is_none() {
         let floor = capability_downtier_floor(
             krea_turbo_ladder,
             tier,
@@ -13255,13 +13337,18 @@ async fn generate_candle_stream_using(
     // resolved artifact drives recipe bits, MemoryNumericTier, active component floors, and the
     // provider begin-request check. `LoadSpec.quantize` remains descriptor-governed: in particular,
     // FLUX.1 packed-detects q4/q8 and therefore receives `None` while its receipt keeps the tier bits.
-    let (quant, quant_bits) = candle_quant_for_resolved_tier(
-        request,
-        tier,
-        &weights_dir,
-        model.supports_quant(),
-        convrot.is_some() || is_anima_model(&request.model),
-    );
+    let (quant, quant_bits) = match flux3_plan.as_ref() {
+        // FP8R/NVFP4 are tier identities with no honest bit count on the q4/q8 ladder, so the
+        // recipe's `mlxQuantize` bits stay empty and the load quant alone carries the format.
+        Some(plan) => plan.quant_and_bits(),
+        None => candle_quant_for_resolved_tier(
+            request,
+            tier,
+            &weights_dir,
+            model.supports_quant(),
+            convrot.is_some() || is_anima_model(&request.model),
+        ),
+    };
     let mut raw_settings =
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
@@ -13274,9 +13361,13 @@ async fn generate_candle_stream_using(
         memory_width,
         memory_height,
     )?;
+    let source_activation_bytes = crate::vram_gate::flux3_source_activation_allowance_bytes(
+        engine_id, memory_width, memory_height,
+    );
     let adapter_resident_bytes =
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
-            .saturating_add(batch_overlay_bytes);
+            .saturating_add(batch_overlay_bytes)
+            .saturating_add(source_activation_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13288,7 +13379,9 @@ async fn generate_candle_stream_using(
     // providers retain their established source-byte accounting.
     let provider_receipt_priced = matches!(
         engine_id,
-        "chroma1_hd"
+        "flux3_klein"
+            | "flux3_klein_base"
+            | "chroma1_hd"
             | "chroma1_base"
             | "chroma1_flash"
             | "ideogram_4"
@@ -13300,7 +13393,12 @@ async fn generate_candle_stream_using(
             | "sd3_5_medium"
     );
     let shared_predicted_peak_gb = if provider_receipt_priced {
-        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
+        let base = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        if matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
+            // Provider receipts replace only adapter/PUP weights. Keep source-derived activation
+            // work exactly once in the base peak; never re-label it as adapter residency.
+            base.map(|peak| peak + batch_overlay_bytes.saturating_add(source_activation_bytes) as f64 / 1_073_741_824.0)
+        } else { base }
     } else {
         needed
     };
@@ -13349,6 +13447,9 @@ async fn generate_candle_stream_using(
         settings,
     )?;
     shared_contract_spec = attach_prompt_upsampler(shared_contract_spec, engine_id, request, settings)?;
+    if let Some(plan) = flux3_plan.as_ref() {
+        shared_contract_spec = plan.attach_components(shared_contract_spec);
+    }
     if let Some((_, convrot_dit)) = convrot.as_ref() {
         shared_contract_spec = shared_contract_spec.with_component(
             gen_core::KREA_CONVROT_DIT_COMPONENT,
@@ -14106,6 +14207,7 @@ async fn generate_candle_stream_using(
                 frames: 1,
                 reference_count,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
@@ -14804,6 +14906,7 @@ fn effective_quant_label_gated(
         Quant::Q4 => "q4",
         Quant::Q8 => "q8",
         Quant::Nvfp4 => NVFP4_TIER,
+        Quant::Fp8Rowwise => "fp8r",
     };
     let floors = active
         .iter()
@@ -14812,6 +14915,7 @@ fn effective_quant_label_gated(
                 Quant::Q4 => "q4",
                 Quant::Q8 => "q8",
                 Quant::Nvfp4 => NVFP4_TIER,
+                Quant::Fp8Rowwise => "fp8r",
             };
             format!("{}:{resident}", floor.component.as_str())
         })

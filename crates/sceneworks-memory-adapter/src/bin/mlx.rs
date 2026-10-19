@@ -40,6 +40,13 @@ mod mlx_ltx25;
 #[path = "mlx_wan_scail2.rs"]
 mod mlx_wan_scail2;
 
+#[path = "flux3_common.rs"]
+mod flux3_common;
+#[path = "mlx_flux3.rs"]
+mod mlx_flux3;
+const FLUX3_PROVIDER: &str = "flux3_klein";
+const FLUX3_BASE_PROVIDER: &str = "flux3_klein_base";
+
 #[path = "mlx_iris.rs"]
 mod mlx_iris;
 
@@ -3044,6 +3051,7 @@ fn krea_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {
             total_bytes: u64::MAX,
@@ -3972,6 +3980,7 @@ fn run_z_image_reference_loaded(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -4739,6 +4748,7 @@ fn flux_one_context(
             frames: 1,
             reference_count: u32::from(arm.identity),
         },
+        reference_resources: None,
         overlay: arm.identity.then(|| "identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -5617,6 +5627,7 @@ fn turnkey_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -6359,6 +6370,7 @@ fn sana_chroma_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -7396,6 +7408,7 @@ fn flux2_admission_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -8228,6 +8241,7 @@ fn krea_base_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -9102,6 +9116,7 @@ fn sdxl_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -9513,6 +9528,7 @@ fn instantid_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay),
         budget: MemoryBudget {
             total_bytes,
@@ -10553,6 +10569,7 @@ fn qwen_provider_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -12171,6 +12188,7 @@ fn mage_run_context(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        reference_resources: None,
         overlay: None,
         // The generator is already loaded when this context is built, so its resident bytes are
         // charged to the snapshot and `predicted_peak_bytes` is the request's INCREMENTAL demand
@@ -15319,6 +15337,7 @@ fn ltx_context(
             frames: geometry.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -18408,6 +18427,7 @@ fn minimax_context(
             frames: geometry.frames,
             reference_count: member.reference_count,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -20375,6 +20395,7 @@ fn sensenova_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -20557,7 +20578,7 @@ impl SenseNovaPhases {
             }
             Progress::Loading(_) => self.other_loading_boundaries += 1,
             Progress::Step { .. } => {}
-            Progress::Upsampling { .. } => {}
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }
     }
 }
@@ -21219,6 +21240,7 @@ fn sd3_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -22559,6 +22581,7 @@ fn run_with(
     // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
+        FLUX3_PROVIDER | FLUX3_BASE_PROVIDER => mlx_flux3::run(request),
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
         // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
         // family and execution path; the arm resolves which member from `(provider, mode)`.
@@ -31493,6 +31516,7 @@ mod bernini_tests {
                 frames: V2V_FRAMES,
                 reference_count: V2V_REFERENCE_COUNT,
             },
+            reference_resources: None,
             overlay: overlay.map(str::to_owned),
             budget: MemoryBudget {
                 total_bytes: 137_438_953_472,

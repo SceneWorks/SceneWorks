@@ -285,14 +285,40 @@ pub(crate) async fn run_model_download_job(
         .contains_key(crate::local_derivation::PAYLOAD_KEY)
     {
         let original = repo_dir.join("snapshots").join(&snapshot_revision);
-        crate::local_derivation::derive_local_tier(
-            api,
-            settings,
-            job,
-            &original,
-            crate::inference_runtime::prepare_audio_snapshot,
-        )
-        .await?;
+        // sc-26241: a FLUX 3 conversion runs the image provider's own converter; every other
+        // derivation is the audio lane's preparer.
+        let flux3 = job
+            .payload
+            .get(crate::local_derivation::PAYLOAD_KEY)
+            .and_then(|block| block.get("conversion"))
+            .and_then(Value::as_str)
+            .and_then(crate::local_derivation::Flux3Conversion::from_id);
+        match flux3 {
+            Some(conversion) => {
+                crate::local_derivation::derive_local_tier(
+                    api,
+                    settings,
+                    job,
+                    &original,
+                    crate::local_derivation::flux3_preparer(
+                        conversion,
+                        repo.to_owned(),
+                        snapshot_revision.clone(),
+                    ),
+                )
+                .await?;
+            }
+            None => {
+                crate::local_derivation::derive_local_tier(
+                    api,
+                    settings,
+                    job,
+                    &original,
+                    crate::inference_runtime::prepare_audio_snapshot,
+                )
+                .await?;
+            }
+        }
     }
 
     complete_hf_cache_download(

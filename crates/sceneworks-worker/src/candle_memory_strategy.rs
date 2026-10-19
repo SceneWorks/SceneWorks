@@ -78,6 +78,11 @@ fn is_sana(engine_id: &str) -> bool {
     matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
 }
 
+/// The FLUX 3 Image Klein provider ids, whose packages include the publisher FP8R/NVFP4 tiers.
+fn is_flux3(engine_id: &str) -> bool {
+    matches!(engine_id, "flux3_klein" | "flux3_klein_base")
+}
+
 pub(crate) fn is_sd35(engine_id: &str) -> bool {
     matches!(
         engine_id,
@@ -853,6 +858,11 @@ fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
         "bf16" => None,
+        // sc-26241: FLUX 3's publisher packages are real numeric tiers of its provider (its memory
+        // contract prices each from the package's own tensor headers), so the selector binds them
+        // by identity. Other families keep NVFP4 off the shared selector.
+        "fp8r" if is_flux3(engine_id) => Some(Quant::Fp8Rowwise),
+        "nvfp4" if is_flux3(engine_id) => Some(Quant::Nvfp4),
         _ => return None,
     };
     Some(MemoryNumericTier {
@@ -3034,6 +3044,27 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
+    /// sc-26241: every FLUX 3 package is a numeric tier the selector can bind by identity — the
+    /// publisher FP8R/NVFP4 as their own quant, never bf16 — while other families keep NVFP4 (and
+    /// the FP8R label) off the shared selector.
+    #[test]
+    fn flux3_packages_are_numeric_tiers_by_identity() {
+        for (tier, quant) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+            ("fp8r", Some(Quant::Fp8Rowwise)),
+            ("nvfp4", Some(Quant::Nvfp4)),
+        ] {
+            let numeric = numeric_tier("flux3_klein", tier).unwrap_or_else(|| panic!("{tier}"));
+            assert_eq!(numeric.quant, quant, "{tier}");
+            assert_eq!(numeric.precision, Precision::Bf16, "{tier}");
+        }
+        assert!(numeric_tier("z_image_turbo", "nvfp4").is_none());
+        assert!(numeric_tier("z_image_turbo", "fp8r").is_none());
+        assert!(numeric_tier("flux3_klein", "int8-convrot").is_none());
+    }
+
     /// sc-17728, the Candle sibling of the MLX fit gate's coverage. The required parameter set
     /// follows the ENGAGED composition, so a provider that implements rung 4 with rungs 2 and 3
     /// `Missing` reads cleanly, while an engaged rung must still name every parameter it owns and a
@@ -3123,6 +3154,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gib(48),

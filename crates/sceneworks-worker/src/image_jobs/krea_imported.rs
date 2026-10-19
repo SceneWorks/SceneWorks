@@ -1294,7 +1294,7 @@ fn imported_model_quant(
     let bits = match selected {
         Some(Quant::Q4) => Some(4),
         Some(Quant::Q8) => Some(8),
-        Some(Quant::Nvfp4) | None => None,
+        Some(Quant::Nvfp4 | Quant::Fp8Rowwise) | None => None,
     };
     Ok((selected, bits))
 }
@@ -1677,6 +1677,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let (base_width, base_height, base_pixels) = krea_imported_generate_pass(
@@ -1718,6 +1719,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     krea_imported_generate_pass(

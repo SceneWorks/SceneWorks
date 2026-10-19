@@ -16882,3 +16882,107 @@ fn h3_empty_last_frame_is_not_a_keyframe_input() {
         assert!(crate::validate_video_job(&payload).is_err());
     }
 }
+
+/// sc-26241: a FLUX 3 request names exactly one of its packages, the publisher FP8R tier is
+/// accepted only for the model that ships it, and everything else is a typed 400 — never a silent
+/// re-interpretation at another precision.
+#[test]
+fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
+    let job = |model: &str, advanced: serde_json::Value| -> crate::dto::ImageJobRequest {
+        serde_json::from_value(json!({
+            "projectId": "project-1",
+            "model": model,
+            "prompt": "a lighthouse",
+            "mode": "text_to_image",
+            "advanced": advanced,
+        }))
+        .expect("image job request parses")
+    };
+    for advanced in [
+        json!({}),
+        json!({"quantTier": "fp8r"}),
+        json!({"quantTier": "nvfp4"}),
+        json!({"mlxQuantize": 0}),
+        json!({"mlxQuantize": 4}),
+        json!({"mlxQuantize": 8, "mlxQuantizeExplicit": true}),
+    ] {
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            assert!(
+                crate::validate_image_job(&job(model, advanced.clone())).is_ok(),
+                "{model}: {advanced}"
+            );
+        }
+    }
+    for (model, advanced) in [
+        ("z_image_turbo", json!({"quantTier": "fp8r"})),
+        (
+            "flux3_klein_base",
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        ),
+        (
+            "flux3_klein",
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        ),
+        ("flux3_klein", json!({"quantTier": "fp8r", "convRot": true})),
+        ("flux3_klein", json!({"mlxQuantize": 6})),
+        ("flux3_klein", json!({"quantTier": "int8-convrot"})),
+    ] {
+        let error =
+            crate::validate_image_job(&job(model, advanced.clone())).expect_err("tier refusal");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST, "{model} {advanced}");
+        assert!(
+            error.detail.contains(model),
+            "{model} {advanced}: {}",
+            error.detail
+        );
+    }
+}
+
+#[tokio::test]
+async fn flux3_base_catalog_tiers_are_canonical_and_unpinned_derivations_fail_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .unwrap();
+    let (_app, state) = create_app_with_state(settings).unwrap();
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            let mut payload = json!({
+                "model":model,"advanced":{"quantTier":tier},
+                "modelManifestEntry":{"id":model,"downloads":[{"variant":tier}]}
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let result = crate::jobs::canonicalize_image_model_payload(
+                &state,
+                &crate::JobType::ImageGenerate,
+                &mut payload,
+            )
+            .await;
+            if model == "flux3_klein_base" && matches!(tier, "q4" | "q8") {
+                let error = result.expect_err("forged catalog cannot invent converted pins");
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert!(
+                    error.detail.contains(tier)
+                        && error.detail.contains("SHA-256")
+                        && error.detail.contains("403"),
+                    "{}",
+                    error.detail
+                );
+            } else {
+                let entry = result.unwrap().unwrap();
+                assert_eq!(entry["id"], model);
+                let declared = entry["downloads"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["variant"] == tier);
+                assert!(declared, "{model}/{tier}");
+            }
+        }
+    }
+}

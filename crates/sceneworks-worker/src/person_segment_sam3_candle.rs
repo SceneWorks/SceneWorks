@@ -447,20 +447,26 @@ pub(crate) fn segment_all_persons_in_memory(
         ));
     }
 
-    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
-    let tensors: Vec<Tensor> = frames
+    // Validate borrowed frame views before opening a device: a malformed CPU payload must be a
+    // typed InvalidPayload even on a host with no CUDA device. The views borrow pixels, not clone
+    // them, and only valid views reach tensor creation.
+    let views = frames
         .iter()
         .map(|frame| {
-            let view = image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
+            image::ImageBuffer::<image::Rgb<u8>, &[u8]>::from_raw(
                 frame.width,
                 frame.height,
                 frame.pixels.as_slice(),
             )
             .ok_or_else(|| {
                 WorkerError::InvalidPayload("scail2 segmentation: malformed RGB frame".into())
-            })?;
-            input_tensor(&view, &device)
+            })
         })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    let tensors: Vec<Tensor> = views
+        .iter()
+        .map(|view| input_tensor(view, &device))
         .collect::<WorkerResult<Vec<_>>>()?;
 
     let outputs = propagate_person_concept(

@@ -5177,6 +5177,13 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
     validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
+    // sc-26241: a FLUX 3 request names exactly one of its packages, and the publisher FP8R tier
+    // exists only for the model that ships it. Which backend and worker can load it is routing's.
+    if let Some(reason) =
+        sceneworks_core::image_request::image_quant_tier_refusal(&payload.model, &payload.advanced)
+    {
+        return Err(ApiError::bad_request(reason));
+    }
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(
