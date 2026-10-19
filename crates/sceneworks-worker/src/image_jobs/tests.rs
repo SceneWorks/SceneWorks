@@ -8,6 +8,26 @@ use super::{
 };
 use serde_json::json;
 
+#[test]
+fn flux3_layout_raw_queue_refuses_unsupported_models_and_malformed_boxes_before_dispatch() {
+    for payload in [
+        json!({"model":"flux2_dev","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,0,1,1]}]}}}),
+        json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,false,1,1]}]}}}),
+        json!({"model":"flux3_klein","referenceAssetIds":["same","same"],"advanced":{"flux3_reference_ids":["slot","slot"]}}),
+    ] {
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        assert!(matches!(
+            validate_flux3_layout_request(&request),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+    }
+    let valid = json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","desc":"cat","bbox":[0.1,0.2,0.7,0.8]}]}}});
+    assert!(
+        validate_flux3_layout_request(&ImageRequest::from_payload(valid.as_object().unwrap()))
+            .is_ok()
+    );
+}
+
 #[cfg(target_os = "macos")]
 fn assert_route_retarget_artifact_seal_mismatch(
     error: WorkerError,

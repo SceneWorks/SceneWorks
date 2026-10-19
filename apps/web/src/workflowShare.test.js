@@ -117,6 +117,19 @@ describe("looksLikeWorkflowCandidate", () => {
 });
 
 describe("recipeFromWorkflowShare", () => {
+  it("retains original layout JSON and attachment-instance order when binding replacement reference assets", () => {
+    const layout = { version: 1, boxes: [
+      { id: "label", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 1] },
+      { id: "removal", desc: "remove", from: "ref_image_1", reference_id: "second-instance", src_bbox: [0, 0, 1, 1], tgt_bbox: null },
+    ] };
+    const recipe = recipeFromWorkflowShare(share({ mode: "edit_image", model: "flux3_klein",
+      advanced: { flux3_layout: layout, flux3_reference_ids: ["first-instance", "second-instance"] } }),
+    report({ model: { state: "resolved", catalogId: "flux3_klein" } }),
+    { referenceAssetIds: ["local-duplicate", "local-duplicate"] });
+    expect(recipe.rawAdapterSettings.flux3_layout).toEqual(layout);
+    expect(recipe.rawAdapterSettings.flux3_reference_ids).toEqual(["first-instance", "second-instance"]);
+    expect(recipe.rawAdapterSettings.referenceAssetIds).toEqual(["local-duplicate", "local-duplicate"]);
+  });
   it("only assigns optional reference geometry intent to FLUX3 image workflows with picked reference slots", () => {
     const workflow = share({ model: "flux3_klein", width: 16, height: undefined,
       inputs: [{ kind: "reference", count: 1 }] });
@@ -582,6 +595,8 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "bridgeRightVideoConditioningStrength",
       "cnScale",
       "distilledVariant",
+      "flux3_layout",
+      "flux3_reference_ids",
       "imageGuidanceScale",
       "lightning",
       "ltxPipeline",

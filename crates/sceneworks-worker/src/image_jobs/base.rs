@@ -7565,6 +7565,8 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// The one trusted FLUX.3 owned-asset resolution used for admission and rendering. Its
     /// original RGB/RGBA carriers and optional size intent must not pass through img2img slots.
     pub(crate) flux3_references: Option<&'a flux3_references::ResolvedReferences>,
+    /// Caption-only box controls, validated against those same owned reference slots before load.
+    pub(crate) flux3_layout: Option<&'a flux3_references::ResolvedLayout>,
     /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
     /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
     pub(crate) output_channels: gen_core::OutputChannels,
@@ -7728,6 +7730,7 @@ fn render_on_surface(
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
+    if let Some(layout) = surface.flux3_layout { layout.apply(&mut request); }
     // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
     // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
     // has its warnings collected for the image's provenance.
@@ -8088,6 +8091,7 @@ fn generate_one_with_hires_on_surface(
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
         flux3_references: surface.flux3_references,
+        flux3_layout: surface.flux3_layout,
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls,
         warnings: surface.warnings,
@@ -8150,6 +8154,7 @@ fn generate_one_with_hires_on_surface(
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         flux3_references: None,
+        flux3_layout: None,
         output_channels: surface.output_channels,
         controls: surface.controls,
         warnings: surface.warnings,
@@ -9983,6 +9988,7 @@ async fn generate_stream_using(
         // Only numeric admission geometry is normalized. Preserve the authored UI mode and the
         // original optional-size intent; the memory route alone is derived from the references.
     }
+    let flux3_layout = flux3_references::resolve_owned_layout(&resolved_request, flux3_references.as_ref())?;
     let request = &resolved_request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -10703,6 +10709,7 @@ async fn generate_stream_using(
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &[],
                                 flux3_references: None,
+                                flux3_layout: None,
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -10787,6 +10794,7 @@ async fn generate_stream_using(
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &edit_ref_alpha,
                                 flux3_references: flux3_references.as_ref(),
+                                flux3_layout: flux3_layout.as_ref(),
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -10839,6 +10847,7 @@ async fn generate_stream_using(
                     if let Some(references) = flux3_references.as_ref() {
                         facts.insert(flux3_references::FACT_KEY.to_owned(), references.image_fact((out_w, out_h)));
                     }
+                    if let Some(layout) = flux3_layout.as_ref() { facts.insert("flux3Layout".to_owned(), layout.image_fact()); }
                     if !facts.is_empty() {
                         prompt_enhancement.send_image_facts(facts);
                     }
@@ -12714,6 +12723,7 @@ async fn generate_candle_stream_using(
         // Only numeric admission geometry is normalized. Preserve the authored UI mode and the
         // original optional-size intent; the memory route alone is derived from the references.
     }
+    let flux3_layout = flux3_references::resolve_owned_layout(&resolved_request, flux3_references.as_ref())?;
     let request = &resolved_request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
@@ -14553,6 +14563,7 @@ async fn generate_candle_stream_using(
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &[],
                                 flux3_references: None,
+                                flux3_layout: None,
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
@@ -14628,6 +14639,7 @@ async fn generate_candle_stream_using(
                         &LaneRgbaSurface {
                             multi_reference_alpha: &edit_ref_alpha,
                             flux3_references: flux3_references.as_ref(),
+                            flux3_layout: flux3_layout.as_ref(),
                             output_channels: rgba_output_channels,
                             controls: lane_controls,
                             warnings: Some(&warnings),
@@ -14678,6 +14690,7 @@ async fn generate_candle_stream_using(
                 if let Some(references) = flux3_references.as_ref() {
                     facts.insert(flux3_references::FACT_KEY.to_owned(), references.image_fact((out_w, out_h)));
                 }
+                if let Some(layout) = flux3_layout.as_ref() { facts.insert("flux3Layout".to_owned(), layout.image_fact()); }
                 if !facts.is_empty() {
                     prompt_enhancement.send_image_facts(facts);
                 }

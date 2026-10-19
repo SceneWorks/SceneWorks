@@ -362,6 +362,17 @@ pub fn ordered_image_reference_error(
     if flux3::is_model(model) {
         return flux3::parse(payload).err();
     }
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| {
+            ["flux3_layout", "flux3_reference_ids"]
+                .iter()
+                .any(|key| advanced.get(*key).is_some_and(|value| !value.is_null()))
+        })
+    {
+        return Some(format!("{model}: FLUX.3 layout and attachment-instance controls are unsupported; remove them or select FLUX.3."));
+    }
     let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is

@@ -7661,7 +7661,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
     .await;
     for model in ["flux3_klein", "flux3_klein_base"] {
         let body = |extra: Value| {
-            let mut value=json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"change the sky","count":1,"referenceAssetIds":[ids[0],ids[1],ids[0]]}).as_object().unwrap().clone();
+            let mut value=json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"change the sky","count":1,"referenceAssetIds":[ids[0],ids[1],ids[0]],"advanced":{"flux3_reference_ids":["slot-a","slot-b","slot-c"],"flux3_layout":{"version":1,"boxes":[{"id":"remove","desc":"remove cat","from":"ref_image_0","reference_id":"slot-c","src_bbox":[0.123456789012345,0.2,0.7,0.8],"tgt_bbox":null}]}}}).as_object().unwrap().clone();
             value.extend(extra.as_object().unwrap().clone());
             Value::Object(value)
         };
@@ -7687,6 +7687,20 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             );
             assert_eq!(job["payload"].get("width"), sides.get("width"));
             assert_eq!(job["payload"].get("height"), sides.get("height"));
+            let authored = &job["payload"]["advanced"];
+            assert_eq!(
+                authored["flux3_reference_ids"],
+                json!(["slot-a", "slot-b", "slot-c"])
+            );
+            assert_eq!(
+                authored["flux3_layout"]["boxes"][0]["src_bbox"][0],
+                json!(0.123456789012345)
+            );
+            assert!(authored["flux3_layout"]["boxes"][0]["tgt_bbox"].is_null());
+            assert_eq!(
+                authored["flux3_layout"]["boxes"][0]["reference_id"],
+                "slot-c"
+            );
             for action in ["duplicate", "retry"] {
                 let route = format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
                 let (status, replay) =
@@ -7694,6 +7708,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
                 assert_eq!(status, StatusCode::CREATED, "{action}: {replay}");
                 assert_eq!(replay["payload"].get("width"), sides.get("width"));
                 assert_eq!(replay["payload"].get("height"), sides.get("height"));
+                assert_eq!(&replay["payload"]["advanced"], authored);
                 assert_eq!(
                     replay["payload"]["referenceAssetIds"],
                     job["payload"]["referenceAssetIds"]
@@ -7714,7 +7729,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             app.clone(),
             "POST",
             "/api/v1/image/jobs",
-            body(json!({"referenceAssetIds":vec![ids[0].clone();10]})),
+            body(json!({"referenceAssetIds":vec![ids[0].clone();10],"advanced":{}})),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{ten}");
@@ -7731,6 +7746,9 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             json!({"referenceAssetIds":["missing-owned-image"]}),
             json!({"strength":1.0}),
             json!({"advanced":{"referenceStrength":1.0}}),
+            json!({"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"bad","bbox":[0,0,0,1]}]}}}),
+            json!({"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"bad","from":"ref_image_3","src_bbox":[0,0,1,1],"tgt_bbox":null}]}}}),
+            json!({"advanced":{"flux3_reference_ids":["duplicate","duplicate","third"]}}),
         ] {
             let (status, error) =
                 request(app.clone(), "POST", "/api/v1/image/jobs", body(invalid)).await;
@@ -7771,7 +7789,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             app.clone(),
             "POST",
             "/api/v1/image/jobs",
-            body(json!({"mode":"text_to_image","referenceAssetIds":[]})),
+            body(json!({"mode":"text_to_image","referenceAssetIds":[],"advanced":{}})),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{plain}");
