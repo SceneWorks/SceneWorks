@@ -10,6 +10,158 @@ pub(crate) async fn list_training_presets(
     Json(effective_training_presets())
 }
 
+/// A duplicate is a new FLUX.3 run, not another writer/resume of the source run. Allocate all
+/// product identities before the store inserts the new job atomically; never copy or alter files
+/// in the source output directory. Like the existing Iris duplicate surface, this copies inputs;
+/// changing training inputs belongs to a new Training Studio submission.
+pub(crate) async fn fresh_flux3_training_duplicate(
+    state: &AppState,
+    job_id: &str,
+    requested_changes: &JsonObject,
+) -> Result<Option<(String, JsonObject)>, ApiError> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Ok(None);
+    }
+    let Some(kernel) = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/kernel"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    if !sceneworks_core::training::flux3::KERNELS.contains(&kernel) {
+        return Ok(None);
+    }
+    if job.job_type != JobType::LoraTrain {
+        return Err(ApiError::bad_request(
+            "FLUX.3 adaptation requires a LoRA training job.",
+        ));
+    }
+    let original = job.payload.get("plan").ok_or_else(|| {
+        ApiError::bad_request("FLUX.3 duplicate requires its original training plan.")
+    })?;
+    let without_resume = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(advanced) = value
+            .pointer_mut("/config/advanced")
+            .and_then(Value::as_object_mut)
+        {
+            advanced.remove("resume");
+        }
+        value
+    };
+    if requested_changes
+        .get("plan")
+        .is_some_and(|plan| without_resume(plan) != without_resume(original))
+        || requested_changes
+            .get("manifestEntry")
+            .is_some_and(|entry| Some(entry) != job.payload.get("manifestEntry"))
+        || requested_changes
+            .get("baseModel")
+            .is_some_and(|base| Some(base) != job.payload.get("baseModel"))
+    {
+        return Err(ApiError::bad_request("FLUX.3 duplicate copies the original training inputs with a fresh server-owned output identity. Use Training Studio to change model, options or dataset."));
+    }
+    let mut plan: sceneworks_core::training::TrainingPlan =
+        serde_json::from_value(original.clone()).map_err(|error| {
+            ApiError::bad_request(format!("Invalid FLUX.3 source plan: {error}"))
+        })?;
+    let target = sceneworks_core::training::flux3::target(kernel == "flux3_klein_edit_lora");
+    if plan.target.target_id != target.id
+        || plan.target.base_model != target.base_model
+        || plan.target.family != target.family
+        || plan.target.base_model_repo != target.base_model_repo
+        || plan.target.output_kind != sceneworks_core::training::TrainingOutputKind::Lora
+        || job.payload.get("baseModel").and_then(Value::as_str) != Some(target.base_model.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 duplicate requires the original publisher-base LoRA identity.",
+        ));
+    }
+    sceneworks_core::training::validate_training_config_for_target(&target, &plan.config)
+        .map_err(training_plan_error_to_api_error)?;
+    if !is_plain_relative_file(&plan.output.file_name)
+        || !plan.output.file_name.ends_with(".safetensors")
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 duplicate requires a safe adapter filename.",
+        ));
+    }
+    let mut entry = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request("FLUX.3 duplicate requires its original output record.")
+        })?;
+    let scope = entry
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 output scope is missing."))?;
+    if scope != training_output_scope(&plan.config.advanced)?.as_str()
+        || entry.get("id").and_then(Value::as_str) != Some(plan.output.lora_id.as_str())
+    {
+        return Err(ApiError::bad_request(
+            "FLUX.3 source output identity is inconsistent.",
+        ));
+    }
+    let fresh_job_id = format!("job_{}", Uuid::new_v4().simple());
+    let fresh_lora_id = format!("lora_{}", Uuid::new_v4().simple());
+    let (output_dir, _) =
+        resolve_training_output_location(state, scope, job.project_id.as_deref(), &fresh_lora_id)
+            .await?;
+    plan.job_id = fresh_job_id.clone();
+    plan.output.lora_id = fresh_lora_id.clone();
+    plan.output.output_dir = output_dir.display().to_string();
+    plan.config.advanced.insert("resume".into(), json!(false));
+    let config = serde_json::to_value(&plan.config)
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    plan.provenance.output_lora_id = fresh_lora_id.clone();
+    plan.provenance.source_job_id = fresh_job_id.clone();
+    plan.provenance.created_at = now_rfc3339();
+    plan.provenance.config_snapshot = config
+        .as_object()
+        .cloned()
+        .ok_or_else(|| ApiError::internal("Training config must serialize as an object."))?;
+    entry.insert("id".into(), json!(fresh_lora_id));
+    entry.insert(
+        "source".into(),
+        json!({"provider":"training", "path":format!("loras/{fresh_lora_id}")}),
+    );
+    entry.insert("baseModel".into(), json!(target.base_model));
+    entry.insert("family".into(), json!(target.family));
+    entry.insert("networkType".into(), json!("lora"));
+    entry.insert("files".into(), json!([plan.output.file_name]));
+    entry.insert("createdAt".into(), json!(plan.provenance.created_at));
+    entry.insert("updatedAt".into(), json!(plan.provenance.created_at));
+    let provenance = entry
+        .entry("provenance")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 output provenance must be an object."))?;
+    provenance.insert("trainingJobId".into(), json!(fresh_job_id));
+    provenance.insert("configSnapshot".into(), config);
+    provenance.insert("createdAt".into(), json!(plan.provenance.created_at));
+    let plan = serde_json::to_value(plan).map_err(|error| ApiError::internal(error.to_string()))?;
+    if job.payload.get("dryRun").and_then(Value::as_bool) != Some(true) {
+        write_training_config_snapshot(&output_dir, &plan).await;
+    }
+    Ok(Some((
+        fresh_job_id,
+        JsonObject::from_iter([
+            ("plan".to_owned(), plan),
+            ("manifestEntry".to_owned(), Value::Object(entry)),
+        ]),
+    )))
+}
+
 /// Return the training catalog as it executes on this platform. The core registry deliberately
 /// retains the established MLX defaults; on non-macOS hosts the API projects only the Candle
 /// limitations into the response the Studio seeds and later submits. That makes the visible form,
@@ -1794,6 +1946,16 @@ pub(crate) async fn create_training_job(
     // contract rather than an advisory UI hint.
     sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
         .map_err(training_plan_error_to_api_error)?;
+    if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
+        && payload
+            .config
+            .advanced
+            .get("resume")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(ApiError::bad_request("Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity."));
+    }
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -2609,6 +2771,9 @@ pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path,
 /// directory. The path need not exist yet — model installation is a separate job; the
 /// dry-run plan only records where the kernel will read from.
 pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath) -> String {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        return flux3_training_snapshot(data_dir).display().to_string();
+    }
     // Locally-converted MLX model: `requiresConversion` models (Wan TI2V-5B / A14B) keep
     // their usable weights in the app-managed `<data>/models/mlx/<id>` tree, NOT the HF cache
     // — which holds only the native *source* checkpoint the converter consumes. Inference reads
@@ -2661,6 +2826,17 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .join(safe_download_dir(&target.base_model))
         .display()
         .to_string()
+}
+
+/// Training always selects the known publisher base revision, never whichever refs/main snapshot
+/// sorts first, a converted generation directory, or an unproven q4/q8 tier.
+fn flux3_training_snapshot(data_dir: &FsPath) -> PathBuf {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    sceneworks_worker::flux3_receipted_snapshot(data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+        // The existing uninstalled app-managed location is only a weights-free plan placeholder.
+        // Neither training_base_model_status nor TrainerLoadInputs accepts it as installation
+        // authority: both independently require the exact receipt-backed publisher snapshot.
+        .unwrap_or_else(|| data_dir.join("models").join(BASE_ID))
 }
 
 /// Whether a diffusers component tree roots here, keyed on its denoiser dir. DiT models (Krea 2 Raw,
@@ -3250,6 +3426,23 @@ pub(crate) fn training_base_model_status(
     data_dir: &FsPath,
     target: &TrainingTarget,
 ) -> TrainingBaseStatus {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        return match sceneworks_worker::flux3_receipted_snapshot(
+            data_dir,
+            BASE_REPO,
+            BASE_REVISION,
+            BASE_ID,
+        ) {
+            Some(snapshot)
+                if sceneworks_worker::flux3_runtime_bundle_check(&snapshot, BASE_ID).is_ok() =>
+            {
+                TrainingBaseStatus::Ready
+            }
+            Some(_) => TrainingBaseStatus::TrainingTierMissing,
+            None => TrainingBaseStatus::Missing,
+        };
+    }
     // macOS Wan: certify the installed MLX turnkey the native trainer loads, NOT the Windows/Linux
     // diffusers `base_model_repo` below (never installed on macOS) — sc-13878. Inert off-Mac / non-Wan.
     if let Some(status) = macos_wan_base_status(data_dir, target) {

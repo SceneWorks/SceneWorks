@@ -29,6 +29,7 @@ use crate::contracts::{string_enum, ContractNumber, ExtraFields, JsonObject};
 use crate::dataset_quality::{CachedTier0Scalars, QualityAck};
 use crate::store_util::is_safe_relative_path;
 
+pub mod flux3;
 pub mod iris;
 
 /// Schema version stamped on persisted training contracts.
@@ -173,7 +174,9 @@ pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
 /// bucket; the Iris-3B trainers (generation, depth, restoration) declare no epic 2123 technique —
 /// they bucket by their own `shape_policy` / `aspect_ratio_bucket` options instead. Every other
 /// builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
-const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 4] = [
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 6] = [
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
     "ltx_2_5_video_lora",
     "iris_3b_generation",
     "iris_3b_depth",
@@ -893,6 +896,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             anima_base_lora_target(),
             qwen_image_2_1_lora_target(),
             qwen_image_2_1_edit_lora_target(),
+            flux3::target(false),
+            flux3::target(true),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -4026,6 +4031,9 @@ pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
+    if flux3::KERNELS.contains(&target.kernel.as_str()) {
+        flux3::validate(target, config)?;
+    }
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;

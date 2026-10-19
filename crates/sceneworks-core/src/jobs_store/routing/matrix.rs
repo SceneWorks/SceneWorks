@@ -1090,6 +1090,10 @@ pub(crate) fn expected_backend_local_trainer_id(
         ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
             ("iris_3b_restore", "iris_3b_restore")
         }
+        ("flux3_klein_lora", "flux3_klein_base", "flux3_klein_lora")
+        | ("flux3_klein_edit_lora", "flux3_klein_base", "flux3_klein_edit_lora") => {
+            ("flux3_klein_base", "flux3_klein_base")
+        }
         ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
         | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
             ("qwen_image_2_1", "qwen_image_2_1")

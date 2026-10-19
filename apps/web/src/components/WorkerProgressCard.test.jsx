@@ -375,13 +375,13 @@ describe("WorkerProgressCard layout", () => {
     expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
   });
 
-  it("offers Resume only for a stopped training job with a checkpoint, and Restart from step 0 (sc-25785)", () => {
+  it.each(["z_image_lora", "flux3_klein_lora", "flux3_klein_edit_lora"])("offers checkpoint Resume and Restart for stopped %s training", (kernel) => {
     const job = {
       id: "t",
       type: "lora_train",
       status: "canceled",
       attempts: 1,
-      payload: {},
+      payload: { plan: { target: { kernel } } },
       result: { resumeCheckpointStep: 150 },
     };
     const onRetry = vi.fn();
