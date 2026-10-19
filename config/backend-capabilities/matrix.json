@@ -20,12 +20,12 @@
     "descriptorCandleRuntime": "7552f7bb261a3db4685ac5cae58061575ba05d8c3f95fd1ea9bbc9401fe6539f",
     "descriptorMlxFacts": "9b248164d9116a2e2b88980de626550b7799ca84b175de0148548e80b0d700b9",
     "descriptorMlxRuntime": "b6ca296abccc41c2e2dbd8ef49893cb141dfbf624ce1495eb2a040ada54341a5",
-    "descriptorPreviewFacts": "7133d4822f3f617db96a02b431034c0d255f33c3ccea24d7cdce0ffa5e0f0c0b",
+    "descriptorPreviewFacts": "959d67f76c144032f809d874b562fc6cf2110f208049fbc5fe3133f46da25421",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "d6b4c9ee201259ce5a94ad72ce4231568063f6b174624ef60b2d087d36d92a12",
     "modelImportDefaults": "5a9b453897bd5df5e0096412c20d8163fcecc7a523e4afd874a504eac6d7386b",
     "routerCandle": "f97251af1f0f9c866c68d3bc3d2e565673f5be2b7462827b1526a1e317c19d6c",
-    "routerCatalog": "f4645a0d50357b7259e01064e9dadf2ebec24f98e30dd933496ba2b6a1c6c8d0",
+    "routerCatalog": "03a800f8ace1b3284cf8c9b1fcd21cb2d2ea90f214359fd6674f1405d2f89d84",
     "routerGaps": "6d541c25c4b36a141021f0ee5846d12743fe6951ca3bfa954ac0c19fad6c0e63",
     "routerMlx": "30052188d546059520443b0e55952abf8f98931bb4ec7aa246789798023ef4f9",
     "scheduler": "4699073664ef21ff0a7e0491816d829285b230df1e1a9f3f2249c717a9582eb6",
@@ -48,7 +48,7 @@
     "workerDispatch": "8fd57d43086d08780c5ba8c8ad1be59b4c9c87b3560e56a00bb4e373980b5221",
     "workerEngineTable": "bffcc754d5280fdf7b79097076f8b2b3e9111240a03ccbb52a57e473ff4259c9",
     "workerGpuCapabilities": "60f023305dd3f747963241518df69f1895140553f21116932e0550b69d2a8cde",
-    "workerImageDispatch": "1efc4627ba915e7407927dd07866c45544284dd31ca8368ab77e51a112e82d65",
+    "workerImageDispatch": "eb78ad462296ad0fa4fed6a049c21a55da98e9bbc6a93929adc1bef2b31d8ed2",
     "workerImageKreaImported": "4bdd99836ab3d5303e5c9e7bca204ca9aaa2aef76c880552ff9252557474c58c",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
@@ -1717,8 +1717,8 @@
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
-        "candle": null
+        "mlx": false,
+        "candle": false
       }
     },
     {

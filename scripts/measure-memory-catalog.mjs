@@ -977,6 +977,8 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
 // packed backends deliberately have different conversion IDs (the install contract).
 export const FLUX3_REPOSITORY = "black-forest-labs/flux-3-image-klein";
 export const FLUX3_REVISION = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+export const FLUX3_BASE_REPOSITORY = "black-forest-labs/flux-3-image-klein-base";
+export const FLUX3_BASE_REVISION = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
 export function flux3Conversion(backend, tier) {
   if (!["q4", "q8"].includes(tier)) return null;
   if (backend === "candle") return `flux3-candle-ggml-${tier === "q4" ? "q4_1" : "q8_0"}-v1`;
@@ -985,6 +987,10 @@ export function flux3Conversion(backend, tier) {
 }
 
 export const PROVIDER_FAMILIES = Object.freeze({
+  flux3_klein_base: {
+    env: "FLUX3_KLEIN", repo: FLUX3_BASE_REPOSITORY, arms: ["mlx", "candle"],
+    layout: "flat", flux3: true,
+  },
   flux3_klein: {
     env: "FLUX3_KLEIN", repo: FLUX3_REPOSITORY, arms: ["mlx", "candle"],
     layout: "flat", flux3: true,
@@ -2195,18 +2201,31 @@ export async function missingIndexedShards(tierRoot) {
 // probe. Missing originals and missing derivations are host conditions, not missing arms.
 async function classifyFlux3Anchor(row, parts, models, hubs) {
   const { backend, tier } = parts;
+  const base = parts.modelId === "flux3_klein_base";
+  const repository = base ? FLUX3_BASE_REPOSITORY : FLUX3_REPOSITORY;
+  const revision = base ? FLUX3_BASE_REVISION : FLUX3_REVISION;
   const conversion = flux3Conversion(backend, tier);
   if (!["bf16", "q4", "q8", ...(backend === "candle" ? ["fp8r", "nvfp4"] : [])].includes(tier)) {
     return { ...row, status: "harness_unsupported", reason: `FLUX3 ${backend} has no native ${tier} producer` };
   }
-  const download = tierDownload(models, parts.modelId, FLUX3_REPOSITORY, "bf16");
-  if (download.revision !== FLUX3_REVISION) {
+  const download = tierDownload(models, parts.modelId, repository, "bf16");
+  if (download.revision !== revision) {
     return { ...row, status: "harness_unsupported", reason: "FLUX3 original revision differs from the pinned native provider" };
   }
-  const expected = snapshotPath(hubs[0], FLUX3_REPOSITORY, FLUX3_REVISION);
-  const original = await firstExistingDirectory(hubs.map(hub => snapshotPath(hub, FLUX3_REPOSITORY, FLUX3_REVISION)));
+  if (base && conversion) {
+    const rows = models.find(model => model.id === parts.modelId)?.downloads ?? [];
+    const pinned = rows.some(entry => entry.variant === tier
+      && entry.repo === repository && entry.revision === revision
+      && (!entry.platforms || entry.platforms.includes(backend === "mlx" ? "macos" : "windows") || (backend === "candle" && entry.platforms.includes("linux")))
+      && entry.localDerivation?.conversion === conversion
+      && Number.isSafeInteger(entry.localDerivation?.weightsBytes) && entry.localDerivation.weightsBytes > 0
+      && /^[0-9a-f]{64}$/.test(entry.localDerivation?.weightsSha256 ?? ""));
+    if (!pinned) return { ...row, status: "weights_missing", reason: `base ${backend}:${tier} requires verified conversion output size and SHA-256 pins; base file access is HTTP 403. Distilled pins, self-reported receipts and dense fallback are not substitutes` };
+  }
+  const expected = snapshotPath(hubs[0], repository, revision);
+  const original = await firstExistingDirectory(hubs.map(hub => snapshotPath(hub, repository, revision)));
   row.roots.push({ label: "FLUX3 pinned original (external TE/AE)", path: original ?? expected });
-  if (!original) return { ...row, status: "weights_missing", reason: `no ${FLUX3_REPOSITORY}@${FLUX3_REVISION} original snapshot; provision the pinned original including text_encoder/ and ae.safetensors` };
+  if (!original) return { ...row, status: "weights_missing", reason: `no ${repository}@${revision} original snapshot; provision the pinned original including text_encoder/ and ae.safetensors${base ? "; base file access is HTTP 403 and requires user authorization" : ""}` };
   const originals = ["config.json", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json"];
   const missing = [];
   for (const file of originals) if (!(await isFile(path.join(original, file)))) missing.push(file);
@@ -2221,12 +2240,12 @@ async function classifyFlux3Anchor(row, parts, models, hubs) {
   if (conversion) {
     const data = process.env.SCENEWORKS_DATA_DIR;
     const derived = process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT
-      ?? (data ? path.join(data, "models", "derived", "flux3_klein") : null);
-    if (!derived) return { ...row, status: "weights_missing", reason: `FLUX3 ${backend}:${tier} requires a local ${conversion} package; set SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT to models/derived/flux3_klein or provide SCENEWORKS_DATA_DIR (no snapshot tier-directory fallback)` };
+      ?? (data ? path.join(data, "models", "derived", parts.modelId) : null);
+    if (!derived) return { ...row, status: "weights_missing", reason: `FLUX3 ${backend}:${tier} requires a local ${conversion} package; set SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT to models/derived/${parts.modelId} or provide SCENEWORKS_DATA_DIR (no snapshot tier-directory fallback)` };
     root = path.resolve(derived, tier, conversion);
   } else if (tier !== "bf16") root = path.join(original, "variants", tier);
   row.roots.push({ label: `FLUX3 ${backend}:${tier} native package`, path: root });
-  const required = ["config.json", "model.safetensors", ...(conversion ? ["flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"] : [])];
+  const required = ["config.json", "model.safetensors", ...(conversion ? ["flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"] : tier === "bf16" ? [] : ["hf_quant_config.json", "manifest.json"])];
   const absent = [];
   for (const file of required) if (!(await isFile(path.join(root, file)))) absent.push(file);
   if (absent.length) return { ...row, status: "weights_missing", reason: `FLUX3 ${backend}:${tier} package ${root} is missing ${absent.join(", ")}; install/derive this exact native tier, never substitute dense weights` };
@@ -2239,11 +2258,11 @@ async function classifyFlux3Anchor(row, parts, models, hubs) {
     { label: "text_encoder", root: path.join(original, "text_encoder"), trustedRoot: trustedOriginal },
     { label: "autoencoder", root: original, files: ["ae.safetensors"], trustedRoot: trustedOriginal },
   ];
-  row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY = FLUX3_REPOSITORY;
-  row.env.SCENEWORKS_FLUX3_KLEIN_REVISION = FLUX3_REVISION;
+  row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY = repository;
+  row.env.SCENEWORKS_FLUX3_KLEIN_REVISION = revision;
   row.env.SCENEWORKS_FLUX3_KLEIN_ROOT = root;
   row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT = original;
-  row.artifact = { repository: FLUX3_REPOSITORY, resolvedRevision: FLUX3_REVISION, variant: tier };
+  row.artifact = { repository: repository, resolvedRevision: revision, variant: tier };
   return row;
 }
 
@@ -2254,7 +2273,7 @@ export async function hashAnchorInventory(row) {
     ? { includeFiles: row.inventoryFiles, trustedRoot: path.dirname(path.dirname(row.tierRoot)) }
     : {};
   if (!row.externalComponents) return hashArtifactInventory(row.tierRoot, packageOptions);
-  if (row.modelId !== "flux3_klein" || row.externalComponents.length !== 2
+  if (!["flux3_klein", "flux3_klein_base"].includes(row.modelId) || row.externalComponents.length !== 2
     || new Set(row.externalComponents.map(c => c.label)).size !== 2
     || row.externalComponents.some(c => !["text_encoder", "autoencoder"].includes(c.label))) {
     throw new Error("ambiguous FLUX3 external component inventory");

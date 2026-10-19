@@ -11,6 +11,41 @@ pub(super) const FLUX3_REPOSITORY: &str = "black-forest-labs/flux-3-image-klein"
 pub(super) const REVISION: &str = "8454017f9ebaada30c998fccd9f67a80c7580f68";
 pub(super) const SEED: u64 = 26_243;
 pub(super) const STEPS: u32 = 16;
+pub(super) const BASE_PROVIDER: &str = "flux3_klein_base";
+pub(super) const FLUX3_BASE_REPOSITORY: &str = "black-forest-labs/flux-3-image-klein-base";
+pub(super) const BASE_REVISION: &str = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Checkpoint {
+    pub provider: &'static str,
+    pub repository: &'static str,
+    pub revision: &'static str,
+    pub label: &'static str,
+    pub steps: u32,
+    pub guidance: f32,
+}
+
+fn checkpoint(provider: &str) -> Result<Checkpoint, String> {
+    match provider {
+        PROVIDER => Ok(Checkpoint {
+            provider: PROVIDER,
+            repository: FLUX3_REPOSITORY,
+            revision: REVISION,
+            label: "flux3-klein",
+            steps: STEPS,
+            guidance: 1.0,
+        }),
+        BASE_PROVIDER => Ok(Checkpoint {
+            provider: BASE_PROVIDER,
+            repository: FLUX3_BASE_REPOSITORY,
+            revision: BASE_REVISION,
+            label: "flux3-klein-base",
+            steps: 50,
+            guidance: 3.5,
+        }),
+        other => Err(format!("{other}: not a native FLUX3 checkpoint")),
+    }
+}
 
 pub(super) fn quant(lane: &str, tier: &str) -> Result<Option<Quant>, String> {
     match (lane, tier) {
@@ -35,7 +70,13 @@ pub(super) fn conversion(lane: &str, tier: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn fingerprint(lane: &str, tier: &str) -> Result<String, String> {
+    fingerprint_for(lane, tier, PROVIDER)
+}
+
+pub(super) fn fingerprint_for(lane: &str, tier: &str, provider: &str) -> Result<String, String> {
+    let checkpoint = checkpoint(provider)?;
     quant(lane, tier)?;
     let suffix = match (lane, tier) {
         (_, "bf16") => "",
@@ -47,10 +88,17 @@ pub(super) fn fingerprint(lane: &str, tier: &str) -> Result<String, String> {
         (_, "nvfp4") => "-nvfp4",
         _ => unreachable!("quant validated the tier"),
     };
-    Ok(format!("flux3-klein-{lane}-derived-2026-10-15-v1{suffix}"))
+    let base = if checkpoint.provider == BASE_PROVIDER {
+        // Exact native base contract identities, NOT a distilled calibration alias.
+        format!("flux3-klein-base-{lane}-cfg-source-v1")
+    } else {
+        format!("flux3-klein-{lane}-derived-2026-10-15-v1")
+    };
+    Ok(format!("{base}{suffix}"))
 }
 
 pub(super) struct Plan {
+    pub checkpoint: Checkpoint,
     pub tier: String,
     pub fingerprint: String,
     pub selection: MemorySelection,
@@ -58,12 +106,18 @@ pub(super) struct Plan {
 
 pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
     let planned = protocol::planned(request)?;
+    let checkpoint = checkpoint(
+        planned
+            .pointer("/target/provider")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "FLUX3 target.provider must name a native checkpoint".to_owned())?,
+    )?;
     protocol::validate_still_geometry(request, "FLUX3 calibration")?;
     protocol::validate_plain_overlay_target(request, "the native FLUX3 text-to-image path")?;
     for (pointer, expected) in [
         ("/backend", lane),
-        ("/target/provider", PROVIDER),
-        ("/target/modelId", PROVIDER),
+        ("/target/provider", checkpoint.provider),
+        ("/target/modelId", checkpoint.provider),
         ("/target/mode", "text_to_image"),
         ("/loadShape", protocol::LOAD_SHAPE_EAGER),
     ] {
@@ -73,15 +127,19 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
     }
     if protocol::target_geometry(request)? != (1024, 1024) {
         return Err(
-            "FLUX3 producer measures the 1024x1024 seed26243 step16 fixture only".to_owned(),
+            "FLUX3 producer measures only its checkpoint-specific 1024x1024 seed26243 fixture"
+                .to_owned(),
         );
     }
     let tier = planned
         .pointer("/target/tier")
         .and_then(Value::as_str)
         .ok_or_else(|| "FLUX3 planned.target.tier must be a string".to_owned())?;
-    let fingerprint = fingerprint(lane, tier)?;
-    let fixture = format!("flux3-klein-{lane}-{tier}-1024-seed26243-step16");
+    let fingerprint = fingerprint_for(lane, tier, checkpoint.provider)?;
+    let fixture = format!(
+        "{}-{lane}-{tier}-1024-seed26243-step{}",
+        checkpoint.label, checkpoint.steps
+    );
     if planned.get("fixture").and_then(Value::as_str) != Some(fixture.as_str()) {
         return Err(format!("FLUX3 planned.fixture must be {fixture:?}"));
     }
@@ -118,6 +176,7 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
         ));
     }
     Ok(Plan {
+        checkpoint,
         tier: tier.to_owned(),
         fingerprint,
         selection,
@@ -129,9 +188,10 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
 pub(super) fn spec(lane: &str, plan: &Plan) -> Result<LoadSpec, String> {
     let repo = protocol::required_env("SCENEWORKS_FLUX3_KLEIN_REPOSITORY")?;
     let rev = protocol::required_env("SCENEWORKS_FLUX3_KLEIN_REVISION")?;
-    if repo != FLUX3_REPOSITORY || rev != REVISION {
+    if repo != plan.checkpoint.repository || rev != plan.checkpoint.revision {
         return Err(format!(
-            "FLUX3 requires pinned original {FLUX3_REPOSITORY}@{REVISION}, got {repo}@{rev}"
+            "FLUX3 requires pinned original {}@{}, got {repo}@{rev}",
+            plan.checkpoint.repository, plan.checkpoint.revision
         ));
     }
     let root = |name| -> Result<PathBuf, String> {
@@ -143,7 +203,12 @@ pub(super) fn spec(lane: &str, plan: &Plan) -> Result<LoadSpec, String> {
         })
     };
     let original = root("SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT")?;
-    protocol::validate_huggingface_revision_root(&original, &repo, &rev, FLUX3_REPOSITORY)?;
+    protocol::validate_huggingface_revision_root(
+        &original,
+        &repo,
+        &rev,
+        plan.checkpoint.repository,
+    )?;
     let package = root("SCENEWORKS_FLUX3_KLEIN_ROOT")?;
     validate_package_root(lane, &plan.tier, &original, &package)?;
     for file in [
@@ -320,6 +385,7 @@ pub(super) fn boundary(
 }
 
 pub(super) fn render(
+    plan: &Plan,
     generator: &dyn Generator,
     context: &MemoryRunContext,
     observed: &mut dyn FnMut(protocol::ReferencePhase),
@@ -330,8 +396,8 @@ pub(super) fn render(
         height: 1024,
         count: 1,
         seed: Some(SEED),
-        steps: Some(STEPS),
-        guidance: Some(1.0),
+        steps: Some(plan.checkpoint.steps),
+        guidance: Some(plan.checkpoint.guidance),
         ..Default::default()
     };
     let mut scope = generator
@@ -424,6 +490,12 @@ pub(super) fn admit(
     let contract = generator
         .memory_strategy_contract()
         .ok_or_else(|| "loaded FLUX3 provider exposes no memory contract".to_owned())?;
+    if contract.provider_id != plan.checkpoint.provider {
+        return Err(format!(
+            "FLUX3 selected {} but loaded {}",
+            plan.checkpoint.provider, contract.provider_id
+        ));
+    }
     contract
         .validate_selection(&plan.selection)
         .map_err(|error| error.to_string())?;
@@ -483,7 +555,7 @@ pub(super) fn fragment(
     let mut fragment = json!({
         "status": "gated", "strategy": strategy,
         "loadShape": protocol::LOAD_SHAPE_EAGER,
-        "artifact": { "repository": FLUX3_REPOSITORY, "resolvedRevision": REVISION, "variant": plan.tier },
+        "artifact": { "repository": plan.checkpoint.repository, "resolvedRevision": plan.checkpoint.revision, "variant": plan.tier },
         "sweep": protocol::reference_sweep(request, "passed")?,
         "scenarios": [
             { "name": "exact_fit", "result": "not_run", "reason": blocker },
@@ -497,7 +569,7 @@ pub(super) fn fragment(
         ],
         "predictedPeakBytes": null, "observedMemory": observed,
         "quality": { "result": "not_run" }, "negativeMutation": null,
-        "loadability": { "result": "passed", "resolvedPathFingerprint": format!("{FLUX3_REPOSITORY}@{REVISION}:{}:{}:external-original-te-ae", plan.tier, conversion(lane, &plan.tier).unwrap_or("publisher")) },
+        "loadability": { "result": "passed", "resolvedPathFingerprint": format!("{}@{}:{}:{}:external-original-te-ae", plan.checkpoint.repository, plan.checkpoint.revision, plan.tier, conversion(lane, &plan.tier).unwrap_or("publisher")) },
         "diagnostics": diagnostics, "capturedAt": protocol::captured_at(),
     });
     protocol::settle_plain_overlay_scenario(
@@ -664,6 +736,7 @@ mod tests {
         lifecycle: std::cell::RefCell<Vec<String>>,
         outcomes: std::cell::RefCell<Vec<MemoryRunOutcome>>,
         cancel_seen: std::cell::Cell<bool>,
+        sampling: std::cell::RefCell<Option<(Option<u32>, Option<f32>)>>,
     }
 
     impl ScriptedGenerator {
@@ -685,6 +758,7 @@ mod tests {
                 lifecycle: Default::default(),
                 outcomes: Default::default(),
                 cancel_seen: Default::default(),
+                sampling: Default::default(),
             }
         }
     }
@@ -742,6 +816,7 @@ mod tests {
             request: &GenerationRequest,
             progress: &mut dyn FnMut(Progress),
         ) -> core::Result<GenerationOutput> {
+            *self.sampling.borrow_mut() = Some((request.steps, request.guidance));
             for event in &self.events {
                 // Deliberately deliver late callbacks even after cancellation: the
                 // capture must preserve the FIRST refusal rather than relabel peaks.
@@ -756,6 +831,52 @@ mod tests {
                 height: 1024,
                 pixels: vec![0; 1024 * 1024 * 3],
             }]))
+        }
+    }
+
+    #[test]
+    fn flux3_base_producer_uses_its_own_identity_sampling_and_calibration() {
+        for lane in ["candle", "mlx"] {
+            let mut value = request(lane, "bf16");
+            value["planned"]["target"]["provider"] = json!(BASE_PROVIDER);
+            value["planned"]["target"]["modelId"] = json!(BASE_PROVIDER);
+            value["planned"]["calibrationFingerprint"] =
+                json!(format!("flux3-klein-base-{lane}-cfg-source-v1"));
+            value["planned"]["fixture"] = json!(format!(
+                "flux3-klein-base-{lane}-bf16-1024-seed26243-step50"
+            ));
+            let plan = plan(&value, lane).unwrap();
+            assert_eq!(plan.checkpoint.provider, BASE_PROVIDER);
+            assert_eq!(
+                plan.checkpoint.repository,
+                "black-forest-labs/flux-3-image-klein-base"
+            );
+            assert_eq!(
+                plan.checkpoint.revision,
+                "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"
+            );
+            assert_eq!(plan.checkpoint.steps, 50);
+            assert_eq!(plan.checkpoint.guidance, 3.5);
+            assert_ne!(plan.fingerprint, fingerprint(lane, "bf16").unwrap());
+            let generator = ScriptedGenerator::new(
+                vec![
+                    Progress::ConditioningComplete,
+                    Progress::Step {
+                        current: 50,
+                        total: 50,
+                    },
+                    Progress::Decoding,
+                ],
+                false,
+            );
+            render(&plan, &generator, &context(&plan, 1, 1 << 34), &mut |_| {}).unwrap();
+            assert_eq!(*generator.sampling.borrow(), Some((Some(50), Some(3.5))));
+            let mut wrong = value.clone();
+            wrong["planned"]["target"]["modelId"] = json!(PROVIDER);
+            assert!(super::plan(&wrong, lane).is_err());
+            wrong = value;
+            wrong["planned"]["calibrationFingerprint"] = json!(fingerprint(lane, "bf16").unwrap());
+            assert!(super::plan(&wrong, lane).is_err());
         }
     }
 
@@ -783,9 +904,12 @@ mod tests {
             ]);
             let generator = ScriptedGenerator::new(events, false);
             let mut observed = Vec::new();
-            render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
-                observed.push(phase)
-            })
+            render(
+                &plan,
+                &generator,
+                &context(&plan, 1, 1 << 34),
+                &mut |phase| observed.push(phase),
+            )
             .unwrap();
             assert_eq!(
                 observed,
@@ -830,9 +954,12 @@ mod tests {
                 false,
             );
             let mut observed = Vec::new();
-            let error = render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
-                observed.push(phase)
-            })
+            let error = render(
+                &plan,
+                &generator,
+                &context(&plan, 1, 1 << 34),
+                &mut |phase| observed.push(phase),
+            )
             .unwrap_err();
             let expected = if current == 0 {
                 BoundaryError::InvalidZeroStep
@@ -863,9 +990,12 @@ mod tests {
             };
             let generator = ScriptedGenerator::new(events, true);
             let mut observed = Vec::new();
-            let error = render(&generator, &context(&plan, 1, 1 << 34), &mut |phase| {
-                observed.push(phase)
-            })
+            let error = render(
+                &plan,
+                &generator,
+                &context(&plan, 1, 1 << 34),
+                &mut |phase| observed.push(phase),
+            )
             .unwrap_err();
             assert_eq!(error, "native FLUX3 generation failed: cancelled");
             assert_eq!(

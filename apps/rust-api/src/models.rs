@@ -7323,6 +7323,73 @@ mod download_receipt_tests {
     }
 
     #[test]
+    fn flux3_derived_catalog_readiness_requires_the_complete_original_on_both_ids() {
+        use sha2::{Digest, Sha256};
+        let _env = isolate_hf_cache();
+        for id in ["flux3_klein", "flux3_klein_base"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut model = builtin_models_entry(id);
+            let mut row = model["downloads"][0].clone();
+            let repo = row["repo"].as_str().unwrap().to_owned();
+            let revision = row["revision"].as_str().unwrap().to_owned();
+            // Synthetic pins are strictly test-only, not real base conversion evidence.
+            row["variant"] = json!("q8");
+            row["default"] = json!(false);
+            row["localDerivation"] = json!({"fromVariant":"bf16","conversion":"fixture-only",
+                "weightsFile":"model.safetensors","weightsBytes":1,
+                "weightsSha256":format!("{:x}", Sha256::digest(b"x")),"reason":"synthetic test"});
+            model["downloads"] = json!([model["downloads"][0].clone(), row]);
+            let derived = temp
+                .path()
+                .join("models/derived")
+                .join(id)
+                .join("q8/fixture-only");
+            std::fs::create_dir_all(&derived).unwrap();
+            std::fs::write(derived.join("model.safetensors"), b"x").unwrap();
+            let q8 = |model: &Value| {
+                model_variant_states(model, temp.path())
+                    .into_iter()
+                    .find(|state| state.variant == "q8")
+                    .unwrap()
+            };
+            let absent = q8(&model);
+            assert!(
+                !absent.installed && absent.derivation_pending == Some(true),
+                "{id}"
+            );
+            assert!(
+                absent
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file.contains("complete pinned original")),
+                "{id}"
+            );
+            let library = sceneworks_core::hf_home::model_source_library(temp.path());
+            let repo_root = library.repository_root(&repo).unwrap();
+            let root = library
+                .snapshots_root_from_repository_root(&repo_root)
+                .unwrap()
+                .join(revision);
+            seed_flux3_runtime_bundle(&root);
+            assert!(
+                q8(&model).installed,
+                "{id}: correct original plus pinned derived bytes"
+            );
+            std::fs::remove_file(root.join("text_encoder/tokenizer_config.json")).unwrap();
+            assert!(
+                !q8(&model).installed,
+                "{id}: a torn original cannot be ready"
+            );
+            seed_flux3_runtime_bundle(&root);
+            std::fs::write(derived.join("model.safetensors"), b"tampered").unwrap();
+            assert!(
+                !q8(&model).installed,
+                "{id}: corrupted conversion cannot be ready"
+            );
+        }
+    }
+
+    #[test]
     fn flux3_runtime_bundles_do_not_alias_between_base_and_distilled() {
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
@@ -8890,7 +8957,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     missing_required_files.push(format!("derived {variant} snapshot: {why}"));
                 }
                 // The companion check below still applies to a verified derived tier.
-                installed = verified && (model_id != "flux3_klein" || cache_installed || managed_installed);
+                installed = verified && (!is_flux3_runtime_model(model_id) || cache_installed || managed_installed);
                 if verified && !installed {
                     missing_required_files.push("FLUX 3 derived tier requires its complete pinned original text encoder and autoencoder".to_owned());
                 }

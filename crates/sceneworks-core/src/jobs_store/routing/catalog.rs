@@ -1170,8 +1170,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
     // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
     // native precision packages. Missing base converted pins never become a dense fallback.
-    ModelCaps::new("flux3_klein", true, true, true, true, true),
-    ModelCaps::new("flux3_klein_base", true, true, true, true, true),
+    ModelCaps::new("flux3_klein", true, true, false, false, true),
+    ModelCaps::new("flux3_klein_base", true, true, false, false, true),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2520,6 +2520,9 @@ mod tests {
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
+        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
+        "flux3_klein",
+        "flux3_klein_base",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
@@ -2569,9 +2572,6 @@ mod tests {
         "sensenova_u1_8b_infographic_v2_fast",
         "sensenova_u1_8b_infographic_v3",
         "sensenova_u1_8b_infographic_v3_fast",
-        // sc-26241: FLUX 3 Image Klein's locally converted GGML q4/q8 packages (its publisher
-        // FP8R/NVFP4 ride `quantTier`, judged by the FLUX 3 surface predicate).
-        "flux3_klein",
     ];
 
     // sc-9983: Krea moved to CANDLE_QUANT_LORA_MODELS (BOTH). sc-10676: Anima is the LoRA-only candle
@@ -2589,8 +2589,6 @@ mod tests {
         "anima_turbo",
         // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
         "iris_3b",
-        "flux3_klein",
-        "flux3_klein_base",
     ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[

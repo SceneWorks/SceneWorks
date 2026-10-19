@@ -25,6 +25,8 @@ import {
   PROVIDER_FAMILIES,
   FLUX3_REPOSITORY,
   FLUX3_REVISION,
+  FLUX3_BASE_REPOSITORY,
+  FLUX3_BASE_REVISION,
   flux3Conversion,
   hashAnchorInventory,
   SDXL_COMPONENTS,
@@ -741,6 +743,51 @@ test("FLUX3 native producers bind the pinned original and exact local backend pa
   assert.match(partial.reason, /missing-shard/);
 });
 
+test("FLUX3 base probes retain base identity and refuse unpinned conversions on both lanes", async (t) => {
+  const data = await mkdtemp(path.join(tmpdir(), "flux3-base-unverified-"));
+  t.after(() => rm(data, { recursive: true, force: true }));
+  const prior = Object.fromEntries(["SCENEWORKS_DATA_DIR", "SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT"].map(key => [key, process.env[key]]));
+  t.after(() => { for (const [key, value] of Object.entries(prior)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+  process.env.SCENEWORKS_DATA_DIR = data;
+  delete process.env.SCENEWORKS_FLUX3_KLEIN_DERIVED_ROOT;
+  const hub = await fakeHub([[FLUX3_REPOSITORY, FLUX3_REVISION]], { empty: true });
+  const models = [{ id: "flux3_klein_base", downloads: [{ provider: "huggingface", repo: FLUX3_BASE_REPOSITORY, revision: FLUX3_BASE_REVISION, variant: "bf16", files: [] }] }];
+  const classify = (backend, tier) => classifyAnchor(`flux3_klein_base:${tier}:${backend}`, { provider: "flux3_klein_base" }, { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+  const original = snapshotPath(hub, FLUX3_BASE_REPOSITORY, FLUX3_BASE_REVISION);
+  const stage = async (root, files) => { for (const file of files) { await mkdir(path.dirname(path.join(root, file)), { recursive: true }); await writeFile(path.join(root, file), "synthetic-not-weights"); } };
+  for (const backend of ["candle", "mlx"]) {
+    const missing = await classify(backend, "bf16");
+    assert.equal(missing.status, "weights_missing");
+    assert.match(missing.reason, /flux-3-image-klein-base.*403/);
+    assert.ok(missing.roots.some(row => row.path === original));
+  }
+  await stage(original, ["config.json", "model.safetensors", "ae.safetensors", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors"]);
+  for (const backend of ["candle", "mlx"]) {
+    const row = await classify(backend, "bf16");
+    assert.equal(row.status, "runnable", row.reason); // Shape probe only, NOT a render or byte proof.
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REPOSITORY, FLUX3_BASE_REPOSITORY);
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_REVISION, FLUX3_BASE_REVISION);
+    assert.equal(row.env.SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT, original);
+    for (const tier of ["q4", "q8"]) {
+      // A self-reported conversion receipt and plausible files cannot replace independent pins.
+      const unverified = path.join(data, "models", "derived", "flux3_klein_base", tier, flux3Conversion(backend, tier));
+      await stage(unverified, ["config.json", "model.safetensors", "flux3-conversion-receipt.json", "LICENSE.md", "NOTICE.md"]);
+      const missing = await classify(backend, tier);
+      assert.equal(missing.status, "weights_missing");
+      assert.match(missing.reason, /verified conversion output size and SHA-256 pins.*403/);
+    }
+  }
+  for (const tier of ["fp8r", "nvfp4"]) {
+    const root = path.join(original, "variants", tier);
+    await stage(root, ["config.json", "model.safetensors", "hf_quant_config.json"]);
+    const torn = await classify("candle", tier);
+    assert.equal(torn.status, "weights_missing");
+    assert.match(torn.reason, /manifest.json/);
+    await stage(root, ["manifest.json"]);
+    assert.equal((await classify("candle", tier)).status, "runnable"); // Probe only.
+  }
+});
+
 test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without claiming execution", async () => {
   const plan = await readPlan();
   for (const tier of ["fp8r", "nvfp4"]) {
@@ -762,8 +809,15 @@ test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without cla
     assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein"), `${backend} must dispatch to a real modular producer`);
     const module = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${backend}_flux3.rs`), "utf8");
     assert.match(module, /catalog\.media\(\)|\.media\(\)/);
-    assert.match(module, /\.load\(common::PROVIDER, &spec\)/);
-    assert.match(module, /common::render\(generator\.as_ref\(\)/);
+    assert.match(module, /\.load\(plan\.checkpoint\.provider, &spec\)/);
+    assert.match(module, /common::render\(&plan, generator\.as_ref\(\)/);
+    assert.ok(adapterCapturableProviders(source, relative).includes("flux3_klein_base"), `${backend} must dispatch the separate base provider`);
+    const base = plan.anchors[`flux3_klein_base:bf16:${backend}`];
+    assert.equal(base.provider, "flux3_klein_base");
+    assert.equal(base.calibrationFingerprint, `flux3-klein-base-${backend}-cfg-source-v1`);
+    assert.equal(base.fixture, `flux3-klein-base-${backend}-bf16-1024-seed26243-step50`);
+    assert.deepEqual(base.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.equal(base.loadShape, "eager_materialization");
     for (const tier of ["bf16", "q4", "q8", ...(backend === "candle" ? ["fp8r", "nvfp4"] : [])]) {
       const row = plan.anchors[`flux3_klein:${tier}:${backend}`];
       assert.ok(row);
