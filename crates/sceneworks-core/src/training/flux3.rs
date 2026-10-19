@@ -18,6 +18,8 @@ pub fn target(edit: bool) -> TrainingTarget {
         "batchSize": [1, 16], "resolutions": [256, 512, 768, 1024],
         "optimizers": ["adamw"], "networkTypes": ["lora"],
         "gradientCheckpointing": false,
+        "timestepTypes": ["uniform", "linear", "sigmoid", "logit_normal", "mode", "cosmap", "sigma_sqrt"],
+        "timestepBiases": ["balanced"], "lossTypes": ["mse"], "mixedPrecisions": ["bf16", "f32"],
         "lrSchedulers": ["constant", "linear", "cosine"],
         "outputScopes": ["project", "global"]
     }));
@@ -58,7 +60,7 @@ pub fn target(edit: bool) -> TrainingTarget {
         limits,
         ui: object(json!({
             "label": name,
-            "description": "Train additive LoRA on the undistilled FLUX.3 Klein base using native Candle or MLX. Dense publisher weights required; no quantized training, activation checkpointing, or in-training previews. Resume requires this run's unchanged checkpoint identity.",
+            "description": "Native Candle/MLX additive LoRA on the undistilled dense FLUX.3 Klein base. Edit pairs require exactly one reference per target. No quantized training, activation checkpointing or in-training previews. Resume unchanged runs from the queue; duplicate starts a separate run. Source JSON is forwarded under flux3 only; unknown keys are refused. Source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power.",
             "datasetModality": "image",
             "datasetKind": if edit { "editPairs" } else { "captioned" },
             "recommendedFor": if edit { vec!["edit"] } else { vec!["character", "style"] }
@@ -211,6 +213,31 @@ mod tests {
             assert_eq!(target.defaults.optimizer, "adamw");
         }
     }
+    #[test]
+    fn flux3_advertised_choices_are_accepted_and_unsupported_choices_refused() {
+        for edit in [false, true] {
+            let target = target(edit);
+            for (limit, key, rejected) in [
+                ("timestepTypes", "timestepType", "weighted"),
+                ("timestepBiases", "timestepBias", "high_noise"),
+                ("lossTypes", "lossType", "mae"),
+                ("mixedPrecisions", "mixedPrecision", "fp16"),
+            ] {
+                for choice in target.limits[limit].as_array().unwrap() {
+                    let mut config = target.defaults.clone();
+                    config.advanced.insert(key.into(), choice.clone());
+                    validate_training_config_for_target(&target, &config).unwrap();
+                }
+                let mut config = target.defaults.clone();
+                config.advanced.insert(key.into(), json!(rejected));
+                assert!(
+                    validate_training_config_for_target(&target, &config).is_err(),
+                    "{key}={rejected}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn flux3_namespace_is_strict_but_other_host_options_are_not_family_options() {
         let target = target(false);

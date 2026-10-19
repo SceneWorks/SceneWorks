@@ -1,11 +1,13 @@
 import React, { act } from "react";
 import workerReport from "../../training/irisDatasetReport.fixture.json";
 import { createRoot } from "react-dom/client";
+import trainingTargets from "../../../../../tests/fixtures/rust_migration_contracts/training/target-registry.json";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   configDraftFromTarget,
   configValidation,
+  trainingConfigSnapshot,
   trainingTargetLicense,
 } from "../../training/trainingConfig.js";
 import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "../../training/iris.testSupport.js";
@@ -42,12 +44,44 @@ function mount(node) {
 }
 
 it("exposes FLUX.3 source options inside the existing advanced training form", () => {
-  const selectedTarget = { id: "flux3_klein_edit_lora", name: "FLUX.3 Klein Base Edit LoRA", baseModel: "flux3_klein_base" };
-  mount(<ConfigureJobPanel {...baseProps({ selectedTarget, showAdvancedConfig: true, configDraft: { ...VALID_DRAFT, flux3Options: '{"mode":"edit","caption_dropout":0.25}' } })} />);
-  expect(container.textContent).toContain("FLUX.3 source training options");
-  expect(container.textContent).toContain("exactly one reference");
+  const selectedTarget = trainingTargets.targets.find((target) => target.id === "flux3_klein_edit_lora");
+  mount(<ConfigureJobPanel {...baseProps({ selectedTarget, showAdvancedConfig: true, configDraft: { ...VALID_DRAFT, flux3: '{"mode":"edit","caption_dropout":0.25}' } })} />);
+  expect(container.textContent).toContain("Source options");
   const source = Array.from(container.querySelectorAll("textarea")).find((input) => input.value.includes("caption_dropout"));
-  expect(source.closest("fieldset").textContent).toContain("Source options (JSON)");
+  expect(source.title).toBe(selectedTarget.ui.description);
+  expect(source.title).toContain("exactly one reference");
+  expect(source.closest("label").textContent).toContain("Source options (JSON)");
+});
+
+it.each(["flux3_klein_lora", "flux3_klein_edit_lora"])("renders native choices and submits selected values for %s", (id) => {
+  const selectedTarget = trainingTargets.targets.find((target) => target.id === id);
+  const activeDataset = { id: "ds_flux3", name: "Synthetic fixtures" };
+  let draft = configDraftFromTarget(selectedTarget, activeDataset, ["auto"]);
+  mount(<ConfigureJobPanel {...baseProps({ selectedTarget, activeDataset, showAdvancedConfig: true, configDraft: draft, updateConfigDraft: (key, value) => { draft = { ...draft, [key]: value }; } })} />);
+  const menu = (name) => Array.from(container.querySelectorAll("label")).find((label) => label.textContent.trim().startsWith(name)).querySelector("select");
+  const values = (select) => Array.from(select.options, (option) => option.value);
+  const timestep = menu("Timestep type");
+  expect(values(timestep)).toEqual(["uniform", "linear", "sigmoid", "logit_normal", "mode", "cosmap", "sigma_sqrt"]);
+  expect(values(timestep)).not.toContain("weighted");
+  expect(values(menu("Timestep bias"))).toEqual(["balanced"]);
+  expect(menu("Timestep bias").disabled).toBe(true);
+  expect(values(menu("Loss type"))).toEqual(["mse"]);
+  expect(menu("Loss type").disabled).toBe(true);
+  const precision = menu("Precision");
+  expect(precision).not.toBeNull();
+  expect(values(precision)).toEqual(["bf16", "f32"]);
+  for (const choice of values(precision)) {
+    act(() => { precision.value = choice; precision.dispatchEvent(new window.Event("change", { bubbles: true })); });
+    expect(trainingConfigSnapshot({ activeDataset, configDraft: draft, selectedTarget }).config.advanced.mixedPrecision).toBe(choice);
+  }
+  for (const choice of values(timestep)) {
+    act(() => { timestep.value = choice; timestep.dispatchEvent(new window.Event("change", { bubbles: true })); });
+    const body = trainingConfigSnapshot({ activeDataset, configDraft: draft, selectedTarget });
+    expect(body.config.advanced.timestepType).toBe(choice);
+    expect(body.config.advanced.timestepBias).toBe("balanced");
+    expect(body.config.advanced.lossType).toBe("mse");
+    expect(body.config.advanced.flux3.mode).toBe(id.includes("edit") ? "edit" : "captioned");
+  }
 });
 
 const noop = () => {};

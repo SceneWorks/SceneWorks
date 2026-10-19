@@ -690,14 +690,26 @@ pub(crate) async fn duplicate_job(
     if let Some(fresh_output) = fresh_output {
         payload.payload_changes.extend(fresh_output);
     }
+    let fresh_job_id = if let Some((id, owned_output)) =
+        crate::training::fresh_flux3_training_duplicate(&state, &job_id, &payload.payload_changes)
+            .await?
+    {
+        // Merge server-owned bindings last: even a complete caller-supplied plan cannot restore the
+        // old output directory, manifest id or resume flag after freshening this duplicate.
+        payload.payload_changes.extend(owned_output);
+        Some(id)
+    } else {
+        None
+    };
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.duplicate_job(
-            &job_id,
-            DuplicateJob {
-                payload_changes: payload.payload_changes,
-                requested_gpu: payload.requested_gpu,
-            },
-        )
+        let request = DuplicateJob {
+            payload_changes: payload.payload_changes,
+            requested_gpu: payload.requested_gpu,
+        };
+        match fresh_job_id {
+            Some(id) => store.duplicate_job_with_id(id, &job_id, request),
+            None => store.duplicate_job(&job_id, request),
+        }
     })
     .await?;
     publish(&state, "job.updated", &job);

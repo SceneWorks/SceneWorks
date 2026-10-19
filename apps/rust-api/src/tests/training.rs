@@ -6876,10 +6876,14 @@ fn flux3_training_base_requires_exact_publisher_revision_and_receipt() {
     let converted = temp.path().join("models").join("mlx").join(BASE_ID);
     std::fs::create_dir_all(&converted).unwrap();
     std::fs::write(converted.join("config.json"), "{}").unwrap();
+    let placeholder = temp.path().join("models").join(BASE_ID);
+    std::fs::create_dir_all(&placeholder).unwrap();
+    std::fs::write(placeholder.join("config.json"), "{}").unwrap();
     assert_eq!(
         crate::training::resolve_base_model_path(&target, temp.path()),
-        pin.display().to_string()
+        placeholder.display().to_string()
     );
+    assert_ne!(placeholder, pin, "unreceipted HF bytes are never selected");
     assert!(matches!(
         crate::training::training_base_model_status(temp.path(), &target),
         crate::training::TrainingBaseStatus::Missing
@@ -6903,9 +6907,110 @@ fn flux3_training_base_requires_exact_publisher_revision_and_receipt() {
 
 #[tokio::test]
 async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
+    async fn duplicate_isolated(
+        app: &axum::Router,
+        source_id: &str,
+        checkpoint: &std::path::Path,
+    ) -> Value {
+        let (_, before) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{source_id}"),
+            Value::Null,
+        )
+        .await;
+        assert!(
+            ["running", "queued"].contains(&before["status"].as_str().unwrap()),
+            "{before}"
+        );
+        let source_plan = &before["payload"]["plan"];
+        let bytes = std::fs::read(checkpoint).unwrap();
+        // Explicitly resend the old bindings and a resume request: server-owned duplicate bindings
+        // must win in the ACTUALLY STORED job, not just in a pre-validation temporary value.
+        let mut requested_plan = source_plan.clone();
+        requested_plan["config"]["advanced"]["resume"] = json!(true);
+        let (status, duplicate) = request(app.clone(), "POST", &format!("/api/v1/jobs/{source_id}/duplicate"), json!({"payloadChanges":{"plan":requested_plan,"manifestEntry":before["payload"]["manifestEntry"]}})).await;
+        assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+        let duplicate_id = duplicate["id"].as_str().unwrap();
+        assert_ne!(duplicate_id, source_id);
+        let (_, stored) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{duplicate_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(stored["payload"], duplicate["payload"]);
+        let plan = &stored["payload"]["plan"];
+        let entry = &stored["payload"]["manifestEntry"];
+        let id = entry["id"].as_str().unwrap();
+        assert_ne!(
+            id,
+            before["payload"]["manifestEntry"]["id"].as_str().unwrap()
+        );
+        assert_eq!(plan["jobId"], duplicate_id);
+        assert_eq!(plan["provenance"]["sourceJobId"], duplicate_id);
+        assert_eq!(entry["provenance"]["trainingJobId"], duplicate_id);
+        assert_eq!(plan["output"]["loraId"], id);
+        assert_eq!(plan["provenance"]["outputLoraId"], id);
+        assert_ne!(
+            plan["output"]["outputDir"],
+            source_plan["output"]["outputDir"]
+        );
+        assert_eq!(
+            std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap())
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            plan["output"]["fileName"],
+            source_plan["output"]["fileName"]
+        );
+        assert_eq!(entry["files"][0], plan["output"]["fileName"]);
+        assert_eq!(entry["source"]["path"], format!("loras/{id}"));
+        assert_eq!(plan["target"], source_plan["target"]);
+        assert_eq!(plan["dataset"], source_plan["dataset"]);
+        let mut expected_config = source_plan["config"].clone();
+        expected_config["advanced"]["resume"] = json!(false);
+        assert_eq!(plan["config"], expected_config);
+        assert_eq!(plan["provenance"]["configSnapshot"], expected_config);
+        assert_eq!(entry["provenance"]["configSnapshot"], expected_config);
+        assert!(stored["result"].get("resumeCheckpointStep").is_none());
+        assert!(
+            !std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap())
+                .join(checkpoint.file_name().unwrap())
+                .exists()
+        );
+        assert_eq!(std::fs::read(checkpoint).unwrap(), bytes);
+        let (_, after) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{source_id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(after["payload"], before["payload"]);
+        assert_eq!(after["result"], before["result"]);
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{duplicate_id}/cancel"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        stored
+    }
     let _env = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
-    let app = create_app(test_settings(&temp)).unwrap();
+    let settings = test_settings(&temp);
+    let placeholder = settings.data_dir.join("models").join("flux3_klein_base");
+    std::fs::create_dir_all(&placeholder).unwrap();
+    std::fs::write(placeholder.join("config.json"), "{}").unwrap();
+    let app = create_app(settings).unwrap();
     let (_, project) = request(
         app.clone(),
         "POST",
@@ -6948,6 +7053,14 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
             .insert("caption_dropout".into(), json!(0.25));
         let mut body = json!({"targetId":target.id, "datasetId":dataset["id"], "config":config, "outputName":"Flux3 Adapter", "dryRun":true});
         let path = format!("/api/v1/projects/{project}/training/jobs");
+        let mut ordinary = body.clone();
+        ordinary["dryRun"] = json!(false);
+        let (status, missing) = request(app.clone(), "POST", &path, ordinary).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+        assert!(
+            missing.to_string().contains("not installed"),
+            "a dry-plan placeholder must not authorize training: {missing}"
+        );
         let (status, job) = request(app.clone(), "POST", &path, body.clone()).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
         let plan = &job["payload"]["plan"];
@@ -6980,6 +7093,18 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         assert!(error.to_string().contains("queue entry"), "{error}");
         let id = job["id"].as_str().unwrap();
         claim_training_job_as_mlx_worker(&app, id).await;
+        // Declared synthetic host checkpoint: no real model/training claim is made by this API
+        // filename-discovery fixture. The worker test covers native identity/admission separately.
+        let output = std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap());
+        std::fs::create_dir_all(output).unwrap();
+        let stem =
+            sceneworks_worker::training_resume_stem(plan["output"]["fileName"].as_str().unwrap());
+        let checkpoint = output.join(format!("{stem}-step000100.resume.safetensors"));
+        write_test_safetensors(&checkpoint);
+        let checkpoint_bytes = std::fs::read(&checkpoint).unwrap();
+        let (status, progress) = request(app.clone(), "POST", &format!("/api/v1/jobs/{id}/progress"), json!({"status":"running","stage":"training","progress":0.1,"message":"Synthetic checkpoint saved","workerId":TEST_TRAINING_WORKER_ID,"result":{"resumeCheckpointStep":100}})).await;
+        assert_eq!(status, StatusCode::OK, "{progress}");
+        let active_duplicate = duplicate_isolated(&app, id, &checkpoint).await;
         let (status, _) = request(
             app.clone(),
             "POST",
@@ -6991,17 +7116,7 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        if edit {
-            // Host plumbing fixture only: native checkpoint contents/identity are validated by S7's
-            // native loader, not this filename-discovery/API test.
-            let output = std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap());
-            std::fs::create_dir_all(output).unwrap();
-            let stem = sceneworks_worker::training_resume_stem(
-                plan["output"]["fileName"].as_str().unwrap(),
-            );
-            let checkpoint = output.join(format!("{stem}-step000100.resume.safetensors"));
-            write_test_safetensors(&checkpoint);
-            let checkpoint_bytes = std::fs::read(&checkpoint).unwrap();
+        {
             for (pointer, changed) in [
                 ("/target/baseModel", json!("flux3_klein")),
                 ("/config/advanced/flux3/caption_dropout", json!(0.6)),
@@ -7040,6 +7155,25 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
                 resumed["payload"]["manifestEntry"]["baseModel"],
                 "flux3_klein_base"
             );
+            let resumed_id = resumed["id"].as_str().unwrap();
+            assert_eq!(
+                resumed["payload"]["plan"]["config"]["advanced"]["resume"],
+                true
+            );
+            let resumed_duplicate = duplicate_isolated(&app, resumed_id, &checkpoint).await;
+            assert_ne!(
+                resumed_duplicate["payload"]["plan"]["output"]["loraId"],
+                active_duplicate["payload"]["plan"]["output"]["loraId"]
+            );
+            let (status, _) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{resumed_id}/cancel"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
         }
     }
 }

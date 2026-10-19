@@ -822,8 +822,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
           ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
         }
       : {}),
-    ...(target?.baseModel === "flux3_klein_base"
-      ? { flux3Options: JSON.stringify(advanced.flux3 ?? target?.defaults?.advanced?.flux3 ?? {}, null, 2) }
+    ...(advanced.flux3 !== undefined
+      ? { flux3: JSON.stringify(advanced.flux3, null, 2) }
       : {}),
     // The Iris engine options bag (sc-25685) plus the previous-run pickers. Seeded from the
     // preset's bag when it has one, else the target's.
@@ -967,7 +967,7 @@ export function trainingLicenseAckKey(targetId) {
 //
 // sc-10492 dropped both as noise; sc-10501 brought the errors back and this is where
 // that distinction became the app's vocabulary rather than one screen's helper.
-function flux3OptionsValue(text) {
+function flux3Value(text) {
   try { return JSON.parse(text || "{}"); } catch { return text; }
 }
 
@@ -986,10 +986,10 @@ export function configValidation(
   } = {},
 ) {
   const issues = [];
-  if (selectedTarget?.baseModel === "flux3_klein_base") {
-    const options = flux3OptionsValue(configDraft.flux3Options);
-    if (!options || typeof options !== "object" || Array.isArray(options)) {
-      issues.push(issue.requirement("flux3Options", "FLUX.3 source options must be a JSON object"));
+  if (selectedTarget?.family === "flux3") {
+    // JSON.parse produces ordinary objects; arrays/scalars are not source-option bags.
+    if (flux3Value(configDraft.flux3)?.constructor !== Object) {
+      issues.push(issue.requirement("flux3", "JSON object required"));
     }
   }
   // The one field the run's subject-mask requirement is reported on (the API's rule).
@@ -1294,7 +1294,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     : null;
   const advanced = compactObject({
     ...defaultAdvanced,
-    ...(selectedTarget?.baseModel === "flux3_klein_base" ? { flux3: flux3OptionsValue(configDraft.flux3Options) } : {}),
+    ...(selectedTarget?.family === "flux3" ? { flux3: flux3Value(configDraft.flux3) } : {}),
     networkType,
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,

@@ -1479,10 +1479,17 @@
           16
         ],
         "gradientCheckpointing": false,
+        "lossTypes": [
+          "mse"
+        ],
         "lrSchedulers": [
           "constant",
           "linear",
           "cosine"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
         ],
         "networkTypes": [
           "lora"
@@ -1507,12 +1514,24 @@
         "steps": [
           1,
           100000
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "timestepTypes": [
+          "uniform",
+          "linear",
+          "sigmoid",
+          "logit_normal",
+          "mode",
+          "cosmap",
+          "sigma_sqrt"
         ]
       },
       "ui": {
         "datasetKind": "captioned",
         "datasetModality": "image",
-        "description": "Train additive LoRA on the undistilled FLUX.3 Klein base using native Candle or MLX. Dense publisher weights required; no quantized training, activation checkpointing, or in-training previews. Resume requires this run's unchanged checkpoint identity.",
+        "description": "Native Candle/MLX additive LoRA on the undistilled dense FLUX.3 Klein base. Edit pairs require exactly one reference per target. No quantized training, activation checkpointing or in-training previews. Resume unchanged runs from the queue; duplicate starts a separate run. Source JSON is forwarded under flux3 only; unknown keys are refused. Source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power.",
         "label": "FLUX.3 Klein Base LoRA",
         "recommendedFor": [
           "character",
@@ -1568,12 +1587,19 @@
           16
         ],
         "gradientCheckpointing": false,
+        "lossTypes": [
+          "mse"
+        ],
         "lrSchedulers": [
           "constant",
           "linear",
           "cosine"
         ],
         "maxReferenceImages": 1,
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
         "networkTypes": [
           "lora"
         ],
@@ -1597,12 +1623,24 @@
         "steps": [
           1,
           100000
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "timestepTypes": [
+          "uniform",
+          "linear",
+          "sigmoid",
+          "logit_normal",
+          "mode",
+          "cosmap",
+          "sigma_sqrt"
         ]
       },
       "ui": {
         "datasetKind": "editPairs",
         "datasetModality": "image",
-        "description": "Train additive LoRA on the undistilled FLUX.3 Klein base using native Candle or MLX. Dense publisher weights required; no quantized training, activation checkpointing, or in-training previews. Resume requires this run's unchanged checkpoint identity.",
+        "description": "Native Candle/MLX additive LoRA on the undistilled dense FLUX.3 Klein base. Edit pairs require exactly one reference per target. No quantized training, activation checkpointing or in-training previews. Resume unchanged runs from the queue; duplicate starts a separate run. Source JSON is forwarded under flux3 only; unknown keys are refused. Source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power.",
         "label": "FLUX.3 Klein Base Edit LoRA",
         "recommendedFor": [
           "edit"

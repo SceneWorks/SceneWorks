@@ -8707,7 +8707,15 @@ mod tests {
         std::fs::create_dir_all(image.parent().unwrap()).unwrap();
         std::fs::write(&image, b"synthetic path fixture").unwrap();
         std::fs::write(&reference, b"synthetic reference fixture").unwrap();
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
         let settings = test_settings(dir.path());
+        let placeholder = dir.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&placeholder).unwrap();
+        std::fs::write(placeholder.join("config.json"), "{}").unwrap();
         for edit in [false, true] {
             let target = sceneworks_core::training::flux3::target(edit);
             let mut value = plan_json(
@@ -8729,6 +8737,14 @@ mod tests {
                     json!([reference.display().to_string()]);
             }
             let mut plan = parse(value);
+            let mut missing_receipt = plan.clone();
+            missing_receipt.target.base_model_path = placeholder.display().to_string();
+            let error = TrainerLoadInputs::resolve(&settings, &missing_receipt, "flux3_klein_base")
+                .err()
+                .expect("a dry-plan placeholder must never load as an installed base");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(message) if message.contains("receipt-backed"))
+            );
             let mut omitted = plan.clone();
             for key in ["timestepType", "weightDecay", "flux3"] {
                 omitted.config.advanced.remove(key);
@@ -8744,6 +8760,32 @@ mod tests {
             let mut prepared = PreparedTrainingInputs::default();
             let mut request =
                 training_request_from_plan(&settings, &plan, &mut prepared, false).unwrap();
+            for choice in target.limits["timestepTypes"].as_array().unwrap() {
+                let mut choice_plan = plan.clone();
+                choice_plan
+                    .config
+                    .advanced
+                    .insert("timestepType".into(), choice.clone());
+                let choice_request =
+                    training_request_from_plan(&settings, &choice_plan, &mut prepared, false)
+                        .unwrap();
+                let name = choice.as_str().unwrap();
+                assert_eq!(choice_request.config.timestep_type, name);
+                let expected = match name {
+                    "uniform" | "linear" => gen_core::flux3::training::Weighting::None,
+                    "sigmoid" | "logit_normal" => gen_core::flux3::training::Weighting::LogitNormal,
+                    "mode" => gen_core::flux3::training::Weighting::Mode,
+                    "cosmap" => gen_core::flux3::training::Weighting::Cosmap,
+                    "sigma_sqrt" => gen_core::flux3::training::Weighting::SigmaSqrt,
+                    _ => panic!("unimplemented advertised timestep {name}"),
+                };
+                assert_eq!(
+                    gen_core::flux3::training::options::TrainingOptions::parse(&choice_request)
+                        .unwrap()
+                        .weighting,
+                    expected
+                );
+            }
             assert_eq!(engine_trainer_id(&plan), Some("flux3_klein_base"));
             assert!(request.config.resume);
             assert_eq!(request.config.rank, 8);
@@ -8846,6 +8888,54 @@ mod tests {
                 TrainingCursor::from_metadata(&read["cursor"]).unwrap(),
                 cursor
             );
+            // A product duplicate forwards a FRESH checkpoint namespace and resume=false. Even
+            // native checkpoint lookup/owned restart cleanup there cannot touch the source bundle.
+            let mut duplicate_plan = plan.clone();
+            duplicate_plan.output.lora_id = format!("lora_duplicate_{edit}");
+            duplicate_plan.output.output_dir = dir
+                .path()
+                .join("loras")
+                .join(&duplicate_plan.output.lora_id)
+                .display()
+                .to_string();
+            duplicate_plan
+                .config
+                .advanced
+                .insert("resume".into(), json!(false));
+            std::fs::create_dir_all(&duplicate_plan.output.output_dir).unwrap();
+            let duplicate =
+                training_request_from_plan(&settings, &duplicate_plan, &mut prepared, false)
+                    .unwrap();
+            assert!(!duplicate.config.resume);
+            assert_eq!(
+                duplicate.output_dir,
+                std::fs::canonicalize(&duplicate_plan.output.output_dir).unwrap()
+            );
+            assert_ne!(duplicate.output_dir, request.output_dir);
+            assert_eq!(duplicate.file_name, request.file_name);
+            assert_eq!(
+                duplicate.config.model_options,
+                original.config.model_options
+            );
+            assert_eq!(
+                controller::find_resume(
+                    &duplicate.output_dir,
+                    stem,
+                    &observed_identity(&duplicate),
+                    policy,
+                    "flux3-native-training-resume-v1",
+                    duplicate.config.seed,
+                    &duplicate.cancel
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                crate::paths::remove_training_resume_bundles(&duplicate.output_dir, stem).unwrap(),
+                0
+            );
+            assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+            assert_eq!(admit(&resumed_identity).unwrap(), Some(saved.clone()));
             let mut wrong_model = resumed_identity.clone();
             wrong_model.base_revision = "f".repeat(40);
             assert!(matches!(

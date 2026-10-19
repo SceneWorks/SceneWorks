@@ -1862,16 +1862,18 @@ describe("FLUX.3 existing training targets", () => {
     expect(target).toBeDefined();
     const dataset = { id: "ds_flux3", name: "Synthetic fixtures" };
     const draft = configDraftFromTarget(target, dataset, ["auto"]);
-    expect(JSON.parse(draft.flux3Options).mode).toBe(id.includes("edit") ? "edit" : "captioned");
-    draft.flux3Options = JSON.stringify({ mode: id.includes("edit") ? "edit" : "captioned", caption_dropout: 0.3, max_sequence_length: 96, random_flip: true });
+    expect(JSON.parse(draft.flux3).mode).toBe(id.includes("edit") ? "edit" : "captioned");
+    draft.flux3 = JSON.stringify({ mode: id.includes("edit") ? "edit" : "captioned", caption_dropout: 0.3, max_sequence_length: 96, random_flip: true });
     const body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target });
     expect(body.targetId).toBe(id);
     expect(body.config.optimizer).toBe("adamw");
     expect(body.config.advanced.gradientCheckpointing).toBe(false);
-    expect(body.config.advanced.flux3).toEqual(JSON.parse(draft.flux3Options));
+    expect(body.config.advanced.flux3).toEqual(JSON.parse(draft.flux3));
     expect(body.config.advanced.sampleEvery).toBe(0);
-    draft.flux3Options = "{bad json";
-    expect(configValidation(draft, { activeDataset: dataset, selectedTarget: target }).some((issue) => issue.field === "flux3Options")).toBe(true);
-    expect(() => trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target })).not.toThrow();
+    for (const invalid of ["{bad json", "null", "[]", "42", '"text"']) {
+      draft.flux3 = invalid;
+      expect(configValidation(draft, { activeDataset: dataset, selectedTarget: target }).some((issue) => issue.field === "flux3")).toBe(true);
+      expect(() => trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target })).not.toThrow();
+    }
   });
 });
