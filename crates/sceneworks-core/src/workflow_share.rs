@@ -2274,6 +2274,19 @@ fn build_share_of_kind(
     // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
     // guard — which is exactly how the top-level labels below escaped the path check before.
     let is_video = kind == WORKFLOW_KIND_VIDEO;
+    // FLUX.3 reference dimensions are authored OPTIONS. Falling back to the produced crop would
+    // turn automatic/one-sided sizing into a different request (and an odd crop may not be on-grid).
+    let reference_output = (!is_video && crate::image_request::flux3::is_model(&model))
+        .then(|| crate::image_request::flux3::parse(job_payload).ok())
+        .flatten()
+        .filter(|intent| !intent.asset_ids.is_empty());
+    let (width, height) = match reference_output {
+        Some(intent) => (intent.width, intent.height),
+        None => (
+            u32_field("width").or(facts.width),
+            u32_field("height").or(facts.height),
+        ),
+    };
     reduce_workflow_share(WorkflowShare {
         kind: kind.to_owned(),
         schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
@@ -2286,8 +2299,8 @@ fn build_share_of_kind(
         prompt,
         negative_prompt,
         seed,
-        width: u32_field("width").or(facts.width),
-        height: u32_field("height").or(facts.height),
+        width,
+        height,
         count: u32_field("count"),
         // Video-only, and read off the payload rather than off the encoded file: these are the ASK
         // (see the field docs). Gated on the kind so an image envelope cannot grow a `fps` from a
@@ -3298,6 +3311,45 @@ fn field_from_serde_error(error: &serde_json::Error) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn flux3_reference_shares_preserve_optional_sides_not_output_crops() {
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            let facts = WorkflowAssetFacts {
+                mode: "edit_image".to_owned(),
+                model: model.to_owned(),
+                prompt: "change the sky".to_owned(),
+                negative_prompt: String::new(),
+                seed: 71,
+                width: Some(83),
+                height: Some(67),
+            };
+            for (sides, expected) in [
+                (json!({}), (None, None)),
+                (json!({"width":16}), (Some(16), None)),
+                (json!({"height":48}), (None, Some(48))),
+                (json!({"width":16,"height":48}), (Some(16), Some(48))),
+            ] {
+                let mut payload = json!({"model":model,"mode":"edit_image","referenceAssetIds":["owned-a","owned-a"]}).as_object().unwrap().clone();
+                payload.extend(sides.as_object().unwrap().clone());
+                let share = build_workflow_share_from(&facts, &payload);
+                assert_eq!((share.width, share.height), expected, "{model}: {sides}");
+                let encoded = serde_json::to_value(&share).unwrap();
+                let decoded: WorkflowShare = serde_json::from_value(encoded).unwrap();
+                assert_eq!((decoded.width, decoded.height), expected);
+            }
+            let plain = json!({"model":model,"mode":"text_to_image"})
+                .as_object()
+                .unwrap()
+                .clone();
+            let share = build_workflow_share_from(&facts, &plain);
+            assert_eq!(
+                (share.width, share.height),
+                (Some(83), Some(67)),
+                "legacy non-reference fallback is unchanged"
+            );
+        }
+    }
 
     /// The keys of a JSON object, sorted, so an assertion about WHICH keys survived the
     /// allow-list cannot accidentally assert the order they came out in.

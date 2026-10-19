@@ -79,6 +79,8 @@ pub(crate) enum CandleImageLane {
     /// refuses `edit_image` and every conditioning carrier for EVERY family — the same reason
     /// `ZImageEdit` exists for an id that is itself a candle txt2img id.
     QwenImage21Edit,
+    /// FLUX.3's ordered AE-only conditioning, served by the generic registered generator.
+    Flux3Reference,
     BooguImg2Img,
     KreaEdit,
     BerniniEdit,
@@ -215,6 +217,11 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     // so this lane's shape predicate is literally the MLX one — one request contract, one gate, two
     // backends. Placed with the other registry editors, above the generic txt2img fall-through,
     // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
+    CandleImageRoute {
+        lane: CandleImageLane::Flux3Reference,
+        models: ModelMatch::Family(crate::image_request::flux3::is_model),
+        shape: flux3_reference_candle_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
         // Turbo (sc-25907) is the same request contract under a second engine id.
@@ -504,6 +511,12 @@ fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> boo
 /// publisher FP8R/NVFP4. Which WORKER may run a publisher package (its device floor) is the
 /// scheduler's `required_capability`, not this lane predicate. A malformed or conflicting
 /// precision request is refused here by name.
+fn flux3_reference_candle_eligible(payload: &Map<String, Value>) -> bool {
+    crate::image_request::flux3::parse(payload).is_ok_and(|request| !request.asset_ids.is_empty())
+        && flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
+        && flux3_surface_eligible(payload)
+}
+
 fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
     FLUX3_TIERED_MODEL_IDS.contains(&model)
         && !(flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)

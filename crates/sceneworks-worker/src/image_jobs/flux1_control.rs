@@ -388,6 +388,7 @@ async fn generate_flux1_dev_control_stream(
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX1_DEV_CONTROL_ENGINE_ID,

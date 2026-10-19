@@ -969,6 +969,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &mut merged,
         )
         .await?;
+        crate::generation::validate_flux3_reference_payload(
+            state.clone(),
+            project_id.as_deref(),
+            &merged,
+        )
+        .await?;
         validate_prompt_enhancement_payload(&merged)?;
 
         // Retry and duplicate are image-job creation boundaries too. The canonicalizer above

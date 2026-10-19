@@ -3606,13 +3606,30 @@ fn flux3_prompt_enhancement_validates_worker_shape_without_requiring_a_local_gpu
             json!({"referenceAssetId":"ref-1"}),
             json!({"referenceAssetIds":["ref-1"]}),
         ] {
-            let mut invalid = enabled.clone();
-            invalid.extend(carrier.as_object().unwrap().clone());
-            assert!(validate_prompt_enhancement_payload(&invalid)
-                .unwrap_err()
-                .detail
-                .contains("cannot include source or reference"));
+            for mode in ["text_to_image", "edit_image", "character_image"] {
+                let mut reference = payload(mode, true);
+                reference.extend(carrier.as_object().unwrap().clone());
+                validate_prompt_enhancement_payload(&reference).unwrap();
+            }
         }
+        let mut ten = payload("edit_image", true);
+        ten.insert(
+            "referenceAssetIds".to_owned(),
+            json!(vec!["duplicate-slot"; 10]),
+        );
+        validate_prompt_enhancement_payload(&ten).unwrap();
+        ten.insert(
+            "referenceAssetIds".to_owned(),
+            json!(vec!["duplicate-slot"; 11]),
+        );
+        assert!(validate_prompt_enhancement_payload(&ten).is_err());
+        let mut strength = payload("edit_image", true);
+        strength.insert("referenceAssetId".to_owned(), json!("ref-1"));
+        strength.get_mut("advanced").unwrap()["referenceStrength"] = json!(1.0);
+        assert!(validate_prompt_enhancement_payload(&strength)
+            .unwrap_err()
+            .detail
+            .contains("unsupported"));
         let mut untrusted = enabled;
         untrusted.get_mut("advanced").unwrap()["promptEnhancement"] =
             json!({"effectivePrompt":"injected"});
@@ -7564,6 +7581,203 @@ async fn image_job_route_threads_upscale_contract_when_enabled() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error["detail"], "upscale.factor must be 2 or 4");
+}
+
+#[tokio::test]
+async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_through_duplicate()
+{
+    let _hf = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let models = [("flux3_klein", "black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68", 16, 0.0),
+        ("flux3_klein_base", "black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", 50, 3.5)]
+        .into_iter().map(|(id,repo,revision,steps,guidance)| json!({
+            "id":id,"name":id,"family":"flux3","type":"image","adapter":"mlx_flux3",
+            "capabilities":["text_to_image","edit_image","image_to_image","character_image"],
+            "downloads":[{"provider":"huggingface","repo":repo,"revision":revision,"variant":"bf16","files":[],"default":true,"estimatedSizeBytes":1024}],
+            "paths":{},"defaults":{"steps":steps,"guidanceScale":guidance,"resolution":"1024x1024","count":1},
+            "limits":{"minDimension":64,"maxDimension":4096,"requiresDimensionsMultipleOf":16,"maxReferenceAssets":10},
+            "ui":{"label":id}
+        })).collect::<Vec<_>>();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"models":models})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        br#"{"schemaVersion":1,"models":[]}"#,
+    )
+    .unwrap();
+    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"FLUX3 references"}),
+    )
+    .await;
+    let project_id = project["id"].as_str().unwrap();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+        83,
+        67,
+        image::Rgba([201, 77, 13, 128]),
+    ))
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
+    let png = png.into_inner();
+    let mut ids = Vec::new();
+    for name in ["first.png", "second.png"] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            &png,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        ids.push(asset["id"].as_str().unwrap().to_owned());
+    }
+    let (_, foreign) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Other references"}),
+    )
+    .await;
+    let (_, foreign_asset) = request_multipart_upload(
+        app.clone(),
+        &format!(
+            "/api/v1/projects/{}/assets",
+            foreign["id"].as_str().unwrap()
+        ),
+        "foreign.png",
+        "image/png",
+        &png,
+    )
+    .await;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let body = |extra: Value| {
+            let mut value=json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"change the sky","count":1,"referenceAssetIds":[ids[0],ids[1],ids[0]]}).as_object().unwrap().clone();
+            value.extend(extra.as_object().unwrap().clone());
+            Value::Object(value)
+        };
+        for sides in [
+            json!({}),
+            json!({"width":1024}),
+            json!({"height":64}),
+            json!({"width":1024,"height":80}),
+            json!({"width":48,"height":64}),
+            json!({"width":16,"height":64}),
+        ] {
+            let (status, job) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                body(sides.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{model}: {job}");
+            assert_eq!(
+                job["payload"]["referenceAssetIds"],
+                json!([ids[0], ids[1], ids[0]])
+            );
+            assert_eq!(job["payload"].get("width"), sides.get("width"));
+            assert_eq!(job["payload"].get("height"), sides.get("height"));
+            for action in ["duplicate", "retry"] {
+                let route = format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
+                let (status, replay) =
+                    request(app.clone(), "POST", &route, json!({"payloadChanges":{}})).await;
+                assert_eq!(status, StatusCode::CREATED, "{action}: {replay}");
+                assert_eq!(replay["payload"].get("width"), sides.get("width"));
+                assert_eq!(replay["payload"].get("height"), sides.get("height"));
+                assert_eq!(
+                    replay["payload"]["referenceAssetIds"],
+                    job["payload"]["referenceAssetIds"]
+                );
+                for patch in [
+                    json!({"projectId":foreign["id"]}),
+                    json!({"referenceAssetIds":[foreign_asset["id"]]}),
+                    json!({"referenceAssetIds":[ids[0],null]}),
+                    json!({"referenceAssetIds":vec![ids[0].clone();11]}),
+                ] {
+                    let (status, error) =
+                        request(app.clone(), "POST", &route, json!({"payloadChanges":patch})).await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {error}");
+                }
+            }
+        }
+        let (status, ten) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body(json!({"referenceAssetIds":vec![ids[0].clone();10]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{ten}");
+        assert_eq!(
+            ten["payload"]["referenceAssetIds"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        for invalid in [
+            json!({"referenceAssetIds":vec![ids[0].clone();11]}),
+            json!({"referenceAssetIds":[foreign_asset["id"]]}),
+            json!({"referenceAssetIds":["missing-owned-image"]}),
+            json!({"strength":1.0}),
+            json!({"advanced":{"referenceStrength":1.0}}),
+        ] {
+            let (status, error) =
+                request(app.clone(), "POST", "/api/v1/image/jobs", body(invalid)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        }
+        // These must survive the public DTO and reach family validation, including snake-case
+        // IP-Adapter scale. A pure parser test cannot catch serde silently dropping a carrier.
+        for carrier in [
+            "strength",
+            "referenceStrength",
+            "denoisingStrength",
+            "imageStrength",
+            "ip_adapter_scale",
+            "ipAdapterScale",
+        ] {
+            let mut extra = serde_json::Map::new();
+            extra.insert(carrier.to_owned(), json!(1.0));
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                body(Value::Object(extra)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{model}/{carrier}: {error}"
+            );
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(carrier)),
+                "{carrier}: {error}"
+            );
+        }
+        let (status, plain) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            body(json!({"mode":"text_to_image","referenceAssetIds":[]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{plain}");
+        assert_eq!(plain["payload"]["width"], 1024);
+        assert_eq!(plain["payload"]["height"], 1024);
+    }
 }
 
 #[tokio::test]

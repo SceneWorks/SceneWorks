@@ -52,6 +52,8 @@ use gen_core::{
 // These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
 // this same implementation without pulling in an accelerator runtime bundle.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) mod flux3_references;
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod prompt_upsampling;
 // sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
 // check compiles on every lane, so the worker trust-boundary refusal holds even without a native
@@ -386,14 +388,17 @@ fn validate_prompt_enhancement_route(
     settings: &Settings,
 ) -> WorkerResult<()> {
     let mode = request.mode.as_str();
+    let flux3 = sceneworks_core::image_request::flux3::is_model(&request.model);
 
     #[cfg(target_os = "macos")]
     {
         let _ = settings;
-        if !matches!(
-            mode,
-            "text_to_image" | "edit_image" | "character_image" | "style_variations"
-        ) {
+        if !flux3
+            && !matches!(
+                mode,
+                "text_to_image" | "edit_image" | "character_image" | "style_variations"
+            )
+        {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on MLX does not support image mode {mode}"
             )));
@@ -408,7 +413,7 @@ fn validate_prompt_enhancement_route(
                     .to_owned(),
             ));
         }
-        if !matches!(mode, "text_to_image" | "edit_image") {
+        if !flux3 && !matches!(mode, "text_to_image" | "edit_image") {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
             )));
@@ -420,7 +425,7 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     {
-        let _ = (mode, settings);
+        let _ = (mode, settings, flux3);
         Err(WorkerError::InvalidPayload(
             "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
         ))
@@ -431,13 +436,11 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     {
-        if matches!(request.model.as_str(), "flux3_klein" | "flux3_klein_base")
-            && mode != "text_to_image"
-        {
-            return Err(WorkerError::InvalidPayload(
-                "FLUX 3 prompt enhancement currently requires the native text_to_image route"
-                    .to_owned(),
-            ));
+        if flux3 {
+            // The renderer receives the same immutable original references as PUP. Validate the
+            // live slot identity and source size intent here without decoding or loading weights.
+            let _ = flux3_references::validated_request(request)?;
+            return Ok(());
         }
         if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
             return Err(WorkerError::InvalidPayload(
@@ -1678,6 +1681,7 @@ pub(crate) async fn run_image_generate_job(
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
                 | CandleImageRoute::QwenImage21Edit
+                | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
                 | CandleImageRoute::CandleTxt2Img => {
@@ -3038,8 +3042,10 @@ pub(crate) fn write_image_asset(
         "mimeType": "image/png",
         "width": width,
         "height": height,
-        "normalizedWidth": request.width,
-        "normalizedHeight": request.height,
+        // Reference-derived/cropped output is not the original plan's generic numeric default.
+        // Authored nullable sides live separately in the resolver-owned reference fact.
+        "normalizedWidth": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { width } else { request.width },
+        "normalizedHeight": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { height } else { request.height },
         "count": plan.image_count,
         "family": plan.family,
         "seed": seed,

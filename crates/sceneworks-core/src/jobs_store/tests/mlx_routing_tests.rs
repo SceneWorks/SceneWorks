@@ -2178,10 +2178,8 @@ fn iris_routes_plain_text_to_image_only() {
     assert!(!support.features.edit && !support.features.reference && !support.features.pose);
 }
 
-/// sc-26234: the distilled FLUX 3 Image Klein route is plain text-to-image in S1 — every carrier
-/// the `flux3_klein` engine has no input for yet (source/reference/mask/control/pose, adapters, a
-/// quant tier, hires fix) keeps the job off the lane instead of reaching an engine that refuses it
-/// by name.
+/// sc-26236 adds ordered references to the existing text route. Masks, controls, pose, hires and
+/// the separately owned adapter/precision policy remain unchanged by reference eligibility.
 #[test]
 fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
     for model in ["flux3_klein", "flux3_klein_base"] {
@@ -2201,9 +2199,8 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
             ));
         }
         for refused in [
-            json!({"mode":"edit_image","sourceAssetId":"a"}),
-            json!({"referenceAssetId":"a"}),
-            json!({"referenceAssetIds":["a"]}),
+            json!({"mode":"edit_image"}),
+            json!({"referenceAssetIds":vec!["a";11]}),
             json!({"maskAssetId":"a"}),
             json!({"controls":[{}]}),
             json!({"advanced":{"poses":[{}]}}),
@@ -2218,7 +2215,7 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
         }
         let support = model_mac_support(model, "image", Some("flux3"));
         assert!(support.supported);
-        assert!(!support.features.edit && !support.features.reference && !support.features.pose);
+        assert!(support.features.edit && support.features.reference && !support.features.pose);
     }
 }
 

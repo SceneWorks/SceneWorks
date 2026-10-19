@@ -10,6 +10,54 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 #[test]
+fn flux3_ordered_references_have_an_explicit_native_lane_without_widening_controls() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for count in [1, 10] {
+            let payload = json!({"model":model,"mode":"edit_image","referenceAssetIds":vec!["same-owned-asset";count]});
+            assert_eq!(
+                image_job_candle_lane(&image_edit_job(payload.clone())),
+                Some(CandleImageLane::Flux3Reference)
+            );
+            assert!(image_request_mlx_eligible(model, &object(payload)));
+        }
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            let payload = object(
+                json!({"model":model, "mode":"edit_image", "sourceAssetId":"a",
+                "referenceAssetIds":["a","b"], "width":48, "advanced":{"quantTier":tier},
+                "loras":[{"id":"identity-checked-at-worker","weight":0.375}]}),
+            );
+            assert_eq!(
+                image_job_candle_lane(&image_edit_job(Value::Object(payload.clone()))),
+                Some(CandleImageLane::Flux3Reference),
+                "{model}/{tier}"
+            );
+            assert_eq!(
+                image_request_mlx_eligible(model, &payload),
+                !matches!(tier, "fp8r" | "nvfp4"),
+                "{model}/{tier}"
+            );
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"maskAssetId":"mask"}),
+            json!({"advanced":{"referenceStrength":1.0}}),
+            json!({"advanced":{"poses":[{"assetId":"pose"}]}}),
+            json!({"hiresFix":{"enabled":true}}),
+        ] {
+            let mut payload =
+                object(json!({"model":model,"mode":"edit_image","referenceAssetId":"ref"}));
+            payload.extend(object(extra));
+            assert!(!image_request_mlx_eligible(model, &payload), "{payload:?}");
+            assert_ne!(
+                image_job_candle_lane(&image_edit_job(Value::Object(payload))),
+                Some(CandleImageLane::Flux3Reference)
+            );
+        }
+    }
+}
+
+#[test]
 fn minimax_h3_candle_surface_is_user_routed_per_partition() {
     assert!(video_request_candle_eligible(
         "minimax_h3",
@@ -177,6 +225,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
             CandleImageLane::MageEdit,
+            CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
@@ -262,6 +311,8 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
         // txt2img id, so both the edit shape and the Character-Studio reference shape must be
         // claimed by this bespoke lane before the generic gate can refuse them.
+        (edit("flux3_klein"), CandleImageLane::Flux3Reference),
+        (edit("flux3_klein_base"), CandleImageLane::Flux3Reference),
         (edit("qwen_image_2_1"), CandleImageLane::QwenImage21Edit),
         (
             character("qwen_image_2_1"),
@@ -5988,8 +6039,8 @@ fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carrier
         assert!(image_request_candle_eligible(model, &adapted));
         assert!(image_request_mlx_eligible(model, &adapted));
         for extra in [
-            json!({"mode":"edit_image","sourceAssetId":"source"}),
-            json!({"referenceAssetIds":["one","two"]}),
+            json!({"mode":"edit_image"}),
+            json!({"referenceAssetIds":["one",null]}),
             json!({"controls":[{}]}),
             json!({"loras":[{}]}),
             json!({"advanced":{"mlxQuantize":6}}),

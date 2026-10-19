@@ -4,16 +4,16 @@
   "summary": {
     "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1097,
+    "cellCount": 1103,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 86,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "1e2543a06d4142ed7597451ce4e764f7abdfafa8697a34a0558107fee1cdc814",
-    "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
-    "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
-    "apiValidation": "8f337e92e1a0615af9431d9f082f778d0d91beaa4ca3d644a664f0b225c3e49c",
+    "apiContractEntry": "3098547f28448d6e874bfbdbe5e114b505c3c8550781691d5de1e70c5d4355f9",
+    "apiDto": "47fe2b751f42403555daf694a96b2c050b082584b7492bc5b97a9f677af618dc",
+    "apiGeneration": "7b68ef49774b994dfff51111904b11b60c594a2aeaff47573525d936dda4d921",
+    "apiValidation": "fd4d17f4e29d3dbb70717c3654276e3226cacaf3cf1d531626d1a5ea8159d3b3",
     "baseWeightImports": "b468fd4ac5f68d6c3a855c2745b3581601314de9cceaa0e9140973a3ba8e368d",
     "descriptorAudioFacts": "2278e8cda8b71e78209a3fd980d0a3133abbf995e4a08a605754674a5801a9ed",
     "descriptorCandleFacts": "0bcfd4d60b7306f9521dfe56f527649b3518c7837b5afda5b3f9be45b26da694",
@@ -22,18 +22,18 @@
     "descriptorMlxRuntime": "3119e1eff9a9c3daf4cc110634e5ce14e80bd788ba995fd0ccf77517986ed440",
     "descriptorPreviewFacts": "959d67f76c144032f809d874b562fc6cf2110f208049fbc5fe3133f46da25421",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "d6b4c9ee201259ce5a94ad72ce4231568063f6b174624ef60b2d087d36d92a12",
+    "manifest": "28c7c52f8327a7d7d9e5615f124550ac8da007b3a6befb14cd795775d268eff9",
     "modelImportDefaults": "89a8ffccfa2f1325a77c64027052659f7d6ed2132a1596a66517e3de6ff00ae3",
-    "routerCandle": "8f3e9afd4f858fb10e13aa9716c92fdcd1dfef2b5ce83fa2ae4ede744e1ae90c",
+    "routerCandle": "7fd0ae949525db5a410cc4ee62c19b4308de429814895a9934cc89c6b90f0e15",
     "routerCatalog": "01242d31d6e66d3bfbedc7f72732f0b5ec3a4ac5e2221b65307f5cf94715763a",
     "routerGaps": "6d541c25c4b36a141021f0ee5846d12743fe6951ca3bfa954ac0c19fad6c0e63",
-    "routerMlx": "d304ca5778532c460a8013c0bf726fcbf63c4b01e13425b34f260b0eac186e89",
+    "routerMlx": "70faed142c08c7cf2682c1f2103f249f7e39a89cf1ff9e595b4058288438312c",
     "scheduler": "147bb604355a617e7e0e0c5d9d625e6d414e4d2b239b4825efb12865220e986b",
     "trainingCatalog": "7a657b985900d1b5502776d374fe429d958f30d59e7682e693d32074bae47f3a",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
     "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
-    "webImageRequest": "55d0130e36d1c2b1192dcada746ae4b0e035ad1d07d779b801bb453564833680",
+    "webImageRequest": "7cf03f5902f0c6b77bd45714ff07fd545041819d0fe78be191851068c2011c52",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
@@ -46,12 +46,12 @@
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
     "workerAudioDispatch": "63e767345ed22edfb96c3bb41b77052f34daf24a1b51f0d3103651b73fec465a",
     "workerDispatch": "fe07b027aff3abdaeedcb56891339b0b5f8ac460f31147a81541826ac3454a4d",
-    "workerEngineTable": "bffcc754d5280fdf7b79097076f8b2b3e9111240a03ccbb52a57e473ff4259c9",
+    "workerEngineTable": "3e29317c1318adee804b8b14bd97a66a0ce8fce3e7ab024855ce1f076c2c5020",
     "workerGpuCapabilities": "60f023305dd3f747963241518df69f1895140553f21116932e0550b69d2a8cde",
-    "workerImageDispatch": "952a2224f3c893e6dcad9d083cf8929a6a849a5af3a21b9ac26a5ef263aae956",
-    "workerImageKreaImported": "4bdd99836ab3d5303e5c9e7bca204ca9aaa2aef76c880552ff9252557474c58c",
-    "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
-    "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
+    "workerImageDispatch": "2d4a7b92f7fa246fd5e1cbca7d0981331c175cc11f4af13b4aba1853f0736684",
+    "workerImageKreaImported": "64409d470a9c73f6d8f7a8d120881c0c5dc20713d5d606e02f0bf9bdc06e0a6f",
+    "workerImageMageFinetuned": "66bd8388d8139bc6b0b307fe3d7eb3c890532481f5981cfc9d0ed67af44b80a5",
+    "workerImagePulid": "f59b2cc49e92532a80e9feb88b3237fd25b8fcc3a682f05087c890f1f42e0420",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
@@ -1576,13 +1576,34 @@
       "family": "flux3",
       "modelType": "image",
       "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
         "text_to_image"
       ],
       "evaluatedOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
         "prompt_enhancement",
         "text_to_image"
       ],
       "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
         {
           "capability": "prompt_enhancement",
           "mlx": true,
@@ -1597,18 +1618,18 @@
       "conditioningShape": [
         {
           "capability": "multiReference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "reference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "referenceRgba",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [
@@ -1664,13 +1685,34 @@
       "family": "flux3",
       "modelType": "image",
       "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
         "text_to_image"
       ],
       "evaluatedOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
         "prompt_enhancement",
         "text_to_image"
       ],
       "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
         {
           "capability": "prompt_enhancement",
           "mlx": true,
@@ -1685,18 +1727,18 @@
       "conditioningShape": [
         {
           "capability": "multiReference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "reference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "referenceRgba",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [

@@ -6178,12 +6178,13 @@
       // absent tier is bf16, never the app-wide q8 default.
       //
       // CONTROL SURFACE (E6) — exactly what the engine honours in S1: prompt, size on a 16-px grid
-      // (64..=2048 here; the engine admits up to 4096), count <= 8 (rendered one after another from
+      // (64..=4096, matching the engine and reference-derived canvases), count <= 8 (rendered one after another from
       // seed + i), seed, steps (the release's 16), the flow-map Euler sampler (`euler`, the only
       // integrator; its schedule alpha 6.93 is fixed, so no scheduler / shift axis). It is a flow
       // map: NO classifier-free guidance and NO negative prompt — the engine refuses any guidance
       // and any negative prompt by name (`supportsGuidance` /
-      // `supportsNegativePrompt` false, the z_image_turbo shape). References / boxes (sc-26236/7),
+      // `supportsNegativePrompt` false, the z_image_turbo shape). Ordered 1–10 owned references
+      // condition the AE-only editing lane (sc-26236); boxes are sc-26237.
       // Base checkpoint + identity-checked LoRA are integrated by sc-26239; tiers by sc-26241.
       // Prompt upsampling uses the separate optional component below (sc-26238).
       "id": "flux3_klein",
@@ -6201,7 +6202,7 @@
       "adapter": "mlx_flux3",
       // The same request and pinned package run on MLX (sc-26234) and Candle/CUDA (sc-26235).
       "macOnly": false,
-      "capabilities": ["text_to_image"],
+      "capabilities": ["text_to_image", "edit_image", "image_to_image", "character_image"],
       "downloads": [
         // The upstream package, pulled directly from Black Forest Labs (GATED under the FLUX
         // Kommunity License; no SceneWorks re-host). Empty files means ALL 42 files at this exact
@@ -6364,7 +6365,8 @@
         "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "768x768", "512x512"],
         "count": [1, 2, 4, 8],
         "minDimension": 64,
-        "maxDimension": 2048,
+        "maxDimension": 4096,
+        "maxReferenceAssets": 10,
         "requiresDimensionsMultipleOf": 16,
         // gen_core::flux3::SAMPLERS: the flow-map Euler step is the only integrator.
         "samplers": ["euler"]
@@ -6404,7 +6406,8 @@
         "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
         "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
-        "recommendedFor": ["text_to_image"],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "hideReferenceStrength": true,
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
           "path": "/prompt-guides/flux3-image-klein.md",
@@ -6433,9 +6436,7 @@
       "type": "image",
       "adapter": "mlx_flux3",
       "macOnly": false,
-      "capabilities": [
-        "text_to_image"
-      ],
+      "capabilities": ["text_to_image", "edit_image", "image_to_image", "character_image"],
       "downloads": [
         {
           "provider": "huggingface",
@@ -6528,7 +6529,8 @@
           8
         ],
         "minDimension": 64,
-        "maxDimension": 2048,
+        "maxDimension": 4096,
+        "maxReferenceAssets": 10,
         "requiresDimensionsMultipleOf": 16,
         "samplers": [
           "euler"
@@ -6554,11 +6556,10 @@
         }
       },
       "ui": {
+        "hideReferenceStrength": true,
         "label": "FLUX 3 Image Klein Base",
         "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately. Base q4/q8 local conversion installation awaits verified output size/SHA pins after base repository access is granted; no dense substitution.",
-        "recommendedFor": [
-          "text_to_image"
-        ],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
           "path": "/prompt-guides/flux3-image-klein.md",
