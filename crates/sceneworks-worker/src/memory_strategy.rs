@@ -202,7 +202,7 @@ pub(crate) fn memory_mode_from_mode_key(key: &str) -> MemoryMode {
 /// Preserve every resource-bearing admission through execution, including Resident: its reference
 /// facts are a provider safety bound, not an optional optimization. Legacy resource-free Resident
 /// contexts retain their established sentinel behavior.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
 pub(crate) fn executable_context(
     engine_id: &str,
     context: gen_core::MemoryRunContext,
