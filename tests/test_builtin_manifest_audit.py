@@ -3017,16 +3017,22 @@ def test_sdxl_manifest_has_mlx_block():
 
 
 def test_hide_reference_strength_models_declare_a_variation_knob():
-    """Symmetry guard for the sc-2017 picker UX. A model that opts out of the
-    IP-Adapter reference-strength slider via `ui.hideReferenceStrength` MUST
-    also declare `ui.variationStrength` — otherwise the picker shows no tuning
-    control at all, and the worker silently runs at default true_cfg_scale.
+    """Identity/edit models need their effective tuning control, while native
+    AE-only reference conditioning must not advertise an ineffective strength axis.
+    The worker's live-route honesty guard independently verifies native dispatch.
     """
     manifest = _load_builtin_models_manifest()
     unbalanced: list[str] = []
     for model in manifest.get("models", []):
         ui = model.get("ui") or {}
         if not ui.get("hideReferenceStrength"):
+            continue
+        if model.get("family") == "flux3":
+            # No img2img noise initialization or identity scale exists on this native route.
+            # Keep its real reference shape AND absence of a fake variation knob load-bearing.
+            assert "variationStrength" not in ui, model["id"]
+            assert model["limits"]["maxReferenceAssets"] == 10, model["id"]
+            assert {"edit_image", "image_to_image", "character_image"} <= set(model["capabilities"]), model["id"]
             continue
         if not ui.get("variationStrength"):
             unbalanced.append(model["id"])

@@ -1681,6 +1681,7 @@ pub(crate) async fn run_image_generate_job(
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
                 | CandleImageRoute::QwenImage21Edit
+                | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
                 | CandleImageRoute::CandleTxt2Img => {
