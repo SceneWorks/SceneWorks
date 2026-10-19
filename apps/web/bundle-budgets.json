@@ -5,9 +5,10 @@
     "brotliBytes": 126000
   },
   "total": {
+    "_comment": "2026-10-19: approved total gzip/Brotli headroom for epic 26233 layout authoring and general controls; all other budgets unchanged.",
     "rawBytes": 3200000,
-    "gzipBytes": 861000,
-    "brotliBytes": 735000
+    "gzipBytes": 866000,
+    "brotliBytes": 739000
   },
   "largestRoute": {
     "rawBytes": 1100000,

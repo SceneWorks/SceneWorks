@@ -1,6 +1,7 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
+import { isFlux3LayoutModel } from "./flux3Layout.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -17,6 +18,9 @@ import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 export function buildImageJobAdvanced(state) {
   const {
     resolution,
+    model,
+    flux3Layout,
+    flux3ReferenceIds,
     // Structured-prompt recipe round-trip (sc-6147).
     sendStructured,
     submitIntent,
@@ -105,6 +109,11 @@ export function buildImageJobAdvanced(state) {
 
   return {
     resolution,
+    ...(isFlux3LayoutModel(model) && flux3Layout?.boxes?.length ? {
+      // Preserve the original document and current attachment order, never a rounded table.
+      flux3_layout: flux3Layout,
+      flux3_reference_ids: flux3ReferenceIds ?? [],
+    } : {}),
     // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
     // original intent + magic-prompt backend alongside the job so "Use this recipe"
     // can rehydrate the builder rather than replay the serialized JSON as a plain

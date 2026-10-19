@@ -265,6 +265,9 @@ export function buildImageJobRequest(state) {
     // builder. Every omit-when-default rule (which keeps saved recipes byte-identical)
     // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
     advanced: buildImageJobAdvanced({
+      model,
+      flux3Layout: state.flux3Layout,
+      flux3ReferenceIds: state.flux3ReferenceIds,
       resolution: resolutionOverride
         ? `${resolutionOverride.width}x${resolutionOverride.height}`
         : resolution,

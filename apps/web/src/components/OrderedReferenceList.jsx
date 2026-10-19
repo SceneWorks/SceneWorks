@@ -30,15 +30,19 @@ export function OrderedReferenceList({
   // (id) => label, so each caller can name an asset the way its own screen does.
   labelFor,
   className = "",
+  // Layout controls bind attachment instances, including repeated assets, not asset ids.
+  itemKeys,
+  onMove,
+  onRemove,
 }) {
   if (!Array.isArray(assetIds) || assetIds.length < 2) {
     return null;
   }
-  const move = (from, to) => onChange(moveReference(assetIds, from, to));
+  const move = (from, to) => onMove ? onMove(from, to) : onChange(moveReference(assetIds, from, to));
   return (
     <ol className={`ordered-references ${className}`.trim()}>
       {assetIds.map((id, index) => (
-        <li className="ordered-reference" key={id}>
+        <li className="ordered-reference" key={itemKeys?.[index] ?? `${id}:${index}`}>
           <span className="ordered-reference-ordinal">{referenceOrdinalLabel(index)}</span>
           <span className="ordered-reference-label">
             {typeof labelFor === "function" ? labelFor(id) : id}
@@ -62,6 +66,8 @@ export function OrderedReferenceList({
             >
               ↓
             </button>
+            {onRemove ? <button aria-label={`Remove ${referenceOrdinalLabel(index)}`}
+              className="secondary-action" type="button" onClick={() => onRemove(index)}>Remove</button> : null}
           </span>
         </li>
       ))}

@@ -1266,6 +1266,10 @@ pub enum AdvancedShape {
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
     /// another length, a string, a nested value — is dropped, like an object under a scalar key.
     NumberPair,
+    /// FLUX.3 authored box document, reduced to public coordinate/identity/description fields.
+    Flux3Layout,
+    /// Ordered attachment-instance IDs (not paths or asset locators), at most ten unique values.
+    StringList,
 }
 
 /// One classified `advanced` key.
@@ -1349,6 +1353,8 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow("flux3_layout", AdvancedShape::Flux3Layout, "Authored FLUX.3 soft-guidance boxes; public row fields only, never worker provenance."),
+    allow("flux3_reference_ids", AdvancedShape::StringList, "Ordered attachment-instance identities for FLUX.3 layout replay; not asset paths."),
     allow(
         "resolution",
         AdvancedShape::Scalar,
@@ -2990,12 +2996,67 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
             AdvancedShape::NumberPair => sanitize_number_pair(value),
+            AdvancedShape::Flux3Layout => sanitize_flux3_layout(value),
+            AdvancedShape::StringList => sanitize_reference_ids(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
         }
     }
     out
+}
+
+fn sanitize_reference_ids(value: &Value) -> Option<Value> {
+    let values = value.as_array()?;
+    if values.len() > 10 {
+        return None;
+    }
+    let ids = values
+        .iter()
+        .map(|v| v.as_str().filter(|s| !s.is_empty() && !is_path_shaped(s)))
+        .collect::<Option<Vec<_>>>()?;
+    if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn sanitize_flux3_layout(value: &Value) -> Option<Value> {
+    let rows = value.get("boxes")?.as_array()?;
+    let identities = rows
+        .iter()
+        .filter_map(|r| {
+            r.get("reference_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    crate::image_request::flux3::validate_layout(value, 10, Some(&identities)).ok()?;
+    let mut boxes = Vec::new();
+    for row in rows {
+        let mut public = JsonObject::new();
+        for key in [
+            "id",
+            "desc",
+            "bbox",
+            "from",
+            "reference_id",
+            "src_bbox",
+            "tgt_bbox",
+            "bbox_space",
+            "src_space",
+            "tgt_space",
+        ] {
+            if let Some(v) = row.get(key) {
+                if key != "desc" && v.as_str().is_some_and(is_path_shaped) {
+                    return None;
+                }
+                public.insert(key.to_owned(), v.clone());
+            }
+        }
+        boxes.push(Value::Object(public));
+    }
+    Some(serde_json::json!({"version":1,"boxes":boxes}))
 }
 
 /// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire
@@ -3675,6 +3736,34 @@ mod tests {
         assert_eq!(upscale.factor, Some(2));
         assert_eq!(upscale.engine.as_deref(), Some("seedvr2"));
         assert_eq!(upscale.softness, Some(0.25));
+    }
+
+    #[test]
+    fn flux3_layout_share_keeps_public_rows_nulls_precision_and_strips_local_provenance() {
+        let document = serde_json::json!({"version":1,"privatePath":"D:/private/source.png","boxes":[{"id":"cat","from":"ref_image_0","reference_id":"slot-b","src_bbox":[0.123456789012345,0.2,0.7,0.8],"tgt_bbox":null,"desc":"cat","privatePath":"D:/private/source.png"}]});
+        let mut advanced = JsonObject::new();
+        advanced.insert("flux3_layout".into(), document.clone());
+        advanced.insert(
+            "flux3_reference_ids".into(),
+            serde_json::json!(["slot-a", "slot-b"]),
+        );
+        let sanitized = sanitize_advanced(&advanced);
+        let rows = &sanitized["flux3_layout"]["boxes"];
+        assert_eq!(rows[0]["src_bbox"], document["boxes"][0]["src_bbox"]);
+        assert!(rows[0]["tgt_bbox"].is_null());
+        assert_eq!(rows[0]["from"], "ref_image_0");
+        assert_eq!(rows[0]["reference_id"], "slot-b");
+        assert!(rows[0].get("privatePath").is_none());
+        assert!(sanitized["flux3_layout"].get("privatePath").is_none());
+        assert_eq!(
+            sanitized["flux3_reference_ids"],
+            advanced["flux3_reference_ids"]
+        );
+        advanced.insert(
+            "flux3_reference_ids".into(),
+            serde_json::json!(["D:/private/source.png"]),
+        );
+        assert!(!sanitize_advanced(&advanced).contains_key("flux3_reference_ids"));
     }
 
     #[test]

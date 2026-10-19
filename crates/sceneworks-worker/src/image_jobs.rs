@@ -556,6 +556,30 @@ fn resolve_pinned_native_package(
     Ok(pinned)
 }
 
+/// Reject raw queued layout controls before dispatch, including routes that do not use the
+/// generic native render surface. Unsupported models must never silently ignore a box request.
+fn validate_flux3_layout_request(request: &ImageRequest) -> WorkerResult<()> {
+    let has_controls = ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
+        request
+            .advanced
+            .get(*key)
+            .is_some_and(|value| !value.is_null())
+    });
+    if !sceneworks_core::image_request::flux3::is_model(&request.model) {
+        if has_controls {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: FLUX.3 layout controls are unsupported; remove them or select FLUX.3",
+                request.model
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(Err(error)) = &request.flux3_reference_request {
+        return Err(WorkerError::InvalidPayload(error.clone()));
+    }
+    Ok(())
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
@@ -567,6 +591,7 @@ pub(crate) async fn run_image_generate_job(
             "Missing payload.projectId".to_owned(),
         ));
     }
+    validate_flux3_layout_request(&request)?;
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
     // sc-26241: a named precision tier is honored only on the model and lane that can load it;
