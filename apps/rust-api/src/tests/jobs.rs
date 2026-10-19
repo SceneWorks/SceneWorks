@@ -7595,7 +7595,7 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
         .into_iter().map(|(id,repo,revision,steps,guidance)| json!({
             "id":id,"name":id,"family":"flux3","type":"image","adapter":"mlx_flux3",
             "capabilities":["text_to_image","edit_image","image_to_image","character_image"],
-            "downloads":[{"provider":"huggingface","repo":repo,"revision":revision,"files":[],"default":true,"estimatedSizeBytes":1024}],
+            "downloads":[{"provider":"huggingface","repo":repo,"revision":revision,"variant":"bf16","files":[],"default":true,"estimatedSizeBytes":1024}],
             "paths":{},"defaults":{"steps":steps,"guidanceScale":guidance,"resolution":"1024x1024","count":1},
             "limits":{"minDimension":64,"maxDimension":4096,"requiresDimensionsMultipleOf":16,"maxReferenceAssets":10},
             "ui":{"label":id}
@@ -7687,32 +7687,28 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
             );
             assert_eq!(job["payload"].get("width"), sides.get("width"));
             assert_eq!(job["payload"].get("height"), sides.get("height"));
-            let (status, duplicate) = request(
-                app.clone(),
-                "POST",
-                &format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap()),
-                json!({}),
-            )
-            .await;
-            assert_eq!(status, StatusCode::CREATED, "{duplicate}");
-            assert_eq!(duplicate["payload"].get("width"), sides.get("width"));
-            assert_eq!(duplicate["payload"].get("height"), sides.get("height"));
-            assert_eq!(
-                duplicate["payload"]["referenceAssetIds"],
-                job["payload"]["referenceAssetIds"]
-            );
-            let (status, error) = request(
-                app.clone(),
-                "POST",
-                &format!("/api/v1/jobs/{}/duplicate", job["id"].as_str().unwrap()),
-                json!({"payloadChanges":{"projectId":foreign["id"]}}),
-            )
-            .await;
-            assert_eq!(
-                status,
-                StatusCode::BAD_REQUEST,
-                "cross-project replay: {error}"
-            );
+            for action in ["duplicate", "retry"] {
+                let route = format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
+                let (status, replay) =
+                    request(app.clone(), "POST", &route, json!({"payloadChanges":{}})).await;
+                assert_eq!(status, StatusCode::CREATED, "{action}: {replay}");
+                assert_eq!(replay["payload"].get("width"), sides.get("width"));
+                assert_eq!(replay["payload"].get("height"), sides.get("height"));
+                assert_eq!(
+                    replay["payload"]["referenceAssetIds"],
+                    job["payload"]["referenceAssetIds"]
+                );
+                for patch in [
+                    json!({"projectId":foreign["id"]}),
+                    json!({"referenceAssetIds":[foreign_asset["id"]]}),
+                    json!({"referenceAssetIds":[ids[0],null]}),
+                    json!({"referenceAssetIds":vec![ids[0].clone();11]}),
+                ] {
+                    let (status, error) =
+                        request(app.clone(), "POST", &route, json!({"payloadChanges":patch})).await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{action}: {error}");
+                }
+            }
         }
         let (status, ten) = request(
             app.clone(),
