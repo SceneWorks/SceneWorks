@@ -621,6 +621,165 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    // Production image consumer + HTTP API seam, with tensor-free provider events.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flux3_saved_provenance_and_progress_use_only_the_per_image_provider_report() {
+        use crate::image_jobs::*;
+        for (model, backend) in [("flux3_klein", "candle"), ("flux3_klein_base", "mlx")] {
+            for mode in ["t2i", "i2i", "t2i_bbox", "i2i_bbox"] {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path().join("project");
+                std::fs::create_dir_all(project.join("assets/images")).unwrap();
+                let payload = json!({"projectId":"p", "model":model, "mode":"text_to_image",
+                    "prompt":"a fox", "width":64, "height":64, "seed":17,
+                    "advanced":{"enhancePrompt":true, "promptEnhancement":{"effectivePrompt":"forged"}}});
+                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let plan = ImagePlan::with_count(&request, 1, None);
+                let (url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+                let settings = crate::tests::test_settings(url, None);
+                let api = ApiClient::new(&settings);
+                let job: JobSnapshot =
+                    serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
+                        .unwrap();
+                let rows = "[ {\"id\":\"obj_1\", \"bbox\":[1,2,3,4], \"desc\":\"locked\"} ]";
+                let report =
+                    gen_core::PromptEnhancementReport::enhanced("a fox", "a fox in snow <obj_1>")
+                        .with_mode(mode)
+                        .with_locked_annotations(rows);
+                let (tx, rx) = tokio::sync::mpsc::channel(8);
+                let blocking = tokio::task::spawn_blocking(move || {
+                    for event in [
+                        GenEvent::Upsampling {
+                            index: 0,
+                            tokens: 32,
+                            max_tokens: 73,
+                        },
+                        GenEvent::PromptEnhancement {
+                            index: 0,
+                            expected_prompt: "a fox".to_owned(),
+                            report,
+                        },
+                        GenEvent::Step {
+                            index: 0,
+                            current: 1,
+                            total: 16,
+                        },
+                        GenEvent::Decoding { index: 0 },
+                        GenEvent::Image {
+                            index: 0,
+                            seed: 17,
+                            width: 64,
+                            height: 64,
+                            pixels: vec![128; 64 * 64 * 3],
+                            face_likeness: None,
+                        },
+                    ] {
+                        tx.blocking_send(event).unwrap();
+                    }
+                    Ok(())
+                });
+                let mut assets = Vec::new();
+                consume_gen_events(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    &project,
+                    backend,
+                    "flux3",
+                    &request.advanced,
+                    1,
+                    rx,
+                    CancelFlag::new(),
+                    blocking,
+                    &mut assets,
+                )
+                .await
+                .unwrap();
+                assert_eq!(assets.len(), 1);
+                let fact = &assets[0]["rawAdapterSettings"]["promptEnhancement"];
+                assert_eq!(fact["originalPrompt"], "a fox");
+                assert_eq!(fact["effectivePrompt"], "a fox in snow <obj_1>");
+                assert_eq!(fact["mode"], mode);
+                assert_eq!(fact["lockedAnnotations"], rows);
+                let posts = posts.lock().unwrap();
+                for detail in ["enhancing prompt (32/73 tokens)", "step 1/16", "decoding"] {
+                    assert!(
+                        posts.iter().any(|post| post["message"]
+                            .as_str()
+                            .is_some_and(|message| message.contains(detail))),
+                        "missing {detail}: {posts:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flux3_prefill_cancellation_stops_before_denoising_or_asset_writes() {
+        use crate::image_jobs::*;
+        let dir = tempfile::tempdir().unwrap();
+        let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"text_to_image",
+            "prompt":"a fox", "advanced":{"enhancePrompt":true}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let plan = ImagePlan::with_count(&request, 1, None);
+        let (url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
+        let mut settings = crate::tests::test_settings(url, None);
+        settings.heartbeat_seconds = 5;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json("job-1", false)).unwrap();
+        let cancel = CancelFlag::new();
+        let producer_cancel = cancel.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        let blocking = tokio::spawn(async move {
+            tx.send(GenEvent::Upsampling {
+                index: 0,
+                tokens: 0,
+                max_tokens: 73,
+            })
+            .await
+            .unwrap();
+            // Quiet prefill: no denoise step is necessary to honor the API cancel.
+            while !producer_cancel.is_cancelled() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            drop(tx);
+            Ok(())
+        });
+        let mut assets = Vec::new();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(8),
+            consume_gen_events(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                dir.path(),
+                "candle",
+                "flux3",
+                &request.advanced,
+                1,
+                rx,
+                cancel.clone(),
+                blocking,
+                &mut assets,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(WorkerError::Canceled(_))));
+        assert!(cancel.is_cancelled());
+        assert!(assets.is_empty());
+        let posts = posts.lock().unwrap();
+        assert!(posts.iter().any(|post| post["status"] == "canceled"));
+        assert!(!posts.iter().any(|post| post["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("step 1/"))));
+    }
+
     #[test]
     fn progress_is_coalesced_without_fabricating_denoise_steps() {
         assert!(publish_upsampling_progress(0, 64));

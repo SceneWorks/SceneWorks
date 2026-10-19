@@ -5,12 +5,14 @@ import { promptEnhancementAvailable } from "./promptEnhancement.js";
 const dev = { id: "flux2_dev", ui: { promptEnhance: true } };
 
 describe("promptEnhancementAvailable", () => {
-  it("admits both FLUX 3 checkpoints only on native text-to-image routes", () => {
+  it("admits both FLUX 3 checkpoints on native generation and reference routes", () => {
     for (const id of ["flux3_klein", "flux3_klein_base"]) {
       const model = { id, ui: { promptEnhance: true } };
       for (const backend of ["mlx", "candle"]) {
-        expect(promptEnhancementAvailable({ model, backend, mode: "text_to_image" })).toBe(true);
-        for (const mode of ["edit_image", "character_image", "style_variations", "reference"]) {
+        for (const mode of ["text_to_image", "edit_image", "character_image", "image_to_image"]) {
+          expect(promptEnhancementAvailable({ model, backend, mode })).toBe(true);
+        }
+        for (const mode of ["style_variations", "reference"]) {
           expect(promptEnhancementAvailable({ model, backend, mode })).toBe(false);
         }
         expect(promptEnhancementAvailable({ model, backend, mode: "text_to_image", strictControlActive: true })).toBe(false);

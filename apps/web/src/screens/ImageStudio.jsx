@@ -170,6 +170,8 @@ import {
   installedTiers,
   isBelowFloor,
   modelQualityFloor,
+  nativeTierEligibility,
+  quantizeTier,
   tierLabel,
   tierPickerOptions,
 } from "../quantTier.js";
@@ -371,40 +373,6 @@ export function ImageStudio() {
     visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
-  // Krea 2 INT8-ConvRot eligibility (sc-9300, epic 9083): the candle-only tier is offered ONLY when a
-  // live worker advertises the `int8_convrot` capability — which the worker emits solely on the candle
-  // lane AND when its GPU clears the sm_89 compute-cap floor (gpu.rs). So macOS/MLX and pre-Ada NVIDIA
-  // hosts (where no worker advertises it) HIDE the tier gracefully rather than only failing at submit.
-  const convRotEligible = useMemo(
-    () =>
-      visibleWorkers.some(
-        (worker) =>
-          worker?.status !== "offline" &&
-          Array.isArray(worker?.capabilities) &&
-          worker.capabilities.includes("int8_convrot"),
-      ),
-    [visibleWorkers],
-  );
-  // NVFP4 eligibility (sc-11042, epic 11037): identical shape to the ConvRot gate above — the
-  // candle-only FP4 tier is offered ONLY when a live worker advertises the `nvfp4` capability, which
-  // the worker emits solely on the candle lane AND when its GPU clears the sm_120 consumer-Blackwell
-  // compute-cap floor (gpu.rs). macOS/MLX (no FP4 hardware) and pre-Blackwell NVIDIA hosts HIDE the
-  // tier rather than only failing at submit. Hiding is the picker-side gate; the worker independently
-  // re-checks the cap at tier-select, so this is UX, not the security boundary.
-  const nvfp4Eligible = useMemo(
-    () =>
-      visibleWorkers.some(
-        (worker) =>
-          worker?.status !== "offline" &&
-          Array.isArray(worker?.capabilities) &&
-          worker.capabilities.includes("nvfp4"),
-      ),
-    [visibleWorkers],
-  );
-  const tierOptions = useMemo(
-    () => ({ convRotEligible, nvfp4Eligible }),
-    [convRotEligible, nvfp4Eligible],
-  );
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -889,6 +857,10 @@ export function ImageStudio() {
   // effective model for either rendering defaults or submitting a job.
   const selectedModel = availableModels.find((item) => item.id === model);
   const selectedModelServesMode = Boolean(selectedModel);
+  const tierOptions = useMemo(
+    () => nativeTierEligibility(selectedModel, visibleWorkers),
+    [selectedModel, visibleWorkers],
+  );
   // Qwen-Image 2.1's OFFICIAL prompt rewriters (sc-24113, epic 24107). Two optional, explicitly
   // downloaded checkpoints, and WHICH ONE applies is decided by the request rather than by a
   // picker: references attached ⇒ the editing rewriter, none ⇒ the text-to-image one. The catalog
@@ -1106,7 +1078,8 @@ export function ImageStudio() {
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
     [selectedModel, unifiedMemoryGb, activeBackend],
   );
-  const { quantTier, tierSwitching, handleTierChange, tierExplicit, tierSuggested, confirmTier } =
+  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
+  const { quantTier: pickedTier, tierSwitching, handleTierChange: pickTier, tierExplicit: pickedExplicit, tierSuggested, confirmTier } =
     useQuantTierPicker({
       screen: TIER_SCREEN,
       model,
@@ -1117,6 +1090,17 @@ export function ImageStudio() {
       useGenerationQuality: true,
       preferencesHydrated,
     });
+  // Keep a replay's exact numeric format, not this user's sticky/default. Unavailable recipes
+  // stay blocked until an explicit new pick; no worker or missing artifact can silently change it.
+  const quantTier = recipeTierRequest?.tier ?? pickedTier;
+  const tierExplicit = Boolean(recipeTierRequest) || pickedExplicit;
+  const replayTierUnavailable = recipeTierRequest &&
+    (recipeTierRequest.model !== model || !availableTiers.includes(quantTier));
+  const handleTierChange = (tier) => {
+    if (!availableTiers.includes(tier)) return;
+    setRecipeTierRequest(null);
+    pickTier(tier);
+  };
   const possibleTiers = useMemo(
     () => allPossibleTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
@@ -1848,6 +1832,9 @@ export function ImageStudio() {
     const recipe = launchRequest.recipe;
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
+    const restoredTier = rawSettings.quantTier ??
+      (rawSettings.convRot === true ? "int8-convrot" : quantizeTier(rawSettings.mlxQuantize));
+    setRecipeTierRequest(restoredTier ? { model: recipe.model, tier: restoredTier } : null);
     const nextMode = recipeMode(recipe);
     const dimensionIntent = recipeImageDimensionIntent(recipe);
     const resolutionFromRecipe = recipeResolution(recipe);
@@ -2410,6 +2397,10 @@ export function ImageStudio() {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
       return;
     }
+    if (replayTierUnavailable) {
+      setSubmitError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
+      return;
+    }
     if (decoderCapabilitiesPending) {
       setSubmitError("Waiting for engine capabilities before using the restored decoder.");
       return;
@@ -2712,6 +2703,10 @@ export function ImageStudio() {
     }
     if (!selectedModelServesMode) {
       setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (replayTierUnavailable) {
+      setBatchError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
       return;
     }
     if (decoderCapabilitiesPending) {
@@ -3078,11 +3073,12 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || Boolean(batchRun?.submitting);
+    !batchValidity.ready || !selectedModelServesMode || replayTierUnavailable || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
+    replayTierUnavailable ||
     !selectedModelServesMode ||
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
@@ -3274,6 +3270,9 @@ export function ImageStudio() {
           {/* Auto-expand failure (sc-6501): a structured model couldn't turn the plain-text idea
               into a caption (e.g. the prompt-refiner model isn't installed). We never fall back to
               sending raw plain text, so surface the reason and the path forward. */}
+          {replayTierUnavailable ? (
+            <p role="alert">Recipe {tierLabel(quantTier)} unavailable. Install it on a supported worker, or <button type="button" onClick={() => setRecipeTierRequest(null)}>use current settings</button>.</p>
+          ) : null}
           {submitError ? (
             <p className="structured-error" role="alert">
               {submitError}

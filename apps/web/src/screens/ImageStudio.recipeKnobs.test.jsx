@@ -422,6 +422,107 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(control("Width override").min).toBe("256");
   });
 
+
+  it.each(["flux3_klein", "flux3_klein_base"])("offers only installed provider-supported packed tiers for %s and sends their exact identity", async (id) => {
+    const packed = { ...FLUX3, id, hasVariantMatrix: true, variants: [
+      { variant: id === "flux3_klein_base" ? "bf16" : "q4", installState: "installed" },
+      { variant: "fp8r", installState: "installed" },
+      { variant: "nvfp4", installState: "missing" },
+    ] };
+    const createImageJob = vi.fn(async () => ({ id: "job-packed" }));
+    const context = baseContext({ imageModels: [packed], models: [packed], createImageJob,
+      visibleWorkers: [{ status: "online", capabilities: ["candle", "nvfp4"] }],
+      studioLaunch: launch({ model: id, mode: "text_to_image", prompt: "a fox", normalizedSettings: {}, rawAdapterSettings: {} }) });
+    await render(context);
+    expect([...container.querySelectorAll("option")].some((option) => option.value === "fp8r")).toBe(false);
+    expect([...container.querySelectorAll("option")].some((option) => option.value === "nvfp4")).toBe(false);
+    await render({ ...context, visibleWorkers: [{ status: "online", capabilities: ["fp8r", "flux3_nvfp4"] }] });
+    const picker = [...container.querySelectorAll("select")].find((node) => [...node.options].some((option) => option.value === "fp8r"));
+    expect(picker).toBeTruthy();
+    expect([...picker.options].find((option) => option.value === "nvfp4").disabled).toBe(true);
+    await editControl(picker, "fp8r");
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.model).toBe(id);
+    expect(payload.advanced.quantTier).toBe("fp8r");
+    expect(payload.advanced).not.toHaveProperty("mlxQuantize");
+    expect(payload.advanced).not.toHaveProperty("convRot");
+  });
+
+
+  it("replays saved FP8R rather than the current default without forwarding trusted reports", async () => {
+    const packed = { ...FLUX3, hasVariantMatrix: true, variants: [
+      { variant: "q8", installState: "installed" }, { variant: "fp8r", installState: "installed" },
+    ], ui: { ...FLUX3.ui, promptEnhance: true } };
+    const createImageJob = vi.fn(async () => ({ id: "job-replay" }));
+    const recipe = { model: packed.id, mode: "text_to_image", prompt: "original fox", normalizedSettings: {},
+      rawAdapterSettings: { quantTier: "fp8r", enhancePrompt: true,
+        promptEnhancement: { originalPrompt: "original fox", effectivePrompt: "a fox in snow", mode: "t2i", outcome: "enhanced" } } };
+    await render(baseContext({ imageModels: [packed], models: [packed], createImageJob,
+      visibleWorkers: [{ status: "online", capabilities: ["fp8r"] }], studioLaunch: launch(recipe) }));
+    const picker = [...container.querySelectorAll("select")].find((node) => [...node.options].some((option) => option.value === "fp8r"));
+    expect(picker.value).toBe("fp8r");
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.prompt).toBe("original fox");
+    expect(payload.advanced.quantTier).toBe("fp8r");
+    expect(payload.advanced.enhancePrompt).toBe(true);
+    expect(payload.advanced).not.toHaveProperty("promptEnhancement");
+  });
+
+  it("blocks an unavailable replay tier even for programmatic submits until explicitly abandoned", async () => {
+    const packed = { ...FLUX3, hasVariantMatrix: true, variants: [
+      { variant: "q8", installState: "installed" }, { variant: "fp8r", installState: "missing" },
+    ] };
+    const createImageJob = vi.fn(async () => ({ id: "job-new-settings" }));
+    await render(baseContext({ imageModels: [packed], models: [packed], createImageJob,
+      visibleWorkers: [{ status: "online", capabilities: ["fp8r"] }],
+      studioLaunch: launch({ model: packed.id, mode: "text_to_image", prompt: "a fox", normalizedSettings: {}, rawAdapterSettings: { quantTier: "fp8r" } }) }));
+    expect(buttonByText("Generate").disabled).toBe(true);
+    expect(container.textContent).toContain("Recipe FP8R (candle, sm_89+) unavailable");
+    await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(createImageJob).not.toHaveBeenCalled();
+    await click(buttonByText("use current settings"));
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
+  });
+
+  it.each(["mlx", "candle"])("retains FLUX3 reference enhancement and omits unsupported strength on %s", async (backend) => {
+    const model = { ...FLUX3, ui: { ...FLUX3.ui, promptEnhance: true } };
+    const recipe = flux3Recipe(null, null);
+    recipe.rawAdapterSettings.enhancePrompt = true;
+    const createImageJob = vi.fn(async () => ({ id: "job-enhance-edit" }));
+    await render(baseContext({ imageModels: [model], models: [model], assets: [FLUX3_REFERENCE],
+      macCapabilities: { macGatingActive: backend === "mlx", available: true, supported: true },
+      createImageJob, studioLaunch: launch(recipe) }));
+    expect(checkbox("Enhance prompt")?.checked).toBe(true);
+    expect(control("Reference strength")).toBeUndefined();
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.mode).toBe("edit_image");
+    expect(payload.advanced.enhancePrompt).toBe(true);
+    expect(payload.advanced).not.toHaveProperty("strength");
+    expect(payload.advanced).not.toHaveProperty("ipAdapterScale");
+    expect(payload.advanced).not.toHaveProperty("promptEnhancement");
+  });
+
+
+  it.each(["loading model", "enhancing prompt (32/73 tokens)", "step 1/16", "decoding"])("binds FLUX3 %s progress and cancel to the actual studio job", async (detail) => {
+    const jobAction = vi.fn();
+    const job = { id: "job-flux3-stage", type: "image_generate", status: "running", stage: "generating",
+      message: "Image 1/1 — " + detail + ".", progress: 0.25, projectId: "project_1",
+      payload: { model: FLUX3.id, prompt: "a fox", count: 1 }, result: {} };
+    await render(baseContext({ imageLocalJobs: [job], jobAction }));
+    expect(container.textContent).toContain(detail);
+    const cancel = buttonByText("Cancel");
+    expect(cancel).toBeTruthy();
+    await click(cancel);
+    expect(jobAction).toHaveBeenCalledWith(job, "cancel");
+  });
+
   it("sets the PiD decoder and its output tier without exposing a forged Krea enhancement flag", async () => {
     await render(baseContext({ studioLaunch: launch(everyKnobRecipe()) }));
 

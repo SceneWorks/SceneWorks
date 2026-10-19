@@ -1,5 +1,5 @@
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
@@ -231,7 +231,8 @@ export function buildImageJobAdvanced(state) {
     // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
     // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
-    ...(showTierPicker && isNvfp4Tier(quantTier) ? { quantTier: NVFP4_TIER } : {}),
+    ...((showTierPicker || tierExplicit) && (isNvfp4Tier(quantTier) || isFp8rTier(quantTier))
+      ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
     // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
