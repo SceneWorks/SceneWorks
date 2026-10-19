@@ -2421,6 +2421,7 @@ impl TimelineExport<'_> {
                 "ffmpeg",
                 &picture_path,
                 &audio,
+                self.spec.fps,
                 &output_path,
                 Some(self.context),
             )
@@ -2609,6 +2610,7 @@ fn frame_scale_pad_filter(width: u32, height: u32) -> String {
 /// documented non-fatal `None`, because the bundled 7.1 and current 9.0.1 both print `frame=`
 /// either way. Decoding reports `frame=   48` on all three builds (sc-19549).
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
@@ -2629,6 +2631,7 @@ async fn probe_source_frame_count(ffmpeg: &str, source_path: &Path) -> WorkerRes
 }
 
 #[cfg(any(
+    test,
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
@@ -2650,10 +2653,6 @@ pub(crate) async fn probe_source_frame_count_command_with_timeout(
 
 /// Extract the last `frame=<N>` counter ffmpeg prints to stderr (the progress token may be padded
 /// with spaces, e.g. `frame=  12`). Split into its own pure fn so it is unit-testable without ffmpeg.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
 fn parse_ffmpeg_frame_count(stderr: &str) -> Option<usize> {
     stderr.rmatch_indices("frame=").find_map(|(idx, _)| {
         stderr[idx + "frame=".len()..]
@@ -3457,14 +3456,25 @@ pub(crate) fn audio_source_filter(input: usize, source: &ResolvedAudioSource) ->
 /// mean nothing. With it off, `volume=` is the only thing that sets a level — which is the whole
 /// point of giving dialogue, ambience and music independent faders.
 ///
-/// `apad` closes the other half: the mix is padded with silence so it always outlasts the picture,
-/// and `-shortest` then cuts the file at the last video frame. Without the pad, `-shortest` would
-/// end the FILE when the audio ran out and truncate the picture.
+/// The final pad AND trim have an intrinsic sample-exact EOF at the finished CFR picture's
+/// measured frame count. A bare `apad` is infinite and makes termination depend solely on muxer
+/// `-shortest` scheduling. Bounding both ends preserves short/empty-source silence and clips long
+/// audio without that unnecessary dependency. The original intermittent FFmpeg stall's exact
+/// scheduler race is not proven; this is deterministic termination hardening.
 ///
 /// [`MIX_LIMITER`] is the third leg. `normalize=0` sums N inputs, and the harness's own defaults
 /// (dialogue 1.0 + ambience 0.35 + music 0.2) peak at 1.55 — the AAC encoder hard-clips anything
 /// above full scale, and clipping distortion is not "their gain choices, audibly" (sc-22712).
-pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
+pub(crate) fn audio_mix_filter(
+    sources: &[ResolvedAudioSource],
+    picture_samples: u64,
+) -> WorkerResult<String> {
+    if sources.is_empty() || picture_samples == 0 || picture_samples > i64::MAX as u64 {
+        return Err(WorkerError::InvalidPayload("Timeline audio requires sources and a positive, finite signed-64-bit picture sample count.".to_owned()));
+    }
+    let ending = format!(
+        "{MIX_LIMITER},aresample=48000,apad=whole_len={picture_samples},atrim=end_sample={picture_samples}[aout]"
+    );
     let mut chains: Vec<String> = sources
         .iter()
         .enumerate()
@@ -3474,14 +3484,34 @@ pub(crate) fn audio_mix_filter(sources: &[ResolvedAudioSource]) -> String {
         .map(|index| format!("[a{index}]"))
         .collect();
     if sources.len() == 1 {
-        chains.push(format!("{labels}{MIX_LIMITER},apad[aout]"));
+        chains.push(format!("{labels}{ending}"));
     } else {
         chains.push(format!(
-            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,{MIX_LIMITER},apad[aout]",
+            "{labels}amix=inputs={}:normalize=0:dropout_transition=0,{ending}",
             sources.len()
         ));
     }
-    chains.join(";")
+    Ok(chains.join(";"))
+}
+
+/// Convert the actual decoded frame count of our finished CFR picture to a 48 kHz EOF.
+/// Round UP by at most one sample, never truncate a video tail. Do not use FFmpeg's header
+/// `Duration`: its centisecond rounding makes 248 frames at 24 fps read 10.33 instead of 248/24.
+fn picture_audio_samples(frames: usize, fps: u32) -> WorkerResult<u64> {
+    let samples = u64::try_from(frames)
+        .ok()
+        .filter(|frames| *frames > 0)
+        .and_then(|frames| frames.checked_mul(48_000))
+        .filter(|_| fps > 0)
+        .map(|numerator| numerator.div_ceil(u64::from(fps)))
+        .filter(|samples| *samples > 0 && *samples <= i64::MAX as u64)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Finished timeline picture has an invalid or overflowing frame/sample clock."
+                    .to_owned(),
+            )
+        })?;
+    Ok(samples)
 }
 
 /// Arguments for the audio pass: take the finished picture, mix every placed source over it, and
@@ -3499,6 +3529,7 @@ pub(crate) fn audio_mix_args(
     ffmpeg: &str,
     picture_path: &Path,
     sources: &[ResolvedAudioSource],
+    picture_samples: u64,
     output_path: &Path,
 ) -> WorkerResult<Vec<String>> {
     if sources.is_empty() {
@@ -3518,7 +3549,7 @@ pub(crate) fn audio_mix_args(
     }
     args.extend([
         "-filter_complex".to_owned(),
-        audio_mix_filter(sources),
+        audio_mix_filter(sources, picture_samples)?,
         "-map".to_owned(),
         "0:v".to_owned(),
         "-map".to_owned(),
@@ -3546,11 +3577,45 @@ pub(crate) async fn mux_audio(
     ffmpeg: &str,
     picture_path: &Path,
     sources: &[ResolvedAudioSource],
+    picture_fps: u32,
     output_path: &Path,
     context: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
+    if let Some(context) = context {
+        if cancel_requested_peek(context.api, context.job_id).await {
+            mark_job_canceled(context.api, context.job_id, context.cancel_message).await?;
+            return Err(WorkerError::Canceled(context.cancel_message.to_owned()));
+        }
+    }
+    // This is our already-rendered CFR picture, not an arbitrary VFR input. Count its ACTUAL
+    // frames after concat/crossfade, rather than using the pre-crossfade timeline sum or a
+    // centisecond-rounded container header. Failure is typed, never an infinite-pad fallback.
+    // Use the ordinary runner with the SAME job context: cancellation/heartbeat failure during
+    // this decode kills/reaps its owned child and returns before the audio pass can start.
+    let measured = run_ffmpeg_capture_stderr(
+        vec![
+            ffmpeg.to_owned(),
+            "-hide_banner".into(),
+            "-i".into(),
+            picture_path.display().to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-f".into(),
+            "null".into(),
+            "-".into(),
+        ],
+        context,
+    )
+    .await?;
+    let frames = parse_ffmpeg_frame_count(&measured).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Could not measure finished timeline picture frames: {}",
+            picture_path.display()
+        ))
+    })?;
+    let samples = picture_audio_samples(frames, picture_fps)?;
     run_ffmpeg(
-        audio_mix_args(ffmpeg, picture_path, sources, output_path)?,
+        audio_mix_args(ffmpeg, picture_path, sources, samples, output_path)?,
         context,
     )
     .await
@@ -6551,7 +6616,7 @@ mod timeline_audio_mix_tests {
             mux_segments("ffmpeg", &segments, dir, &picture, None)
                 .await
                 .expect("picture muxes");
-            mux_audio("ffmpeg", &picture, &sources, &output, None)
+            mux_audio("ffmpeg", &picture, &sources, spec.fps, &output, None)
                 .await
                 .expect("audio mixes");
         }
@@ -6779,15 +6844,348 @@ mod timeline_audio_mix_tests {
                 media_path: PathBuf::from(format!("{id}.wav")),
             })
             .collect();
-        let filter = audio_mix_filter(&sources);
+        let filter = audio_mix_filter(&sources, 48_000).expect("finite mix");
         assert!(
             filter.contains("amix=inputs=2:normalize=0"),
             "the mix must not renormalise: {filter}"
         );
         assert!(
-            filter.ends_with("apad[aout]"),
-            "the mix must be padded so -shortest cuts on the PICTURE, not on the audio: {filter}"
+            filter.ends_with("apad=whole_len=48000,atrim=end_sample=48000[aout]"),
+            "the graph must reach its own picture-bounded EOF, not rely on -shortest: {filter}"
         );
+    }
+
+    #[test]
+    fn picture_audio_eof_is_checked_frame_exact_and_rounded_only_up() {
+        assert_eq!(picture_audio_samples(248, 24).unwrap(), 496_000);
+        assert_eq!(picture_audio_samples(1, 29).unwrap(), 1_656);
+        for (frames, fps) in [(0, 24), (248, 0), (usize::MAX, 1)] {
+            assert!(picture_audio_samples(frames, fps).is_err());
+        }
+        let segments = [
+            TimelineSegment {
+                path: "a".into(),
+                duration: 2.0,
+                transition: None,
+                transition_duration: 0.0,
+            },
+            TimelineSegment {
+                path: "b".into(),
+                duration: 2.0,
+                transition: Some("crossfade".into()),
+                transition_duration: 1.0,
+            },
+        ];
+        let timing = PictureTiming::from_segments(&segments);
+        assert_eq!(timing.duration(), 3.0);
+        assert_eq!(picture_audio_samples(72, 24).unwrap(), 144_000);
+        assert_ne!(
+            picture_audio_samples(72, 24).unwrap(),
+            192_000,
+            "pre-crossfade timeline sum is not the picture clock"
+        );
+    }
+
+    async fn finite_fixture_picture(path: &Path, frames: u32) {
+        assert!(frames > 0 && frames <= 248);
+        let args = lavfi(
+            &["testsrc2=size=320x180:rate=24"],
+            &[
+                "-frames:v",
+                &frames.to_string(),
+                "-pix_fmt",
+                "yuv420p",
+                "-an",
+            ],
+            path,
+        );
+        run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(std::fs::metadata(path).unwrap().len() < 16 * 1024 * 1024);
+    }
+
+    fn finite_fixture_wave(path: &Path, seconds: f64, rate: u32, hz: u32) {
+        assert!(seconds.is_finite() && (0.0..=32.0).contains(&seconds));
+        assert!([8000, 44100, 48000].contains(&rate));
+        let count = (seconds * f64::from(rate)).round() as u32;
+        let size = count.checked_mul(2).unwrap();
+        assert!(size <= 4 * 1024 * 1024);
+        let mut bytes = Vec::with_capacity(size as usize + 44);
+        bytes.extend(b"RIFF");
+        bytes.extend((36 + size).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend((rate * 2).to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(16u16.to_le_bytes());
+        bytes.extend(b"data");
+        bytes.extend(size.to_le_bytes());
+        for index in 0..count {
+            let value = (4000.0
+                * (2.0 * std::f64::consts::PI * f64::from(hz) * f64::from(index) / f64::from(rate))
+                    .sin()) as i16;
+            bytes.extend(value.to_le_bytes());
+        }
+        std::fs::write(path, bytes).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), u64::from(size) + 44);
+    }
+
+    #[tokio::test]
+    async fn finite_audio_graph_reaches_exact_eof_without_shortest_for_zero_short_and_long_inputs()
+    {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("finite_audio_graph_");
+        let picture = dir.path().join("picture.mp4");
+        finite_fixture_picture(&picture, 248).await;
+        let frames = probe_source_frame_count("ffmpeg", &picture)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frames, 248);
+        let samples = picture_audio_samples(frames, 24).unwrap();
+        assert_eq!(
+            samples, 496_000,
+            "not the centisecond header's 495840 samples"
+        );
+        for (index, (seconds, rate)) in [0.0, 0.125, 15.0]
+            .into_iter()
+            .flat_map(|seconds| {
+                [8000, 44100, 48000]
+                    .into_iter()
+                    .map(move |rate| (seconds, rate))
+            })
+            .enumerate()
+        {
+            let wav = dir.path().join(format!("source_{index}.wav"));
+            finite_fixture_wave(&wav, seconds, rate, 440);
+            let sources = [ResolvedAudioSource {
+                media_path: wav.clone(),
+                placement: AudioPlacement {
+                    asset_id: "audio".into(),
+                    track_id: "track_audio".into(),
+                    role: "music".into(),
+                    source_in: 0.0,
+                    source_out: seconds,
+                    picture_start: 0.0,
+                    span: seconds,
+                    speed: 1.0,
+                    gain: 1.0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                    generated: false,
+                },
+            }];
+            let graph = audio_mix_filter(&sources, samples).unwrap();
+            assert!(graph
+                .ends_with("aresample=48000,apad=whole_len=496000,atrim=end_sample=496000[aout]"));
+            let output = dir.path().join(format!("audio_{index}.pcm"));
+            let args = vec![
+                "ffmpeg".into(),
+                "-y".into(),
+                "-i".into(),
+                picture.display().to_string(),
+                "-i".into(),
+                wav.display().to_string(),
+                "-filter_complex".into(),
+                graph,
+                "-map".into(),
+                "[aout]".into(),
+                "-vn".into(),
+                "-c:a".into(),
+                "pcm_s16le".into(),
+                "-f".into(),
+                "s16le".into(),
+                output.display().to_string(),
+            ];
+            assert!(!args.iter().any(|arg| arg == "-shortest"));
+            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+                .await
+                .expect("the graph must terminate intrinsically, even without -shortest");
+            assert_eq!(
+                std::fs::metadata(output).unwrap().len(),
+                samples * 2 * 2,
+                "exact stereo PCM sample count for input duration {seconds} at {rate} Hz"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn finished_picture_cancel_stops_before_starting_probe_or_mix() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/jobs/picture-cancel",
+                get(|| async { Json(crate::tests::job_snapshot_json("picture-cancel", true)) }),
+            )
+            .route(
+                "/api/v1/jobs/picture-cancel/progress",
+                post(|| async { Json(crate::tests::job_snapshot_json("picture-cancel", true)) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut settings = crate::tests::test_settings("http://127.0.0.1:9".into(), None);
+        settings.api_url = format!("http://{address}");
+        settings.gpu_id = "cpu".into();
+        let api = ApiClient::new(&settings);
+        let dir = scratch("canceled_picture_");
+        let output = dir.path().join("must-not-exist.mp4");
+        let context = FfmpegContext {
+            api: &api,
+            settings: &settings,
+            job_id: "picture-cancel",
+            cancel_message: "cancel before picture decode",
+        };
+        let result = mux_audio(
+            "must-not-start-canceled-picture-probe",
+            &dir.path().join("missing.mp4"),
+            &[],
+            24,
+            &output,
+            Some(context),
+        )
+        .await;
+        assert!(matches!(result, Err(WorkerError::Canceled(_))));
+        assert!(!output.exists());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn finished_picture_probe_failure_stops_before_audio_mix_or_header_fallback() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("bad_finished_picture_");
+        let picture = dir.path().join("broken.mp4");
+        let output = dir.path().join("must-not-exist.mp4");
+        std::fs::write(&picture, b"not a rendered picture").unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            mux_audio("ffmpeg", &picture, &[], 24, &output, None),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn finite_three_source_mix_preserves_248_picture_frames_and_crossfade_clock() {
+        if !ffmpeg_reachable() {
+            return;
+        }
+        let dir = scratch("finite_three_source_mix_");
+        let root = dir.path();
+        let seconds = 124.0 / 24.0;
+        finite_fixture_picture(&root.join("a.mp4"), 124).await;
+        finite_fixture_picture(&root.join("b.mp4"), 124).await;
+        for (name, duration, hz) in [
+            ("room", 32.0, 100),
+            ("music", 32.0, 250),
+            ("line", 1.5, 400),
+        ] {
+            finite_fixture_wave(&root.join(format!("{name}.wav")), duration, 8000, hz);
+        }
+        for crossfade in [false, true] {
+            let segments = [
+                TimelineSegment {
+                    path: root.join("a.mp4"),
+                    duration: seconds,
+                    transition: None,
+                    transition_duration: 0.0,
+                },
+                TimelineSegment {
+                    path: root.join("b.mp4"),
+                    duration: seconds,
+                    transition: crossfade.then(|| "crossfade".into()),
+                    transition_duration: 1.0,
+                },
+            ];
+            let timing = PictureTiming::from_segments(&segments);
+            let picture = root.join(format!("picture_{crossfade}.mp4"));
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                mux_segments("ffmpeg", &segments, root, &picture, None),
+            )
+            .await
+            .expect("bounded fixture mux")
+            .unwrap();
+            let frames = probe_source_frame_count("ffmpeg", &picture)
+                .await
+                .unwrap()
+                .unwrap();
+            if crossfade {
+                assert!(
+                    (223..=225).contains(&frames),
+                    "encoded xfade boundary may differ by a frame: {frames}"
+                );
+            } else {
+                assert_eq!(frames, 248);
+            }
+            let samples = picture_audio_samples(frames, 24).unwrap();
+            assert_eq!(
+                samples,
+                frames as u64 * 2000,
+                "actual post-encode clock, not theoretical overlap duration"
+            );
+            if crossfade {
+                assert_ne!(
+                    samples, 496_000,
+                    "must not use the pre-crossfade timeline sum"
+                );
+            } else {
+                assert_eq!(samples, 496_000);
+            }
+            assert!((timing.duration() - frames as f64 / 24.0).abs() <= 1.0 / 24.0 + 1e-9);
+            let sources: Vec<_> = [
+                ("room", 32.0, 0.35, 0.0),
+                ("music", 32.0, 0.2, 0.0),
+                ("line", 1.5, 1.0, 6.367),
+            ]
+            .into_iter()
+            .map(|(name, duration, gain, start)| ResolvedAudioSource {
+                media_path: root.join(format!("{name}.wav")),
+                placement: AudioPlacement {
+                    asset_id: name.into(),
+                    track_id: format!("track_{name}"),
+                    role: name.into(),
+                    source_in: 0.0,
+                    source_out: duration,
+                    picture_start: start,
+                    span: duration,
+                    speed: 1.0,
+                    gain,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                    generated: false,
+                },
+            })
+            .collect();
+            let output = root.join(format!("mix_{crossfade}.mp4"));
+            let mut args = audio_mix_args("ffmpeg", &picture, &sources, samples, &output).unwrap();
+            // Prove intrinsic graph EOF: do not let -shortest hide an infinite-pad regression.
+            args.retain(|arg| arg != "-shortest");
+            run_ffmpeg_capture_stderr_inner(args, None, None, Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert_eq!(
+                probe_source_frame_count("ffmpeg", &output).await.unwrap(),
+                Some(frames),
+                "video stays copy-only and frame-exact"
+            );
+            let decoded = decode_window(&output, 0.0, frames as f64 / 24.0 + 1.0);
+            assert!((decoded.len() as i64-samples as i64).abs()<=1024,"AAC tail is at most one codec frame, not the pre-crossfade timeline: {} vs {samples}",decoded.len());
+        }
     }
 
     /// The same inheritance hazard `a_crossfaded_export_does_not_inherit_a_clips_recipe` measured,
@@ -6815,6 +7213,7 @@ mod timeline_audio_mix_tests {
             "ffmpeg",
             Path::new("picture.mp4"),
             &sources,
+            48_000,
             Path::new("out.mp4"),
         )
         .expect("one source mixes");
