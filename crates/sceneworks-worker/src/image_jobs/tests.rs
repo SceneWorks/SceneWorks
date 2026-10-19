@@ -3576,8 +3576,20 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         .find("CandleImageRoute::PoseReject => {")
         .expect("PoseReject dispatch arm");
     let stub_fallback = run_job
-        .find("if !handled {\n        if request.hires_fix.enabled")
-        .expect("procedural-stub fallback");
+        .find("dispatch_legacy_fallback(&request.model, handled, || async {")
+        .expect("model-bound guarded procedural-stub fallback");
+    assert_eq!(
+        run_job.matches("generate_stub_stream(").count(),
+        1,
+        "the single procedural stub must remain inside the guarded fallback"
+    );
+    let stub_call = run_job
+        .find("generate_stub_stream(")
+        .expect("single stub invocation");
+    assert!(
+        stub_fallback < stub_call,
+        "the model-bound no-fallback guard must run before the procedural stub"
+    );
     assert!(
         pose_reject_dispatch < stub_fallback,
         "PoseReject dispatch must execute before the procedural-stub fallback"
