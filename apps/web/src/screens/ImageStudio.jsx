@@ -59,7 +59,7 @@ import {
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
-import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences } from "../imageJobRequest.js";
 import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import {
   usePoseLibrary,
@@ -1264,6 +1264,15 @@ export function ImageStudio() {
   // for the recipe path, which sets the model AND the tuning together.
   const skipReferenceTuningReset = useRef(false);
   const referenceTuningModel = useRef(saved.ipAdapterScale != null ? model : null);
+  // One declared-default policy for a model switch and the first late catalog resolution.
+  // The effects retain their distinct ownership/skip gates and model-only transient resets.
+  const applyDeclaredReferenceDefaults = useCallback((ui) => {
+    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
+    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
+  }, [setControlScale]);
   useEffect(() => {
     if (referenceTuningModel.current === model) {
       return;
@@ -1274,9 +1283,7 @@ export function ImageStudio() {
       return;
     }
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
-    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
-    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
-    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    applyDeclaredReferenceDefaults(ui);
     setViewAngle("");
     setSelectedPoseIds([]);
     setWorkflowPoses([]);
@@ -1286,9 +1293,6 @@ export function ImageStudio() {
     // reset the control-scale to the model's manifest default, and clear a stale control image.
     const nextModes = supportedControlModes(imageModels.find((item) => item.id === model));
     setControlMode((current) => (nextModes.includes(current) ? current : nextModes[0] ?? "pose"));
-    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
-    // Krea text-style gain: snap to the new model's declared default (1.0 = no-op when undeclared).
-    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
     setControlImageAssetId("");
     setControlImagePassthrough(false);
     // Clear a stale overlay pick so an id trained for a different backbone can't leak into a submit
@@ -1324,12 +1328,8 @@ export function ImageStudio() {
       return;
     }
     const ui = resolved.ui ?? {};
-    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
-    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
-    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
-    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
-    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
-  }, [model, imageModels, setControlScale]);
+    applyDeclaredReferenceDefaults(ui);
+  }, [model, imageModels, applyDeclaredReferenceDefaults]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -2044,14 +2044,10 @@ export function ImageStudio() {
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
   // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
-  const flux3ReferenceRequest = isFlux3ReferenceRequest({
-    model: selectedModel,
-    sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId : null,
-    referenceAssetId: mode === "character_image" ? referenceAssetId
-      : supportsImg2img ? img2imgReferenceAssetId : null,
-    referenceAssetIds: mode === "edit_image" && (multiReference || sourceWithMultiReference)
-      ? referenceAssetIds : null,
-  });
+  const jobReferences = imageJobReferences({ mode, multiReference, sourceWithMultiReference,
+    editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
+    supportsImg2img, img2imgReferenceAssetId });
+  const flux3ReferenceRequest = isFlux3ReferenceRequest(model, Object.values(jobReferences).flat());
   const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
     referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
   useEffect(() => {
