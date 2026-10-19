@@ -168,7 +168,7 @@
   "flux3_klein_base:mlx:bounded_decode": [0,0,6],
   "flux3_klein_base:mlx:bounded_transformer_residency": [0,0,6],
   "flux3_klein_base:mlx:resident": [6,0,0],
-  "flux3_klein_base:mlx:staged_residency": [0,0,6],
+  "flux3_klein_base:mlx:staged_residency": [6,0,0],
   "flux_dev:candle:bounded_attention": [18,0,6],
   "flux_dev:candle:bounded_decode": [18,0,6],
   "flux_dev:candle:bounded_transformer_residency": [18,0,6],

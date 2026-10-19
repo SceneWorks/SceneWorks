@@ -1875,6 +1875,14 @@ fn validate_lora_safetensors_header_for_model(
     let Some(path) = sceneworks_core::lora_family::adapter_record_path(lora) else {
         return Ok(None);
     };
+    // Preserve legacy family-assignment semantics for non-safetensors file formats. FLUX3
+    // inspects the selected bytes (including trusted HF extensionless blobs) unconditionally.
+    if !matches!(model, "flux3_klein" | "flux3_klein_base")
+        && path.is_file()
+        && !sceneworks_core::lora_family::is_safetensors_file(&path)
+    {
+        return Ok(None);
+    }
     let file = sceneworks_core::lora_family::resolve_adapter_for_model(
         &path,
         sceneworks_core::lora_family::declared_adapter_file(lora),
