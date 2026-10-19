@@ -1513,6 +1513,7 @@ fn krea_imported_memory_inputs(
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     }
 }
 

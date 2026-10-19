@@ -3017,16 +3017,22 @@ def test_sdxl_manifest_has_mlx_block():
 
 
 def test_hide_reference_strength_models_declare_a_variation_knob():
-    """Symmetry guard for the sc-2017 picker UX. A model that opts out of the
-    IP-Adapter reference-strength slider via `ui.hideReferenceStrength` MUST
-    also declare `ui.variationStrength` — otherwise the picker shows no tuning
-    control at all, and the worker silently runs at default true_cfg_scale.
+    """Identity/edit models need their effective tuning control, while native
+    AE-only reference conditioning must not advertise an ineffective strength axis.
+    The worker's live-route honesty guard independently verifies native dispatch.
     """
     manifest = _load_builtin_models_manifest()
     unbalanced: list[str] = []
     for model in manifest.get("models", []):
         ui = model.get("ui") or {}
         if not ui.get("hideReferenceStrength"):
+            continue
+        if model.get("family") == "flux3":
+            # No img2img noise initialization or identity scale exists on this native route.
+            # Keep its real reference shape AND absence of a fake variation knob load-bearing.
+            assert "variationStrength" not in ui, model["id"]
+            assert model["limits"]["maxReferenceAssets"] == 10, model["id"]
+            assert {"edit_image", "image_to_image", "character_image"} <= set(model["capabilities"]), model["id"]
             continue
         if not ui.get("variationStrength"):
             unbalanced.append(model["id"])
@@ -4981,3 +4987,16 @@ def test_flux3_base_and_distilled_have_separate_defaults_and_adapter_identity():
             for name in ["config.json", "hf_quant_config.json", "manifest.json", "model.safetensors"]:
                 assert f"variants/{row['variant']}/{name}" in metadata_paths
     assert all("localDerivation" not in row for row in primary)
+
+
+def test_flux3_both_checkpoints_declare_the_owned_reference_editing_surface():
+    models = {row["id"]: row for row in _load_builtin_models_manifest()["models"]}
+    for model_id in ["flux3_klein", "flux3_klein_base"]:
+        model = models[model_id]
+        assert set(model["capabilities"]) >= {"text_to_image", "edit_image", "image_to_image", "character_image"}
+        assert model["limits"]["maxReferenceAssets"] == 10
+        assert model["limits"]["minDimension"] == 64  # plain T2I; references use the family parser's 16px floor
+        assert model["limits"]["maxDimension"] == 4096
+        assert model["limits"]["requiresDimensionsMultipleOf"] == 16
+        assert model["ui"]["hideReferenceStrength"] is True
+        assert model["ui"]["promptEnhance"] is True

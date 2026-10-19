@@ -24,6 +24,8 @@
 
 // `status` values of `POST /api/v1/workflows/inspect`. Both keys are always present in the body,
 // so a reader branches on `status` rather than on the absence of `workflow`.
+import { isFlux3ReferenceRequest } from "./resolutionOverride.js";
+
 export const WORKFLOW_STATUS_WORKFLOW = "workflow";
 export const WORKFLOW_STATUS_NO_WORKFLOW = "no_workflow";
 
@@ -482,7 +484,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null } = {},
 ) {
   if (!share) {
     return null;
@@ -566,6 +568,15 @@ export function recipeFromWorkflowShare(
   const modelId = workflowModelId(report) ?? (substituteModelId || null);
   if (modelId) {
     recipe.model = modelId;
+  }
+  // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
+  // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
+  if (share.sceneworksWorkflow === "image" && share.inputs?.some(({ kind }) =>
+    isFlux3ReferenceRequest(modelId, kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
+    recipe.uiDimensionIntent = {
+      width: Number.isInteger(width) && width > 0 ? width : null,
+      height: Number.isInteger(height) && height > 0 ? height : null,
+    };
   }
   // `stylePreset` is NOT set here even when it resolved. Nothing in `apps/web/src` reads
   // `recipe.stylePreset` — the studio's preset seam is `launchRequest.presetId`, a different

@@ -382,6 +382,46 @@ fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availa
     }
 }
 
+#[test]
+fn flux3_enhancement_uses_the_same_ordered_reference_shape_without_loading_assets() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = true;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for mode in ["text_to_image", "edit_image", "character_image"] {
+            let req = request(
+                json!({"model":model,"mode":mode,"referenceAssetIds":vec!["duplicate-slot";10],"advanced":{"enhancePrompt":true}}),
+            );
+            let result = validate_prompt_enhancement_request(&req, &settings);
+            #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+            assert!(result.is_ok(), "{model}/{mode}: {result:?}");
+            #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native MLX or Candle"));
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"referenceAssetId":"a","maskAssetId":"mask"}),
+            json!({"referenceAssetId":"a","advanced":{"enhancePrompt":true,"referenceStrength":1.0}}),
+        ] {
+            let mut payload =
+                json!({"model":model,"mode":"edit_image","advanced":{"enhancePrompt":true}})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            payload.extend(extra.as_object().unwrap().clone());
+            assert!(validate_prompt_enhancement_request(
+                &ImageRequest::from_payload(&payload),
+                &settings
+            )
+            .is_err());
+        }
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -18929,18 +18969,23 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
     let final_selector = source
-        .split_once(
-            "let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(",
-        )
+        .split_once("let shared_memory = if let Some(references) = flux3_references.as_ref() {")
         .expect("final-pass selector")
         .1
         .split_once("let first_pass_shared_memory")
         .expect("end final-pass selector")
         .0;
+    let final_selector = final_selector
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        final_selector.contains("hires_fix.is_some(),\n        hires_fix.is_some(),"),
+        final_selector.contains("hires_fix.is_some(), hires_fix.is_some(),"),
         "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
     );
+    assert!(final_selector.contains("evaluate_shared_image_priced("));
+    assert!(final_selector.contains("evaluate_shared_image_priced_with_resources("));
+    assert!(final_selector.contains("Some(&references.resources)"));
     let first_mode = source
         .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
         .expect("first-pass admission")
@@ -21962,6 +22007,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
         // admission gate. Structurally the SenseNova case, not the ControlNet case.
         "QwenImage21Edit",
+        // FLUX.3 references use the base autoencoder, not an additional conditioning network.
+        "Flux3Reference",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic
@@ -22001,6 +22048,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // them. Their companion snapshot's transformer is replaced by the primary File and must not be
     // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "Flux3Reference",
+            "base.rs",
+            include_str!("base.rs"),
+            "evaluate_shared_image_priced_with_resources(",
+        ),
         (
             "SdxlEdit",
             "sdxl_edit_candle.rs",
@@ -27992,9 +28045,19 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
     assert!(!detail.contains("packed/request-quantized detail is not supported"));
     assert!(base.contains("context.mode = if reference_count == 0"));
-    assert!(base.contains(
-        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
-    ));
+    let mode_call = base
+        .split_once("let shared_request_mode = candle_base_memory_request_mode(")
+        .expect("shared mode must use the family-specific mode mapper")
+        .1
+        .split_once(");")
+        .expect("shared mode mapper call must terminate")
+        .0;
+    assert!(mode_call.contains("engine_id,"));
+    assert!(mode_call.contains("if flux3_references.is_some() { \"edit_image\" }"));
+    assert!(
+        mode_call.contains("else { &request.mode }"),
+        "all other families must preserve their authored mode"
+    );
     assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
     assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
     assert!(base.contains("| \"sdxl\""));
@@ -28358,29 +28421,32 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         !stream.contains("ladder_reserve_gb(budget"),
         "the ladder reserve must never be derived from the reclaimable-credited budget"
     );
-    // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
-    // the hires first pass is the plain selection.
+    // Exactly one final-pass branch runs: the legacy priced twin for no references, or the
+    // reference-aware twin. The optional hires first pass remains the plain selection.
+    assert!(stream
+        .contains("let shared_memory = if let Some(references) = flux3_references.as_ref() {"));
     let shared_calls = stream
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
         .count()
         + stream
             .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .count()
+        + stream
+            .match_indices(
+                "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(",
+            )
             .count();
     assert_eq!(
-        shared_calls, 2,
-        "the final-pass and hires first-pass shared selections"
+        shared_calls, 3,
+        "the mutually exclusive final-pass branches and the hires first-pass selection"
     );
+    let normalized_stream = stream.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        stream
-            .match_indices("budget,\n        shared_reserve_gb,\n        shared_predicted_peak_gb,")
-            .count()
-            + stream
-                .match_indices(
-                    "budget,\n            shared_reserve_gb,\n            shared_predicted_peak_gb,"
-                )
-                .count(),
-        2,
-        "both shared selections must pass the raw-probe reserve explicitly after the budget"
+        normalized_stream
+            .match_indices("budget, shared_reserve_gb, shared_predicted_peak_gb,")
+            .count(),
+        3,
+        "every shared call must pass the raw-probe reserve explicitly after the budget"
     );
 
     // Deference arm: gated on sequential capability AND a staging-engaging selection.

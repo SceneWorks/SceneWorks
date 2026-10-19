@@ -528,7 +528,16 @@ pub(crate) fn flux3_payload_tier(payload: &Map<String, Value>) -> Result<Flux3Ti
 /// Iris (its second pass is an img2img refinement the engine refuses). Judged with the precision
 /// carriers removed, since [`flux3_payload_tier`] owns them.
 pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
+    let Ok(references) = crate::image_request::flux3::parse(payload) else {
+        return false;
+    };
     let mut surface = payload.clone();
+    if !references.asset_ids.is_empty() {
+        for key in ["sourceAssetId", "referenceAssetId", "referenceAssetIds"] {
+            surface.remove(key);
+        }
+        surface.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
+    }
     if let Some(advanced) = surface.get_mut("advanced").and_then(Value::as_object_mut) {
         for carrier in crate::image_request::FLUX3_PRECISION_CARRIERS {
             advanced.remove(*carrier);

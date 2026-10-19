@@ -22,6 +22,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { recipeFromWorkflowShare } from "../workflowShare.js";
 
 // One model that advertises every lane the knobs belong to, so a single mount can observe all of
 // them: img2img, Krea's text-style gain, strict control (pose/canny/depth), FLUX-style prompt
@@ -77,6 +78,31 @@ const FLUX2_DEV = {
   ui: { promptEnhance: true },
 };
 
+const FLUX3 = {
+  id: "flux3_klein", name: "FLUX 3 Klein", type: "image", family: "flux3",
+  capabilities: ["text_to_image", "edit_image", "character_image"], installState: "installed",
+  defaults: { resolution: "1024x1024" },
+  limits: { resolutions: ["1024x1024", "1536x1024"], minDimension: 64,
+    maxDimension: 4096, requiresDimensionsMultipleOf: 16 },
+  ui: { multiReference: true, hideReferenceStrength: true },
+};
+const FLUX3_REFERENCE = {
+  id: "flux3-reference", type: "image", projectId: "project_1", displayName: "83 by 67 reference",
+  width: 83, height: 67, status: {}, file: { path: "assets/images/reference.png", mimeType: "image/png" },
+};
+
+function flux3Recipe(width, height) {
+  return {
+    mode: "edit_image", model: FLUX3.id, prompt: "a lighthouse in heavy fog", loras: [],
+    normalizedSettings: { width: 80, height: 64, count: 1 },
+    rawAdapterSettings: {
+      referenceAssetIds: [FLUX3_REFERENCE.id],
+      flux3ReferenceEditing: { output: { requestedWidth: width, requestedHeight: height,
+        canvas: { width: 83, height: 67 }, actualSize: { width: 80, height: 64 } } },
+    },
+  };
+}
+
 const PID_CHECKPOINT = { id: "pid_qwenimage", name: "PiD decoder", installState: "installed" };
 
 const ACCEL_LORA = {
@@ -108,8 +134,8 @@ function baseContext(overrides = {}) {
     deleteAsset: vi.fn(),
     purgeAsset: vi.fn(),
     gpuOptions: [],
-    imageModels: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV],
-    models: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV, PID_CHECKPOINT],
+    imageModels: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV, FLUX3],
+    models: [EVERY_LANE, OTHER_MODEL, FLUX2_DEV, FLUX3, PID_CHECKPOINT],
     importAsset: vi.fn(),
     latestImageAssets: [],
     recentImageAssets: [],
@@ -238,6 +264,163 @@ describe("a replayed recipe reaches every allow-listed control", () => {
   // be read in the editor's own id-keyed shape — the remapped structure, not a rendering of it.
   const persistedStudioSettings = () =>
     JSON.parse(window.localStorage.getItem("sceneworks-studio-image-project_1") ?? "{}");
+
+  const editControl = async (node, value) => act(async () => {
+    if (node.tagName === "INPUT") {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(node, value);
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      node.value = value;
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+
+  it.each([[null, null], [512, 768], [512, null], [null, 768], [16, 48]])(
+    "restores FLUX3 requested axes %s / %s through mounted submission, not actual image geometry",
+    async (width, height) => {
+      seedOpenDisclosures({ widthOverride: "2048", heightOverride: "1536" });
+      const createImageJob = vi.fn(async () => ({ id: "job-flux3" }));
+      await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
+        studioLaunch: launch(flux3Recipe(width, height)) }));
+      expect(control("Width override").value).toBe(width == null ? "" : String(width));
+      expect(control("Height override").value).toBe(height == null ? "" : String(height));
+      expect(control("Width override").min).toBe("16");
+      expect(buttonByText("Generate").disabled).toBe(false);
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.referenceAssetIds).toEqual([FLUX3_REFERENCE.id]);
+      if (width == null) expect(payload).not.toHaveProperty("width");
+      else expect(payload.width).toBe(width);
+      if (height == null) expect(payload).not.toHaveProperty("height");
+      else expect(payload.height).toBe(height);
+    },
+  );
+
+  it.each([[undefined, undefined], [512, 768], [512, undefined], [undefined, 768], [16, 48]])(
+    "submits imported FLUX3 reference workflow axes %s / %s without forging worker facts",
+    async (width, height) => {
+      const recipe = recipeFromWorkflowShare({
+        sceneworksWorkflow: "image", mode: "edit_image", model: FLUX3.id,
+        prompt: "a lighthouse", width, height, inputs: [{ kind: "reference" }],
+      }, { model: { state: "resolved", catalogId: FLUX3.id }, loras: [], styles: [] },
+      { referenceAssetIds: [FLUX3_REFERENCE.id] });
+      expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
+      const createImageJob = vi.fn(async () => ({ id: "job-shared-flux3" }));
+      await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
+      expect(buttonByText("Generate").disabled).toBe(false);
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.advanced).not.toHaveProperty("flux3ReferenceEditing");
+      if (width == null) expect(payload).not.toHaveProperty("width");
+      else expect(payload.width).toBe(width);
+      if (height == null) expect(payload).not.toHaveProperty("height");
+      else expect(payload.height).toBe(height);
+    },
+  );
+
+  it.each([[undefined, undefined], [512, 768], [512, undefined], [undefined, 48], [16, 48]])(
+    "submits source-only imported FLUX3 workflow axes %s / %s through the existing launch binding",
+    async (width, height) => {
+      // The shipped FLUX3 UI uses the single-source edit picker, not multiReference.
+      const model = { ...FLUX3, ui: { hideReferenceStrength: true } };
+      const sourceAssetId = FLUX3_REFERENCE.id;
+      const recipe = recipeFromWorkflowShare({
+        sceneworksWorkflow: "image", mode: "edit_image", model: model.id,
+        prompt: "a lighthouse", width, height, inputs: [{ kind: "source", count: 1 }],
+      }, { model: { state: "resolved", catalogId: model.id }, loras: [], styles: [] },
+      { sourceAssetId });
+      expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
+      expect(recipe.rawAdapterSettings).not.toHaveProperty("referenceAssetIds");
+      const createImageJob = vi.fn(async () => ({ id: "job-source-workflow" }));
+      await render(baseContext({ imageModels: [model], models: [model], assets: [FLUX3_REFERENCE],
+        createImageJob, studioLaunch: launch(recipe, { sourceAssetId }) }));
+      expect(buttonByText("Generate").disabled).toBe(false);
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.sourceAssetId).toBe(sourceAssetId);
+      if (width == null) expect(payload).not.toHaveProperty("width");
+      else expect(payload.width).toBe(width);
+      if (height == null) expect(payload).not.toHaveProperty("height");
+      else expect(payload.height).toBe(height);
+      expect(payload.advanced).not.toHaveProperty("flux3ReferenceEditing");
+    },
+  );
+
+  it.each(["Width override", "Height override", "Aspect"])(
+    "disarms automatic reference sizing on a subsequent %s edit", async (field) => {
+      const createImageJob = vi.fn(async () => ({ id: "job-edited-flux3" }));
+      await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
+        studioLaunch: launch(flux3Recipe(null, null)) }));
+      await editControl(control(field), field === "Aspect" ? "1536x1024" : "512");
+      await click(buttonByText("Generate"));
+      expect(createImageJob.mock.calls[0][0]).toMatchObject({
+        width: field === "Width override" ? 512 : field === "Aspect" ? 1536 : 1024,
+        height: field === "Height override" ? 512 : 1024,
+      });
+      expect(control("Width override").placeholder).not.toContain("Auto");
+      expect(control("Height override").placeholder).not.toContain("Auto");
+    },
+  );
+
+  it.each(["edit_image", "character_image"])(
+    "uses optional small reference geometry with the emitted %s single-reference source", async (mode) => {
+      const model = { ...FLUX3, ui: { hideReferenceStrength: true } };
+      const character = { id: "flux3-character", name: "Reference character", looks: [],
+        approvedReferences: [{ assetId: FLUX3_REFERENCE.id, asset: FLUX3_REFERENCE }] };
+      const recipe = flux3Recipe(null, 48);
+      recipe.mode = mode;
+      delete recipe.rawAdapterSettings.referenceAssetIds;
+      recipe.rawAdapterSettings.referenceAssetId = FLUX3_REFERENCE.id;
+      recipe.normalizedSettings.characterId = character.id;
+      recipe.normalizedSettings.sourceAssetId = FLUX3_REFERENCE.id;
+      const createImageJob = vi.fn(async () => ({ id: "job-source-flux3" }));
+      await render(baseContext({ imageModels: [model], models: [model], assets: [FLUX3_REFERENCE],
+        characters: [character], createImageJob, studioLaunch: launch(recipe) }));
+      expect(buttonByText("Generate").disabled).toBe(false);
+      expect(control("Width override").min).toBe("16");
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload).not.toHaveProperty("width");
+      expect(payload.height).toBe(48);
+      expect(payload[mode === "edit_image" ? "sourceAssetId" : "referenceAssetId"]).toBe(FLUX3_REFERENCE.id);
+    },
+  );
+
+  it("keeps authored omitted axes while the model catalog is still loading", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-late-catalog" }));
+    const context = baseContext({ imageModels: [], models: [], assets: [FLUX3_REFERENCE], createImageJob,
+      studioLaunch: launch(flux3Recipe(null, 48)) });
+    await render(context);
+    await render({ ...context, imageModels: [FLUX3], models: [FLUX3] });
+    expect(buttonByText("Generate").disabled).toBe(false);
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0]).not.toHaveProperty("width");
+    expect(createImageJob.mock.calls[0][0].height).toBe(48);
+  });
+
+  it("drops automatic sizing on a same-model non-recipe launch", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-fresh-flux3" }));
+    const context = baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
+      studioLaunch: launch(flux3Recipe(null, null)) });
+    await render(context);
+    await render({ ...context, studioLaunch: { id: "fresh-intent", view: "Image", mode: "edit_image" } });
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0]).toMatchObject({ width: 1024, height: 1024 });
+  });
+
+  it("clears automatic sizing at a later ordinary recipe and retains the plain T2I floor", async () => {
+    const context = baseContext({ assets: [FLUX3_REFERENCE],
+      studioLaunch: launch(flux3Recipe(null, null)) });
+    await render(context);
+    const recipe = { ...flux3Recipe(16, 48), mode: "text_to_image" };
+    await render({ ...context, studioLaunch: launch(recipe) });
+    expect(control("Width override").min).toBe("64");
+    expect(buttonByText("Generate").disabled).toBe(true);
+    await render({ ...context, studioLaunch: launch(everyKnobRecipe()) });
+    expect(control("Width override").value).toBe("");
+    expect(control("Height override").value).toBe("");
+    expect(control("Width override").min).toBe("256");
+  });
 
   it("sets the PiD decoder and its output tier without exposing a forged Krea enhancement flag", async () => {
     await render(baseContext({ studioLaunch: launch(everyKnobRecipe()) }));
