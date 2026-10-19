@@ -457,6 +457,8 @@ mod moss_consumer_tests {
         )
         .unwrap_err()
         .to_string();
+        // Native errors display host paths, including Windows backslash separators.
+        let error = error.replace('\\', "/");
         assert!(error.contains("text_encoder/config.json"), "{error}");
         assert!(!error.contains("transformer/config.json"), "{error}");
         // The macOS normal registry constructor prepares sources before device/tensor work.
