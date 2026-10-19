@@ -247,7 +247,7 @@ pub struct GenerateImageArgs {
     )]
     pub caption_overflow: Option<String>,
     #[schemars(
-        description = "A native prompt batch: 2+ prompts rendered together in ONE pass, prompts × count <= the model's imageControls.maxPromptBatchImages (Iris-3B: 8). `prompt` must equal prompts[0]. Image k renders prompts[k % len] on seed seed + k. Only for a model declaring maxPromptBatchImages; omit otherwise."
+        description = "A native prompt batch: 2+ prompts rendered together in ONE pass, prompts × count <= the model's imageControls.maxPromptBatchImages (Iris-3B: 8). `prompt` must equal prompts[0]. Output order depends on the model: Iris-3B is round-robin, image k renders prompts[k % len]; MOSS-Image is prompt-major, image k renders prompts[k / count] using integer division. Both use seed + k. Only for a model declaring maxPromptBatchImages; omit otherwise."
     )]
     pub prompts: Option<Vec<String>>,
     #[schemars(
@@ -2317,6 +2317,19 @@ mod tests {
     // -----------------------------------------------------------------------
     // generate_image (sc-10234): args → ImageJobRequest mapping.
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn prompt_batch_schema_describes_each_models_output_order() {
+        let schema = serde_json::to_value(schemars::schema_for!(GenerateImageArgs)).unwrap();
+        let description = schema["properties"]["prompts"]["description"]
+            .as_str()
+            .expect("published prompts description");
+        assert!(description.contains("Iris-3B is round-robin"));
+        assert!(description.contains("prompts[k % len]"));
+        assert!(description.contains("MOSS-Image is prompt-major"));
+        assert!(description.contains("prompts[k / count] using integer division"));
+        assert!(description.contains("Both use seed + k"));
+    }
 
     #[test]
     fn moss_image_options_reach_advanced_losslessly() {

@@ -23,6 +23,7 @@ import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
+import { mossSeededRecipeReplay } from "./mossImage.js";
 import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -2908,8 +2909,7 @@ export function App() {
     setSelectedAssetId(asset.id);
     closePreview();
     await launchImageRecipe({
-      recipe,
-      replaySeed,
+      ...mossSeededRecipeReplay(asset, recipe, replaySeed),
       assetId: asset.id,
       sourceAssetId: asset.lineage?.sourceAssetId ?? null,
     });

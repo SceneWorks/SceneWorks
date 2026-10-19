@@ -129,6 +129,19 @@ describe("MOSS Image Studio", () => {
   expect(field(container,"Guidance").checkValidity()).toBe(true);expect(field(container,"SLG scale").checkValidity()).toBe(true);expect(field(container,"SLG start").checkValidity()).toBe(true);
   await click(generateButton());expect(ctx.createImageJob.mock.calls[0][0].advanced).toMatchObject({guidanceScale:1.234,mossImage:options});
  });
+ it.each(["Unconditional skip layers", "SLG layers"])("Enter submits focused %s edits without requiring blur",async(label)=>{
+  const options={acceleration:"off",uncond_skip_layers:[22],slg:{layers:[22],scale:1,start:0,stop:1}};
+  const ctx=await render(baseContext({studioLaunch:{id:"focused-layers",view:"Image",recipe:{mode:"text_to_image",model:TURBO.id,prompt:"a cup",loras:[],normalizedSettings:{count:1},rawAdapterSettings:{mossImage:options}}}}));await advanced();
+  const input=field(container,label);input.focus();
+  await act(async()=>setInput(input,"["));expect(document.activeElement).toBe(input);expect(input.value).toBe("[");
+  await act(async()=>setInput(input,"[]"));expect(document.activeElement).toBe(input);
+  // jsdom does not implement the browser's implicit Enter submission; deliver
+  // that default form action while the edited input stays focused, without blur.
+  await act(async()=>{input.dispatchEvent(new window.KeyboardEvent("keydown",{key:"Enter",bubbles:true}));input.form.requestSubmit();});
+  expect(document.activeElement).toBe(input);expect(ctx.createImageJob).toHaveBeenCalledTimes(1);
+  const sent=ctx.createImageJob.mock.calls[0][0].advanced.mossImage;
+  expect(label==="SLG layers"?sent.slg.layers:sent.uncond_skip_layers).toEqual([]);
+ });
  it("persists acceleration choice across a studio remount",async()=>{
   await render();await click(field(container,"8-step acceleration"));await unmountRoot(root,container);({root,container}=mountRoot());await render();expect(field(container,"8-step acceleration").checked).toBe(true);
  });
@@ -160,6 +173,15 @@ describe("MOSS Image Studio", () => {
   await click(buttonWithText("Run batch"));if(container.querySelector(".batch-confirm .prompt-cta")) await click(container.querySelector(".batch-confirm .prompt-cta"));
   await vi.waitFor(()=>expect(ctx.createImageJob).toHaveBeenCalledTimes(size===2?1:2));
   const jobs=ctx.createImageJob.mock.calls.map(([job])=>job);expect(jobs.map(job=>job.count)).toEqual(size===2?[2]:[2,2]);expect(jobs.flatMap(job=>job.prompts)).toEqual(prompts);expect(jobs.map(job=>job.count*job.prompts.length)).toEqual(size===2?[4]:[8,4]);
+ });
+ it("leaves a previously opened batch when replaying one selected image",async()=>{
+  const ctx=await render(baseContext({studioLaunch:{id:"whole-batch",view:"Image",recipe:BATCH_RECIPE}}));
+  expect(container.querySelector('textarea[aria-label="Batch prompts"]')).not.toBeNull();
+  const recipe={...BATCH_RECIPE,prompt:"dog",normalizedSettings:{...BATCH_RECIPE.normalizedSettings,count:1},rawAdapterSettings:{mossImage:{acceleration:"off"}}};
+  await render({...ctx,studioLaunch:{id:"selected-image",view:"Image",recipe,replaySeed:102}});
+  expect(container.querySelector('textarea[aria-label="Batch prompts"]')).toBeNull();
+  await click(generateButton());expect(ctx.createImageJob.mock.calls[0][0]).toMatchObject({prompt:"dog",count:1,seed:102});
+  expect(ctx.createImageJob.mock.calls[0][0].prompts).toBeUndefined();
  });
  it("gates optional precision packages and reports download errors",async()=>{
   await render(); await click(field(container,"8-step acceleration")); await advanced(); await act(async()=>setSelect(field(container,"Acceleration precision"),"full_fp32"));

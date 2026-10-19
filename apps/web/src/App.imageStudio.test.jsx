@@ -1,4 +1,8 @@
 import React, { act } from "react";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import JSON5 from "json5";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
@@ -6,6 +10,9 @@ import { withImageStudioContext, FakeEventSource, response, settle } from "./mai
 import { styleTextForId } from "./data/styleCatalog.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { writeWorkflowEmbedNoticeSeen } from "./workflowEmbed.js";
+
+const MOSS_MODEL = JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../config/manifests/builtin.models.jsonc"), "utf8"))
+  .models.find((model) => model.id === "moss_image_sft");
 
 describe("SceneWorks app shell", () => {
   let container;
@@ -269,6 +276,52 @@ describe("SceneWorks app shell", () => {
         guidanceScale: 2.5,
       }),
     });
+  });
+
+  it.each([100, null])("Keep seed on a nonfirst MOSS batch image preserves its prompt/seed pair (saved base %s)", async (baseSeed) => {
+    const payloads = [];
+    const recipe = { mode: "text_to_image", model: MOSS_MODEL.id, prompt: "cat", seed: baseSeed, loras: [],
+      normalizedSettings: { width: 1024, height: 1024, count: 2 },
+      rawAdapterSettings: { promptBatch: ["cat", "dog"], mossImage: { acceleration: "off" } } };
+    const asset = { id: "dog-102", projectId: "project-1", generationSetId: "moss-batch", type: "image", displayName: "dog #3",
+      file: { path: "assets/images/dog.png", mimeType: "image/png" }, status: {},
+      generationSet: { recipe }, recipe: { ...recipe, prompt: "dog", seed: 102 } };
+    const fallback = global.fetch.getMockImplementation();
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/projects")) return Promise.resolve(response([{ id: "project-1", name: "Noir" }]));
+      if (path.endsWith("/assets")) return Promise.resolve(response([asset]));
+      if (path.endsWith("/models")) return Promise.resolve(response([{ ...MOSS_MODEL, installState: "installed", usable: true }]));
+      if (path.endsWith("/image/jobs") && options.method === "POST") {
+        const payload = JSON.parse(options.body); payloads.push(payload);
+        return Promise.resolve(response({ id: "moss-replay", type: "image_generate", status: "queued", payload }));
+      }
+      return fallback(url, options);
+    });
+    root = createRoot(container);
+    await act(async () => root.render(<App />)); await settle();
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Assets").click()); await settle();
+    await act(async () => document.body.querySelector(".asset-tile").dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))); await settle();
+    await act(async () => [...document.body.querySelectorAll("label")].find((label) => label.textContent.trim() === "Keep seed").querySelector("input").click());
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use this recipe").click()); await settle();
+    if (baseSeed != null) {
+      await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")).click());
+      const confirm = document.body.querySelector(".batch-confirm .prompt-cta");
+      if (confirm) await act(async () => confirm.click());
+    } else {
+      await act(async () => document.body.querySelector(".image-studio form").requestSubmit());
+    }
+    await settle(); await vi.waitFor(() => expect(payloads).toHaveLength(1));
+    const sent = payloads[0];
+    if (baseSeed != null) {
+      expect(sent).toMatchObject({ prompt: "cat", prompts: ["cat", "dog"], count: 2, seed: 100 });
+      expect(sent.prompts.flatMap((prompt) => Array.from({ length: sent.count }, () => prompt)).map((prompt, index) => [prompt, sent.seed + index]))
+        .toEqual([["cat", 100], ["cat", 101], ["dog", 102], ["dog", 103]]);
+    } else {
+      expect(sent).toMatchObject({ prompt: "dog", count: 1, seed: 102 });
+      expect(sent.prompts).toBeUndefined();
+    }
+    expect(asset.recipe.seed).toBe(102);
   });
 
   it("replays a STYLED recipe: re-selects the style, recomposes the identical prompt, no double-wrap (sc-13132)", async () => {
