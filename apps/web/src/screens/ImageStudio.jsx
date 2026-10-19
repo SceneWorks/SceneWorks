@@ -1924,8 +1924,8 @@ export function ImageStudio() {
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
     // Recipe replay leaves Seed random by default so "Use this recipe" makes a close
     // variation instead of a byte-for-byte rerun. When the launcher passes a replaySeed
-    // (viewer "Keep seed" toggle), it is already resolved to THIS image's own seed —
-    // replay it verbatim for an exact reproduction. Guard with `!= null` so seed 0 is honored.
+    // (viewer "Keep seed" toggle), the launcher resolves this image's own seed or
+    // the original base when replaying its whole MOSS batch. Seed 0 is valid.
     const replaySeed = launchRequest.replaySeed;
     setSeed(replaySeed != null && replaySeed !== "" ? String(replaySeed) : "");
     const countValue = finiteRecipeNumber(settings.count);
@@ -1949,8 +1949,9 @@ export function ImageStudio() {
     setCaptionOverflow(rawSettings.captionOverflow ?? "default");
     // sc-25681: an image of a native prompt batch reopens the whole batch.
     const batch = rawSettings.promptBatch;
-    if (Array.isArray(batch) && batch.length > 1) {
-      setBatchMode(true);
+    const replayBatch = Array.isArray(batch) && batch.length > 1;
+    setBatchMode(replayBatch);
+    if (replayBatch) {
       setBatchPromptsText(batch.join(batch.some((p) => p.includes("\n")) ? "\n---\n" : "\n"));
     }
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
@@ -4731,19 +4732,33 @@ export function ImageStudio() {
 }
 
 function MossOrdinaryControls({ options, disabled, onChange }) {
-  const layers = (text, apply) => {
-    try {
-      const value = text.trim() === "" ? null : JSON.parse(text);
-      apply(value);
-    } catch { apply(text); }
-  };
   return <>
     <label>Training shift<input disabled={disabled} type="number" min="0" step="any" value={options.training_shift ?? 1} onChange={(event) => onChange("training_shift", Number(event.target.value))} /></label>
-    <label>Unconditional skip layers<input disabled={disabled} key={JSON.stringify(options.uncond_skip_layers)} defaultValue={options.uncond_skip_layers == null ? "" : JSON.stringify(options.uncond_skip_layers)} placeholder="[22] (author default); [] disables" onBlur={(event) => layers(event.target.value, (value) => onChange("uncond_skip_layers", value))} /></label>
+    <label>Unconditional skip layers<MossLayerInput disabled={disabled} value={options.uncond_skip_layers} placeholder="[22] (author default); [] disables" onChange={(value) => onChange("uncond_skip_layers", value)} /></label>
     <label className="checkline"><input disabled={disabled} type="checkbox" checked={Boolean(options.slg)} onChange={(event) => onChange("slg", event.target.checked ? { layers: [22], scale: 1, start: 0, stop: 1 } : null)} />Skip-layer guidance</label>
     {options.slg ? <>
-      <label>SLG layers<input disabled={disabled} key={JSON.stringify(options.slg.layers)} defaultValue={JSON.stringify(options.slg.layers)} onBlur={(event) => layers(event.target.value, (value) => onChange("slg", { ...options.slg, layers: value ?? [] }))} /></label>
+      <label>SLG layers<MossLayerInput disabled={disabled} value={options.slg.layers} emptyValue={[]} onChange={(value) => onChange("slg", { ...options.slg, layers: value })} /></label>
       {["scale", "start", "stop"].map((key) => <label key={key}>SLG {key}<input disabled={disabled} type="number" min="0" max={key === "scale" ? undefined : 1} step="any" value={options.slg[key]} onChange={(event) => onChange("slg", { ...options.slg, [key]: Number(event.target.value) })} /></label>)}
     </> : null}
   </>;
+}
+
+const mossLayerText = (value) => value == null ? "" : typeof value === "string" ? value : JSON.stringify(value);
+
+function MossLayerInput({ value, onChange, emptyValue = null, ...props }) {
+  const [draft, setDraft] = useState(() => mossLayerText(value));
+  const lastValue = useRef(value);
+  useEffect(() => {
+    if (value !== lastValue.current) setDraft(mossLayerText(value));
+    lastValue.current = value;
+  }, [value]);
+  return <input {...props} value={draft} onChange={(event) => {
+    const text = event.target.value;
+    let next;
+    try { next = text.trim() === "" ? emptyValue : JSON.parse(text) ?? emptyValue; }
+    catch { next = text; }
+    lastValue.current = next;
+    setDraft(text);
+    onChange(next);
+  }} />;
 }

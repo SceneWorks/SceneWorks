@@ -2,6 +2,22 @@
 export const isMossImage = (id) => id === "moss_image_base" || id === "moss_image_sft";
 export const mossDefaults = () => ({ acceleration: "off", max_sequence_length: 4096 });
 export const mossAccelerated = (options) => Boolean(options?.acceleration && options.acceleration !== "off");
+export function mossSeededRecipeReplay(asset, recipe, replaySeed) {
+  const batch = recipe?.rawAdapterSettings?.promptBatch;
+  if (replaySeed == null || !isMossImage(recipe?.model) || !Array.isArray(batch) || batch.length < 2) {
+    return { recipe, replaySeed };
+  }
+  // A batch expands its base seed by output index; a sibling's own seed cannot
+  // replace that base without changing every prompt/seed pair in the batch.
+  const baseSeed = asset?.generationSet?.recipe?.seed;
+  if (baseSeed != null && baseSeed !== "") return { recipe, replaySeed: baseSeed };
+  // Older/random-seed sets may lack the original base. Replay the selected
+  // image alone, whose persisted prompt is already styled, instead of shifting a batch.
+  const rawAdapterSettings = { ...recipe.rawAdapterSettings };
+  for (const key of ["promptBatch", "styleId", "stylePrompt"]) delete rawAdapterSettings[key];
+  return { replaySeed, recipe: { ...recipe, prompt: asset?.recipe?.prompt ?? recipe.prompt,
+    normalizedSettings: { ...recipe.normalizedSettings, count: 1 }, rawAdapterSettings } };
+}
 export function mossWireOptions(options) {
   const value = { ...mossDefaults(), ...options };
   if (mossAccelerated(value)) {
