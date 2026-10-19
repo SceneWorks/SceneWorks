@@ -71,6 +71,10 @@
       "candle": false,
       "mlx": false
     },
+    "flux3_klein_base": {
+      "candle": false,
+      "mlx": false
+    },
     "flux_dev": {
       "candle": true,
       "mlx": true

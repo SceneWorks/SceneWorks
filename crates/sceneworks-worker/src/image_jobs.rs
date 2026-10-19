@@ -53,6 +53,10 @@ use gen_core::{
 // this same implementation without pulling in an accelerator runtime bundle.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod prompt_upsampling;
+// sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
+// check compiles on every lane, so the worker trust-boundary refusal holds even without a native
+// backend; package resolution compiles with the native lanes.
+mod flux3_precision;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 use prompt_upsampling::{
     attach_prompt_upsampler, prompt_enhancement_fact, publish_upsampling_progress, PromptEnhance,
@@ -494,6 +498,61 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+fn require_legacy_fallback_allowed(model: &str) -> WorkerResult<()> {
+    if matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return Err(WorkerError::InvalidPayload(format!("unsupported: {model} requires its native MLX/Candle handler and verified pinned components. No native handler completed this request; update/enable the native worker and check the selected operation. Procedural or text-to-image fallback is disabled")));
+    }
+    Ok(())
+}
+
+/// The production dispatch/fallback decision, with the real stub invocation supplied by the
+/// caller. Kept backend-neutral so a missing/unlinked/disabled backend is testable without GPU.
+pub(super) async fn dispatch_legacy_fallback<F, Fut>(
+    model: &str,
+    handled: bool,
+    stub: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
+{
+    if handled {
+        return Ok(());
+    }
+    require_legacy_fallback_allowed(model)?;
+    stub().await
+}
+
+// Backend-neutral filesystem part of the actual canonical package resolution. Never infer
+// revision from cache HEAD or a directory name; use the worker-owned immutable receipt.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn resolve_pinned_native_package(
+    data_dir: &std::path::Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+    explicit: Option<&std::path::Path>,
+) -> WorkerResult<PathBuf> {
+    let pinned = crate::flux3_receipted_snapshot(data_dir, repo, revision, model)
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("{model} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized credential. Unpinned cache snapshots are not a fallback")))?;
+    crate::flux3_runtime_bundle_check(&pinned, model).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "{model} pinned package is incomplete or invalid: {error}"
+        ))
+    })?;
+    if let Some(explicit) = explicit {
+        if !explicit
+            .canonicalize()
+            .ok()
+            .zip(pinned.canonicalize().ok())
+            .is_some_and(|(explicit, pinned)| explicit == pinned)
+        {
+            return Err(WorkerError::InvalidPayload(format!("{model} modelPath does not match verified {repo}@{revision}; remove the override or install the pinned package")));
+        }
+    }
+    Ok(pinned)
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
@@ -507,6 +566,13 @@ pub(crate) async fn run_image_generate_job(
     }
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
+    // sc-26241: a named precision tier is honored only on the model and lane that can load it;
+    // raw queue writes and stored jobs never passed the API validator.
+    flux3_precision::validate_image_quant_tier_request(
+        &request.model,
+        &request.advanced,
+        flux3_precision::ImageLane::current(),
+    )?;
     // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
     // The joint attention sequence a route like `qwen_image_2_1` runs over grows with the reference
     // count as well as the target area, and no resolution menu can express that — so a request can
@@ -1666,7 +1732,7 @@ pub(crate) async fn run_image_generate_job(
         }
     }
 
-    if !handled {
+    dispatch_legacy_fallback(&request.model, handled, || async {
         if request.hires_fix.enabled {
             return Err(WorkerError::InvalidPayload(
                 "Hires.fix requires a native image engine with img2img support; this job resolved only to the procedural stub."
@@ -1682,8 +1748,8 @@ pub(crate) async fn run_image_generate_job(
             backend,
             &mut asset_writes,
         )
-        .await?;
-    }
+        .await
+    }).await?;
 
     // sc-8091: Image Studio "Upscale" toggle. The native worker never ported the Python inline-upscale
     // path, so the UI's `upscale` request was silently dropped (images came out at the base size). Mirror
@@ -1926,22 +1992,7 @@ fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String
     test
 ))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
-    for key in ["installedPath", "sourcePath", "path"] {
-        if let Some(value) = lora
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(PathBuf::from(value));
-        }
-    }
-    lora.get("source")
-        .and_then(|source| source.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    sceneworks_core::lora_family::adapter_record_path(lora)
 }
 
 /// The exact adapter filename a manifest declares when its LoRA path is a directory.
@@ -1951,12 +2002,7 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     test
 ))]
 pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
-    lora.get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    sceneworks_core::lora_family::declared_adapter_file(lora)
 }
 
 /// Resolve the exact adapter file inference will load. Attribution calls this same function before
@@ -1966,20 +2012,21 @@ pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
     all(not(target_os = "macos"), feature = "backend-candle"),
     test
 ))]
-fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathBuf> {
+fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> WorkerResult<PathBuf> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let file = if path.is_dir() {
-        crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
+    let file = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &path,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            path.display()
+        ))
+    })?;
     if !file.exists() {
         return Err(WorkerError::InvalidPayload(format!(
             "LoRA file is missing: {}",
@@ -1999,20 +2046,29 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,
+    model: &str,
 ) -> WorkerResult<gen_core::PinnedWeightsFile> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let candidate = if confined.is_dir() {
-        let directory = confined;
-        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                directory.display()
-            ))
-        })?
-    } else {
+    let candidate = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &confined,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            confined.display()
+        ))
+    })?;
+    // Legacy direct-file routes have always owned the original lexical entry, so a symlink
+    // retarget between selection and dispatch must still invalidate their prepared token.
+    // Confinement and shared selection above remain mandatory before retaining that entry.
+    let candidate = if !matches!(model, "flux3_klein" | "flux3_klein_base") && !confined.is_dir() {
         raw
+    } else {
+        candidate
     };
     crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
@@ -2228,7 +2284,7 @@ async fn trusted_loras_for_share(
     let mut used_names = std::collections::HashSet::new();
     let mut loras = Vec::with_capacity(request.loras.len());
     for raw in &request.loras {
-        let file = match resolve_adapter_file(raw, settings) {
+        let file = match resolve_adapter_file(raw, settings, &request.model) {
             Ok(file) => file,
             Err(error) => {
                 tracing::warn!(%error, "LoRA attribution could not resolve the inference file");

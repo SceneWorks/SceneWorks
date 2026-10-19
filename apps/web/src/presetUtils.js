@@ -276,6 +276,20 @@ export function loraMatchesModel(lora, model) {
   // A trained full Iris checkpoint is listed under its own id but RUNS on its engine (the API aliases
   // it onto `iris_3b` before the adapter gate), so an adapter's recorded base is compared with that
   // engine id — a `baseModel: iris_3b` adapter is offered for the trained checkpoint too.
+  // Exact training checkpoint identity is separate from family and adapter download identity.
+  // Explicitly declaring this contract fails closed for unstamped or mismatched adapters.
+  const compatibility = model?.loraCompatibility;
+  if (compatibility && Object.hasOwn(compatibility, "baseModel")) {
+    if (typeof compatibility.baseModel !== "string" || !compatibility.baseModel || lora?.baseModel !== compatibility.baseModel) return false;
+  }
+  if (compatibility && Object.hasOwn(compatibility, "baseRevision")) {
+    if (typeof compatibility.baseRevision !== "string" || !compatibility.baseRevision || lora?.baseRevision !== compatibility.baseRevision) return false;
+  }
+  if (compatibility && Object.hasOwn(compatibility, "adapterKinds")) {
+    const kinds = compatibility.adapterKinds;
+    const kind = typeof lora?.networkType === "string" ? lora.networkType.toLowerCase() : "";
+    if (!Array.isArray(kinds) || !kinds.length || !kind || !kinds.includes(kind)) return false;
+  }
   const irisTask = model?.loraCompatibility?.irisTask;
   if (irisTask) {
     if (lora?.irisTask !== irisTask) return false;

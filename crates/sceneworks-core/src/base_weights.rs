@@ -402,6 +402,7 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              refused rather than guessing at a loader."
                 .to_owned(),
         ),
+        (Some("flux3"), _, _) => Err("The 'flux3' family requires its pinned package directory with config, DiT, autoencoder and Qwen3-VL encoder. Install the base or distilled model from the catalog; a lone checkpoint file is not that package.".to_owned()),
         (Some(family), _, _) if !IMPORT_SUPPORTED_FAMILIES.contains(&family) => Err(format!(
             "Model import does not yet support the '{family}' family. Supported today: {}.",
             IMPORT_SUPPORTED_FAMILIES.join(", ")
@@ -986,6 +987,14 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     {
         return Some("ltx-video");
     }
+    // FLUX3 (sc-26239): mode-specific image blocks + separate text blocks + shared single
+    // stream. This classifies identity only; it does NOT add a single-file import loader.
+    if any_key_contains(keys, "content_mode_blocks.image.")
+        && any_key_contains(keys, "txt_mode_blocks.")
+        && any_key_contains(keys, "single_blocks.")
+    {
+        return Some("flux3");
+    }
     // FLUX.2 (epic 6564): shared-modulation tensors across all blocks.
     if any_key_contains(keys, "double_stream_modulation_")
         || any_key_contains(keys, "single_stream_modulation.")
@@ -1099,6 +1108,20 @@ mod tests {
             map.insert((*name).to_owned(), json!({ "dtype": dtype }));
         }
         Value::Object(map)
+    }
+
+    #[test]
+    fn flux3_checkpoint_identity_is_distinct_without_claiming_single_file_import() {
+        let header = header(&[
+            ("content_mode_blocks.image.0.q_proj.weight", "BF16"),
+            ("txt_mode_blocks.0.q_proj.weight", "BF16"),
+            ("single_blocks.0.q_proj.weight", "BF16"),
+        ]);
+        let verdict = recognized(classify_base_header(&header));
+        assert_eq!(verdict.family.as_deref(), Some("flux3"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert!(!IMPORT_SUPPORTED_FAMILIES.contains(&"flux3"));
+        assert!(import_supported(&verdict).unwrap_err().contains("catalog"));
     }
 
     fn recognized(detection: BaseWeightDetection) -> BaseWeightVerdict {

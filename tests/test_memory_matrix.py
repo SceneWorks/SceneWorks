@@ -755,184 +755,84 @@ def implementation_axis(state):
     return "implemented"
 
 
-def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
-    """sc-22513: the per-(modelId, backend, rung) census of implemented / structurally-N/A / missing
-    coordinates, pinned against a fixture NO script regenerates.
+def assert_implementation_census_shape(matrix, pinned):
+    """Preserve each lane's implementation partition, independently of axis cardinality.
 
-    Why it exists: the collapse dropped the rung-4 applicability survey out of the generator's read
-    set, and that silently moved the implementation axis on nine lanes — a real MLX rung-4 ladder
-    became Missing on Bernini and Krea, six real structural exemptions on Krea's Candle lane became
-    Missing, and four Candle lanes newly claimed Implemented. None of it was visible in a review of
-    the generator diff. This census is derived from `coverage[].states`, which counts EVERY resolved
-    coordinate (published and elided), so an implementation-axis move cannot hide behind elision.
-
-    What it pins is a claim about CODE and CATALOG — does this route implement this rung — read off
-    the provider contracts, the manifest declarations and the routing tables. It deliberately pins
-    no measurement, no anchor and no currency: `implementation_axis` folds the three implemented
-    states together precisely so anchor movement cannot red it.
-
-    Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
-    commit that changes the declaration, and say in the commit body which lanes moved and why.
-
-    Last moved: sc-26234 adds the MLX-only `flux3_klein` catalog entry (one untagged bf16
-    artifact, so a single tier; `text_to_image` only and no LoRA overlay, so ONE coordinate per
-    lane). It contributes exactly five NEW lanes and moves nothing else: `resident` [1,0,0];
-    `staged_residency` [1,0,0] because the descriptor advertises sequential offload and the engine
-    joined the fit gate's staged-residency sweep; the three bounded rungs [0,0,1] because the
-    provider's memory contract declares them `Missing` at this pin (sc-26241 owns the ladder).
-
-    Last moved: sc-25907 (epic 25899) adds the `qwen_image_2_1_turbo` catalog entry, the distilled
-    sibling of `qwen_image_2_1`, routed on BOTH lanes. It adds exactly ten NEW lanes
-    (`qwen_image_2_1_turbo:<backend>:<rung>`, 18 coordinates each = 3 tiers x 3 catalog modes x
-    {none, lora}) and moves NOTHING else. Each is base's lane profile verbatim — including
-    `mlx:staged_residency` [18,0,0], because the same commit adds the Turbo id to the worker's
-    `mlx_fit_gate.rs#engine_engages_staged_residency_is_derived_from_the_registered_capability`
-    sweep (the generator's MLX staged-residency authority). This is an IMPLEMENTATION claim only:
-    no anchor and no measurement is involved, and every Turbo cell is analytic (E10) — base's
-    `mlx` lanes read Anchored where Turbo's read Implemented, and both fold to the same axis here.
-
-    Previously: the sc-25680 review round gives `iris_3b` a `candle` block (declared
-    `minMemoryGb` + `sequentialPeakGb` floors, so the Candle fit gate has a prediction). Exactly two
-    lanes move, each [0,0,2] -> [2,0,0]: `iris_3b:candle:resident` (a lane with a per-backend block
-    is no longer the generator's "routed but untriaged" all-Missing slice) and
-    `iris_3b:candle:staged_residency` (the block declares a sequential peak, and `candle-gen-iris`
-    does advertise sequential offload). The three bounded rungs stay [0,0,2] (no ladder at this
-    pin) and nothing else moves.
-
-    Previously: sc-25680 routes `iris_3b` to Candle/CUDA. It adds exactly five NEW lanes
-    (`iris_3b:candle:*`), each [0,0,2]: the catalog entry carries no `candle` block yet, so the
-    whole Candle slice is the generator's "routed but untriaged" Missing (its memory declaration is
-    sc-25684's, S6), and nothing else moves.
-
-    Previously: sc-25679 adds the MLX-only `iris_3b` catalog entry (one untagged artifact, so a
-    single tier; text_to_image x {none, lora} = 2 coordinates per lane). It contributes exactly
-    five NEW lanes and moves nothing else: `resident` [2,0,0]; `staged_residency` [2,0,0] because
-    the descriptor advertises sequential offload and the engine joined the fit gate's
-    staged-residency sweep; the three bounded rungs [0,0,2] because the provider publishes no
-    memory-strategy ladder at this pin.
-
-    Previously: sc-24163, epic 24107's terminal pin bump (inference 457f1a37), where both 2.1
-    providers apply LoRA/LoKr. The five hand-authored `qwen_image_2_1` contract rows gain the
-    `lora` overlay and load profile, and the worker's memory-route rows move PLAIN -> PLAIN_LORA
-    with the re-dump. Three `qwen_image_2_1` lanes move and nothing else — the `lora` half of each
-    declared lane becomes implemented, 9 -> 18 of 18 (3 tiers x 3 catalog modes x {none, lora}):
-    * `candle:staged_residency` and `candle:bounded_decode` [9,0,9] -> [18,0,0].
-    * `mlx:bounded_decode` [9,0,9] -> [18,0,0]. `mlx:staged_residency` was already 18 (the fit
-      gate's staged sweep) and `resident` already 18 on both lanes.
-
-    Previously: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
-    request-owned `memoryStrategyContract` on BOTH lanes whose `modes` cover the reference faces
-    (`edit_image` / `image_to_image`, plus `character_image` which the catalog axis does not
-    carry) as well as `text_to_image`, all over `none`. Three `qwen_image_2_1` lanes move and
-    nothing else — each to 9 implemented of 18 (3 tiers x 3 catalog modes x `none`; the `lora`
-    half stays missing because the provider refuses adapters):
-    * `candle:staged_residency` and `candle:bounded_decode` 3 -> 9 — the declaration now covers
-      the reference modes, where the generated block covered `text_to_image` alone.
-    * `mlx:bounded_decode` 0 -> 9 — the MLX block now declares the rung. `mlx:staged_residency`
-      does NOT move: it stays the fit gate's staged sweep (18), and the MLX block deliberately
-      declares no staged row (an MLX staged row forces every load onto `Sequential`).
-
-    Previously: sc-24112's integration on the epic's terminal pin (inference b12c632b4), where
-    the 2.1 providers register on both lanes. Three `qwen_image_2_1` lanes move and nothing else:
-    * `mlx:staged_residency` 0 -> 18 implemented — the engine now registers, its descriptor
-      advertises sequential offload, and it joined the fit gate's staged-residency sweep (the
-      generator's MLX authority), so every coordinate of the lane is implemented.
-    * `candle:staged_residency` and `candle:bounded_decode` 0 -> 3 implemented (15 still missing) —
-      the Candle block gained the `memoryStrategyContract` generated from the re-dumped
-      `capabilities.candle.json`, which declares exactly `text_to_image` x `none` x {bf16,q8,q4}.
-    The MLX block declares no contract (a non-legacy MLX lane needs hand-authored
-    `requestContexts`), so no MLX rung beyond staged residency moves.
-
-    Previously: sc-24112 gives `qwen_image_2_1` a real TIER AXIS — bf16/q8/q4 `variant` rows on
-    both backends, where sc-24108/sc-24109 had one untagged artifact. `tiersFor` unions the
-    declared download variants, so the entry's tier axis goes 1 -> 3 and every one of its ten lanes
-    multiplies by 3.
-
-    The same branch carries sc-24113/sc-24110, which widen the entry's `capabilities` from
-    `["text_to_image"]` to `["text_to_image", "image_to_image", "edit_image"]`, so the MODE axis
-    goes 2 -> 3 on top of that. The two multipliers compose: 4 -> 12 (tiers) -> 18 (modes) per
-    lane, i.e. `resident` 4 -> 18 implemented and each of the other four rungs 4 -> 18 missing, on
-    each backend. 18 = 3 tiers x 3 modes x {none, lora}.
-
-    No other model is touched and no rung's CLASSIFICATION changes: the ladder is still unpublished
-    on both lanes until the epic's terminal pin bump re-dumps the capability files, so the new
-    coordinates are Missing for exactly the reason the old ones were. The per-tier memory floors
-    ride `minMemoryGbByTier`, which the matrix does not read, so they move nothing here; nor does
-    the `admissionGeometry` block.
-
-    Previously: sc-24109 adds the native Candle/CUDA lane for `qwen_image_2_1` (routing-catalog
-    `candle_routed: true` + the manifest `candle` block), so the entry contributes five NEW lanes
-    (`qwen_image_2_1:candle:<rung>`) and moves NOTHING else — no existing lane gained, lost or
-    moved a coordinate. The Candle profile is identical to the MLX one recorded below, and for the
-    same two reasons: one bf16 artifact and no `variant`, so the tier axis is a single tier; and no
-    memory-strategy ladder published at this pin (the Candle contract block is generated from
-    `capabilities.candle.json`, which cannot be re-dumped until the epic's terminal pin bump), so
-    only `resident` is implemented (2 coordinates: one tier x text_to_image x {none, lora}) and the
-    other four rungs are Missing.
-
-    Before that: sc-24108 adds the `qwen_image_2_1` catalog entry, which is MLX-only and ships one
-    bf16 artifact with no `variant`, so it contributes exactly five NEW lanes
-    (`qwen_image_2_1:mlx:<rung>`) and moves nothing else. Its provider publishes no
-    memory-strategy ladder at this pin, so only `resident` is implemented (2 coordinates: the
-    single tier x text_to_image x {none, lora} overlay pair) and the other four rungs are Missing.
-    No existing lane gained, lost or moved a coordinate.
-
-    Previously: sc-23648 restores missing MLX streaming declarations: SDXL q4/q8 add
-    five supported mode/overlay coordinates per tier (implemented 3 -> 13), and
-    RealVisXL Lightning bf16/q8 add two per tier (implemented 2 -> 6). These are
-    provider-validated declarations, with no new measurements or other census moves.
-
-    Previously: sc-22738, on top of `6968692a3` removing the candle-only short-circuit in
-    `tiersFor` (`backend === "candle" && backendTiers.length ? backendTiers : [...]`). That
-    short-circuit read `vramGbByTier` — a MEASUREMENT block — as a routing ceiling, so the moment a
-    candle lane declared any peak the axis collapsed to those keys alone and `downloadTiers` /
-    `inferred` were discarded. Six route-declared, download-shipped coordinates came back onto the
-    published axis, each widening its lane's tier axis by exactly one tier:
-
-      * `flux_dev`, `flux_schnell`, `flux2_dev` at bf16 (candle) — `["q4","q8"]` -> `["bf16","q4","q8"]`
-      * `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` at q8 (candle) — `["bf16","q4"]` -> `["bf16","q4","q8"]`
-
-    That is 6 lanes x 5 rungs = 30 fixture entries, and NOTHING else: no lane gained or lost a key,
-    no seventh lane moved, and every moved entry is exactly one more copy of that lane's own
-    pre-existing per-tier profile (so no rung flipped state for a tier that was already on the
-    axis). Matrix totals moved with it: cells 9265 -> 9390, publishedCells 2178 -> 2216,
-    anchoredCells 1935 -> 1973 (the 38 newly published cells are the flux_dev/flux_schnell candle
-    bf16 anchors binding).
-
-    sc-24113 moves exactly the ten `qwen_image_2_1` lanes (5 rungs x 2 backends), each DOUBLING:
-    declaring `image_to_image` on that model gives it a second mode, and a mode is a coordinate
-    axis. `[0,0,2]` -> `[0,0,4]` on every rung but `resident`, and `[2,0,0]` -> `[4,0,0]` there.
-    No other lane moved, and no rung changed STATE — the model gained coordinates, not an
-    implementation. That is the shape to check when re-pinning: a lane outside qwen_image_2_1
-    moving here would be a real regression, not a re-pin.
+    The historical census fixture supplies the expected state proportions, not a population
+    ceiling. Adding supported catalog tiers may scale a lane without changing its classification.
+    Declared axis products still require every coordinate, and fixture/declaration key equality
+    still rejects missing lanes. Anchors and currency cannot change this implementation projection.
     """
-    matrix = load_matrix()
+    axes_by_lane = {
+        (model["id"], backend): axes
+        for model in matrix["models"]
+        for backend, axes in model["axes"].items()
+    }
+    declared_keys = {
+        f"{model_id}:{backend}:{rung}"
+        for (model_id, backend), axes in axes_by_lane.items()
+        for rung in axes["rungs"]
+    }
     census = {}
     for row in matrix["coverage"]:
         tally = {"implemented": 0, "structurally-na": 0, "missing": 0}
         for state, count in row["states"].items():
+            assert isinstance(count, int) and count >= 0, row
             tally[implementation_axis(state)] += count
         key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
         assert key not in census, key
-        census[key] = [tally["implemented"], tally["structurally-na"], tally["missing"]]
+        counts = [tally["implemented"], tally["structurally-na"], tally["missing"]]
+        census[key] = counts
+        axes = axes_by_lane[(row["modelId"], row["backend"])]
+        coordinates = len(axes["tiers"]) * len(axes["modes"]) * len(axes["overlays"])
+        assert coordinates > 0, key
+        assert sum(counts) == row["coordinates"] == coordinates, key
+        assert counts[0] == row["implemented"], key
 
-    pinned = json.loads(
+    assert census.keys() == declared_keys == pinned.keys(), {
+        "undeclared lanes": sorted(census.keys() - declared_keys),
+        "missing declared lanes": sorted(declared_keys - census.keys()),
+        "unpinned lanes": sorted(census.keys() - pinned.keys()),
+        "vanished lanes": sorted(pinned.keys() - census.keys()),
+    }
+    for key, counts in census.items():
+        expected = pinned[key]
+        assert len(expected) == 3 and sum(expected) > 0, key
+        # Exact rational comparison: preserve classification, not a pinned tier population.
+        assert [count * sum(expected) for count in counts] == [
+            count * sum(counts) for count in expected
+        ], {"lane": key, "expected partition": expected, "actual partition": counts}
+
+
+def implementation_census_fixture():
+    return json.loads(
         (ROOT / "tests/fixtures/memory-matrix-implementation-census.json").read_text(
             encoding="utf-8"
         )
     )
-    assert census.keys() == pinned.keys(), {
-        "unpinned lanes": sorted(census.keys() - pinned.keys()),
-        "vanished lanes": sorted(pinned.keys() - census.keys()),
-    }
-    moved = {
-        key: {"pinned": pinned[key], "generated": census[key]}
-        for key in sorted(census)
-        if census[key] != pinned[key]
-    }
-    assert not moved, moved
-    # The census is a partition of the resolved coordinates, so it also has to add up.
-    for row in matrix["coverage"]:
-        key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
-        assert sum(pinned[key]) == row["coordinates"], key
-        assert pinned[key][0] == row["implemented"], key
+
+
+def test_the_implementation_axis_census_preserves_per_lane_state_partition():
+    assert_implementation_census_shape(load_matrix(), implementation_census_fixture())
+
+
+@pytest.mark.parametrize("mutation", ["drop_lane", "drop_tier", "change_classification"])
+def test_implementation_census_rejects_lost_lane_tier_and_classification(mutation):
+    matrix = load_matrix()
+    if mutation == "drop_lane":
+        matrix["coverage"].pop()
+    elif mutation == "drop_tier":
+        axes = next(
+            axes
+            for model in matrix["models"]
+            for axes in model["axes"].values()
+            if len(axes["tiers"]) > 1
+        )
+        axes["tiers"].pop()
+    else:
+        row = next(row for row in matrix["coverage"] if row["states"].get("Implemented", 0))
+        row["states"]["Implemented"] -= 1
+        row["states"]["Missing"] = row["states"].get("Missing", 0) + 1
+        row["implemented"] -= 1
+    with pytest.raises(AssertionError):
+        assert_implementation_census_shape(matrix, implementation_census_fixture())

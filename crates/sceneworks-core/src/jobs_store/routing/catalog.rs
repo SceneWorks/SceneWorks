@@ -1168,9 +1168,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // (`iris_mlx_eligible`).
     ModelCaps::new("iris_3b", true, true, false, true, false),
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
-    // MLX and Candle/CUDA. Neither lane advertises quant tiers or adapters; the Candle surface
-    // delegates to the MLX predicate so unsupported carriers are never silently discarded.
-    ModelCaps::new("flux3_klein", true, true, false, false, false),
+    // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
+    // native precision packages. Missing base converted pins never become a dense fallback.
+    ModelCaps::new("flux3_klein", true, true, false, false, true),
+    ModelCaps::new("flux3_klein_base", true, true, false, false, true),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2425,10 +2426,12 @@ mod tests {
         "anima_turbo",
         "iris_3b",
         "flux3_klein",
+        "flux3_klein_base",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
         "flux3_klein",
+        "flux3_klein_base",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -2517,6 +2520,9 @@ mod tests {
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
+        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
+        "flux3_klein",
+        "flux3_klein_base",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",

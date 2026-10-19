@@ -299,6 +299,28 @@ pub(crate) fn with_candle_capabilities(
                 gpu.capabilities
                     .push(WorkerCapability::Unknown(NVFP4_CAPABILITY.to_owned()));
             }
+            // FLUX 3 publisher FP8R eligibility marker (sc-26241): the linked provider advertises
+            // `Quant::Fp8Rowwise` AND the GPU clears its sm_89 floor (the inference
+            // `DitFormat::check_device` rule). The scheduler requires it for an FP8R job, so a
+            // worker that would refuse the package at load never claims it.
+            if fp8r_worker_eligible(compute_cap) {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown(FP8R_CAPABILITY.to_owned()));
+            }
+            // Unlike the older generic NVFP4 marker (used by other families too), this one
+            // additionally proves that the linked FLUX 3 provider advertises NVFP4.
+            if compute_cap_meets_nvfp4(compute_cap)
+                && crate::engines::mlx_model("flux3_klein").is_some_and(|model| {
+                    model
+                        .descriptor
+                        .capabilities
+                        .supported_quants
+                        .contains(&gen_core::Quant::Nvfp4)
+                })
+            {
+                gpu.capabilities
+                    .push(WorkerCapability::Unknown("flux3_nvfp4".to_owned()));
+            }
         }
     }
     gpu
@@ -560,6 +582,31 @@ const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn compute_cap_meets_nvfp4(cap: Option<f32>) -> bool {
     cap.is_some_and(|c| c >= NVFP4_MIN_COMPUTE_CAP)
+}
+
+/// The advertised marker capability meaning "this candle worker can run a publisher FP8 rowwise
+/// package" (sc-26241). Its name is the request tier key the scheduler requires for such a job
+/// ([`sceneworks_core::image_request::Flux3Tier::required_worker_capability`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) const FP8R_CAPABILITY: &str = sceneworks_core::image_request::FP8R_QUANT_TIER;
+
+/// The FP8R device floor: compute capability 8.9 (Ada), mirroring the inference
+/// `DitFormat::check_device` rule for `Fp8Rowwise`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const FP8R_MIN_COMPUTE_CAP: f32 = 8.9;
+
+/// Whether this worker can run FP8R: its GPU clears the floor AND the linked FLUX 3 provider
+/// advertises the tier (only the CUDA build does). `None` (no probe) ⇒ ineligible.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn fp8r_worker_eligible(cap: Option<f32>) -> bool {
+    cap.is_some_and(|c| c >= FP8R_MIN_COMPUTE_CAP)
+        && crate::engines::mlx_model("flux3_klein").is_some_and(|model| {
+            model
+                .descriptor
+                .capabilities
+                .supported_quants
+                .contains(&gen_core::Quant::Fp8Rowwise)
+        })
 }
 
 /// Process-wide cache of the selected GPU's startup compute-cap probe, published by [`discover_gpu`].

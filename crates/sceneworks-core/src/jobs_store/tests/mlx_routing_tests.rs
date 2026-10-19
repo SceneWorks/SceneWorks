@@ -2183,34 +2183,43 @@ fn iris_routes_plain_text_to_image_only() {
 /// quant tier, hires fix) keeps the job off the lane instead of reaching an engine that refuses it
 /// by name.
 #[test]
-fn flux3_routes_plain_text_to_image_only() {
-    assert!(MLX_ROUTED_MODELS.contains(&"flux3_klein"));
-    let eligible = |payload: Value| image_request_mlx_eligible("flux3_klein", &object(payload));
-    assert!(eligible(
-        json!({ "model": "flux3_klein", "mode": "text_to_image" })
-    ));
-    assert!(eligible(json!({
-        "model": "flux3_klein",
-        "advanced": { "steps": 16, "resolution": "1024x1024", "sampler": "euler" }
-    })));
-    for refused in [
-        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
-        json!({ "referenceAssetId": "a" }),
-        json!({ "referenceAssetIds": ["a"] }),
-        json!({ "maskAssetId": "a" }),
-        json!({ "controls": [{}] }),
-        json!({ "advanced": { "poses": [{}] } }),
-        json!({ "advanced": { "mlxQuantize": 8 } }),
-        json!({ "advanced": { "quantTier": "nvfp4" } }),
-        json!({ "hiresFix": { "enabled": true } }),
-        // sc-26239 owns adapters: a LoRA stack stays off the lane until then.
-        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
-    ] {
-        assert!(!eligible(refused.clone()), "{refused}");
+fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        assert!(MLX_ROUTED_MODELS.contains(&model));
+        let eligible = |payload: Value| image_request_mlx_eligible(model, &object(payload));
+        assert!(eligible(json!({"model":model,"mode":"text_to_image"})));
+        // Native capabilities are shared, but absent production base q4/q8 artifact pins are
+        // independently refused at catalog/readiness boundaries (never a dense fallback).
+        for bits in [0, 4, 8] {
+            assert!(eligible(
+                json!({"model":model,"advanced":{"mlxQuantize":bits}})
+            ));
+        }
+        for weight in [0.0, 0.375, -0.25] {
+            assert!(eligible(
+                json!({"model":model,"loras":[{"id":"compatible-file","weight":weight}]})
+            ));
+        }
+        for refused in [
+            json!({"mode":"edit_image","sourceAssetId":"a"}),
+            json!({"referenceAssetId":"a"}),
+            json!({"referenceAssetIds":["a"]}),
+            json!({"maskAssetId":"a"}),
+            json!({"controls":[{}]}),
+            json!({"advanced":{"poses":[{}]}}),
+            json!({"advanced":{"mlxQuantize":6}}),
+            json!({"advanced":{"quantTier":"nvfp4"}}),
+            json!({"hiresFix":{"enabled":true}}),
+            json!({"loras":{"id":"not-an-array"}}),
+            json!({"loras":[{}]}),
+            json!({"loras":[42]}),
+        ] {
+            assert!(!eligible(refused.clone()), "{model}: {refused}");
+        }
+        let support = model_mac_support(model, "image", Some("flux3"));
+        assert!(support.supported);
+        assert!(!support.features.edit && !support.features.reference && !support.features.pose);
     }
-    let support = model_mac_support("flux3_klein", "image", Some("flux3"));
-    assert!(support.supported);
-    assert!(!support.features.edit && !support.features.reference && !support.features.pose);
 }
 
 /// sc-2126: `dataset_subject_mask` has no capability of its own — it requires the SAM3

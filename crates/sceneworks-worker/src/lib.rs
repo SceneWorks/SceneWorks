@@ -37,8 +37,7 @@ use sceneworks_core::lora_family::{
 use sceneworks_core::lora_family::read_safetensors_header;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
@@ -56,6 +55,31 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
+
+/// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
+/// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
+/// from an arbitrary cache directory, and never repairs an existing corrupt tree stamp.
+pub fn flux3_receipted_snapshot(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+) -> Option<PathBuf> {
+    // All these catalog rows download the SAME original whole repository. Derived q4/q8
+    // receipts never authorize an original, and the generic resolver's exact identity policy
+    // stays unchanged (including its legacy `None` => `default` interpretation).
+    ["bf16", "default", "fp8r", "nvfp4"]
+        .into_iter()
+        .find_map(|variant| {
+            model_jobs::huggingface_receipt_weights_dir_at_revision(
+                data_dir,
+                repo,
+                revision,
+                Some(model),
+                Some(variant),
+            )
+        })
+}
 
 /// Validate the canonical FLUX 3 runtime payload independently of download selectors.
 /// This is filesystem/index integrity, not whole-repository download completion or a weights
@@ -82,6 +106,108 @@ pub fn flux3_runtime_bundle_check(
         &roots,
     )
     .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Check one snapshot member by its canonical path. File symlinks may target this HF repository's
+/// own blob store; directory links must stay inside the snapshot. Nothing from a sibling repo or
+/// arbitrary caller path may certify a bundled component.
+pub(crate) fn flux3_snapshot_member(
+    root: &Path,
+    path: &Path,
+    directory: bool,
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let allowed = if directory {
+        target.starts_with(&canonical_root)
+    } else {
+        gen_core::safetensors_shards::snapshot_shard_roots(root)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|allowed| target.starts_with(allowed))
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} resolves outside the pinned snapshot (or its own blob store): {}",
+            path.display(),
+            target.display()
+        ))
+    }
+}
+
+/// Validate the runtime resources for a publisher FLUX 3 tier contained in a whole snapshot.
+/// Whole-repository download completion is separate: a dense bundle alone cannot certify FP8R or
+/// NVFP4. No tensors or accelerator are loaded.
+pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> Result<(), String> {
+    if !matches!(tier, "fp8r" | "nvfp4") {
+        return flux3_runtime_bundle_check(root, model);
+    }
+    let package = root.join("variants").join(tier);
+    flux3_snapshot_member(root, &package, true)?;
+    for name in ["config.json", "model.safetensors"] {
+        flux3_snapshot_member(root, &package.join(name), false)?;
+    }
+    let config = gen_core::flux3::Flux3Config::from_dir(&package).map_err(|e| e.to_string())?;
+    let storage = gen_core::flux3::artifacts::NativeDitStorage::from_package(&package)
+        .map_err(|e| e.to_string())?;
+    if storage.key().map_err(|e| e.to_string())? != tier {
+        return Err(format!(
+            "{} is not the selected {tier} package",
+            package.display()
+        ));
+    }
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(package))
+        .with_component(
+            gen_core::flux3::TEXT_ENCODER_COMPONENT,
+            gen_core::WeightsSource::Dir(te),
+        )
+        .with_component(
+            gen_core::flux3::AUTOENCODER_COMPONENT,
+            gen_core::WeightsSource::File(ae),
+        );
+    gen_core::flux3::GenerationResources::from_spec(&spec, &config, model)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Check the complete inventory of a locally converted FLUX 3 package: owned outputs and external
+/// encoder/autoencoder files by their conversion receipt, plus the encoder shard set. This is an
+/// integrity check, not a GPU load or memory measurement.
+pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
+    use gen_core::flux3::conversion::ComponentRole;
+    let config = gen_core::flux3::Flux3Config::from_dir(package).map_err(|e| e.to_string())?;
+    let receipt =
+        gen_core::flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let prefix = format!("{}/", config.text_encoder.path);
+    receipt
+        .verify_external_with(|role, path| match role {
+            ComponentRole::TextEncoder => path
+                .strip_prefix(&prefix)
+                .map(|rest| te.join(rest))
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(format!("unrecognized encoder path {path}"))
+                }),
+            ComponentRole::Autoencoder if path == config.vae.path => Ok(ae.clone()),
+            other => Err(gen_core::Error::Unsupported(format!(
+                "unexpected external {other:?}: {path}"
+            ))),
+        })
+        .map_err(|e| e.to_string())?;
+    let roots =
+        gen_core::safetensors_shards::snapshot_shard_roots(&te).map_err(|e| e.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(&te, "model", &roots)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

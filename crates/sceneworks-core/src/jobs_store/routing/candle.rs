@@ -4,15 +4,18 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
-use crate::image_request::MAX_JOB_POSES;
+use crate::image_request::{
+    image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS, MAX_JOB_POSES,
+};
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
     CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    flux3_mlx_eligible, instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
-    qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
+    pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible,
+    video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -347,6 +350,13 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
     }
     let model = job.payload.get("model").and_then(Value::as_str)?;
 
+    // sc-26241: a precision request the model cannot load is refused before ANY lane — a
+    // specialized conditioned route matching on its other carriers must never pick it up and run
+    // it at a precision the request did not name.
+    if candle_image_quant_tier_refusal(model, &job.payload) {
+        return None;
+    }
+
     if imported_image_request_provider_eligible(model, &job.payload, "candle") {
         return Some(CandleImageLane::ImportedFamily);
     }
@@ -400,6 +410,9 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
+    /// `advanced.quantTier: "fp8r"` (sc-26241) on a model that ships no publisher FP8 rowwise
+    /// package, or combined with a second precision carrier.
+    Fp8rTier,
     /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
     /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
     /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
@@ -425,6 +438,7 @@ impl CandleImageRefusal {
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
+            Self::Fp8rTier => "an advanced.quantTier fp8r this model cannot load",
             Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
             Self::Flux3Surface => {
                 "a carrier outside distilled FLUX 3's plain text-to-image surface"
@@ -467,6 +481,7 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+    (CandleImageRefusal::Fp8rTier, candle_refuses_fp8r_tier),
     (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
     (
         CandleImageRefusal::Flux3Surface,
@@ -484,8 +499,31 @@ fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> boo
     model == "iris_3b" && !iris_mlx_eligible(payload)
 }
 
+/// Distilled FLUX 3 on Candle: the shared text-to-image surface ([`flux3_surface_eligible`]) in any
+/// package the Candle provider serves (sc-26241) — bf16, the locally converted GGML q4/q8, and the
+/// publisher FP8R/NVFP4. Which WORKER may run a publisher package (its device floor) is the
+/// scheduler's `required_capability`, not this lane predicate. A malformed or conflicting
+/// precision request is refused here by name.
 fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "flux3_klein" && !flux3_mlx_eligible(payload)
+    FLUX3_TIERED_MODEL_IDS.contains(&model)
+        && !(flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
+            && flux3_surface_eligible(payload))
+}
+
+/// A named precision tier the model cannot load is refused, never run at another precision: the
+/// generic lane reads only `mlxQuantize`, so without this a `quantTier: "fp8r"` on a dense family
+/// would silently render dense. FLUX 3's own tiers are judged by [`candle_refuses_flux3_surface`].
+fn candle_refuses_fp8r_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    !FLUX3_TIERED_MODEL_IDS.contains(&model) && candle_image_quant_tier_refusal(model, payload)
+}
+
+/// [`image_quant_tier_refusal`] over a payload's `advanced` block (absent = nothing to refuse).
+fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) -> bool {
+    match payload.get("advanced") {
+        None | Some(Value::Null) => false,
+        Some(Value::Object(advanced)) => image_quant_tier_refusal(model, advanced).is_some(),
+        Some(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
+    }
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
