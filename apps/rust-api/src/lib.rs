@@ -4986,6 +4986,7 @@ fn validate_prompt_enhancement_fields(
     Ok(enabled)
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
     payload
         .get(key)
@@ -4993,6 +4994,7 @@ fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
     prompt_enhancement_payload_string(payload, "referenceAssetId")
         || payload
@@ -5006,6 +5008,7 @@ fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
 }
 
 fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     let mode = payload
         .get("mode")
         .and_then(Value::as_str)
