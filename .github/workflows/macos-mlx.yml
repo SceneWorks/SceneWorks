@@ -597,6 +597,11 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+      - name: Select the active Xcode SDK for native builds
+        run: |
+          sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+          test -d "$sdkroot"
+          echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
