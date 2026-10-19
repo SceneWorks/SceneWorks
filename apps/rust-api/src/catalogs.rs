@@ -2360,6 +2360,8 @@ async fn schedule_catalog_scan(
     let injected_sqlite_busy_failures = state.catalog_scan_injected_sqlite_busy_failures.clone();
     #[cfg(test)]
     let contention_backoff_started = state.catalog_scan_contention_backoff_started.clone();
+    #[cfg(test)]
+    let busy_lease_cancel_barrier = state.catalog_scan_busy_lease_cancel_barrier_once.clone();
     let work_slots = state.catalog_scan_work_slots.clone();
     let log_catalog_id = catalog_id.clone();
     let rejected_config_dir = config_dir.clone();
@@ -2488,9 +2490,29 @@ async fn schedule_catalog_scan(
                                 return;
                             }
                         }
+                        #[cfg(test)]
+                        {
+                            let handshake_armed = { busy_lease_cancel_barrier.lock().is_some() };
+                            contention_backoff_started.notify_one();
+                            if handshake_armed {
+                                // Hold this exact lease-wait boundary for the cancellation fixture,
+                                // rather than relying on a timer to keep the waiter here.
+                                cancellation.cancelled().await;
+                            }
+                        }
                         tokio::select! {
                             _ = tokio::time::sleep(retry_delay) => {}
                             _ = cancellation.cancelled() => {
+                                #[cfg(test)]
+                                {
+                                    let barrier = { busy_lease_cancel_barrier.lock().take() };
+                                    if let Some(barrier) = barrier {
+                                        // First acknowledge cancellation while the fixture still
+                                        // owns the lease; then wait for its explicit release.
+                                        barrier.wait().await;
+                                        barrier.wait().await;
+                                    }
+                                }
                                 reconcile_cancelled_catalog_scan(
                                     config_dir.clone(),
                                     catalog_id.clone(),

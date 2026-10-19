@@ -478,6 +478,10 @@ pub struct AppState {
     pub(crate) catalog_scan_injected_sqlite_busy_failures: Arc<AtomicU64>,
     #[cfg(test)]
     pub(crate) catalog_scan_contention_backoff_started: Arc<tokio::sync::Notify>,
+    /// Two-phase cancellation acknowledgment before reconciling a busy lease.
+    #[cfg(test)]
+    pub(crate) catalog_scan_busy_lease_cancel_barrier_once:
+        Arc<Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     /// Deterministic race hook for progress acceptance tests. Production builds
     /// contain no hook or synchronization overhead.
     #[cfg(test)]

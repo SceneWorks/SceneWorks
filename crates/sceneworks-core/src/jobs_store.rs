@@ -1993,6 +1993,26 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_optional_id(None, job_id, request)
+    }
+
+    /// Duplicate under a preallocated id when the copied product plan must reference its own new
+    /// job id before it becomes claimable, just like `create_job_with_id` at initial submission.
+    pub fn duplicate_job_with_id(
+        &self,
+        id: String,
+        job_id: &str,
+        request: DuplicateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_optional_id(Some(id), job_id, request)
+    }
+
+    fn duplicate_job_with_optional_id(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2016,7 +2036,7 @@ impl JobsStore {
                 // claimable — never `pending_caption` (sc-9120).
                 initial_status: None,
             },
-            None,
+            id,
         )?;
         transaction.commit()?;
         Ok(job)

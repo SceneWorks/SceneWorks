@@ -1206,6 +1206,19 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
         return false;
     }
+    if crate::training::flux3::KERNELS.contains(&kernel) {
+        return plan
+            .get("target")
+            .and_then(|t| t.get("baseModel"))
+            .and_then(Value::as_str)
+            == Some(crate::training::flux3::BASE_ID)
+            && plan
+                .get("config")
+                .and_then(|c| c.get("advanced"))
+                .and_then(|a| a.get("networkType"))
+                .map_or(Some("lora"), Value::as_str)
+                == Some("lora");
+    }
     // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;

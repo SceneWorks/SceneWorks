@@ -1473,6 +1473,8 @@ fn create_app_with_state_mode(
         #[cfg(test)]
         catalog_scan_contention_backoff_started: Arc::new(tokio::sync::Notify::new()),
         #[cfg(test)]
+        catalog_scan_busy_lease_cancel_barrier_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),

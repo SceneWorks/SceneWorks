@@ -11,7 +11,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -20,24 +21,46 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCRIPT = path.join(ROOT, "scripts/check-license-coverage.mjs");
 const AUDIT = path.join(ROOT, "config/inference-third-party-source.json");
 
-/** Run the checker with the audit temporarily pointed at a foreign revision. */
+// The checker derives its root from import.meta.url, NOT cwd. Copy its read-only packaging
+// inputs and scripts into an owned fixture. Never mutate a tracked audit and hope finally can
+// restore it: a Windows sharing error on that restore poisoned the following full-suite retry.
+const CHECKER_INPUTS = [
+  "scripts/check-license-coverage.mjs", "scripts/scan-inference-provenance.mjs",
+  "config/manifests/builtin.models.jsonc", "config/inference-third-party-source.json",
+  "config/inference-provenance-candidates.tsv", "config/inference-crate-prefixes.txt",
+  "crates/sceneworks-worker/Cargo.toml", "Cargo.toml", "Cargo.lock", "package.json",
+  "apps/desktop/licenses", "apps/web/src/data/bundledLicenses.js",
+  "apps/desktop/tauri.conf.json", "apps/rust-api/src/lib.rs", "apps/desktop/package.json",
+  "apps/desktop/scripts/build-sidecar.mjs", "apps/desktop/scripts/build-sidecar-platform.mjs",
+];
+
 function withPinSkew(run) {
-  const original = readFileSync(AUDIT, "utf8");
+  const liveAudit = readFileSync(AUDIT, "utf8");
+  const fixture = mkdtempSync(path.join(os.tmpdir(), "license-coverage-fixture-"));
   try {
-    const audit = JSON.parse(original);
+    for (const relative of CHECKER_INPUTS) {
+      const target = path.join(fixture, relative);
+      mkdirSync(path.dirname(target), { recursive: true });
+      cpSync(path.join(ROOT, relative), target, { recursive: true });
+    }
+    const fixtureAudit = path.join(fixture, "config/inference-third-party-source.json");
+    assert.notEqual(fixtureAudit, AUDIT, "mutation must never target the live checkout");
+    assert.ok(path.relative(fixture, fixtureAudit).startsWith(`config${path.sep}`));
+    const audit = JSON.parse(readFileSync(fixtureAudit, "utf8"));
     audit.inferenceRevision = "0".repeat(40);
-    writeFileSync(AUDIT, `${JSON.stringify(audit, null, 2)}\n`);
-    return run();
+    writeFileSync(fixtureAudit, `${JSON.stringify(audit, null, 2)}\n`);
+    return run((args = []) => runChecker(args, path.join(fixture, "scripts/check-license-coverage.mjs")), fixture);
   } finally {
-    writeFileSync(AUDIT, original);
+    rmSync(fixture, { recursive: true, force: true });
+    assert.equal(readFileSync(AUDIT, "utf8"), liveAudit, "isolated checker must leave the live audit byte-for-byte unchanged");
   }
 }
 
 // Findings are written to stderr and the summary to stdout, so both streams have to be captured —
 // `execFileSync` returns stdout only, which made an earlier version of this test read a clean-tree
 // summary and miss the report entirely.
-function runChecker(args = []) {
-  const result = spawnSync("node", [SCRIPT, ...args], { encoding: "utf8" });
+function runChecker(args = [], script = SCRIPT) {
+  const result = spawnSync(process.execPath, [script, ...args], { encoding: "utf8", cwd: ROOT });
   if (result.error) throw result.error;
   return { status: result.status, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
 }
@@ -51,8 +74,22 @@ test("the audit comment never restates the mutable inference pin", () => {
   );
 });
 
+test("pin-skew subprocess uses its isolated script root and never writes the live checkout", () => {
+  const before = readFileSync(AUDIT, "utf8");
+  withPinSkew((check, fixture) => {
+    assert.notEqual(fixture, ROOT);
+    assert.equal(JSON.parse(readFileSync(path.join(fixture, "config/inference-third-party-source.json"), "utf8")).inferenceRevision, "0".repeat(40));
+    assert.equal(readFileSync(AUDIT, "utf8"), before);
+    const { status, output } = check(["--strict"]);
+    assert.equal(status, 1, output);
+    assert.match(output, /Re-audit inference NOTICE/);
+    assert.equal(readFileSync(AUDIT, "utf8"), before);
+  });
+  assert.equal(readFileSync(AUDIT, "utf8"), before);
+});
+
 test("a pin bump alone does not fail the build", () => {
-  const { status, output } = withPinSkew(() => runChecker());
+  const { status, output } = withPinSkew((check) => check());
   assert.equal(status, 0, `an inference pin bump must not fail CI (sc-19751):\n${output}`);
   assert.match(output, /REPORT — not enforced/);
   assert.match(output, /Re-audit inference NOTICE/, "the finding must still be reported, not hidden");
@@ -60,7 +97,7 @@ test("a pin bump alone does not fail the build", () => {
 });
 
 test("--strict still gates, so the compliance pass has a lever", () => {
-  const { status, output } = withPinSkew(() => runChecker(["--strict"]));
+  const { status, output } = withPinSkew((check) => check(["--strict"]));
   assert.equal(status, 1, `--strict must still exit non-zero:\n${output}`);
   assert.match(output, /License coverage check FAILED/);
 });
