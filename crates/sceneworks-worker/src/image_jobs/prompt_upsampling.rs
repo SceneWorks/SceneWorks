@@ -637,7 +637,9 @@ mod tests {
                 let request = ImageRequest::from_payload(payload.as_object().unwrap());
                 let plan = ImagePlan::with_count(&request, 1, None);
                 let (url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
-                let settings = crate::tests::test_settings(url, None);
+                let mut settings = crate::tests::test_settings(url.clone(), None);
+                settings.api_url = url.clone();
+                assert_eq!(settings.api_url, url, "use only the owned API stub");
                 let api = ApiClient::new(&settings);
                 let job: JobSnapshot =
                     serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
@@ -726,7 +728,9 @@ mod tests {
         let request = ImageRequest::from_payload(payload.as_object().unwrap());
         let plan = ImagePlan::with_count(&request, 1, None);
         let (url, posts) = crate::tests::spawn_analysis_cancel_stub().await;
-        let mut settings = crate::tests::test_settings(url, None);
+        let mut settings = crate::tests::test_settings(url.clone(), None);
+        settings.api_url = url.clone();
+        assert_eq!(settings.api_url, url, "use only the owned API stub");
         settings.heartbeat_seconds = 5;
         let api = ApiClient::new(&settings);
         let job: JobSnapshot =
