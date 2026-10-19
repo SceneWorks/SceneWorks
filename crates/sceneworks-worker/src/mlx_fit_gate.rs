@@ -8649,6 +8649,111 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReferenceRenderRecord {
+        safety: Vec<gen_core::MemoryRunContext>,
+        scopes: Vec<gen_core::MemoryRunContext>,
+        generated: usize,
+        finished: Vec<gen_core::MemoryRunOutcome>,
+    }
+
+    struct ReferenceRenderScope(std::sync::Arc<std::sync::Mutex<ReferenceRenderRecord>>);
+    impl gen_core::MemoryRequestScope for ReferenceRenderScope {
+        fn configure_request(
+            &mut self,
+            _: &mut gen_core::GenerationRequest,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn enter_phase(&mut self, _: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn leave_phase(&mut self, _: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_decode(&mut self, _: u32, _: u32, _: MemoryGeometry) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_attention(&mut self, _: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn materialize_transformer_window(&mut self, _: u32, _: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn finish(&mut self, outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+            self.0.lock().unwrap().finished.push(outcome);
+            Ok(())
+        }
+    }
+
+    struct ReferenceRenderGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        record: std::sync::Arc<std::sync::Mutex<ReferenceRenderRecord>>,
+    }
+    impl gen_core::Generator for ReferenceRenderGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn memory_strategy_safety_check(
+            &self,
+            context: &gen_core::MemoryRunContext,
+        ) -> gen_core::MemorySafetyDecision {
+            self.record.lock().unwrap().safety.push(context.clone());
+            gen_core::MemorySafetyDecision::Accept
+        }
+        fn begin_memory_strategy_request(
+            &self,
+            context: &gen_core::MemoryRunContext,
+        ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+            self.record.lock().unwrap().scopes.push(context.clone());
+            Ok(Some(Box::new(ReferenceRenderScope(std::sync::Arc::clone(
+                &self.record,
+            )))))
+        }
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            let mut record = self.record.lock().unwrap();
+            assert_eq!(
+                record.safety.len(),
+                1,
+                "provider guard must run before rendering"
+            );
+            assert_eq!(
+                record.scopes.len(),
+                1,
+                "the admitted scope must be open before rendering"
+            );
+            let context = &record.scopes[0];
+            assert_eq!(record.safety[0], *context);
+            assert_eq!(
+                context
+                    .reference_resources
+                    .as_ref()
+                    .unwrap()
+                    .prepared_canvases
+                    .len(),
+                request.conditioning.len()
+            );
+            assert_eq!(
+                (request.width, request.height),
+                (context.geometry.width, context.geometry.height)
+            );
+            assert!(request.flux3_reference_output.is_some());
+            record.generated += 1;
+            Ok(gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                width: request.width,
+                height: request.height,
+                pixels: vec![137; (request.width * request.height * 3) as usize],
+            }]))
+        }
+    }
+
     fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
@@ -9275,22 +9380,61 @@ mod tests {
         };
         let registry = registry(true);
         let mut generator = fixture_generator();
-        for capability in &mut generator.contract.as_mut().unwrap().strategies {
-            if capability.strategy != MemoryStrategy::Resident {
-                capability.support = gen_core::MemoryStrategySupport::Missing;
-            }
-        }
+        // A real staging opportunity: separate 30 GiB conditioning and 3 GiB transformer stacks.
+        let contract = generator.contract.as_mut().unwrap();
+        contract.asset_facts.base_bytes = gib_to_bytes(33.0);
+        contract.asset_facts.conditioning_bytes = gib_to_bytes(30.0);
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
         let plan = MlxRequestPlan {
+            asset_bytes: gib_to_bytes(33.0),
             calibration: MlxCalibrationConfig::Absent,
             ..fixture_plan()
         };
-        let q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("q4")));
-        let bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("bf16")));
+        let mut q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("q4")));
+        q4.offload_policy = OffloadPolicy::Sequential;
+        let mut bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("bf16")));
+        bf16.offload_policy = OffloadPolicy::Sequential;
         let plain = fixture_inputs(1024, 1024);
-        let facts = gen_core::MemoryReferenceResourceFacts {
-            conditioning_tokens: 16,
-            prepared_canvases: vec![(64, 64)],
-        };
+        let data = tempfile::tempdir().unwrap();
+        let store = sceneworks_core::project_store::ProjectStore::new(
+            data.path().to_path_buf(),
+            "scope-test",
+        );
+        let project = store.create_project("owned pre-load references").unwrap();
+        let source = data.path().join("source.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([17, 31, 47, 0]))
+            .save(&source)
+            .unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        let payload = serde_json::json!({"projectId":project.id,"model":"flux3_klein","mode":"edit_image","sourceAssetId":asset["id"],"width":1024,"height":1024,"count":1});
+        let authored = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().unwrap(),
+        );
+        let references = crate::image_jobs::flux3_references::resolve_owned_references(
+            &authored,
+            data.path(),
+            std::path::Path::new(&project.path),
+        )
+        .unwrap()
+        .unwrap();
+        let facts = references.resources.clone();
+        assert_eq!(facts.prepared_canvases, [(64, 64)]);
+        assert_eq!(facts.conditioning_tokens, 16);
         let mut referenced = plain.clone();
         referenced.has_reference = true;
         referenced.reference_count = 1;
@@ -9317,7 +9461,7 @@ mod tests {
                 &plan,
                 inputs,
                 MemoryCacheState::Cold,
-                OffloadPolicy::Resident,
+                OffloadPolicy::Sequential,
                 crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
                 fixture_budget(total),
                 plan.generic_total_peak_bytes(request_geometry(inputs)),
@@ -9364,8 +9508,127 @@ mod tests {
                 base.context.predicted_peak_bytes + gib_to_bytes(16.0)
             );
             assert_eq!(small.context.reference_resources, Some(facts.clone()));
+            let optimized = (8..128)
+                .find_map(|total| {
+                    run(&referenced, Some(&q4), f64::from(total), phase)
+                        .unwrap()
+                        .into_evaluation()
+                        .ok()
+                        .filter(|evaluation| evaluation.context.selection.strategy.is_optimized())
+                })
+                .expect("fixture must exercise an actually admitted optimized reference request");
+            // This is the SAME scope/render entry used by render_on_surface on both native lanes,
+            // past real pre-load pricing and selection, not an assertion on a helper's stored field.
+            for admission in [&small, &optimized] {
+                for backend in ["candle", "mlx"] {
+                    for engine_id in ["flux3_klein", "flux3_klein_base"] {
+                        let context = crate::memory_strategy::executable_context(
+                            engine_id,
+                            admission.context.clone(),
+                        )
+                        .expect("resource-bearing Resident and optimized contexts must survive");
+                        let mut descriptor = fixture_generator().descriptor;
+                        descriptor.id = engine_id;
+                        descriptor.backend = backend;
+                        let record = std::sync::Arc::new(std::sync::Mutex::new(
+                            ReferenceRenderRecord::default(),
+                        ));
+                        // Construct the loaded handle ONLY after the provider-priced pre-load gate.
+                        let loaded = ReferenceRenderGenerator {
+                            descriptor,
+                            record: std::sync::Arc::clone(&record),
+                        };
+                        let mut request = gen_core::GenerationRequest {
+                            prompt: "reference-scoped render".to_owned(),
+                            width: context.geometry.width,
+                            height: context.geometry.height,
+                            // The production reference-render seam, not the test, installs the
+                            // resolved original carriers and authored output-size intent.
+                            memory: Some(admission.memory),
+                            ..Default::default()
+                        };
+                        crate::image_jobs::flux3_references::render_reference_request(
+                            &loaded,
+                            &mut request,
+                            &references,
+                            Some(&context),
+                            &mut |_| {},
+                        )
+                        .unwrap();
+                        fn carrier(
+                            conditioning: &gen_core::Conditioning,
+                        ) -> (u32, u32, &[u8], Option<f32>) {
+                            match conditioning {
+                                gen_core::Conditioning::Reference { image, strength } => {
+                                    (image.width, image.height, &image.pixels, *strength)
+                                }
+                                gen_core::Conditioning::ReferenceRgba { image, strength } => {
+                                    (image.width, image.height, &image.pixels, *strength)
+                                }
+                                other => panic!("unexpected owned carrier: {other:?}"),
+                            }
+                        }
+                        assert_eq!(request.conditioning.len(), references.conditioning.len());
+                        for (actual, expected) in
+                            request.conditioning.iter().zip(&references.conditioning)
+                        {
+                            assert_eq!(carrier(actual), carrier(expected));
+                        }
+                        assert_eq!(request.flux3_reference_output, Some(references.output_size));
+                        let observed = record.lock().unwrap();
+                        assert_eq!(observed.safety, vec![admission.context.clone()]);
+                        assert_eq!(observed.scopes, vec![admission.context.clone()]);
+                        assert_eq!(observed.scopes[0].reference_resources, Some(facts.clone()));
+                        assert_eq!(observed.generated, 1);
+                        assert_eq!(
+                            observed.finished,
+                            vec![gen_core::MemoryRunOutcome::Complete]
+                        );
+                        drop(observed);
+                        assert!(
+                            crate::memory_strategy::generate_with_scope_report(
+                                &loaded,
+                                &mut request,
+                                None,
+                                &mut |_| {}
+                            )
+                            .is_err(),
+                            "references must not take the legacy no-context shortcut"
+                        );
+                        let mut substituted = context.clone();
+                        substituted
+                            .reference_resources
+                            .as_mut()
+                            .unwrap()
+                            .conditioning_tokens += 1;
+                        let error = crate::image_jobs::flux3_references::render_reference_request(
+                            &loaded,
+                            &mut request,
+                            &references,
+                            Some(&substituted),
+                            &mut |_| {},
+                        )
+                        .unwrap_err();
+                        assert!(error.to_string().contains("same admitted reference"));
+                        let mut missing_facts = context.clone();
+                        missing_facts.reference_resources = None;
+                        assert!(crate::memory_strategy::generate_with_scope_report(
+                            &loaded,
+                            &mut request,
+                            Some(&missing_facts),
+                            &mut |_| {}
+                        )
+                        .is_err());
+                        assert_eq!(
+                            record.lock().unwrap().generated,
+                            1,
+                            "missing facts must fail before rendering"
+                        );
+                    }
+                }
+            }
             let mut rejected_only_with_references = 0;
-            for total in 8..40 {
+            for total in 8..128 {
                 let without = run(&plain, None, f64::from(total), phase).unwrap();
                 let with = run(&referenced, Some(&bf16), f64::from(total), phase).unwrap();
                 if matches!(without, MlxRequestAdmission::Admitted(_))

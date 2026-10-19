@@ -7736,6 +7736,37 @@ async fn flux3_owned_reference_jobs_preserve_order_duplicates_and_optional_size_
                 request(app.clone(), "POST", "/api/v1/image/jobs", body(invalid)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
         }
+        // These must survive the public DTO and reach family validation, including snake-case
+        // IP-Adapter scale. A pure parser test cannot catch serde silently dropping a carrier.
+        for carrier in [
+            "strength",
+            "referenceStrength",
+            "denoisingStrength",
+            "imageStrength",
+            "ip_adapter_scale",
+            "ipAdapterScale",
+        ] {
+            let mut extra = serde_json::Map::new();
+            extra.insert(carrier.to_owned(), json!(1.0));
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/image/jobs",
+                body(Value::Object(extra)),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{model}/{carrier}: {error}"
+            );
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(carrier)),
+                "{carrier}: {error}"
+            );
+        }
         let (status, plain) = request(
             app.clone(),
             "POST",

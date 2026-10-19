@@ -143,6 +143,31 @@ describe("evaluateModelDimensions (native-resolution enforcement)", () => {
   });
 });
 
+describe("optional reference axes do not loosen malformed geometry validation", () => {
+  const flux3Model = { id: "flux3_klein", limits: { minDimension: 64, maxDimension: 4096,
+    requiresDimensionsMultipleOf: 16, resolutions: ["1024x1024"] } };
+
+  it.each([
+    ["legacy model", plainModel, false, null, false],
+    ["legacy model with unrelated intent", plainModel, true, { width: null, height: null }, false],
+    ["plain FLUX3 T2I", flux3Model, false, null, true],
+    ["plain FLUX3 T2I with unrelated intent", flux3Model, false, { width: null, height: null }, true],
+    ["reference without intent", flux3Model, true, null, true],
+    ["reference omitting only width", flux3Model, true, { width: null, height: 48 }, true],
+  ])("rejects missing dropdown height for %s", (_label, model, referenceRequest, dimensionIntent, offStride) => {
+    expect(evaluateModelDimensions({ model, referenceRequest, dimensionIntent,
+      resolution: "1024", widthOverride: "", heightOverride: "" }))
+      .toMatchObject({ height: undefined, invalid: true, outOfRange: true, offStride });
+  });
+
+  it("accepts a missing height only when that exact axis was deliberately omitted", () => {
+    expect(evaluateModelDimensions({ model: flux3Model, referenceRequest: true,
+      dimensionIntent: { width: 1024, height: null }, resolution: "1024",
+      widthOverride: "", heightOverride: "" }))
+      .toMatchObject({ width: 1024, height: undefined, invalid: false, outOfRange: false, offStride: false });
+  });
+});
+
 describe("dimensionConstraintMessage", () => {
   it("returns null when the dimensions are valid", () => {
     const ok = evaluateModelDimensions({ model: mageModel, resolution: "1024x1024" });

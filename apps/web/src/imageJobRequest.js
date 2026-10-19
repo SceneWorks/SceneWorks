@@ -187,8 +187,10 @@ export function buildImageJobRequest(state) {
     count: posePayload.length ? 1 : count,
     seed: seed === "" ? null : Number(seed),
     // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
-    width: resolutionOverride?.width ?? width,
-    height: resolutionOverride?.height ?? height,
+    ...((resolutionOverride?.width ?? width) != null
+      ? { width: resolutionOverride?.width ?? width } : {}),
+    ...((resolutionOverride?.height ?? height) != null
+      ? { height: resolutionOverride?.height ?? height } : {}),
     recipePresetId,
     // The studio seeds a selected preset's LoRAs straight into the visible `loras` above
     // (generationStudio's preset-LoRA seed effect), so the client — not the server — is

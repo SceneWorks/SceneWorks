@@ -4664,18 +4664,7 @@ fn optimized_shared_memory_context(
     engine_id: &str,
     context: gen_core::MemoryRunContext,
 ) -> Option<gen_core::MemoryRunContext> {
-    (context.selection.strategy.is_optimized()
-        || matches!(
-            engine_id,
-            "ideogram_4"
-                | "ideogram_4_turbo"
-                | "sana_1600m"
-                | "sana_sprint_1600m"
-                | "sd3_5_large"
-                | "sd3_5_large_turbo"
-                | "sd3_5_medium"
-        ))
-    .then_some(context)
+    crate::memory_strategy::executable_context(engine_id, context)
 }
 
 /// The registered FLUX.2-dev generator is a text-to-image provider even when the catalog surface
@@ -5438,7 +5427,7 @@ fn mlx_raw_settings(
     quant_bits: Option<i64>,
     guidance: Option<f32>,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
+    let mut raw = flux3_references::caller_raw_settings(&request.advanced);
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
@@ -7690,13 +7679,14 @@ fn render_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
-    let conditioning = if let Some(references) = surface.flux3_references {
+    let conditioning = if surface.flux3_references.is_some() {
         if reference.is_some() || !multi_references.is_empty() || edit_mask.is_some() {
             return Err(WorkerError::InvalidPayload(
                 "FLUX.3 references must use the owned ordered conditioning list, not img2img or mask slots".to_owned(),
             ));
         }
-        references.conditioning.clone()
+        // The owned render seam below installs these carriers only after checking the admitted facts.
+        Vec::new()
     } else {
         build_lane_conditioning_with_alpha(
             reference,
@@ -7729,7 +7719,7 @@ fn render_on_surface(
         text_style_gain,
         memory,
         conditioning,
-        flux3_reference_output: surface.flux3_references.map(|references| references.output_size),
+        flux3_reference_output: None,
         output_channels: surface.output_channels,
         cfg_interval: surface.controls.cfg_interval,
         caption_overflow: surface.controls.caption_overflow,
@@ -7741,13 +7731,15 @@ fn render_on_surface(
     // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
     // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
     // has its warnings collected for the image's provenance.
-    let report = crate::memory_strategy::generate_with_scope_report(
-        generator,
-        &mut request,
-        memory_strategy_context,
-        on_progress,
-    )
-    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    let report = if let Some(references) = surface.flux3_references {
+        flux3_references::render_reference_request(
+            generator, &mut request, references, memory_strategy_context, on_progress,
+        )
+    } else {
+        crate::memory_strategy::generate_with_scope_report(
+            generator, &mut request, memory_strategy_context, on_progress,
+        )
+    }.map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
     }
@@ -10845,7 +10837,7 @@ async fn generate_stream_using(
                         ),
                     ).unwrap_or_default();
                     if let Some(references) = flux3_references.as_ref() {
-                        facts.insert("flux3ReferenceEditing".to_owned(), references.image_fact((out_w, out_h)));
+                        facts.insert(flux3_references::FACT_KEY.to_owned(), references.image_fact((out_w, out_h)));
                     }
                     if !facts.is_empty() {
                         prompt_enhancement.send_image_facts(facts);
@@ -14684,7 +14676,7 @@ async fn generate_candle_stream_using(
                     ),
                 ).unwrap_or_default();
                 if let Some(references) = flux3_references.as_ref() {
-                    facts.insert("flux3ReferenceEditing".to_owned(), references.image_fact((out_w, out_h)));
+                    facts.insert(flux3_references::FACT_KEY.to_owned(), references.image_fact((out_w, out_h)));
                 }
                 if !facts.is_empty() {
                     prompt_enhancement.send_image_facts(facts);
@@ -15356,9 +15348,10 @@ async fn consume_gen_events_with_disclosure(
                 image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
                 image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
                 image_raw_settings.remove(lane_controls::PREFIX_KV_CACHE_KEY);
-                if let Some(facts) = pending_image_facts.remove(&index) {
-                    image_raw_settings.extend(facts);
-                }
+                flux3_references::merge_image_facts(
+                    &mut image_raw_settings,
+                    pending_image_facts.remove(&index),
+                );
                 // A measured fact set from the loaded handle supersedes the route's pre-load stamp
                 // (whose materialization is honestly `no-runtime-receipt`): same three facts, now
                 // with what the load actually materialized (sc-11045).

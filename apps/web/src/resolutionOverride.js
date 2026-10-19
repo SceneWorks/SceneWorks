@@ -95,12 +95,32 @@ function sideOnStride(value, step) {
 // used, and WHY it is invalid split into `outOfRange` / `offStride` so the Studio can surface a precise,
 // user-facing error (never a raw requirement string). `invalid` is the OR of the two — the single flag
 // the Generate gate reads.
-export function evaluateModelDimensions({ model, resolution, widthOverride, heightOverride }) {
+export function isFlux3ReferenceRequest({ model, sourceAssetId, referenceAssetId, referenceAssetIds }) {
+  const id = typeof model === "string" ? model : model?.id;
+  const hasId = (value) => typeof value === "string" && value.trim().length > 0;
+  return ["flux3_klein", "flux3_klein_base"].includes(id) &&
+    (hasId(sourceAssetId) || hasId(referenceAssetId) ||
+      (Array.isArray(referenceAssetIds) && referenceAssetIds.some(hasId)));
+}
+
+export function evaluateModelDimensions({ model, resolution, widthOverride, heightOverride,
+  referenceRequest = false, dimensionIntent = null }) {
   const constraints = modelDimensionConstraints(model);
-  const { width, height } = resolveEffectiveDimensions({ resolution, widthOverride, heightOverride });
-  const outOfRange = !(sideInRange(width, constraints) && sideInRange(height, constraints));
+  // FLUX3 reference canvases admit a single 16px patch; plain generation retains its catalog floor.
+  const referenceGeometry = referenceRequest && ["flux3_klein", "flux3_klein_base"].includes(model?.id);
+  if (referenceGeometry) constraints.min = 16;
+  const effective = resolveEffectiveDimensions({ resolution, widthOverride, heightOverride });
+  const omitWidth = referenceGeometry && dimensionIntent?.width === null;
+  const omitHeight = referenceGeometry && dimensionIntent?.height === null;
+  const width = omitWidth ? undefined : effective.width;
+  const height = omitHeight ? undefined : effective.height;
+  // Undefined is legal only for an axis deliberately omitted by an eligible reference request,
+  // never for a missing axis in malformed dropdown geometry (including ordinary T2I).
+  const validSide = (value, omitted) => omitted || sideInRange(value, constraints);
+  const strideSide = (value, omitted) => omitted || sideOnStride(value, constraints.step);
+  const outOfRange = !(validSide(width, omitWidth) && validSide(height, omitHeight));
   const offStride =
-    constraints.step > 1 && !(sideOnStride(width, constraints.step) && sideOnStride(height, constraints.step));
+    constraints.step > 1 && !(strideSide(width, omitWidth) && strideSide(height, omitHeight));
   return { width, height, constraints, outOfRange, offStride, invalid: outOfRange || offStride };
 }
 

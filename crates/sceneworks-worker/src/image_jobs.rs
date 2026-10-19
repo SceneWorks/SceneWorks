@@ -52,7 +52,7 @@ use gen_core::{
 // These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
 // this same implementation without pulling in an accelerator runtime bundle.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
-mod flux3_references;
+pub(crate) mod flux3_references;
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 mod prompt_upsampling;
 // sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
@@ -3042,8 +3042,10 @@ pub(crate) fn write_image_asset(
         "mimeType": "image/png",
         "width": width,
         "height": height,
-        "normalizedWidth": request.width,
-        "normalizedHeight": request.height,
+        // Reference-derived/cropped output is not the original plan's generic numeric default.
+        // Authored nullable sides live separately in the resolver-owned reference fact.
+        "normalizedWidth": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { width } else { request.width },
+        "normalizedHeight": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { height } else { request.height },
         "count": plan.image_count,
         "family": plan.family,
         "seed": seed,

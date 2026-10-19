@@ -12,6 +12,29 @@ use sha2::{Digest, Sha256};
 
 use crate::{WorkerError, WorkerResult};
 
+pub(crate) const FACT_KEY: &str = "flux3ReferenceEditing";
+
+/// The native lanes share this ingress: reserved provenance is never caller-authored.
+pub(crate) fn caller_raw_settings(
+    advanced: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut raw = advanced.clone();
+    raw.remove(FACT_KEY);
+    raw
+}
+
+/// The shared image-event persistence seam independently scrubs legacy/replayed settings, then
+/// admits only the current render's worker-authored facts. No-reference renders leave no record.
+pub(crate) fn merge_image_facts(
+    raw: &mut serde_json::Map<String, serde_json::Value>,
+    trusted_facts: Option<serde_json::Map<String, serde_json::Value>>,
+) {
+    raw.remove(FACT_KEY);
+    if let Some(facts) = trusted_facts {
+        raw.extend(facts);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnedReferenceBinding {
@@ -30,6 +53,40 @@ pub(crate) struct ResolvedReferences {
     pub(crate) output_size: ReferenceOutputSize,
     pub(crate) plan: ReferencePlan,
     pub(crate) resources: MemoryReferenceResourceFacts,
+}
+
+/// The actual reference-render seam shared by MLX and Candle. The provider sees exactly the owned
+/// carriers and facts priced before its load; a missing, stale, or substituted context fails closed.
+pub(crate) fn render_reference_request(
+    generator: &dyn gen_core::Generator,
+    request: &mut gen_core::GenerationRequest,
+    references: &ResolvedReferences,
+    context: Option<&gen_core::MemoryRunContext>,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> gen_core::Result<gen_core::GenerationReport> {
+    let context = context
+        .filter(|context| {
+            context.reference_resources.as_ref() == Some(&references.resources)
+                && usize::try_from(context.geometry.reference_count).ok()
+                    == Some(references.conditioning.len())
+                && (context.geometry.width, context.geometry.height)
+                    == references.plan.output.canvas
+                && (request.width, request.height) == references.plan.output.canvas
+        })
+        .ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "FLUX.3 render must retain the same admitted reference resource facts and canvas"
+                    .to_owned(),
+            )
+        })?;
+    request.conditioning = references.conditioning.clone();
+    request.flux3_reference_output = Some(references.output_size);
+    crate::memory_strategy::generate_with_scope_report(
+        generator,
+        request,
+        Some(context),
+        on_progress,
+    )
 }
 
 impl ResolvedReferences {
@@ -259,6 +316,178 @@ mod tests {
             resolve_owned_references(request, self.data.path(), &self.project_path)
                 .unwrap()
                 .unwrap()
+        }
+    }
+
+    #[test]
+    fn reference_asset_recipes_roundtrip_authored_options_and_actual_pixels_on_both_lanes() {
+        let fixture = Fixture::new();
+        let store = ProjectStore::new(fixture.data.path().to_path_buf(), "worker");
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            for adapter in ["mlx_flux3", "candle_flux3"] {
+                for (sides, actual) in [
+                    (json!({}), (83, 67)),
+                    (json!({"width":16}), (16, 80)),
+                    (json!({"height":48}), (96, 48)),
+                    (json!({"width":16,"height":48}), (16, 48)),
+                ] {
+                    let mut extra = sides.as_object().unwrap().clone();
+                    extra.insert("model".to_owned(), json!(model));
+                    extra.insert("modelManifestEntry".to_owned(), json!({"id":model,"family":"flux3","limits":{"minDimension":64,"maxDimension":4096,"requiresDimensionsMultipleOf":16}}));
+                    extra.insert("advanced".to_owned(), json!({"flux3ReferenceEditing":{"references":[{"contentSha256":"forged"}],"output":{"requestedWidth":2048}}}));
+                    let request = fixture.request(serde_json::Value::Object(extra));
+                    let resolved = fixture.resolve(&request);
+                    let genuine = resolved.image_fact(actual);
+                    let mut raw = caller_raw_settings(&request.advanced);
+                    assert!(
+                        !raw.contains_key(FACT_KEY),
+                        "{adapter}: caller provenance must be scrubbed at ingress"
+                    );
+                    // Independently protect the event boundary from legacy/replayed raw settings.
+                    raw.insert(
+                        FACT_KEY.to_owned(),
+                        json!({"references":[{"contentSha256":"forged"}]}),
+                    );
+                    let mut facts = serde_json::Map::new();
+                    facts.insert(FACT_KEY.to_owned(), genuine.clone());
+                    merge_image_facts(&mut raw, Some(facts));
+                    let plan =
+                        super::super::ImagePlan::with_count_and_adapter(&request, 1, adapter, None);
+                    let fact = super::super::write_image_asset(
+                        &plan,
+                        0,
+                        71,
+                        actual.0,
+                        actual.1,
+                        vec![137; (actual.0 * actual.1 * 3) as usize],
+                        adapter,
+                        raw,
+                        &fixture.project_path,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        fact["normalizedWidth"], actual.0,
+                        "{model}/{adapter}/{sides}"
+                    );
+                    assert_eq!(
+                        fact["normalizedHeight"], actual.1,
+                        "{model}/{adapter}/{sides}"
+                    );
+                    let fact_value = serde_json::Value::Object(fact.clone());
+                    store
+                        .persist_generated_asset(
+                            &fixture.project_id,
+                            "job-reference-roundtrip",
+                            &plan.genset_id,
+                            &fact_value,
+                        )
+                        .unwrap();
+                    let asset_id = fact["assetId"].as_str().unwrap();
+                    let asset = store.get_asset(&fixture.project_id, asset_id).unwrap();
+                    assert_eq!(asset["file"]["width"], actual.0);
+                    assert_eq!(asset["file"]["height"], actual.1);
+                    assert_eq!(asset["recipe"]["normalizedSettings"]["width"], actual.0);
+                    assert_eq!(asset["recipe"]["normalizedSettings"]["height"], actual.1);
+                    let recorded = &asset["recipe"]["rawAdapterSettings"][FACT_KEY];
+                    assert_eq!(recorded, &genuine);
+                    assert_eq!(
+                        recorded["output"]["requestedWidth"],
+                        sides
+                            .get("width")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                    );
+                    assert_eq!(
+                        recorded["output"]["requestedHeight"],
+                        sides
+                            .get("height")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                    );
+                    assert_eq!(
+                        recorded["output"]["actualSize"],
+                        json!([actual.0, actual.1])
+                    );
+                    let png = image::open(
+                        fixture
+                            .project_path
+                            .join(fact["mediaPath"].as_str().unwrap()),
+                    )
+                    .unwrap();
+                    assert_eq!((png.width(), png.height()), actual);
+                    let standalone: serde_json::Value = serde_json::from_slice(
+                        &std::fs::read(
+                            fixture
+                                .project_path
+                                .join("recipes")
+                                .join(format!("{asset_id}.recipe.json")),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        standalone["normalizedSettings"],
+                        asset["recipe"]["normalizedSettings"]
+                    );
+                    assert_eq!(standalone["rawAdapterSettings"][FACT_KEY], genuine);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn forged_reference_provenance_cannot_reach_a_plain_image_asset_recipe() {
+        let fixture = Fixture::new();
+        let store = ProjectStore::new(fixture.data.path().to_path_buf(), "worker");
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            for adapter in ["mlx_flux3", "candle_flux3"] {
+                let payload = json!({"projectId":fixture.project_id,"model":model,"mode":"text_to_image","prompt":"plain","count":1,"width":64,"height":64,
+                    "advanced":{"flux3ReferenceEditing":{"references":[{"contentSha256":"forged"}],"geometry":[[2048,2048]]},"sampler":"euler"}});
+                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                assert!(resolve_owned_references(
+                    &request,
+                    fixture.data.path(),
+                    &fixture.project_path
+                )
+                .unwrap()
+                .is_none());
+                let ingress = caller_raw_settings(&request.advanced);
+                assert!(!ingress.contains_key(FACT_KEY));
+                assert_eq!(ingress["sampler"], "euler");
+                let mut legacy_raw = request.advanced.clone();
+                merge_image_facts(&mut legacy_raw, None);
+                let plan =
+                    super::super::ImagePlan::with_count_and_adapter(&request, 1, adapter, None);
+                let fact = super::super::write_image_asset(
+                    &plan,
+                    0,
+                    72,
+                    64,
+                    64,
+                    vec![77; 64 * 64 * 3],
+                    adapter,
+                    legacy_raw,
+                    &fixture.project_path,
+                )
+                .unwrap();
+                store
+                    .persist_generated_asset(
+                        &fixture.project_id,
+                        "job-plain-roundtrip",
+                        &plan.genset_id,
+                        &serde_json::Value::Object(fact.clone()),
+                    )
+                    .unwrap();
+                let asset = store
+                    .get_asset(&fixture.project_id, fact["assetId"].as_str().unwrap())
+                    .unwrap();
+                assert!(
+                    asset["recipe"]["rawAdapterSettings"]
+                        .get(FACT_KEY)
+                        .is_none(),
+                    "{model}/{adapter}: {asset}"
+                );
+            }
         }
     }
 

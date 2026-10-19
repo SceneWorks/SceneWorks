@@ -46,6 +46,21 @@ function rawResolutionString(recipe) {
   return typeof raw === "string" && raw.includes("x") ? raw : null;
 }
 
+// Authored FLUX3 reference geometry is not the rendered/cropped image geometry. A null side
+// deliberately delegates that axis to the reference canvas. Workflow imports carry UI intent,
+// not fabricated worker-owned reference provenance.
+export function recipeImageDimensionIntent(recipe) {
+  if (!["flux3_klein", "flux3_klein_base"].includes(recipe?.model)) return null;
+  const output = recipe?.rawAdapterSettings?.flux3ReferenceEditing?.output;
+  const requested = output && Object.hasOwn(output, "requestedWidth") && Object.hasOwn(output, "requestedHeight")
+    ? { width: output.requestedWidth, height: output.requestedHeight }
+    : recipe?.uiDimensionIntent;
+  if (!requested || !["width", "height"].every((axis) =>
+    Object.hasOwn(requested, axis) &&
+    (requested[axis] === null || (Number.isInteger(requested[axis]) && requested[axis] > 0)))) return null;
+  return { width: requested.width, height: requested.height };
+}
+
 // A recipe's LoRAs are either bare id strings or `{id, weight}` objects, depending on how the
 // job was submitted.
 export function recipeLoraId(lora) {

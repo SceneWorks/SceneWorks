@@ -199,6 +199,29 @@ pub(crate) fn memory_mode_from_mode_key(key: &str) -> MemoryMode {
     }
 }
 
+/// Preserve every resource-bearing admission through execution, including Resident: its reference
+/// facts are a provider safety bound, not an optional optimization. Legacy resource-free Resident
+/// contexts retain their established sentinel behavior.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn executable_context(
+    engine_id: &str,
+    context: gen_core::MemoryRunContext,
+) -> Option<gen_core::MemoryRunContext> {
+    (context.reference_resources.is_some()
+        || context.selection.strategy.is_optimized()
+        || matches!(
+            engine_id,
+            "ideogram_4"
+                | "ideogram_4_turbo"
+                | "sana_1600m"
+                | "sana_sprint_1600m"
+                | "sd3_5_large"
+                | "sd3_5_large_turbo"
+                | "sd3_5_medium"
+        ))
+    .then_some(context)
+}
+
 /// Execute one provider request through the adopted safety/lifecycle seam. A created scope receives
 /// exactly one explicit terminal outcome; its Drop remains only a panic/unwind backstop.
 ///
@@ -251,6 +274,21 @@ fn run_with_scope<T>(
         &mut dyn FnMut(gen_core::Progress),
     ) -> gen_core::Result<T>,
 ) -> gen_core::Result<T> {
+    // A reference render may never take the legacy no-context shortcut: that would erase the
+    // provider's pre-load bound and bypass its safety check and request lifecycle.
+    let has_flux3_references = request.flux3_reference_output.is_some()
+        || (sceneworks_core::image_request::flux3::is_model(generator.descriptor().id)
+            && !request.conditioning.is_empty());
+    if has_flux3_references
+        && context
+            .and_then(|context| context.reference_resources.as_ref())
+            .is_none()
+    {
+        return Err(gen_core::Error::Unsupported(
+            "FLUX.3 reference rendering requires its admitted reference resource context"
+                .to_owned(),
+        ));
+    }
     let execution_domains =
         crate::execution_planner::plan_request_execution_domains(generator, request);
     if !execution_domains.is_empty() {

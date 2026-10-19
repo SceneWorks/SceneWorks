@@ -27,7 +27,7 @@ import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } f
 import {
   dimensionConstraintMessage,
   evaluateModelDimensions,
-  modelDimensionConstraints,
+  isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
 // sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
 // `limits.hardMinSteps` first; the reader is model-agnostic and reading it here is what stops this
@@ -187,7 +187,7 @@ import {
 } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
-import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
+import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -609,6 +609,12 @@ export function ImageStudio() {
   // ride the existing top-level width/height payload; the backend caps each at 256–4096.
   const [widthOverride, setWidthOverride] = useState(saved.widthOverride ?? "");
   const [heightOverride, setHeightOverride] = useState(saved.heightOverride ?? "");
+  // Recipe-only optional axes. Never infer authored intent from the actual output dimensions.
+  const [referenceDimensionIntent, setReferenceDimensionIntent] = useState(null);
+  const handleResolutionChange = (value) => {
+    setReferenceDimensionIntent(null);
+    setResolution(value);
+  };
   // Flash attention (sc-3674): fused attention on the candle (Windows/CUDA) SDXL backend — faster +
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
@@ -789,6 +795,7 @@ export function ImageStudio() {
       setWorkflowPoses([]);
       setPoseLibraryReplayOpen(false);
       setFaceRestore(false);
+      setReferenceDimensionIntent(null);
     }
     if (launchRequest.characterId) {
       setMode(normalizeImageMode(launchRequest.mode ?? "character_image"));
@@ -1842,7 +1849,13 @@ export function ImageStudio() {
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
     const nextMode = recipeMode(recipe);
+    const dimensionIntent = recipeImageDimensionIntent(recipe);
     const resolutionFromRecipe = recipeResolution(recipe);
+    setReferenceDimensionIntent(dimensionIntent
+      ? { ...dimensionIntent, model: recipe.model, mode: nextMode } : null);
+    // A launch replaces stale custom sides, including when either requested axis was omitted.
+    setWidthOverride(dimensionIntent?.width ?? "");
+    setHeightOverride(dimensionIntent?.height ?? "");
     const { loraIds, loraWeights: loraWeightMap } = recipeLoraSelection(recipe);
 
     // Arm the model-change reset skip only when this recipe actually changes the model. A
@@ -2030,7 +2043,23 @@ export function ImageStudio() {
   // Per-model geometry constraints for the free Width/Height override (sc-14058). Native-resolution
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
-  const dimensionConstraints = modelDimensionConstraints(selectedModel);
+  // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
+  const flux3ReferenceRequest = isFlux3ReferenceRequest({
+    model: selectedModel,
+    sourceAssetId: mode === "edit_image" && !multiReference ? sourceAssetId : null,
+    referenceAssetId: mode === "character_image" ? referenceAssetId
+      : supportsImg2img ? img2imgReferenceAssetId : null,
+    referenceAssetIds: mode === "edit_image" && (multiReference || sourceWithMultiReference)
+      ? referenceAssetIds : null,
+  });
+  const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
+    referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
+  useEffect(() => {
+    if (referenceDimensionIntent && (referenceDimensionIntent.model !== model ||
+        referenceDimensionIntent.mode !== mode || (selectedModel && !flux3ReferenceRequest))) {
+      setReferenceDimensionIntent(null);
+    }
+  }, [referenceDimensionIntent, model, mode, selectedModel, flux3ReferenceRequest]);
   // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect
   // dropdown. The resulting dims flow through the existing top-level width/height payload,
   // so submit() and the batch builder need no further change. Logic lives in the pure,
@@ -2040,8 +2069,10 @@ export function ImageStudio() {
     resolution,
     widthOverride,
     heightOverride,
+    referenceRequest: flux3ReferenceRequest,
+    dimensionIntent: activeDimensionIntent,
   });
-  const { width, height, invalid: dimensionsInvalid } = dimensionEval;
+  const { width, height, invalid: dimensionsInvalid, constraints: dimensionConstraints } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
@@ -2918,6 +2949,7 @@ export function ImageStudio() {
           resolution: `${res.width}x${res.height}`,
           widthOverride: "",
           heightOverride: "",
+          referenceRequest: flux3ReferenceRequest,
         }).invalid,
     );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
@@ -3505,7 +3537,7 @@ export function ImageStudio() {
                       // The aspect suggestion lands on the SAME resolution control the Aspect menu
                       // drives, and only ever with a value that menu already offers — accepting it
                       // is indistinguishable from the user picking it by hand.
-                      onApplyResolution={setResolution}
+                      onApplyResolution={handleResolutionChange}
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       // The ORDERED list the render will condition on. Same array, same order —
@@ -3853,7 +3885,7 @@ export function ImageStudio() {
               </label>
               <label className="settings-field settings-field-aspect">
                 Aspect
-                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+                <select onChange={(event) => handleResolutionChange(event.target.value)} value={resolution}>
                   {resolutionOptions.map((option) => (
                     <option key={option} value={option}>{formatResolutionLabel(option)}</option>
                   ))}
@@ -4060,8 +4092,11 @@ export function ImageStudio() {
                   min={dimensionConstraints.min}
                   max={dimensionConstraints.max}
                   step={dimensionConstraints.step}
-                  onChange={(event) => setWidthOverride(event.target.value)}
-                  placeholder={String(dropdownWidth)}
+                  onChange={(event) => {
+                    setReferenceDimensionIntent(null);
+                    setWidthOverride(event.target.value);
+                  }}
+                  placeholder={activeDimensionIntent?.width === null ? "Auto (reference canvas)" : String(dropdownWidth)}
                   type="number"
                   value={widthOverride}
                 />
@@ -4072,8 +4107,11 @@ export function ImageStudio() {
                   min={dimensionConstraints.min}
                   max={dimensionConstraints.max}
                   step={dimensionConstraints.step}
-                  onChange={(event) => setHeightOverride(event.target.value)}
-                  placeholder={String(dropdownHeight)}
+                  onChange={(event) => {
+                    setReferenceDimensionIntent(null);
+                    setHeightOverride(event.target.value);
+                  }}
+                  placeholder={activeDimensionIntent?.height === null ? "Auto (reference canvas)" : String(dropdownHeight)}
                   type="number"
                   value={heightOverride}
                 />

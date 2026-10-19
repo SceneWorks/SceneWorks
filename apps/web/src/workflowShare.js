@@ -482,7 +482,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null } = {},
 ) {
   if (!share) {
     return null;
@@ -566,6 +566,18 @@ export function recipeFromWorkflowShare(
   const modelId = workflowModelId(report) ?? (substituteModelId || null);
   if (modelId) {
     recipe.model = modelId;
+  }
+  // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
+  // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
+  if (share.sceneworksWorkflow === "image" &&
+      ["flux3_klein", "flux3_klein_base"].includes(modelId) &&
+      ((references.length && share.inputs?.some((input) => input.kind === "reference")) ||
+       (typeof sourceAssetId === "string" && sourceAssetId.trim() &&
+        share.inputs?.some((input) => input.kind === "source")))) {
+    recipe.uiDimensionIntent = {
+      width: Number.isInteger(width) && width > 0 ? width : null,
+      height: Number.isInteger(height) && height > 0 ? height : null,
+    };
   }
   // `stylePreset` is NOT set here even when it resolved. Nothing in `apps/web/src` reads
   // `recipe.stylePreset` — the studio's preset seam is `launchRequest.presetId`, a different
