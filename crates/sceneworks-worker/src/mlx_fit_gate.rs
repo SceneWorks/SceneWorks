@@ -4994,6 +4994,13 @@ pub(crate) fn preflight_request(
     inputs: &MlxRequestInputs,
     budget: MemoryBudget,
 ) -> WorkerResult<MlxRequestAdmission> {
+    // Fail closed before deriving a contract for this actual candidate spec. The selector also
+    // resolves the same pure provider bound before grading, including every warm-cache request.
+    crate::memory_strategy::reference_workspace_bytes(
+        plan.engine_id,
+        spec,
+        inputs.reference_resources.as_ref(),
+    )?;
     let contract = crate::inference_runtime::media()
         .memory_strategy_contract(plan.engine_id, spec)
         .map_err(|error| {
@@ -9313,7 +9320,7 @@ mod tests {
                 OffloadPolicy::Resident,
                 crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
                 fixture_budget(total),
-                request_total_peak_bytes(&plan, request_geometry(inputs)),
+                plan.generic_total_peak_bytes(request_geometry(inputs)),
                 0,
                 &[],
                 None,
@@ -9379,7 +9386,7 @@ mod tests {
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
             fixture_budget(128.0),
-            request_total_peak_bytes(&plan, request_geometry(&referenced)),
+            plan.generic_total_peak_bytes(request_geometry(&referenced)),
             0,
             &[],
         )

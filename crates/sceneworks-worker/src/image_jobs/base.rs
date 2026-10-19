@@ -10421,7 +10421,7 @@ async fn generate_stream_using(
         })
     };
     let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
-    let explicit_pick = request
+    let explicit_pick = flux3_plan.is_some() || request
         .advanced
         .get("mlxQuantizeExplicit")
         .and_then(Value::as_bool)
