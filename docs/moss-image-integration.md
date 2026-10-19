@@ -63,6 +63,6 @@ The separate native backend acceptance retains advanced tensor and cancellation 
 
 ## Web bundle evidence
 
-The feature keeps every initial, raw and route limit enabled. Against the clean `875666c7c` web baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 465,936 / 143,123 / 122,561. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
+All initial-load, raw-size and largest-route limits remain enabled and unchanged. Against the clean `875666c7c` baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 467,260 / 143,621 / 122,981. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
 
-Total JavaScript changes from 2,888,178 / 859,234 / 733,239 to 2,894,715 / 861,430 / 735,478 bytes. The compressed total limits add exactly the positive measured feature deltas, 2,196 gzip and 2,239 Brotli bytes: 862,196 and 737,239. This preserves the previous baseline headroom of 766 and 1,761 bytes. The raw total limit and all coverage checks remain unchanged.
+The final reviewed web profile totals 2,897,898 / 862,405 / 736,096 bytes (raw/gzip/Brotli). Its compressed total caps match the measured totals: 862,405 gzip and 736,096 Brotli bytes, with zero remaining headroom. Relative to the previous feature caps of 862,196 and 737,239, gzip increases by 209 bytes and Brotli tightens by 1,143 bytes. The earlier headroom figures of 766 / 1,761 describe a superseded feature snapshot. The raw total cap, initial-load and largest-route caps, coverage checks and negative budget tests remain unchanged.
