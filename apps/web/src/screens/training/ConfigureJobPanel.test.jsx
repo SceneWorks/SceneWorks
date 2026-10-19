@@ -41,6 +41,15 @@ function mount(node) {
   act(() => root.render(node));
 }
 
+it("exposes FLUX.3 source options inside the existing advanced training form", () => {
+  const selectedTarget = { id: "flux3_klein_edit_lora", name: "FLUX.3 Klein Base Edit LoRA", baseModel: "flux3_klein_base" };
+  mount(<ConfigureJobPanel {...baseProps({ selectedTarget, showAdvancedConfig: true, configDraft: { ...VALID_DRAFT, flux3Options: '{"mode":"edit","caption_dropout":0.25}' } })} />);
+  expect(container.textContent).toContain("FLUX.3 source training options");
+  expect(container.textContent).toContain("exactly one reference");
+  const source = Array.from(container.querySelectorAll("textarea")).find((input) => input.value.includes("caption_dropout"));
+  expect(source.closest("fieldset").textContent).toContain("Source options (JSON)");
+});
+
 const noop = () => {};
 
 // A draft that satisfies every rule, so a test can break exactly one thing.

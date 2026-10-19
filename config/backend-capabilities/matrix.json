@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1095,
+    "cellCount": 1097,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 86,
     "exceptionCount": 10
@@ -13,23 +13,23 @@
     "apiContractEntry": "1e2543a06d4142ed7597451ce4e764f7abdfafa8697a34a0558107fee1cdc814",
     "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
-    "apiValidation": "05ba80de4f2a6e342bacb4e40cb7c201482e1ec426cdd2e38663b0dce28a22b4",
+    "apiValidation": "b6c5297aa8a69922eea39486b216e6aefd9a5a5e009b7e873df5700bc711204c",
     "baseWeightImports": "b468fd4ac5f68d6c3a855c2745b3581601314de9cceaa0e9140973a3ba8e368d",
     "descriptorAudioFacts": "2278e8cda8b71e78209a3fd980d0a3133abbf995e4a08a605754674a5801a9ed",
     "descriptorCandleFacts": "0bcfd4d60b7306f9521dfe56f527649b3518c7837b5afda5b3f9be45b26da694",
-    "descriptorCandleRuntime": "f7f27f1fba057e2d59081c61705ff02134ec53615b3ac85f385ea44486e78fdd",
+    "descriptorCandleRuntime": "d4c6efcc04637cbb09b27f3a7566484648340bd51fd42d1d6c4edcfb79e7c58d",
     "descriptorMlxFacts": "9b248164d9116a2e2b88980de626550b7799ca84b175de0148548e80b0d700b9",
-    "descriptorMlxRuntime": "e001ae7ab14203481be5e6908cda2313fb6ae3bc7afaa4ec75c7b2cc890fc1e5",
+    "descriptorMlxRuntime": "3119e1eff9a9c3daf4cc110634e5ce14e80bd788ba995fd0ccf77517986ed440",
     "descriptorPreviewFacts": "959d67f76c144032f809d874b562fc6cf2110f208049fbc5fe3133f46da25421",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "d6b4c9ee201259ce5a94ad72ce4231568063f6b174624ef60b2d087d36d92a12",
     "modelImportDefaults": "89a8ffccfa2f1325a77c64027052659f7d6ed2132a1596a66517e3de6ff00ae3",
-    "routerCandle": "f97251af1f0f9c866c68d3bc3d2e565673f5be2b7462827b1526a1e317c19d6c",
-    "routerCatalog": "03a800f8ace1b3284cf8c9b1fcd21cb2d2ea90f214359fd6674f1405d2f89d84",
+    "routerCandle": "8f3e9afd4f858fb10e13aa9716c92fdcd1dfef2b5ce83fa2ae4ede744e1ae90c",
+    "routerCatalog": "01242d31d6e66d3bfbedc7f72732f0b5ec3a4ac5e2221b65307f5cf94715763a",
     "routerGaps": "6d541c25c4b36a141021f0ee5846d12743fe6951ca3bfa954ac0c19fad6c0e63",
-    "routerMlx": "30052188d546059520443b0e55952abf8f98931bb4ec7aa246789798023ef4f9",
+    "routerMlx": "d304ca5778532c460a8013c0bf726fcbf63c4b01e13425b34f260b0eac186e89",
     "scheduler": "4699073664ef21ff0a7e0491816d829285b230df1e1a9f3f2249c717a9582eb6",
-    "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
+    "trainingCatalog": "7a657b985900d1b5502776d374fe429d958f30d59e7682e693d32074bae47f3a",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
     "webImageAdvanced": "16c4dc222a2ebe6072bfddf445b8d19d9b6bc82ef8f04bdc9313a013f2d17579",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "14208b1a60b21fea666670e1df66e2c51318f1f3955526ac102ca8a01ee7f7d1",
+    "workerTrainingDispatch": "d707c277e09d3323c6b43802c2496f972db960ab8fad8e4bc9365324d5600363",
     "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -8532,6 +8532,28 @@
       "target": "anima_base_lora",
       "baseModel": "anima_base",
       "kernel": "anima_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "flux3_klein_edit_lora",
+      "baseModel": "flux3_klein_base",
+      "kernel": "flux3_klein_edit_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "flux3_klein_lora",
+      "baseModel": "flux3_klein_base",
+      "kernel": "flux3_klein_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",

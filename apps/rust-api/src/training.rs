@@ -1794,6 +1794,16 @@ pub(crate) async fn create_training_job(
     // contract rather than an advisory UI hint.
     sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
         .map_err(training_plan_error_to_api_error)?;
+    if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
+        && payload
+            .config
+            .advanced
+            .get("resume")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return Err(ApiError::bad_request("Resume a stopped FLUX.3 run using its queue entry; a new submit cannot select a previous checkpoint identity."));
+    }
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset
     // resolution, plan build, and output/guardrail plumbing — but produces a control branch, not a
     // LoRA. A `ControlBranch` target enqueues the orchestrated `control_training` job (render the
@@ -2609,6 +2619,9 @@ pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path,
 /// directory. The path need not exist yet — model installation is a separate job; the
 /// dry-run plan only records where the kernel will read from.
 pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath) -> String {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        return flux3_training_snapshot(data_dir).display().to_string();
+    }
     // Locally-converted MLX model: `requiresConversion` models (Wan TI2V-5B / A14B) keep
     // their usable weights in the app-managed `<data>/models/mlx/<id>` tree, NOT the HF cache
     // — which holds only the native *source* checkpoint the converter consumes. Inference reads
@@ -2661,6 +2674,26 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
         .join(safe_download_dir(&target.base_model))
         .display()
         .to_string()
+}
+
+/// Training always selects the known publisher base revision, never whichever refs/main snapshot
+/// sorts first, a converted generation directory, or an unproven q4/q8 tier.
+fn flux3_training_snapshot(data_dir: &FsPath) -> PathBuf {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    if let Some(snapshot) =
+        sceneworks_worker::flux3_receipted_snapshot(data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+    {
+        return snapshot;
+    }
+    huggingface_repo_cache_path(data_dir, BASE_REPO)
+        .unwrap_or_else(|| {
+            data_dir
+                .join("huggingface")
+                .join("hub")
+                .join(format!("models--{}", BASE_REPO.replace('/', "--")))
+        })
+        .join("snapshots")
+        .join(BASE_REVISION)
 }
 
 /// Whether a diffusers component tree roots here, keyed on its denoiser dir. DiT models (Krea 2 Raw,
@@ -3250,6 +3283,23 @@ pub(crate) fn training_base_model_status(
     data_dir: &FsPath,
     target: &TrainingTarget,
 ) -> TrainingBaseStatus {
+    if target.base_model == sceneworks_core::training::flux3::BASE_ID {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        return match sceneworks_worker::flux3_receipted_snapshot(
+            data_dir,
+            BASE_REPO,
+            BASE_REVISION,
+            BASE_ID,
+        ) {
+            Some(snapshot)
+                if sceneworks_worker::flux3_runtime_bundle_check(&snapshot, BASE_ID).is_ok() =>
+            {
+                TrainingBaseStatus::Ready
+            }
+            Some(_) => TrainingBaseStatus::TrainingTierMissing,
+            None => TrainingBaseStatus::Missing,
+        };
+    }
     // macOS Wan: certify the installed MLX turnkey the native trainer loads, NOT the Windows/Linux
     // diffusers `base_model_repo` below (never installed on macOS) — sc-13878. Inert off-Mac / non-Wan.
     if let Some(status) = macos_wan_base_status(data_dir, target) {

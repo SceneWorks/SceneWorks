@@ -124,7 +124,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
         for target in &registry.targets {
             // The Iris-3B trainers declare no epic 2123 technique.
             let adapter = target.id != "krea_2_control"
-                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+                && !sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str());
             assert_eq!(
                 sceneworks_core::training::target_supports_weight_noise(target),
                 adapter,
@@ -167,7 +168,9 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
+        .filter(|id| {
+            id != "krea_2_control" && !id.starts_with("iris_3b") && !id.starts_with("flux3_klein")
+        })
         .collect();
     assert_eq!(mlx, all);
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
@@ -6858,6 +6861,187 @@ fn seed_hf_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> s
     std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
     std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
     snapshot
+}
+
+#[test]
+fn flux3_training_base_requires_exact_publisher_revision_and_receipt() {
+    use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let target = sceneworks_core::training::flux3::target(false);
+    let wrong = seed_hf_snapshot(temp.path(), BASE_REPO, "different-revision");
+    std::fs::write(wrong.join("config.json"), "{}").unwrap();
+    let pin = seed_hf_snapshot(temp.path(), BASE_REPO, BASE_REVISION);
+    std::fs::write(pin.join("config.json"), "{}").unwrap();
+    let converted = temp.path().join("models").join("mlx").join(BASE_ID);
+    std::fs::create_dir_all(&converted).unwrap();
+    std::fs::write(converted.join("config.json"), "{}").unwrap();
+    assert_eq!(
+        crate::training::resolve_base_model_path(&target, temp.path()),
+        pin.display().to_string()
+    );
+    assert!(matches!(
+        crate::training::training_base_model_status(temp.path(), &target),
+        crate::training::TrainingBaseStatus::Missing
+    ));
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .unwrap()
+        .1;
+    let catalog: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let base = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == BASE_ID)
+        .unwrap();
+    assert_eq!(base["downloads"][0]["repo"], BASE_REPO);
+    assert_eq!(base["downloads"][0]["revision"], BASE_REVISION);
+}
+
+#[tokio::test]
+async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp)).unwrap();
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Flux3 Training"}),
+    )
+    .await;
+    let project = project["id"].as_str().unwrap();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project}/assets"),
+        "target.png",
+        "image/png",
+        b"declared synthetic fixture, not model evidence",
+    )
+    .await;
+    let asset = asset["id"].as_str().unwrap();
+    for edit in [false, true] {
+        let mut item = json!({"assetId":asset,"caption":{"text":"make the wall blue"}});
+        if edit {
+            item["references"] = json!([{"assetId":asset}]);
+        }
+        let (_, dataset) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{project}/training/datasets"),
+            json!({"name":"synthetic fixture", "items":[item]}),
+        )
+        .await;
+        let target = sceneworks_core::training::flux3::target(edit);
+        let mut config = target.defaults.clone();
+        config.rank = 8;
+        config.alpha = 12;
+        config
+            .advanced
+            .get_mut("flux3")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("caption_dropout".into(), json!(0.25));
+        let mut body = json!({"targetId":target.id, "datasetId":dataset["id"], "config":config, "outputName":"Flux3 Adapter", "dryRun":true});
+        let path = format!("/api/v1/projects/{project}/training/jobs");
+        let (status, job) = request(app.clone(), "POST", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        let plan = &job["payload"]["plan"];
+        assert_eq!(plan["target"]["baseModel"], "flux3_klein_base");
+        assert_eq!(plan["target"]["kernel"], target.kernel);
+        assert_eq!(plan["config"]["rank"], 8);
+        assert_eq!(plan["config"]["alpha"], 12);
+        assert_eq!(plan["config"]["advanced"]["flux3"]["caption_dropout"], 0.25);
+        assert_eq!(
+            plan["dataset"]["items"][0]
+                .get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            usize::from(edit)
+        );
+        let entry = &job["payload"]["manifestEntry"];
+        assert_eq!(entry["baseModel"], "flux3_klein_base");
+        assert_eq!(entry["family"], "flux3");
+        assert_eq!(entry["files"][0], plan["output"]["fileName"]);
+        body["config"]["advanced"]["flux3"]["not_a_source_option"] = json!(true);
+        let (status, _) = request(app.clone(), "POST", &path, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        body["config"]["advanced"]["flux3"]
+            .as_object_mut()
+            .unwrap()
+            .remove("not_a_source_option");
+        body["config"]["advanced"]["resume"] = json!(true);
+        let (status, error) = request(app.clone(), "POST", &path, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.to_string().contains("queue entry"), "{error}");
+        let id = job["id"].as_str().unwrap();
+        claim_training_job_as_mlx_worker(&app, id).await;
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/progress"),
+            json!({
+                "status":"canceled", "stage":"canceled", "progress":1,
+                "workerId":TEST_TRAINING_WORKER_ID, "message":"Synthetic stopped run"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        if edit {
+            // Host plumbing fixture only: native checkpoint contents/identity are validated by S7's
+            // native loader, not this filename-discovery/API test.
+            let output = std::path::Path::new(plan["output"]["outputDir"].as_str().unwrap());
+            std::fs::create_dir_all(output).unwrap();
+            let stem = sceneworks_worker::training_resume_stem(
+                plan["output"]["fileName"].as_str().unwrap(),
+            );
+            let checkpoint = output.join(format!("{stem}-step000100.resume.safetensors"));
+            write_test_safetensors(&checkpoint);
+            let checkpoint_bytes = std::fs::read(&checkpoint).unwrap();
+            for (pointer, changed) in [
+                ("/target/baseModel", json!("flux3_klein")),
+                ("/config/advanced/flux3/caption_dropout", json!(0.6)),
+                ("/dataset/items/0/caption", json!("different instruction")),
+                ("/output/fileName", json!("different.safetensors")),
+            ] {
+                let mut altered = plan.clone();
+                *altered.pointer_mut(pointer).unwrap() = changed;
+                let (status, error) = request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/jobs/{id}/retry"),
+                    json!({"resume":true,"payloadChanges":{"plan":altered}}),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{pointer}: {error}");
+                assert!(
+                    error.to_string().contains("checkpoint identity mismatch"),
+                    "{error}"
+                );
+                assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+            }
+            let (status, resumed) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/retry"),
+                json!({"resume":true}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{resumed}");
+            let mut expected = plan.clone();
+            expected["config"]["advanced"]["resume"] = json!(true);
+            assert_eq!(resumed["payload"]["plan"], expected);
+            assert_eq!(std::fs::read(&checkpoint).unwrap(), checkpoint_bytes);
+            assert_eq!(
+                resumed["payload"]["manifestEntry"]["baseModel"],
+                "flux3_klein_base"
+            );
+        }
+    }
 }
 
 fn qwen_image_2_1_training_target() -> sceneworks_core::training::TrainingTarget {

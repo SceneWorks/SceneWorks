@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import trainingTargets from "../../../../tests/fixtures/rust_migration_contracts/training/target-registry.json";
 
 import { summarize } from "../validation/issues.js";
 import {
@@ -1852,5 +1853,25 @@ describe("configValidation edit-pair dataset shape", () => {
     expect(messages(3).some((message) => message.includes("limit of 2"))).toBe(true);
     expect(messages(2).some((message) => message.includes("reference"))).toBe(false);
     expect(messages(0).some((message) => message.includes("needs a"))).toBe(true);
+  });
+});
+
+describe("FLUX.3 existing training targets", () => {
+  it.each(["flux3_klein_lora", "flux3_klein_edit_lora"])("round trips nondefault source options for %s", (id) => {
+    const target = trainingTargets.targets.find((target) => target.id === id);
+    expect(target).toBeDefined();
+    const dataset = { id: "ds_flux3", name: "Synthetic fixtures" };
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(JSON.parse(draft.flux3Options).mode).toBe(id.includes("edit") ? "edit" : "captioned");
+    draft.flux3Options = JSON.stringify({ mode: id.includes("edit") ? "edit" : "captioned", caption_dropout: 0.3, max_sequence_length: 96, random_flip: true });
+    const body = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target });
+    expect(body.targetId).toBe(id);
+    expect(body.config.optimizer).toBe("adamw");
+    expect(body.config.advanced.gradientCheckpointing).toBe(false);
+    expect(body.config.advanced.flux3).toEqual(JSON.parse(draft.flux3Options));
+    expect(body.config.advanced.sampleEvery).toBe(0);
+    draft.flux3Options = "{bad json";
+    expect(configValidation(draft, { activeDataset: dataset, selectedTarget: target }).some((issue) => issue.field === "flux3Options")).toBe(true);
+    expect(() => trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: target })).not.toThrow();
   });
 });

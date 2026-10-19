@@ -371,6 +371,8 @@
   ],
   "trainerMappings": {
     "anima_base_lora": "anima_base",
+    "flux3_klein_edit_lora": "flux3_klein_base",
+    "flux3_klein_lora": "flux3_klein_base",
     "illustrious_xl_v1_lora": "sdxl",
     "illustrious_xl_v2_lora": "sdxl",
     "iris_3b_depth": "iris_3b_depth",

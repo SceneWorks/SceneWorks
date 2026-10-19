@@ -527,6 +527,40 @@ async fn apply_training_retry_resume(
             "Only a failed, canceled or interrupted training job can be resumed.",
         ));
     }
+    let source_is_flux3 = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(|kernel| sceneworks_core::training::flux3::KERNELS.contains(&kernel));
+    let effective_resume = resume.unwrap_or_else(|| {
+        plan.get("config")
+            .and_then(|config| config.pointer("/advanced/resume"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    if source_is_flux3 && effective_resume {
+        let original = job
+            .payload
+            .get("plan")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ApiError::bad_request("FLUX.3 resume requires the original stored training plan.")
+            })?;
+        let normalize = |plan: &JsonObject| {
+            let mut value = Value::Object(plan.clone());
+            if let Some(advanced) = value
+                .pointer_mut("/config/advanced")
+                .and_then(Value::as_object_mut)
+            {
+                advanced.remove("resume");
+            }
+            value
+        };
+        if normalize(original) != normalize(&plan) {
+            return Err(ApiError::bad_request("FLUX.3 checkpoint identity mismatch: resume must keep the original model, options, dataset and output. Start a new training run to change them."));
+        }
+    }
     let output_dir = plan
         .get("output")
         .and_then(|output| output.get("outputDir"))

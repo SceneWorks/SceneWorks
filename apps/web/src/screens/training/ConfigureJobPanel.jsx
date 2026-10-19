@@ -1289,6 +1289,22 @@ export function ConfigureJobPanel({
               ) : null}
             </div>
 
+            {selectedTarget?.baseModel === "flux3_klein_base" ? (
+              <fieldset className="training-resolution-buckets">
+                <legend>FLUX.3 source training options</legend>
+                <p>Captioned examples train text-to-image; edit pairs require exactly one reference per target. Only the undistilled dense base and additive LoRA are supported. Resume a stopped run from its queue entry to preserve its checkpoint identity.</p>
+                <label>
+                  Source options (JSON)
+                  <textarea
+                    value={configDraft.flux3Options ?? "{}"}
+                    onChange={(event) => updateConfigDraft("flux3Options", event.target.value)}
+                    rows={6}
+                    {...invalidProps(configValidity, "flux3Options")}
+                  />
+                </label>
+                <p>Options are forwarded under flux3 only. Supported source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power. Unknown or unsupported source intent is rejected, never substituted.</p>
+              </fieldset>
+            ) : null}
             {iris ? (
               <IrisTrainingOptions
                 captionFieldOptions={irisContext.captionFieldOptions}

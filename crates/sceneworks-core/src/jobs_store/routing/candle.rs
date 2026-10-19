@@ -2181,6 +2181,9 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
 
     match kernel {
+        "flux3_klein_lora" | "flux3_klein_edit_lora" => {
+            base_model == "flux3_klein_base" && network_type == "lora"
+        }
         "kolors_lora" => base_model == "kolors" && is_adapter,
         "sd3_lora" => matches!(base_model, "sd3_5_large" | "sd3_5_medium") && is_adapter,
         "wan_lora" => base_model == "wan_2_2" && network_type.eq_ignore_ascii_case("lora"),
