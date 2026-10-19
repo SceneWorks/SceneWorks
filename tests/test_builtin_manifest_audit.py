@@ -4981,3 +4981,16 @@ def test_flux3_base_and_distilled_have_separate_defaults_and_adapter_identity():
             for name in ["config.json", "hf_quant_config.json", "manifest.json", "model.safetensors"]:
                 assert f"variants/{row['variant']}/{name}" in metadata_paths
     assert all("localDerivation" not in row for row in primary)
+
+
+def test_flux3_both_checkpoints_declare_the_owned_reference_editing_surface():
+    models = {row["id"]: row for row in _load_builtin_models_manifest()["models"]}
+    for model_id in ["flux3_klein", "flux3_klein_base"]:
+        model = models[model_id]
+        assert set(model["capabilities"]) >= {"text_to_image", "edit_image", "image_to_image", "character_image"}
+        assert model["limits"]["maxReferenceAssets"] == 10
+        assert model["limits"]["minDimension"] == 64  # plain T2I; references use the family parser's 16px floor
+        assert model["limits"]["maxDimension"] == 4096
+        assert model["limits"]["requiresDimensionsMultipleOf"] == 16
+        assert model["ui"]["hideReferenceStrength"] is True
+        assert model["ui"]["promptEnhance"] is True

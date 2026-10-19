@@ -6529,7 +6529,8 @@
           8
         ],
         "minDimension": 64,
-        "maxDimension": 2048,
+        "maxDimension": 4096,
+        "maxReferenceAssets": 10,
         "requiresDimensionsMultipleOf": 16,
         "samplers": [
           "euler"
@@ -6555,11 +6556,11 @@
         }
       },
       "ui": {
+        "promptEnhance": true,
+        "hideReferenceStrength": true,
         "label": "FLUX 3 Image Klein Base",
         "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately. Base q4/q8 local conversion installation awaits verified output size/SHA pins after base repository access is granted; no dense substitution.",
-        "recommendedFor": [
-          "text_to_image"
-        ],
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
           "path": "/prompt-guides/flux3-image-klein.md",
