@@ -6039,8 +6039,8 @@ fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carrier
         assert!(image_request_candle_eligible(model, &adapted));
         assert!(image_request_mlx_eligible(model, &adapted));
         for extra in [
-            json!({"mode":"edit_image","sourceAssetId":"source"}),
-            json!({"referenceAssetIds":["one","two"]}),
+            json!({"mode":"edit_image"}),
+            json!({"referenceAssetIds":["one",null]}),
             json!({"controls":[{}]}),
             json!({"loras":[{}]}),
             json!({"advanced":{"mlxQuantize":6}}),
