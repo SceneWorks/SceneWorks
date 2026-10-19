@@ -639,6 +639,45 @@ describe("a replayed recipe reaches every allow-listed control", () => {
   });
 
 
+  it.each([true, false])("restores layout, duplicate bindings, optional geometry and FP8R together with backend eligibility %s", async (eligible) => {
+    const packed = { ...FLUX3, hasVariantMatrix: true, variants: [
+      { variant: "q8", installState: "installed" }, { variant: "fp8r", installState: "installed" },
+    ] };
+    const layout = { version: 1, boxes: [{ id: "combined-remove", desc: "remove second occurrence",
+      from: "ref_image_1", reference_id: "second-instance", src_bbox: [0, 0.123456789012345, 1, 1], tgt_bbox: null }] };
+    const recipe = flux3Recipe(null, 768);
+    Object.assign(recipe.rawAdapterSettings, { quantTier: "fp8r", flux3_layout: layout,
+      referenceAssetIds: [FLUX3_REFERENCE.id, FLUX3_REFERENCE.id],
+      flux3_reference_ids: ["first-instance", "second-instance"] });
+    const createImageJob = vi.fn(async () => ({ id: "combined-replay" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], imageModels: [packed], models: [packed], createImageJob,
+      visibleWorkers: [{ status: "online", capabilities: eligible ? ["fp8r"] : ["candle"] }],
+      studioLaunch: launch(recipe) }));
+    expect(document.querySelector('[aria-label="Select combined-remove"]')).not.toBeNull();
+    await click(document.querySelector('[aria-label="Select combined-remove"]'));
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("second-instance");
+    expect(persistedStudioSettings().flux3Layout).toEqual(layout);
+    if (!eligible) {
+      expect(buttonByText("Generate").disabled).toBe(true);
+      expect(container.textContent).toContain("Recipe FP8R (candle, sm_89+) unavailable");
+      await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+      expect(createImageJob).not.toHaveBeenCalled();
+      return;
+    }
+    expect(buttonByText("Generate").disabled).toBe(false);
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.referenceAssetIds).toEqual([FLUX3_REFERENCE.id, FLUX3_REFERENCE.id]);
+    expect(payload).not.toHaveProperty("width");
+    expect(payload.height).toBe(768);
+    expect(payload.advanced.flux3_layout).toEqual(layout);
+    expect(payload.advanced.flux3_reference_ids).toEqual(["first-instance", "second-instance"]);
+    expect(payload.advanced.quantTier).toBe("fp8r");
+    expect(payload.advanced).not.toHaveProperty("mlxQuantize");
+    expect(payload.advanced).not.toHaveProperty("flux3ReferenceEditing");
+  });
+
   it("replays saved FP8R rather than the current default without forwarding trusted reports", async () => {
     const packed = { ...FLUX3, hasVariantMatrix: true, variants: [
       { variant: "q8", installState: "installed" }, { variant: "fp8r", installState: "installed" },
