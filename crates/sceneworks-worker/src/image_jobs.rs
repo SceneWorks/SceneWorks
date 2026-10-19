@@ -2062,6 +2062,14 @@ fn resolve_prepared_adapter_file(
             confined.display()
         ))
     })?;
+    // Legacy direct-file routes have always owned the original lexical entry, so a symlink
+    // retarget between selection and dispatch must still invalidate their prepared token.
+    // Confinement and shared selection above remain mandatory before retaining that entry.
+    let candidate = if !matches!(model, "flux3_klein" | "flux3_klein_base") && !confined.is_dir() {
+        raw
+    } else {
+        candidate
+    };
     crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
 

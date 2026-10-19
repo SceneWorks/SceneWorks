@@ -8737,6 +8737,73 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
 }
 
+/// A direct legacy adapter must retain its lexical entry even when confinement resolves a
+/// filesystem alias. A distinct sibling and an alias retarget must never pass as that entry.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("directory symlink fixture");
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("create directory junction fixture");
+            assert!(
+                result.status.success(),
+                "junction creation failed: {result:?}"
+            );
+        }
+    }
+    fn unlink_directory(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory junction without traversing it");
+    }
+
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+    let first = data.path().join("loras").join("first");
+    let second = data.path().join("loras").join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    write_min_lora(&first.join("adapter.safetensors"));
+    write_min_lora(&second.join("adapter.safetensors"));
+    let alias = data.path().join("loras").join("selected");
+    link_directory(&first, &alias);
+    let lexical = alias.join("adapter.safetensors");
+    let sibling = second.join("adapter.safetensors");
+    let pin = resolve_prepared_adapter_file(
+        &json!({ "path": lexical.display().to_string() }),
+        &settings,
+        "imported_krea_control_route_pin",
+    )
+    .expect("validated legacy adapter is pinned");
+    assert_eq!(pin.loader_path(), lexical);
+    assert_eq!(
+        pin.canonical_target_path(),
+        first.join("adapter.safetensors").canonicalize().unwrap()
+    );
+    assert_ne!(pin.canonical_target_path(), sibling.canonicalize().unwrap());
+    pin.ensure_unchanged().expect("original alias is unchanged");
+
+    unlink_directory(&alias);
+    link_directory(&second, &alias);
+    let refused = pin.ensure_unchanged().is_err();
+    unlink_directory(&alias);
+    assert!(
+        refused,
+        "retargeted lexical adapter must invalidate its token"
+    );
+}
+
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
 /// control overlay, and ordered LoRA/LoKr stack. Prove the production route carries the exact lexical
 /// token for every non-primary file and that replacing either the overlay or either adapter is rejected.
