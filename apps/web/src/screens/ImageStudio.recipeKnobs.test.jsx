@@ -275,6 +275,80 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     }
   });
 
+  it.each(["flux3ReferenceEditing", "flux3Layout"])("restores actual worker-shaped ordered references from %s without a raw referenceAssetIds field", async (factKey) => {
+    const other = { ...FLUX3_REFERENCE, id: "other-reference", displayName: "Other reference" };
+    const orderedAssets = [FLUX3_REFERENCE.id, other.id, FLUX3_REFERENCE.id];
+    const instanceIds = ["first-instance", "middle-instance", "last-instance"];
+    const layout = { version: 1, boxes: [{ id: "worker-row", desc: "remove second occurrence", from: "ref_image_2",
+      reference_id: "last-instance", src_bbox: [0, -0.123456789012345, 1, 1], tgt_bbox: null }] };
+    const recipe = flux3Recipe(null, null);
+    delete recipe.rawAdapterSettings.referenceAssetIds;
+    recipe.rawAdapterSettings.flux3_layout = layout;
+    const references = orderedAssets.map((assetId, ordinal) => ({ ordinal, assetId, orientedSize: [83, 67], contentSha256: "a".repeat(64) }));
+    if (factKey === "flux3ReferenceEditing") {
+      recipe.rawAdapterSettings.flux3ReferenceEditing.references = references;
+      recipe.rawAdapterSettings.flux3_reference_ids = instanceIds;
+    } else {
+      delete recipe.rawAdapterSettings.flux3ReferenceEditing;
+      recipe.rawAdapterSettings.flux3Layout = { references, referenceInstanceIds: instanceIds, authoring: layout };
+    }
+    expect(recipe.rawAdapterSettings).not.toHaveProperty("referenceAssetIds");
+    seedOpenDisclosures({ model: FLUX3.id, mode: "edit_image", referenceAssetIds: ["stale-picker-asset"],
+      flux3ReferenceSlots: [{ assetId: "stale-picker-asset", id: "stale-instance" }] });
+    const createImageJob = vi.fn(async () => ({ id: "worker-replay" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE, other], createImageJob, studioLaunch: launch(recipe) }));
+    await click(document.querySelector('[aria-label="Select worker-row"]'));
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("last-instance");
+    expect(persistedStudioSettings().referenceAssetIds).toEqual(orderedAssets);
+    expect(persistedStudioSettings().flux3Layout).toEqual(layout);
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0].referenceAssetIds).toEqual(orderedAssets);
+    expect(createImageJob.mock.calls[0][0].advanced.flux3_reference_ids).toEqual(instanceIds);
+    expect(createImageJob.mock.calls[0][0].advanced.flux3_layout).toEqual(layout);
+    expect(recipe.rawAdapterSettings).not.toHaveProperty("referenceAssetIds");
+  });
+
+  it.each(["approved selection", "character switch", "approved fallback"])("binds an ordinal-only source to its OLD attachment before %s", async (change) => {
+    const other = { ...FLUX3_REFERENCE, id: "replacement-reference", displayName: "Replacement reference" };
+    const first = { id: "first-character", name: "First character", looks: [], approvedReferences: [
+      { assetId: FLUX3_REFERENCE.id, asset: FLUX3_REFERENCE }, { assetId: other.id, asset: other },
+    ] };
+    const second = { id: "second-character", name: "Second character", looks: [], approvedReferences: [{ assetId: other.id, asset: other }] };
+    const box = { id: "ordinal-source", desc: "remove vase", from: "ref_image_0", src_bbox: [0, 0.123456789012345, 1, 1], tgt_bbox: null };
+    const recipe = flux3Recipe(null, null);
+    recipe.mode = "character_image";
+    recipe.normalizedSettings.characterId = first.id;
+    delete recipe.rawAdapterSettings.referenceAssetIds;
+    recipe.rawAdapterSettings.flux3_layout = { version: 1, boxes: [box] };
+    recipe.rawAdapterSettings.flux3_reference_ids = ["original-instance"];
+    recipe.rawAdapterSettings.flux3ReferenceEditing.references = [{ ordinal: 0, assetId: FLUX3_REFERENCE.id,
+      orientedSize: [83, 67], contentSha256: "b".repeat(64) }];
+    const createImageJob = vi.fn(async () => ({ id: "replacement-job" }));
+    const context = baseContext({ assets: [FLUX3_REFERENCE, other], characters: [first, second], createImageJob, studioLaunch: launch(recipe) });
+    await render(context);
+    await click(document.querySelector('[aria-label="Select ordinal-source"]'));
+    expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual(box);
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("original-instance");
+    if (change === "approved selection") {
+      await click(document.querySelector('[aria-label="Use Replacement reference as reference"]'));
+    } else if (change === "character switch") {
+      await editControl([...document.querySelectorAll("select")].find((node) =>
+        [...node.options].some(({ value }) => value === second.id)), second.id);
+    } else {
+      await render({ ...context, characters: [{ ...first, approvedReferences: [{ assetId: other.id, asset: other }] }, second] });
+    }
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("");
+    expect(document.querySelector('[role="alert"]').textContent).toMatch(/source attachment is missing/);
+    const expected = { ...box, reference_id: "original-instance" };
+    expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual(expected);
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.referenceAssetId).toBe(other.id);
+    expect(payload.advanced.flux3_reference_ids).toHaveLength(1);
+    expect(payload.advanced.flux3_reference_ids[0]).not.toBe("original-instance");
+    expect(payload.advanced.flux3_layout.boxes[0]).toEqual(expected);
+  });
+
   it("replays the original layout document and duplicate attachment identities through reorder and submit", async () => {
     const layout = { version: 1, boxes: [
       { id: "precise", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 0.987654321098765] },

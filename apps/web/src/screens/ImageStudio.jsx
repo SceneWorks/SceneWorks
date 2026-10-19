@@ -42,7 +42,7 @@ import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import { Flux3LayoutEditor } from "../components/Flux3LayoutEditor.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
-import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
+import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds, recordedLayoutReferences } from "../flux3Layout.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
@@ -548,6 +548,19 @@ export function ImageStudio() {
   // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
   // band is model-specific, so no clamp beyond the slider's 0–1).
   const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const referenceChangeState = useRef(null);
+  const changeReference = useCallback((field, id, setter) => {
+    const current = referenceChangeState.current;
+    if (current?.available && current[field] !== id) {
+      setFlux3Layout((layout) => bindLayoutReferenceIds(layout, current.references));
+    }
+    setter(id);
+  }, []);
+  const changeReferenceAssetId = useCallback((id) => changeReference("referenceAssetId", id, setReferenceAssetId), [changeReference]);
+  const changeCharacterId = useCallback((id) => changeReference("characterId", id, setCharacterId), [changeReference]);
+  const changeSourceAssetId = useCallback((id) => changeReference("sourceAssetId", id, setSourceAssetId), [changeReference]);
+  const changeEditSecondAssetId = useCallback((id) => changeReference("editSecondAssetId", id, setEditSecondAssetId), [changeReference]);
+  const changeImg2imgReferenceAssetId = useCallback((id) => changeReference("img2imgReferenceAssetId", id, setImg2imgReferenceAssetId), [changeReference]);
   const [img2imgStrength, setImg2imgStrength] = useState(saved.img2imgStrength ?? 0.5);
   // Krea "text style" tap-reweight gain (sc-11878): the ui.textStyleGain slider (Krea/Qwen-family).
   // 1.0 = no-op; >1 warmer/richer (early Qwen3-VL taps), <1 late-biased. Resets to the model default on
@@ -777,9 +790,9 @@ export function ImageStudio() {
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
-      setSourceAssetId(selectedAssetEditableSourceId);
+      changeSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [mode, selectedAssetEditableSourceId]);
+  }, [mode, selectedAssetEditableSourceId, changeSourceAssetId]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
@@ -824,9 +837,9 @@ export function ImageStudio() {
       setModel(launchRequest.model);
     }
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
-      setSourceAssetId(selectedAssetEditableSourceId);
+      changeSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId]);
+  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -1357,8 +1370,8 @@ export function ImageStudio() {
     if (characterReferences.some((reference) => reference.assetId === referenceAssetId)) {
       return;
     }
-    setReferenceAssetId(characterReferences[0]?.assetId ?? "");
-  }, [mode, characterReferences, referenceAssetId]);
+    changeReferenceAssetId(characterReferences[0]?.assetId ?? "");
+  }, [mode, characterReferences, referenceAssetId, changeReferenceAssetId]);
   // Seed a character-appropriate default prompt when entering character mode, unless
   // the user has already typed/picked their own. The generic text-to-image default
   // ("neon street at midnight") makes no sense for character variations.
@@ -1709,7 +1722,7 @@ export function ImageStudio() {
     fallbackModelId: "z_image_turbo",
     characters,
     characterId,
-    setCharacterId,
+    setCharacterId: changeCharacterId,
     setCharacterLookId,
     assets,
     latestAssets,
@@ -1856,12 +1869,14 @@ export function ImageStudio() {
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
     // Restore the authoring document, never the worker's rounded/locked caption table.
-    setFlux3Layout(rawSettings.flux3_layout ?? { version: 1, boxes: [] });
+    setFlux3Layout(rawSettings.flux3_layout ?? rawSettings.flux3Layout?.authoring ?? { version: 1, boxes: [] });
     const nextMode = recipeMode(recipe);
+    const recordedReferences = isFlux3LayoutModel(recipe.model) ? recordedLayoutReferences(rawSettings) : null;
     const restoredReferenceAssets = nextMode === "edit_image"
-      ? rawSettings.referenceAssetIds ?? [launchRequest.sourceAssetId].filter(Boolean)
-      : [rawSettings.referenceAssetId ?? launchRequest.referenceAssetId].filter(Boolean);
-    setFlux3ReferenceSlots(reconcileLayoutReferences([], restoredReferenceAssets, rawSettings.flux3_reference_ids));
+      ? rawSettings.referenceAssetIds ?? recordedReferences?.assetIds ?? [launchRequest.sourceAssetId].filter(Boolean)
+      : [rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId].filter(Boolean);
+    setFlux3ReferenceSlots(reconcileLayoutReferences([], restoredReferenceAssets,
+      rawSettings.flux3_reference_ids ?? recordedReferences?.referenceIds));
     const dimensionIntent = recipeImageDimensionIntent(recipe);
     const resolutionFromRecipe = recipeResolution(recipe);
     setReferenceDimensionIntent(dimensionIntent
@@ -1956,13 +1971,15 @@ export function ImageStudio() {
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
-    setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
-    // sc-15952: the reference images the user supplied in the shared-workflow panel. Guarded on
-    // presence rather than assigned unconditionally — a recorded recipe carries no
-    // `referenceAssetIds`, and clearing the multi-reference picker on every "Use this recipe"
-    // would drop a selection the user had already made.
-    if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
+    setReferenceAssetId(rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId ?? "");
+    // Explicit workflow input picks and trusted worker bindings replace the picker sequence.
+    // Only a recipe with neither recorded input shape keeps the user's existing selection.
+    if (Array.isArray(rawSettings.referenceAssetIds)) {
       setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+    } else if (recordedReferences && nextMode === "edit_image") {
+      // A real worker recipe's provenance is the complete ordered sequence, including repeats.
+      // Replace stale picker state instead of merging it or requiring a synthetic raw field.
+      setReferenceAssetIds(recordedReferences.assetIds);
     }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
@@ -2023,7 +2040,7 @@ export function ImageStudio() {
     setMultiPhasePhases(restoredPhases);
     setMultiPhaseEnabled(restoredPhases.length > 0);
     if (nextMode === "edit_image") {
-      setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
+      setSourceAssetId(recordedReferences?.assetIds[0] ?? launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
       setFitMode(rawSettings.fitMode ?? settings.fitMode ?? "crop");
     }
     const upscale = rawSettings.upscale ?? settings.upscale;
@@ -2071,6 +2088,10 @@ export function ImageStudio() {
         slot.assetId !== flux3ReferenceSlots[index]?.assetId || slot.id !== flux3ReferenceSlots[index]?.id))) {
     setFlux3ReferenceSlots(layoutReferences);
   }
+  // Stable change callbacks read the OLD complete sequence before their setter runs.
+  // This snapshot also covers approved-reference fallback effects without changing effect cadence.
+  referenceChangeState.current = { available: flux3LayoutAvailable, references: layoutReferences,
+    referenceAssetId, characterId, sourceAssetId, editSecondAssetId, img2imgReferenceAssetId };
   const changeReferenceAssetIds = (ids) => {
     if (flux3LayoutAvailable) {
       setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
@@ -3413,7 +3434,7 @@ export function ImageStudio() {
                     emptyLabel="No reference image selected"
                     importAsset={importAsset}
                     label="Reference image"
-                    onChange={setImg2imgReferenceAssetId}
+                    onChange={changeImg2imgReferenceAssetId}
                     projectId={activeProject?.id}
                     value={img2imgReferenceAssetId}
                   />
@@ -3649,7 +3670,7 @@ export function ImageStudio() {
                       emptyLabel="No source image selected"
                       importAsset={importAsset}
                       label={editReferences ? "Image 1" : "Source image"}
-                      onChange={setSourceAssetId}
+                      onChange={changeSourceAssetId}
                       projectId={activeProject?.id}
                       value={sourceAssetId}
                     />
@@ -3666,7 +3687,7 @@ export function ImageStudio() {
                           emptyLabel="No second image selected (optional)"
                           importAsset={importAsset}
                           label={editReferences.secondaryLabel ?? "Image 2 (optional)"}
-                          onChange={setEditSecondAssetId}
+                          onChange={changeEditSecondAssetId}
                           projectId={activeProject?.id}
                           value={editSecondAssetId}
                         />
@@ -3756,7 +3777,7 @@ export function ImageStudio() {
                 <div className="control-grid compact-controls">
                   <label>
                     Character
-                    <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                    <select onChange={(event) => changeCharacterId(event.target.value)} value={characterId}>
                       <option value="">Select character</option>
                       {characters.map((character) => (
                         <option key={character.id} value={character.id}>
@@ -3788,7 +3809,7 @@ export function ImageStudio() {
                             aria-pressed={reference.assetId === referenceAssetId}
                             className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
                             key={reference.assetId}
-                            onClick={() => setReferenceAssetId(reference.assetId)}
+                            onClick={() => changeReferenceAssetId(reference.assetId)}
                             title={reference.asset?.displayName ?? reference.assetId}
                             type="button"
                           >

@@ -516,10 +516,12 @@ mod tests {
             .contains("\"src_bbox\": [123, 200, 700, 800]"));
         assert!(outcome.caption.contains("\"tgt_bbox\": null"));
         assert_eq!(native.flux3_layout.as_ref().unwrap().to_json(), &document);
+        let (width, height) = references.plan.output.canvas;
         for adapter in ["mlx_flux3", "candle_flux3"] {
             let mut raw = caller_raw_settings(&request.advanced);
             assert!(!raw.contains_key("flux3Layout"));
             let mut facts = serde_json::Map::new();
+            facts.insert(FACT_KEY.into(), references.image_fact((width, height)));
             facts.insert("flux3Layout".into(), layout.image_fact());
             merge_image_facts(&mut raw, Some(facts));
             let plan = super::super::ImagePlan::with_count_and_adapter(&request, 1, adapter, None);
@@ -527,9 +529,9 @@ mod tests {
                 &plan,
                 0,
                 77,
-                64,
-                64,
-                vec![103; 64 * 64 * 3],
+                width,
+                height,
+                vec![103; (width * height * 3) as usize],
                 adapter,
                 raw,
                 &fixture.project_path,
@@ -551,6 +553,21 @@ mod tests {
             let recipe: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             assert_eq!(recipe["rawAdapterSettings"]["flux3_layout"], document);
+            // The real worker persists ordered source identity in its trusted facts, NOT a
+            // top-level request referenceAssetIds array. Replay must consume this producer shape.
+            let raw = recipe["rawAdapterSettings"].as_object().unwrap();
+            assert!(!raw.contains_key("referenceAssetIds"));
+            assert_eq!(raw["flux3_reference_ids"], json!(["first", "second"]));
+            assert_eq!(
+                raw[FACT_KEY]["references"],
+                serde_json::to_value(&references.bindings).unwrap()
+            );
+            assert_eq!(raw[FACT_KEY]["references"][0]["assetId"], fixture.id);
+            assert_eq!(raw[FACT_KEY]["references"][1]["assetId"], fixture.id);
+            assert_eq!(
+                raw["flux3Layout"]["referenceInstanceIds"],
+                raw["flux3_reference_ids"]
+            );
             assert_eq!(
                 recipe["rawAdapterSettings"]["flux3Layout"]["authoring"],
                 document

@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { reconcileLayoutReferences, moveLayoutReference, orderedLayoutAssetIds } from "./flux3Layout.js";
+import { reconcileLayoutReferences, moveLayoutReference, orderedLayoutAssetIds, recordedLayoutReferences } from "./flux3Layout.js";
 
 describe("layout attachment identity", () => {
+  it("rehydrates worker provenance by ordinal, preserving duplicates and instance ids", () => {
+    const references = [{ ordinal: 2, assetId: "a" }, { ordinal: 0, assetId: "a" }, { ordinal: 1, assetId: "b" }];
+    const ids = ["first", "middle", "last"];
+    expect(recordedLayoutReferences({ flux3ReferenceEditing: { references }, flux3_reference_ids: ids }))
+      .toEqual({ assetIds: ["a", "b", "a"], referenceIds: ids });
+    expect(recordedLayoutReferences({ flux3Layout: { references, referenceInstanceIds: ids } }))
+      .toEqual({ assetIds: ["a", "b", "a"], referenceIds: ids });
+    expect(references[0].ordinal).toBe(2);
+    expect(recordedLayoutReferences({})).toBeNull();
+    expect(recordedLayoutReferences({ flux3ReferenceEditing: { references: [{ ordinal: 1, assetId: "a" }] } })).toBeNull();
+  });
   it("keeps duplicate attachments distinct across reorder, removal and replay", () => {
     const original = reconcileLayoutReferences([], ["a", "a", "b"]);
     expect(new Set(original.map(({ id }) => id)).size).toBe(3);

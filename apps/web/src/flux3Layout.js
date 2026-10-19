@@ -9,6 +9,19 @@ export function reconcileLayoutReferences(previous = [], assetIds = [], ids = nu
   });
 }
 
+// Saved worker recipes record the decoded attachment sequence as provenance, not as
+// rawAdapterSettings.referenceAssetIds (which exists only for explicit replay selections).
+export function recordedLayoutReferences(rawSettings) {
+  const rows = rawSettings.flux3ReferenceEditing?.references ?? rawSettings.flux3Layout?.references;
+  if (!Array.isArray(rows)) return null;
+  const ordered = [...rows].sort((a, b) => a.ordinal - b.ordinal);
+  if (ordered.some((row, index) => row.ordinal !== index || typeof row.assetId !== "string" || !row.assetId)) return null;
+  return {
+    assetIds: ordered.map(({ assetId }) => assetId),
+    referenceIds: rawSettings.flux3_reference_ids ?? rawSettings.flux3Layout?.referenceInstanceIds ?? null,
+  };
+}
+
 export function isFlux3LayoutModel(model) {
   return ["flux3_klein", "flux3_klein_base"].includes(typeof model === "string" ? model : model?.id ?? "");
 }
