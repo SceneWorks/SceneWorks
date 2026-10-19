@@ -22,6 +22,7 @@ vi.mock("../api.js", async (importOriginal) => {
 
 import { AppContext } from "../context/AppContext.js";
 import { ImageStudio } from "./ImageStudio.jsx";
+import { readLastTier } from "../lastTierStore.js";
 import { recipeFromWorkflowShare } from "../workflowShare.js";
 
 // One model that advertises every lane the knobs belong to, so a single mount can observe all of
@@ -441,6 +442,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(picker).toBeTruthy();
     expect([...picker.options].find((option) => option.value === "nvfp4").disabled).toBe(true);
     await editControl(picker, "fp8r");
+    expect(readLastTier("image", id)).toBe("fp8r");
     await click(buttonByText("Generate"));
     expect(createImageJob).toHaveBeenCalledTimes(1);
     const payload = createImageJob.mock.calls[0][0];
@@ -463,6 +465,8 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       visibleWorkers: [{ status: "online", capabilities: ["fp8r"] }], studioLaunch: launch(recipe) }));
     const picker = [...container.querySelectorAll("select")].find((node) => [...node.options].some((option) => option.value === "fp8r"));
     expect(picker.value).toBe("fp8r");
+    expect(container.querySelector('[aria-label="Keep FP8R (candle, sm_89+) as your pick"]')).toBeNull();
+    expect(readLastTier("image", packed.id)).not.toBe("q8");
     await click(buttonByText("Generate"));
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.prompt).toBe("original fox");
@@ -487,6 +491,57 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     await click(buttonByText("Generate"));
     expect(createImageJob).toHaveBeenCalledTimes(1);
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(8);
+  });
+
+
+  it("serializes a sole installed FP8R tier even without a picker or prior explicit pick", async () => {
+    const packed = { ...FLUX3, hasVariantMatrix: true, variants: [{ variant: "fp8r", installState: "installed" }] };
+    const createImageJob = vi.fn(async () => ({ id: "job-single-fp8r" }));
+    seedOpenDisclosures({ model: packed.id, prompt: "a fox" });
+    await render(baseContext({ imageModels: [packed], models: [packed], createImageJob,
+      visibleWorkers: [{ status: "online", capabilities: ["fp8r"] }] }));
+    expect(container.querySelector(".quant-tier-picker")).toBeNull();
+    expect(readLastTier("image", packed.id)).toBeNull();
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.quantTier).toBe("fp8r");
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantize");
+  });
+
+  it("restores a legacy Boogu bf16 recipe through its precision toggle, not a nonexistent tier matrix", async () => {
+    const boogu = { ...FLUX3, id: "boogu_image", family: "boogu", ui: { precisionToggle: true } };
+    const createImageJob = vi.fn(async () => ({ id: "job-boogu-bf16" }));
+    await render(baseContext({ imageModels: [boogu], models: [boogu], createImageJob,
+      studioLaunch: launch({ model: boogu.id, mode: "text_to_image", prompt: "a fox",
+        normalizedSettings: {}, rawAdapterSettings: { mlxQuantize: 0 } }) }));
+    expect(checkbox("Full precision (bf16)")?.checked).toBe(true);
+    expect(container.textContent).not.toContain("Recipe Full precision (bf16) unavailable");
+    expect(buttonByText("Generate").disabled).toBe(false);
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(0);
+  });
+
+  it("confirms the displayed recipe bits tier and reopens the same persisted format", async () => {
+    const packed = { ...FLUX3, hasVariantMatrix: true, variants: [
+      { variant: "q4", installState: "installed" }, { variant: "q8", installState: "installed" },
+    ] };
+    const createImageJob = vi.fn(async () => ({ id: "job-kept-q4" }));
+    const context = baseContext({ imageModels: [packed], models: [packed], createImageJob });
+    await render({ ...context, studioLaunch: launch({ model: packed.id, mode: "text_to_image", prompt: "a fox",
+      normalizedSettings: {}, rawAdapterSettings: { mlxQuantize: 4 } }) });
+    const keep = container.querySelector('[aria-label="Keep Q4 (smallest) as your pick"]');
+    expect(keep).toBeTruthy();
+    await click(keep);
+    expect(readLastTier("image", packed.id)).toBe("q4");
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(context);
+    const picker = container.querySelector(".quant-tier-picker select");
+    expect(picker.value).toBe("q4");
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
   });
 
   it.each(["mlx", "candle"])("retains FLUX3 reference enhancement and omits unsupported strength on %s", async (backend) => {

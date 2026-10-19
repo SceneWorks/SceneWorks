@@ -593,7 +593,8 @@ export function ImageStudio() {
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
-  const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  const [pickedBf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   // Transparency / RGBA output (sc-24113): on emits `advanced.transparentBackground: true`, which
   // the worker's `qwen_alpha` adapter turns into a four-channel decode and the sc-24111 egress path
   // writes as a genuinely transparent PNG. Sticky pref, default off; the toggle only RENDERS when
@@ -1017,6 +1018,9 @@ export function ImageStudio() {
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
+  const precisionReplay = precisionToggle && recipeTierRequest?.model === model &&
+    ["bf16", "q8"].includes(recipeTierRequest?.tier);
+  const bf16Precision = precisionReplay ? recipeTierRequest.tier === "bf16" : pickedBf16Precision;
   // Quant-tier picker state (sc-8515, generalized). `availableTiers` is the SELECTABLE set — tiers that
   // are installed AND complete on disk, and the ONLY tiers we ever send to the worker (the user's bottom
   // line: never generate off a tier that isn't in the cache). `possibleTiers` is the FULL display set —
@@ -1078,10 +1082,10 @@ export function ImageStudio() {
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
     [selectedModel, unifiedMemoryGb, activeBackend],
   );
-  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const { quantTier: pickedTier, tierSwitching, handleTierChange: pickTier, tierExplicit: pickedExplicit, tierSuggested, confirmTier } =
     useQuantTierPicker({
       screen: TIER_SCREEN,
+      resolvedTier: precisionReplay ? null : recipeTierRequest?.tier,
       model,
       selectedModel,
       availableTiers,
@@ -1092,9 +1096,9 @@ export function ImageStudio() {
     });
   // Keep a replay's exact numeric format, not this user's sticky/default. Unavailable recipes
   // stay blocked until an explicit new pick; no worker or missing artifact can silently change it.
-  const quantTier = recipeTierRequest?.tier ?? pickedTier;
+  const quantTier = pickedTier;
   const tierExplicit = Boolean(recipeTierRequest) || pickedExplicit;
-  const replayTierUnavailable = recipeTierRequest &&
+  const replayTierUnavailable = recipeTierRequest && !precisionReplay &&
     (recipeTierRequest.model !== model || !availableTiers.includes(quantTier));
   const handleTierChange = (tier) => {
     if (!availableTiers.includes(tier)) return;
@@ -4315,7 +4319,7 @@ export function ImageStudio() {
                 >
                   <input
                     checked={bf16Precision}
-                    onChange={(event) => setBf16Precision(event.target.checked)}
+                    onChange={(event) => { setRecipeTierRequest(null); setBf16Precision(event.target.checked); }}
                     type="checkbox"
                   />
                   Full precision (bf16)

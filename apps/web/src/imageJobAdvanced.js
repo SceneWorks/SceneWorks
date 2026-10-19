@@ -231,7 +231,9 @@ export function buildImageJobAdvanced(state) {
     // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
     // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
-    ...((showTierPicker || tierExplicit) && (isNvfp4Tier(quantTier) || isFp8rTier(quantTier))
+    // FP8R must identify even a single installed tier (including Simple's hidden picker).
+    // Unlike the legacy NVFP4 opt-in, omitting it would request a different dense format.
+    ...(isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier))
       ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
