@@ -12,9 +12,18 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
   const gesture = useRef(null);
   const boxes = value.boxes ?? [];
   const selected = boxes.find((box) => box.id === selectedId);
-  const source = references.find((ref) => ref.id === selected?.reference_id);
-  const isEdit = selected && !Object.hasOwn(selected, "bbox");
-  const patch = (changes) => onChange({ ...value, boxes: boxes.map((box) => box.id === selectedId ? { ...box, ...changes } : box) });
+  const referenceFor = (box) => box?.reference_id
+    ? references.find((ref) => ref.id === box.reference_id)
+    : references[Number(/^ref_image_(\d+)$/.exec(box?.from ?? "")?.[1] ?? NaN)];
+  const source = referenceFor(selected);
+  const targetKey = Array.isArray(selected?.bbox) ? "bbox" : "tgt_bbox";
+  const isEdit = selected && !Array.isArray(selected.bbox) && selected.from !== "target";
+  const patch = (changes, removeKeys = []) => onChange({ ...value, boxes: boxes.map((box) => {
+    if (box.id !== selectedId) return box;
+    const next = { ...box, ...changes };
+    for (const key of removeKeys) delete next[key];
+    return next;
+  }) });
   const add = (edit) => {
     const id = `box_${crypto.randomUUID().replaceAll("-", "_")}`;
     const box = edit
@@ -23,7 +32,7 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
     onChange({ ...value, boxes: [...boxes, box] });
     setSelectedId(id);
   };
-  const coordinateKey = (kind) => kind === "source" ? "src_bbox" : isEdit ? "tgt_bbox" : "bbox";
+  const coordinateKey = (kind) => kind === "source" ? "src_bbox" : targetKey;
   const updateCoordinates = (kind, index, text) => {
     if (text.trim() === "") return;
     const number = Number(text);
@@ -39,8 +48,8 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
     return { x: (event.clientX - rect.left) / rect.width, y: (event.clientY - rect.top) / rect.height };
   };
   const drawStart = (kind, event) => {
-    if (disabled || !selected || (kind === "source" && !isEdit) || (kind === "target" && isEdit && selected.tgt_bbox === null)) return;
-    const space = selected[kind === "source" ? "src_space" : isEdit ? "tgt_space" : "bbox_space"];
+    if (disabled || !selected || (kind === "source" && !isEdit) || (kind === "target" && !Array.isArray(selected[targetKey]))) return;
+    const space = selected[kind === "source" ? "src_space" : targetKey === "bbox" ? "bbox_space" : "tgt_space"];
     if (space && space !== "normalized") return; // never reinterpret existing pixel coordinates
     const start = point(event);
     if (!start) return;
@@ -60,7 +69,7 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
   const renderCanvas = (kind) => {
     const sourceCanvas = kind === "source";
     const visible = boxes.filter((box) => sourceCanvas
-      ? box.reference_id === source?.id && box.src_bbox && (!box.src_space || box.src_space === "normalized")
+      ? source && referenceFor(box)?.id === source.id && box.src_bbox && (!box.src_space || box.src_space === "normalized")
       : (box.bbox || box.tgt_bbox) && (!((box.bbox ? box.bbox_space : box.tgt_space)) || (box.bbox ? box.bbox_space : box.tgt_space) === "normalized"));
     return (
       <div className="flux3-layout-pane">
@@ -87,7 +96,7 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
     const key = coordinateKey(kind);
     const coords = selected[key];
     if (!coords) return null;
-    const space = selected[kind === "source" ? "src_space" : isEdit ? "tgt_space" : "bbox_space"];
+    const space = selected[kind === "source" ? "src_space" : targetKey === "bbox" ? "bbox_space" : "tgt_space"];
     return <fieldset className="flux3-layout-coordinates" disabled={disabled}>
       <legend>{kind === "source" ? "Source" : "Target"} coordinates ({space || "normalized"}, YXYX)</legend>
       {SIDES.map((side, index) => <label key={side}>{side}<input aria-label={`${kind === "source" ? "Source" : "Target"} ${side}`} type="number" step="any" value={coords[index]} onChange={(event) => updateCoordinates(kind, index, event.target.value)} /></label>)}
@@ -101,17 +110,18 @@ export function Flux3LayoutEditor({ value = { version: 1, boxes: [] }, onChange,
     <p className="muted">Boxes provide soft spatial guidance, not hard masks or pixel-preserving edits. Select a control, then draw its source or target box, or enter precise coordinates.</p>
     <div className="flux3-layout-canvases">{isEdit && renderCanvas("source")}{renderCanvas("target")}</div>
     <div className="flux3-layout-controls">
-      <ol className="flux3-layout-list">{boxes.map((box) => <li key={box.id}><button type="button" className="secondary-action" aria-label={`Select ${box.id}`} aria-pressed={box.id === selectedId} onClick={() => setSelectedId(box.id)}>{box.desc || box.id}<span className="muted">{box.bbox ? "Placement" : box.tgt_bbox === null ? "Removal" : "Move"}</span></button></li>)}</ol>
+      <ol className="flux3-layout-list">{boxes.map((box) => <li key={box.id}><button type="button" className="secondary-action" aria-label={`Select ${box.id}`} aria-pressed={box.id === selectedId} onClick={() => setSelectedId(box.id)}>{box.desc || box.id}<span className="muted">{Array.isArray(box.bbox) || box.from === "target" ? "Placement" : !Array.isArray(box.tgt_bbox) ? "Removal" : "Move"}</span></button></li>)}</ol>
       {selected && <div className="flux3-layout-inspector">
         <label className="field-label">Box label<input aria-label="Box label" value={selected.desc ?? ""} disabled={disabled} onChange={(event) => patch({ desc: event.target.value })} /></label>
         {isEdit && <>
-          <label className="field-label">Source reference<select aria-label="Source reference" value={selected.reference_id || ""} disabled={disabled} onChange={(event) => patch({ reference_id: event.target.value, from: `ref_image_${references.findIndex((ref) => ref.id === event.target.value)}` })}>
+          {!source && <p role="alert">This control’s source attachment is missing. Select an attached reference or delete the control before generating.</p>}
+          <label className="field-label">Source reference<select aria-label="Source reference" value={source?.id || ""} disabled={disabled} onChange={(event) => patch({ reference_id: event.target.value, from: `ref_image_${references.findIndex((ref) => ref.id === event.target.value)}` })}>
             {!source && <option value="">Select an attached reference</option>}
             {references.map((ref, index) => <option key={ref.id} value={ref.id}>{index + 1}. {ref.label || ref.id}</option>)}
           </select></label>
           <div className="flux3-layout-toolbar">
-            <button type="button" className="secondary-action" disabled={disabled || selected.tgt_bbox !== null} onClick={() => patch({ tgt_bbox: [...DEFAULT_BOX], ...(selected.tgt_space ? { tgt_space: "normalized" } : {}) })}>Move object to target</button>
-            <button type="button" className="secondary-action" disabled={disabled || selected.tgt_bbox === null} onClick={() => patch({ tgt_bbox: null })}>Remove object from output</button>
+            <button type="button" className="secondary-action" disabled={disabled || Array.isArray(selected.tgt_bbox)} onClick={() => patch({ tgt_bbox: [...DEFAULT_BOX], ...(selected.tgt_space ? { tgt_space: "normalized" } : {}) })}>Move object to target</button>
+            <button type="button" className="secondary-action" disabled={disabled || !Array.isArray(selected.tgt_bbox)} onClick={() => patch({ tgt_bbox: null }, ["tgt_space"])}>Remove object from output</button>
           </div>
           {renderCoordinates("source")}
         </>}

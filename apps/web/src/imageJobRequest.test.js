@@ -97,6 +97,22 @@ function img2imgPidState(overrides = {}) {
 }
 
 describe("buildImageJobRequest", () => {
+  it("sends original layout and attachment ids identically for single and batch overrides", () => {
+    const flux3Layout = { version: 1, boxes: [{ id: "remove", desc: "vase", from: "ref_image_0",
+      reference_id: "instance-b", src_bbox: [0, -0.123456789012345, 1, 1], tgt_bbox: null }] };
+    const state = img2imgPidState({ model: "flux3_klein", mode: "edit_image", multiReference: true,
+      supportsImg2img: false, referenceAssetIds: ["same", "same"], flux3Layout,
+      flux3ReferenceIds: ["instance-a", "instance-b"] });
+    const single = buildImageJobRequest(state);
+    const batch = buildImageJobRequest({ ...state, promptToSend: "batch vase", resolutionOverride: { width: 512, height: 768 } });
+    expect(single.advanced.flux3_layout).toBe(flux3Layout);
+    expect(batch.advanced.flux3_layout).toEqual(single.advanced.flux3_layout);
+    expect(batch.advanced.flux3_reference_ids).toEqual(["instance-a", "instance-b"]);
+    expect(batch.referenceAssetIds).toEqual(["same", "same"]);
+    const unrelated = buildImageJobRequest({ ...state, model: "flux2_dev" });
+    expect(unrelated.advanced).not.toHaveProperty("flux3_layout");
+    expect(unrelated.advanced).not.toHaveProperty("flux3_reference_ids");
+  });
   it.each([
     ["hidden stale pickers", { sourceAssetId: "hidden-source", referenceAssetIds: ["hidden-reference"] },
       { sourceAssetId: null, referenceAssetIds: undefined, referenceAssetId: null }],

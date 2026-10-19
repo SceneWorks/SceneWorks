@@ -20,6 +20,7 @@ pub(crate) fn caller_raw_settings(
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut raw = advanced.clone();
     raw.remove(FACT_KEY);
+    raw.remove("flux3Layout");
     raw
 }
 
@@ -30,6 +31,7 @@ pub(crate) fn merge_image_facts(
     trusted_facts: Option<serde_json::Map<String, serde_json::Value>>,
 ) {
     raw.remove(FACT_KEY);
+    raw.remove("flux3Layout");
     if let Some(facts) = trusted_facts {
         raw.extend(facts);
     }
@@ -156,10 +158,86 @@ pub(crate) fn validated_request(
     let live =
         sceneworks_core::image_request::flux3::parse(live.as_object().expect("object literal"))
             .map_err(WorkerError::InvalidPayload)?;
-    if live.asset_ids != authored.asset_ids {
+    if live.asset_ids != authored.asset_ids
+        || live.layout != authored.layout
+        || live.reference_ids != authored.reference_ids
+    {
         return Err(WorkerError::InvalidPayload("FLUX.3 reference attachment slots changed after validation; rebuild the request from the authored payload".to_owned()));
     }
     Ok(Some(authored))
+}
+
+/// Lossless authored layout and the exact locked rows resolved before either native lane loads.
+pub(crate) struct ResolvedLayout {
+    layout: gen_core::flux3::layouts::Layout,
+    bindings: Vec<gen_core::flux3::layouts::ReferenceBinding>,
+    fact: serde_json::Value,
+}
+
+impl ResolvedLayout {
+    pub(crate) fn apply(&self, request: &mut gen_core::GenerationRequest) {
+        request.flux3_layout = Some(self.layout.clone());
+        request.flux3_layout_bindings = self.bindings.clone();
+    }
+    pub(crate) fn image_fact(&self) -> serde_json::Value {
+        self.fact.clone()
+    }
+}
+
+pub(crate) fn resolve_owned_layout(
+    request: &ImageRequest,
+    references: Option<&ResolvedReferences>,
+) -> WorkerResult<Option<ResolvedLayout>> {
+    let Some(authored) = validated_request(request)? else {
+        return Ok(None);
+    };
+    let Some(document) = &authored.layout else {
+        return Ok(None);
+    };
+    let invalid = |error: gen_core::Error| WorkerError::InvalidPayload(error.to_string());
+    let layout = gen_core::flux3::layouts::Layout::from_json(document.clone()).map_err(invalid)?;
+    let bindings = references
+        .map(|refs| {
+            refs.bindings
+                .iter()
+                .map(|binding| {
+                    gen_core::flux3::layouts::ReferenceBinding::oriented(
+                        authored
+                            .reference_ids
+                            .as_ref()
+                            .map(|ids| ids[binding.ordinal].clone())
+                            .unwrap_or_else(|| format!("ref_image_{}", binding.ordinal)),
+                        binding.oriented_size,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let output = references.map(|refs| refs.plan.output.clone()).unwrap_or(
+        gen_core::flux3::references::OutputGeometry {
+            canvas: (request.width, request.height),
+            crop: None,
+        },
+    );
+    let compiled = layout
+        .compile(&bindings, references.map(|r| &r.plan), &output)
+        .map_err(invalid)?;
+    compiled.caption(&request.prompt).map_err(invalid)?;
+    let fact = serde_json::json!({
+        "schemaVersion":1,
+        "upstreamRevision":gen_core::flux3::UPSTREAM_CODE_REVISION,
+        "semantics":"caption_only_soft_spatial_guidance",
+        "coordinateConvention":"yxyx",
+        "authoring":layout.to_json(),
+        "lockedAnnotations":compiled.rows_json(),
+        "referenceInstanceIds":authored.reference_ids,
+        "references":references.map(|r| &r.bindings),
+    });
+    Ok(Some(ResolvedLayout {
+        layout,
+        bindings,
+        fact,
+    }))
 }
 
 /// Run before either lane's fit, admission, cache lookup or generator load. The same immutable
@@ -317,6 +395,180 @@ mod tests {
                 .unwrap()
                 .unwrap()
         }
+    }
+
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn real_generic_render_surface_transports_placement_document_to_generator() {
+        struct Capture(gen_core::ModelDescriptor);
+        impl gen_core::Generator for Capture {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                &self.0
+            }
+            fn validate(&self, _: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+                Ok(())
+            }
+            fn generate(
+                &self,
+                req: &gen_core::GenerationRequest,
+                _: &mut dyn FnMut(gen_core::Progress),
+            ) -> gen_core::Result<gen_core::GenerationOutput> {
+                let input = gen_core::flux3::references::upsampler_input(req)?;
+                let outcome = gen_core::flux3::pup::upsample(
+                    None,
+                    &input,
+                    &Default::default(),
+                    &req.cancel,
+                    &mut |_| panic!("bypass"),
+                )?;
+                assert_eq!(outcome.caption,"scene [{\"id\": \"placed\", \"bbox\": [100, 200, 700, 800], \"desc\": \"cat\"}]");
+                Ok(gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                    width: 64,
+                    height: 64,
+                    pixels: vec![31; 64 * 64 * 3],
+                }]))
+            }
+        }
+        let payload = json!({"model":"flux3_klein","prompt":"scene","width":64,"height":64,"advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"placed","desc":"cat","bbox":[0.1,0.2,0.7,0.8]}]}}});
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let layout = resolve_owned_layout(&request, None).unwrap().unwrap();
+        let generator = Capture(gen_core::ModelDescriptor {
+            id: "flux3_klein",
+            family: "flux3",
+            backend: "candle",
+            modality: gen_core::Modality::Image,
+            capabilities: Default::default(),
+            encoder_contract: None,
+            required_components: &[],
+            control_kinds: None,
+            denoiser_output_latent_space: None,
+        });
+        let surface = super::super::LaneRgbaSurface {
+            flux3_layout: Some(&layout),
+            ..Default::default()
+        };
+        let images = super::super::render_on_surface(
+            &generator,
+            "scene",
+            64,
+            64,
+            7,
+            16,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+            &super::super::PromptEnhance::default(),
+            Default::default(),
+            Default::default(),
+            &surface,
+            &Default::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].2, vec![31; 64 * 64 * 3]);
+    }
+
+    #[test]
+    fn layout_payload_binds_duplicate_slots_and_reaches_native_caption_and_asset_recipe() {
+        let fixture = Fixture::new();
+        let document = json!({"version":1,"boxes":[{"id":"cat","desc":"remove","from":"ref_image_0","reference_id":"second","src_bbox":[0.123456789012345,0.2,0.7,0.8],"tgt_bbox":null}]});
+        let request=fixture.request(json!({"referenceAssetId":null,"referenceAssetIds":[fixture.id,fixture.id],"advanced":{"flux3_layout":document,"flux3_reference_ids":["first","second"],"flux3Layout":{"forged":true}}}));
+        let references = fixture.resolve(&request);
+        let layout = resolve_owned_layout(&request, Some(&references))
+            .unwrap()
+            .unwrap();
+        let mut native = gen_core::GenerationRequest {
+            prompt: request.prompt.clone(),
+            width: references.plan.output.canvas.0,
+            height: references.plan.output.canvas.1,
+            conditioning: references.conditioning.clone(),
+            flux3_reference_output: Some(references.output_size),
+            ..Default::default()
+        };
+        layout.apply(&mut native);
+        let input = gen_core::flux3::references::upsampler_input(&native).unwrap();
+        assert_eq!(
+            input.boxes.as_ref().unwrap()[0].from.as_deref(),
+            Some("ref_image_1")
+        );
+        let outcome = gen_core::flux3::pup::upsample(
+            None,
+            &input,
+            &Default::default(),
+            &native.cancel,
+            &mut |_| panic!("bypass must not infer"),
+        )
+        .unwrap();
+        assert!(outcome
+            .caption
+            .contains("\"src_bbox\": [123, 200, 700, 800]"));
+        assert!(outcome.caption.contains("\"tgt_bbox\": null"));
+        assert_eq!(native.flux3_layout.as_ref().unwrap().to_json(), &document);
+        for adapter in ["mlx_flux3", "candle_flux3"] {
+            let mut raw = caller_raw_settings(&request.advanced);
+            assert!(!raw.contains_key("flux3Layout"));
+            let mut facts = serde_json::Map::new();
+            facts.insert("flux3Layout".into(), layout.image_fact());
+            merge_image_facts(&mut raw, Some(facts));
+            let plan = super::super::ImagePlan::with_count_and_adapter(&request, 1, adapter, None);
+            let fact = super::super::write_image_asset(
+                &plan,
+                0,
+                77,
+                64,
+                64,
+                vec![103; 64 * 64 * 3],
+                adapter,
+                raw,
+                &fixture.project_path,
+            )
+            .unwrap();
+            let store = ProjectStore::new(fixture.data.path().to_path_buf(), "worker");
+            store
+                .persist_generated_asset(
+                    &fixture.project_id,
+                    "job-layout-roundtrip",
+                    &plan.genset_id,
+                    &serde_json::Value::Object(fact.clone()),
+                )
+                .unwrap();
+            let path = fixture
+                .project_path
+                .join("recipes")
+                .join(format!("{}.recipe.json", fact["assetId"].as_str().unwrap()));
+            let recipe: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(recipe["rawAdapterSettings"]["flux3_layout"], document);
+            assert_eq!(
+                recipe["rawAdapterSettings"]["flux3Layout"]["authoring"],
+                document
+            );
+            assert_eq!(
+                recipe["rawAdapterSettings"]["flux3Layout"]["references"][1]["ordinal"],
+                1
+            );
+            assert_ne!(
+                recipe["rawAdapterSettings"]["flux3Layout"]["references"][1]["contentSha256"],
+                serde_json::Value::Null
+            );
+        }
+        let mut tampered = request.clone();
+        tampered
+            .advanced
+            .insert("flux3_reference_ids".into(), json!(["second", "first"]));
+        assert!(resolve_owned_layout(&tampered, Some(&references)).is_err());
     }
 
     #[test]

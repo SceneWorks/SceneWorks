@@ -385,6 +385,8 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
+| `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
+| `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
 | `sampler` | `Scalar` | Sampler choice. |

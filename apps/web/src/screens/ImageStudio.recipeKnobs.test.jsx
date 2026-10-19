@@ -275,6 +275,118 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     }
   });
 
+  it("replays the original layout document and duplicate attachment identities through reorder and submit", async () => {
+    const layout = { version: 1, boxes: [
+      { id: "precise", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 0.987654321098765] },
+      { id: "remove", desc: "remove second instance", from: "ref_image_1", reference_id: "slot-second", src_bbox: [0, 0.111111111111111, 1, 1], tgt_bbox: null },
+    ] };
+    const recipe = flux3Recipe(null, null);
+    recipe.rawAdapterSettings.referenceAssetIds = [FLUX3_REFERENCE.id, FLUX3_REFERENCE.id];
+    recipe.rawAdapterSettings.flux3_layout = layout;
+    recipe.rawAdapterSettings.flux3_reference_ids = ["slot-first", "slot-second"];
+    const createImageJob = vi.fn(async () => ({ id: "layout-job" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
+    await click(document.querySelector('[aria-label="Select remove"]'));
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("slot-second");
+    expect(document.querySelector('[aria-label="Target top"]')).toBeNull();
+    await click(document.querySelector('[aria-label="Move Image 2 earlier"]'));
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("slot-second");
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    expect(payload.referenceAssetIds).toEqual([FLUX3_REFERENCE.id, FLUX3_REFERENCE.id]);
+    expect(payload.advanced.flux3_reference_ids).toEqual(["slot-second", "slot-first"]);
+    expect(payload.advanced.flux3_layout).toEqual(layout);
+    expect(persistedStudioSettings().flux3Layout).toEqual(layout);
+    expect(persistedStudioSettings().flux3ReferenceSlots.map(({ id }) => id)).toEqual(["slot-second", "slot-first"]);
+    // Remove one occurrence, not every attachment with this asset id.
+    await click(document.querySelector('[aria-label="Remove Image 2"]'));
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls.at(-1)[0].referenceAssetIds).toEqual([FLUX3_REFERENCE.id]);
+    expect(createImageJob.mock.calls.at(-1)[0].advanced.flux3_reference_ids).toEqual(["slot-second"]);
+    expect(createImageJob.mock.calls.at(-1)[0].advanced.flux3_layout).toEqual(layout);
+  });
+
+  it("binds an ordinal-only native source before explicit reorder/removal without retargeting or rounding", async () => {
+    const box = { id: "native-row", desc: "vase", bbox: null, from: "ref_image_1", src_bbox: [0, 0.123456789012345, 1, 1], tgt_bbox: null };
+    const recipe = flux3Recipe(null, null);
+    recipe.rawAdapterSettings.referenceAssetIds = [FLUX3_REFERENCE.id, FLUX3_REFERENCE.id];
+    recipe.rawAdapterSettings.flux3_layout = { version: 1, boxes: [box] };
+    recipe.rawAdapterSettings.flux3_reference_ids = ["first", "second"];
+    const createImageJob = vi.fn(async () => ({ id: "native-layout" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
+    await click(document.querySelector('[aria-label="Select native-row"]'));
+    expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual(box);
+    await click(document.querySelector('[aria-label="Move Image 2 earlier"]'));
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.flux3_layout.boxes[0]).toEqual({ ...box, reference_id: "second" });
+    await click(document.querySelector('[aria-label="Remove Image 1"]'));
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("");
+    expect(document.querySelector('[role="alert"]').textContent).toMatch(/source attachment is missing/);
+    expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual({ ...box, reference_id: "second" });
+  });
+
+  it("preserves an absent native removal target until explicitly moved, then edits target geometry", async () => {
+    const box = { id: "absent-target", desc: "vase", from: "ref_image_0", reference_id: "native-slot", src_bbox: [0, 0, 1, 1] };
+    const recipe = flux3Recipe(null, null);
+    recipe.rawAdapterSettings.flux3_layout = { version: 1, boxes: [box] };
+    recipe.rawAdapterSettings.flux3_reference_ids = ["native-slot"];
+    const createImageJob = vi.fn(async () => ({ id: "moved-native-removal" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob, studioLaunch: launch(recipe) }));
+    await click(document.querySelector('[aria-label="Select absent-target"]'));
+    expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual(box);
+    expect(document.querySelector('[aria-label="Select absent-target"]').textContent).toContain("Removal");
+    expect(document.querySelector('[aria-label="Target left"]')).toBeNull();
+    expect(buttonByText("Move object to target").disabled).toBe(false);
+    expect(buttonByText("Remove object from output").disabled).toBe(true);
+    await click(buttonByText("Move object to target"));
+    await editControl(document.querySelector('[aria-label="Target left"]'), "0.123456789012345");
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.flux3_layout.boxes[0]).toEqual({ ...box, tgt_bbox: [0.25, 0.123456789012345, 0.75, 0.75] });
+  });
+
+  it("authors labels, placements, moves and null-target removals in the actual Studio", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "authored-layout" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], createImageJob,
+      studioLaunch: launch(flux3Recipe(null, null)) }));
+    await click(buttonByText("Add placement box"));
+    await editControl(document.querySelector('[aria-label="Box label"]'), "a red vase");
+    await editControl(document.querySelector('[aria-label="Target left"]'), "0.123456789012345");
+    await click(buttonByText("Add source edit"));
+    await editControl(document.querySelector('[aria-label="Box label"]'), "move blue vase");
+    await editControl(document.querySelector('[aria-label="Source top"]'), "0");
+    await editControl(document.querySelector('[aria-label="Target right"]'), "1");
+    await click(buttonByText("Remove object from output"));
+    expect(document.querySelector('[aria-label="Target right"]')).toBeNull();
+    await click(buttonByText("Move object to target"));
+    expect(document.querySelector('[aria-label="Target right"]')).not.toBeNull();
+    await click(buttonByText("Remove object from output"));
+    await click(buttonByText("Generate"));
+    const { advanced } = createImageJob.mock.calls[0][0];
+    expect(advanced.flux3_layout.boxes).toMatchObject([
+      { desc: "a red vase", bbox: [0.25, 0.123456789012345, 0.75, 0.75] },
+      { desc: "move blue vase", from: "ref_image_0", reference_id: advanced.flux3_reference_ids[0], src_bbox: [0, 0.25, 0.75, 0.75], tgt_bbox: null },
+    ]);
+    expect(advanced).not.toHaveProperty("strength");
+    expect(advanced).not.toHaveProperty("controlScale");
+  });
+
+  it("restores saved layout and slot ids on mount but hides and omits them on other models", async () => {
+    const layout = { version: 1, boxes: [{ id: "saved", desc: "saved label", bbox: [0, 0, 1, 1] }] };
+    seedOpenDisclosures({ model: FLUX3.id, mode: "edit_image", prompt: "vase", referenceAssetIds: [FLUX3_REFERENCE.id],
+      flux3Layout: layout, flux3ReferenceSlots: [{ assetId: FLUX3_REFERENCE.id, id: "saved-slot" }] });
+    const createImageJob = vi.fn(async () => ({ id: "saved-layout" }));
+    await render(baseContext({ assets: [FLUX3_REFERENCE], selectedAsset: FLUX3_REFERENCE, createImageJob }));
+    await click(document.querySelector('[aria-label="Select saved"]'));
+    expect(document.querySelector('[aria-label="Box label"]').value).toBe("saved label");
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.flux3_reference_ids).toEqual(["saved-slot"]);
+    await editControl([...document.querySelectorAll("select")].find((node) =>
+      [...node.options].some(({ value }) => value === FLUX2_DEV.id)), FLUX2_DEV.id);
+    expect(document.querySelector('[aria-label="FLUX 3 layout editor"]')).toBeNull();
+    await click(buttonByText("Generate"));
+    expect(createImageJob.mock.calls.at(-1)[0].advanced).not.toHaveProperty("flux3_layout");
+  });
+
   it.each([[null, null], [512, 768], [512, null], [null, 768], [16, 48]])(
     "restores FLUX3 requested axes %s / %s through mounted submission, not actual image geometry",
     async (width, height) => {

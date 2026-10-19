@@ -40,6 +40,9 @@ import {
 } from "../qwenAlpha.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
+import { Flux3LayoutEditor } from "../components/Flux3LayoutEditor.jsx";
+import { assetUrl } from "../components/assetMedia.jsx";
+import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds } from "../flux3Layout.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
@@ -522,6 +525,8 @@ export function ImageStudio() {
   const [referenceAssetIds, setReferenceAssetIds] = useState(() =>
     Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
   );
+  const [flux3Layout, setFlux3Layout] = useState(saved.flux3Layout ?? { version: 1, boxes: [] });
+  const [flux3ReferenceSlots, setFlux3ReferenceSlots] = useState(saved.flux3ReferenceSlots ?? []);
   // Optional SECOND source for a Krea-style two-reference edit (epic 10871 P1.3). Any two images —
   // the `sourceAssetId` above is image 1 (required), this is image 2 (optional), a fixed order (the
   // instruction describes how to combine them). Only surfaced when the model declares
@@ -795,6 +800,8 @@ export function ImageStudio() {
       setWorkflowPoses([]);
       setPoseLibraryReplayOpen(false);
       setFaceRestore(false);
+      setFlux3Layout({ version: 1, boxes: [] });
+      setFlux3ReferenceSlots([]);
       setReferenceDimensionIntent(null);
     }
     if (launchRequest.characterId) {
@@ -1848,7 +1855,13 @@ export function ImageStudio() {
     const recipe = launchRequest.recipe;
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
+    // Restore the authoring document, never the worker's rounded/locked caption table.
+    setFlux3Layout(rawSettings.flux3_layout ?? { version: 1, boxes: [] });
     const nextMode = recipeMode(recipe);
+    const restoredReferenceAssets = nextMode === "edit_image"
+      ? rawSettings.referenceAssetIds ?? [launchRequest.sourceAssetId].filter(Boolean)
+      : [rawSettings.referenceAssetId ?? launchRequest.referenceAssetId].filter(Boolean);
+    setFlux3ReferenceSlots(reconcileLayoutReferences([], restoredReferenceAssets, rawSettings.flux3_reference_ids));
     const dimensionIntent = recipeImageDimensionIntent(recipe);
     const resolutionFromRecipe = recipeResolution(recipe);
     setReferenceDimensionIntent(dimensionIntent
@@ -2047,6 +2060,29 @@ export function ImageStudio() {
   const jobReferences = imageJobReferences({ mode, multiReference, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
+  const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
+  const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
+  const layoutReferences = flux3LayoutAvailable
+    ? reconcileLayoutReferences(flux3ReferenceSlots, layoutAssetIds) : [];
+  // Keep hidden model state intact. Reconcile only the active attachment sequence, without
+  // deduplicating it. Updating our own state here avoids an effect/submit identity race.
+  if (flux3LayoutAvailable && layoutAssetIds.length &&
+      (layoutReferences.length !== flux3ReferenceSlots.length || layoutReferences.some((slot, index) =>
+        slot.assetId !== flux3ReferenceSlots[index]?.assetId || slot.id !== flux3ReferenceSlots[index]?.id))) {
+    setFlux3ReferenceSlots(layoutReferences);
+  }
+  const changeReferenceAssetIds = (ids) => {
+    if (flux3LayoutAvailable) {
+      setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+      setFlux3ReferenceSlots(reconcileLayoutReferences(layoutReferences, ids));
+    }
+    setReferenceAssetIds(ids);
+  };
+  const moveFlux3Reference = (from, to) => {
+    setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+    setFlux3ReferenceSlots(moveLayoutReference(layoutReferences, from, to));
+    setReferenceAssetIds(moveLayoutReference(referenceAssetIds, from, to));
+  };
   const flux3ReferenceRequest = isFlux3ReferenceRequest(model, Object.values(jobReferences).flat());
   const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
     referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
@@ -2322,6 +2358,8 @@ export function ImageStudio() {
     heightOverride,
     fitMode,
     referenceAssetIds,
+    flux3Layout,
+    flux3ReferenceSlots,
     ipAdapterScale,
     controlnetScale,
     trueCfgScale,
@@ -2543,6 +2581,8 @@ export function ImageStudio() {
     const { foldPrompt, isStructured, promptToSend } = composeJobPrompt(overrides);
     const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
     return buildImageJobRequest({
+      flux3Layout,
+      flux3ReferenceIds: layoutReferences.map(({ id }) => id),
       // Overrides — the one legitimate single-vs-batch difference.
       promptToSend,
       submitIntent: overrides.submitIntent,
@@ -3549,6 +3589,18 @@ export function ImageStudio() {
             );
           })()}
 
+        {flux3LayoutAvailable ? <Flux3LayoutEditor
+          value={flux3Layout}
+          onChange={setFlux3Layout}
+          width={width || 1024}
+          height={height || 1024}
+          references={layoutReferences.map((slot) => {
+            const asset = assets.find(({ id }) => id === slot.assetId);
+            return { ...slot, label: asset?.displayName ?? asset?.name ?? slot.assetId,
+              url: asset ? assetUrl(asset) : null, width: asset?.width, height: asset?.height };
+          })}
+        /> : null}
+
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
             {mode === "edit_image" ? (
@@ -3568,7 +3620,7 @@ export function ImageStudio() {
                         : "Reference images"
                     }
                     multiple
-                    onChange={setReferenceAssetIds}
+                    onChange={changeReferenceAssetIds}
                     values={referenceAssetIds}
                   />
                 ) : null}
@@ -3578,8 +3630,15 @@ export function ImageStudio() {
                 {multiReference ? (
                   <OrderedReferenceList
                     assetIds={referenceAssetIds}
+                    itemKeys={flux3LayoutAvailable ? layoutReferences.map(({ id }) => id) : undefined}
+                    onMove={flux3LayoutAvailable ? moveFlux3Reference : undefined}
+                    onRemove={flux3LayoutAvailable ? (index) => {
+                      setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+                      setFlux3ReferenceSlots(layoutReferences.filter((_, slotIndex) => slotIndex !== index));
+                      setReferenceAssetIds(referenceAssetIds.filter((_, slotIndex) => slotIndex !== index));
+                    } : undefined}
                     labelFor={assetLabelFor}
-                    onChange={setReferenceAssetIds}
+                    onChange={changeReferenceAssetIds}
                   />
                 ) : (
                   <>
@@ -3624,7 +3683,7 @@ export function ImageStudio() {
                         emptyLabel="No additional references selected (optional)"
                         label="Additional references (optional)"
                         multiple
-                        onChange={setReferenceAssetIds}
+                        onChange={changeReferenceAssetIds}
                         values={referenceAssetIds}
                       />
                     ) : null}
@@ -3632,7 +3691,7 @@ export function ImageStudio() {
                       <OrderedReferenceList
                         assetIds={referenceAssetIds}
                         labelFor={assetLabelFor}
-                        onChange={setReferenceAssetIds}
+                        onChange={changeReferenceAssetIds}
                       />
                     ) : null}
                   </>
