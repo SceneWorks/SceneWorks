@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -705,6 +705,50 @@
         "normalization": {
           "kind": "learnedPerChannel",
           "identity": "mochi-1-config-per-channel-statistics"
+        }
+      }
+    },
+    {
+      "id": "moss_image_base",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
         }
       }
     },

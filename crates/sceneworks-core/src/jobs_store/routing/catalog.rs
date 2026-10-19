@@ -1166,6 +1166,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
     // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
     // (`iris_mlx_eligible`).
+    ModelCaps::new("moss_image_base", true, true, false, false, false),
+    ModelCaps::new("moss_image_sft", true, true, false, false, false),
     ModelCaps::new("iris_3b", true, true, false, true, false),
 ];
 
@@ -2420,6 +2422,8 @@ mod tests {
         "anima_aesthetic",
         "anima_turbo",
         "iris_3b",
+        "moss_image_base",
+        "moss_image_sft",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
@@ -2484,6 +2488,8 @@ mod tests {
         "anima_aesthetic",
         "anima_turbo",
         "iris_3b",
+        "moss_image_base",
+        "moss_image_sft",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its

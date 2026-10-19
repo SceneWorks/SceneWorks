@@ -97,6 +97,14 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
             mage_flow_edit_mlx_eligible(payload)
         }
+        "moss_image_base" | "moss_image_sft" => {
+            let entry = payload
+                .get("modelManifestEntry")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            crate::moss_image::native_request(payload, &entry).is_ok()
+        }
         "iris_3b" => iris_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.

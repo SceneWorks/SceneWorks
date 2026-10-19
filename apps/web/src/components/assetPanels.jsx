@@ -4,7 +4,7 @@ import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
 import {
   AssetMedia,

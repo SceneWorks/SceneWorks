@@ -272,6 +272,10 @@ export function buildImageJobRequest(state) {
     // builder. Every omit-when-default rule (which keeps saved recipes byte-identical)
     // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
     advanced: buildImageJobAdvanced({
+      model,
+      mossImage: state.mossImage,
+      mossDmdSteps: state.mossDmdSteps,
+      mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride
         ? `${resolutionOverride.width}x${resolutionOverride.height}`
         : resolution,
