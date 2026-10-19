@@ -1146,6 +1146,9 @@
             "properties": {
               "families": { "type": "array", "items": { "type": "string" } },
               "types": { "type": "array", "items": { "type": "string" } },
+              "baseModel": { "type": "string", "minLength": 1, "description": "Exact training-base identity required by this model's adapter contract; FLUX3 uses the canonical upstream repository, not a SceneWorks model-id alias." },
+              "baseRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "Exact training-base commit required by the adapter contract, never the adapter download source revision." },
+              "adapterKinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 }, "description": "Explicitly admitted adapter algorithms. Unknown or absent adapter kind fails closed when this field is declared." },
               "irisTask": {
                 "type": "string",
                 "enum": ["generation", "depth", "restoration"],

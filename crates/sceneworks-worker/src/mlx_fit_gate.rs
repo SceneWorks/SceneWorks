@@ -779,11 +779,14 @@ impl MlxRequestPlan {
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
         let fixed_reserve_bytes = self.fixed_reserve_bytes.min(self.activation_headroom_bytes);
         let area_bytes = self.activation_headroom_bytes - fixed_reserve_bytes;
-        fixed_reserve_bytes.saturating_add(
+        let baseline = fixed_reserve_bytes.saturating_add(
             (area_bytes as f64 * request_scale)
                 .round()
                 .clamp(0.0, u64::MAX as f64) as u64,
-        )
+        );
+        let extra =
+            flux3_cfg_additional_workspaces(self.engine_id, geometry.width, geometry.height);
+        baseline.saturating_add(extra.0.max(extra.1))
     }
 
     /// Convert the legacy whole-spec estimate into the base-only scalar expected by the additive
@@ -1361,6 +1364,81 @@ pub(crate) struct MlxRequestEvaluation {
     /// every provider that prices none. A `Cached` plan is already written onto [`Self::memory`]
     /// and counted in `context.predicted_peak_bytes`.
     pub prefix_kv_cache: Option<crate::execution_planner::PrefixKvCachePlan>,
+}
+
+/// Frozen FLUX3 sampling.denoise always packs [unconditional, conditional], including scales
+/// 0 and 1; the distilled flow map packs one. This is NOT output/job count or decoder batch.
+pub(crate) fn flux3_conditioning_forward_batch(engine_id: &str) -> u64 {
+    if engine_id == "flux3_klein_base" {
+        2
+    } else {
+        1
+    }
+}
+
+/// Live hidden-width (3072) activation buffers of ONE FLUX3 `Block::forward` (pinned BFL
+/// `dit.py` / native `dit.rs`), per token, counted from the tensors alive at its widest point
+/// with NO intra-block reuse assumed: x 1, modulated x_mod 1, q/k/v projections 3, their
+/// contiguous head-split copies 3, f32 RMSNorm+RoPE q/k 2, attention output 1, mlp_in
+/// (2 x mlp_ratio 3) 6, silu(gate) 3, silu(gate)*up 3, mlp_out 1, attn_out 1, delta 1,
+/// gate*delta 1, residual 1 = 28. Blocks run sequentially, so only one block's set is live.
+pub(crate) const FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS: u64 = 28;
+
+/// Source-derived retained conditioning/DiT allowances, NOT measurements. The source clamps text
+/// at 4096, stacks 8 x 2560 encoder channels, uses 3072-wide blocks and 128-channel packed
+/// latents. Each active row carries [`FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS`] at f32 width even though
+/// most are bf16 — a deliberate PROVISIONAL over-estimate (no buffer reuse, f32 everywhere) until
+/// the epic-end measured anchor (sc-26243) replaces it; it is bounded by the source live set, not
+/// a guessed multiplier, so it does not refuse renders the live set could fit. Attention scratch
+/// and allocator reserve remain in the existing generic headroom; no weights, decoder, job count
+/// or optional PUP copies are added here.
+pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
+    if !matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
+        return (0, 0);
+    }
+    let rows = flux3_conditioning_forward_batch(engine_id);
+    let image = u64::from(width.div_ceil(16)).saturating_mul(u64::from(height.div_ceil(16)));
+    let conditioning = rows.saturating_mul(4096 * 20480 * 4);
+    let projections = image
+        .saturating_add(4096)
+        .saturating_mul(3072 * 4 * FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS)
+        .saturating_mul(rows);
+    let cfg_merge = if rows == 2 {
+        image.saturating_mul(128 * 4 * 5)
+    } else {
+        0
+    };
+    (
+        conditioning,
+        projections
+            .saturating_add(conditioning)
+            .saturating_add(cfg_merge),
+    )
+}
+
+fn flux3_cfg_additional_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
+    if engine_id != "flux3_klein_base" {
+        return (0, 0);
+    }
+    let base = flux3_source_workspaces(engine_id, width, height);
+    let distilled = flux3_source_workspaces("flux3_klein", width, height);
+    (
+        base.0.saturating_sub(distilled.0),
+        base.1.saturating_sub(distilled.1),
+    )
+}
+
+fn flux3_cfg_workspace(
+    engine_id: &str,
+    geometry: MemoryGeometry,
+    generic: u64,
+) -> crate::mlx_phase_estimate::Workspace {
+    let extra = flux3_cfg_additional_workspaces(engine_id, geometry.width, geometry.height);
+    crate::mlx_phase_estimate::Workspace {
+        conditioning: generic.saturating_add(extra.0),
+        denoise: generic.saturating_add(extra.1),
+        decode: generic,
+    }
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -2911,7 +2989,7 @@ fn mlx_selected_phase_peak(
     selection: &MemorySelection,
     conditioning_windows: Option<u32>,
 ) -> Option<u64> {
-    use crate::mlx_phase_estimate::{layerwise_decode_workspace, Workspace};
+    use crate::mlx_phase_estimate::layerwise_decode_workspace;
     use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
     if mode_key != "text_to_image"
         || overlay.is_some()
@@ -2922,14 +3000,12 @@ fn mlx_selected_phase_peak(
         return None;
     }
     let phase = contract.phase_facts.as_ref()?;
+    let extra = flux3_cfg_additional_workspaces(plan.engine_id, geometry.width, geometry.height);
     let generic = plan
         .generic_headroom_bytes(geometry)
-        .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
-    let mut workspace = Workspace {
-        conditioning: generic,
-        denoise: generic,
-        decode: generic,
-    };
+        .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes))
+        .saturating_sub(extra.0.max(extra.1));
+    let mut workspace = flux3_cfg_workspace(plan.engine_id, geometry, generic);
     if let Some(anchor) = mlx_image_anchor_store()
         .and_then(|store| {
             store.image_anchor_for(&plan.model_id, AnchorBackend::Mlx, plan_tier_key(plan.tier))
@@ -6821,6 +6897,50 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flux3_cfg_source_allowance_tracks_forward_rows_not_jobs_weights_or_decode() {
+        assert_eq!(flux3_conditioning_forward_batch("flux3_klein_base"), 2);
+        assert_eq!(flux3_conditioning_forward_batch("flux3_klein"), 1);
+        let geometry = request_geometry(&request_inputs(1024, 768, 1));
+        let full_base = flux3_source_workspaces("flux3_klein_base", 1024, 768);
+        // 1024x768 -> 64x48 = 3072 image tokens + 4096 text tokens, two CFG rows.
+        let tokens = 3072u64 + 4096;
+        assert_eq!(full_base.0, 2 * 4096 * 20480 * 4);
+        assert_eq!(
+            full_base.1,
+            tokens * 3072 * 4 * 28 * 2 + full_base.0 + 3072 * 128 * 4 * 5
+        );
+        let full_distilled = flux3_source_workspaces("flux3_klein", 1024, 768);
+        assert_eq!(full_base.0, full_distilled.0 * 2);
+        assert!(full_base.1 > full_distilled.1 * 2); // CFG merge buffers, not another weight copy.
+        let phase = flux3_cfg_workspace("flux3_klein_base", geometry, 791);
+        assert!(phase.conditioning > 791 && phase.denoise > 791);
+        assert_eq!(phase.decode, 791);
+        let mut base = request_plan();
+        base.engine_id = "flux3_klein_base";
+        base.model_id = "flux3_klein_base".into();
+        let mut distilled = base.clone();
+        distilled.engine_id = "flux3_klein";
+        distilled.model_id = "flux3_klein".into();
+        let extra = flux3_cfg_additional_workspaces("flux3_klein_base", 1024, 768);
+        assert_eq!(
+            base.generic_total_peak_bytes(geometry) - distilled.generic_total_peak_bytes(geometry),
+            extra.0.max(extra.1)
+        );
+        assert_eq!(
+            base.generic_total_peak_bytes(geometry) - base.generic_headroom_bytes(geometry),
+            base.asset_bytes
+        );
+        for count in [1, 4, 8] {
+            let inputs = request_inputs(1024, 768, count);
+            assert_eq!(request_geometry(&inputs).batch, 1);
+            assert_eq!(
+                base.generic_total_peak_bytes(request_geometry(&inputs)),
+                base.generic_total_peak_bytes(geometry)
+            );
+        }
+    }
 
     // -------------------------------------------------------------------------------------
     // Image-MLX anchor injection seam (epic 22505 feature-end fix round): the mirror of
@@ -20053,6 +20173,7 @@ mod tests {
             "iris_3b",
             // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
             "flux3_klein",
+            "flux3_klein_base",
             "z_image",
             "z_image_control",
             "z_image_turbo",

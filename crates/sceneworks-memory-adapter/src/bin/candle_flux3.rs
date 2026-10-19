@@ -13,7 +13,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
     let generator = catalog
         .media()
-        .load(common::PROVIDER, &spec)
+        .load(plan.checkpoint.provider, &spec)
         .map_err(|error| format!("load native FLUX3 {} (no substitution): {error}", plan.tier))?;
     vram.end_load(load_sample);
     let context = common::admit(generator.as_ref(), &plan, request)?;
@@ -29,7 +29,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let mut phase_sample = Some(vram.phase());
     let mut conditioning = None;
     let mut denoise = None;
-    let result = common::render(generator.as_ref(), &context, &mut |next| {
+    let result = common::render(&plan, generator.as_ref(), &context, &mut |next| {
         let peak = phase_sample.take().map(|sample| vram.end_observed(sample));
         match next {
             protocol::ReferencePhase::Denoise => conditioning = peak,
@@ -80,6 +80,27 @@ mod tests {
                     common::quant("candle", tier).unwrap()
                 )
                 .unwrap()
+            );
+        }
+    }
+    #[test]
+    fn flux3_base_fingerprints_come_from_its_distinct_native_contract() {
+        use runtime_cuda::providers::flux3::memory_strategy as engine;
+        let spec = common::load_spec(
+            "candle",
+            "bf16",
+            PathBuf::from("unused"),
+            PathBuf::from("unused"),
+        )
+        .unwrap();
+        let contract =
+            engine::weights_free_memory_strategy_contract(common::BASE_PROVIDER, &spec).unwrap();
+        assert_eq!(contract.provider_id, common::BASE_PROVIDER);
+        let base = contract.calibration.unwrap().fingerprint;
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            assert_eq!(
+                common::fingerprint_for("candle", tier, common::BASE_PROVIDER).unwrap(),
+                engine::tier_fingerprint(&base, common::quant("candle", tier).unwrap()).unwrap()
             );
         }
     }

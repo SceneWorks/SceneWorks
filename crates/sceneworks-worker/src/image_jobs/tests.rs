@@ -202,6 +202,161 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+/// Execute the actual production dispatch/fallback seam, not a copy of its classification.
+/// Mutations: delete require_legacy_fallback_allowed CALL inside it, or remove the root callsite.
+#[tokio::test]
+async fn flux3_missing_native_handler_never_invokes_procedural_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let production = include_str!("../image_jobs.rs");
+    let call = production
+        .find("dispatch_legacy_fallback(&request.model, handled,")
+        .expect("real dispatcher calls the shared decision seam");
+    let stub = production[call..]
+        .find("generate_stub_stream(")
+        .expect("real stub closure is guarded");
+    assert!(stub > 0);
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let called = AtomicBool::new(false);
+        let error = dispatch_legacy_fallback(model, false, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(message) if message.contains("unsupported") && message.contains(model))
+        );
+        assert!(
+            !called.load(Ordering::Relaxed),
+            "{model} produced fake procedural success"
+        );
+        dispatch_legacy_fallback(model, true, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!called.load(Ordering::Relaxed));
+    }
+    let called = AtomicBool::new(false);
+    dispatch_legacy_fallback("test_stub_model", false, || async {
+        called.store(true, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        called.load(Ordering::Relaxed),
+        "legacy non-FLUX3 stub behavior must remain"
+    );
+}
+
+#[test]
+fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cache_head() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let repo = "black-forest-labs/flux-3-image-klein-base";
+    let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+    let stage = |repo: &str, revision: &str| {
+        let library = sceneworks_core::hf_home::model_source_library(root.path());
+        let cache = library.repository_root(repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&cache)
+            .unwrap()
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors"),
+            b"tiny source fixture, not model weights",
+        )
+        .unwrap();
+        std::fs::create_dir_all(snapshot.join("text_encoder")).unwrap();
+        for file in [
+            "config.json",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            std::fs::write(snapshot.join(file), b"{}").unwrap();
+        }
+        std::fs::write(snapshot.join("text_encoder/model.safetensors.index.json"), serde_json::to_vec(&json!({"weight_map":{"first":"model-00001-of-00002.safetensors","last":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), revision).unwrap();
+        snapshot
+    };
+    let expected = stage(repo, revision);
+    let write_receipt = |repo: &str, revision: &str, snapshot: &std::path::Path| {
+        let marker = root.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&marker).unwrap();
+        let stamp =
+            crate::model_jobs::resolved_files_tree_stamp(snapshot, &["model.safetensors"]).unwrap();
+        std::fs::write(marker.join(crate::INSTALL_MARKER), serde_json::to_vec(&json!({
+            "schemaVersion":2,"repo":repo,"modelId":"flux3_klein_base","variant":"default",
+            "snapshotRevision":revision,"resolvedFiles":["model.safetensors"],"artifactTreeStamp":stamp
+        })).unwrap()).unwrap();
+    };
+    let resolve =
+        || resolve_pinned_native_package(root.path(), repo, revision, "flux3_klein_base", None);
+    let error = resolve().unwrap_err();
+    assert!(error.to_string().contains("exact-revision install receipt"));
+    let distilled_repo = "black-forest-labs/flux-3-image-klein";
+    let distilled_revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+    let distilled = stage(distilled_repo, distilled_revision);
+    write_receipt(distilled_repo, distilled_revision, &distilled);
+    assert!(resolve().is_err());
+    let wrong_revision = "0000000000000000000000000000000000000000";
+    let wrong = stage(repo, wrong_revision);
+    write_receipt(repo, wrong_revision, &wrong);
+    assert!(resolve().is_err());
+    write_receipt(repo, revision, &expected);
+    // Compare filesystem identity, not Windows path spelling (`\\?\` extended form).
+    assert_eq!(
+        std::fs::canonicalize(resolve().unwrap()).unwrap(),
+        std::fs::canonicalize(&expected).unwrap()
+    );
+    std::fs::remove_file(expected.join("ae.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("ae.safetensors"));
+    std::fs::write(expected.join("ae.safetensors"), b"{}").unwrap();
+    std::fs::remove_file(expected.join("text_encoder/model-00002-of-00002.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("model-00002-of-00002.safetensors"));
+    std::fs::write(
+        expected.join("text_encoder/model-00002-of-00002.safetensors"),
+        b"{}",
+    )
+    .unwrap();
+    let wrong_override = root.path().join("models/another-checkpoint");
+    std::fs::create_dir_all(&wrong_override).unwrap();
+    assert!(resolve_pinned_native_package(
+        root.path(),
+        repo,
+        revision,
+        "flux3_klein_base",
+        Some(&wrong_override)
+    )
+    .is_err());
+    std::fs::write(
+        expected.join("model.safetensors"),
+        b"changed under same snapshot path",
+    )
+    .unwrap();
+    assert!(resolve().is_err());
+}
+
 #[test]
 fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availability() {
     let _env = crate::test_env::env_lock();
@@ -2375,6 +2530,54 @@ fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
 }
 
 #[test]
+fn flux3_worker_adapter_selection_is_declared_and_confined() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&temp.path().join("config"));
+    settings.data_dir = temp.path().join("data");
+    let dir = settings.data_dir.join("loras/selected");
+    std::fs::create_dir_all(&dir).unwrap();
+    let selected = dir.join("final.safetensors");
+    std::fs::write(&selected, b"selected file").unwrap();
+    std::fs::write(dir.join("other.safetensors"), b"wrong sibling").unwrap();
+    for model in ["flux3_klein_base", "flux3_klein"] {
+        let record = json!({"installedPath":dir,"files":["final.safetensors"]});
+        let file = resolve_adapter_file(&record, &settings, model).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(file).unwrap(),
+            std::fs::canonicalize(&selected).unwrap()
+        );
+        for name in [
+            "../outside.safetensors".to_owned(),
+            selected.canonicalize().unwrap().display().to_string(),
+            "missing.safetensors".into(),
+        ] {
+            let invalid = json!({"installedPath":dir,"files":[name]});
+            assert!(
+                resolve_adapter_file(&invalid, &settings, model).is_err(),
+                "{model}/{name}"
+            );
+        }
+    }
+    let external = temp.path().join("outside.safetensors");
+    std::fs::write(&external, b"outside adapter root").unwrap();
+    let link = dir.join("link.safetensors");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&external, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&external, &link);
+    if linked.is_ok() {
+        for model in ["flux3_klein_base", "flux3_klein"] {
+            assert!(resolve_adapter_file(
+                &json!({"installedPath":dir,"files":["link.safetensors"]}),
+                &settings,
+                model
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
 fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = settings_with_config_dir(&dir.path().join("config"));
@@ -2392,7 +2595,7 @@ fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     });
     assert_eq!(lora_weight(&raw), 0.7);
     assert_eq!(
-        resolve_adapter_file(&raw, &settings).unwrap(),
+        resolve_adapter_file(&raw, &settings, "test").unwrap(),
         std::fs::canonicalize(final_file).unwrap(),
         "attribution and inference must choose the same manifest-declared adapter"
     );
@@ -3421,8 +3624,20 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         .find("CandleImageRoute::PoseReject => {")
         .expect("PoseReject dispatch arm");
     let stub_fallback = run_job
-        .find("if !handled {\n        if request.hires_fix.enabled")
-        .expect("procedural-stub fallback");
+        .find("dispatch_legacy_fallback(&request.model, handled, || async {")
+        .expect("model-bound guarded procedural-stub fallback");
+    assert_eq!(
+        run_job.matches("generate_stub_stream(").count(),
+        1,
+        "the single procedural stub must remain inside the guarded fallback"
+    );
+    let stub_call = run_job
+        .find("generate_stub_stream(")
+        .expect("single stub invocation");
+    assert!(
+        stub_fallback < stub_call,
+        "the model-bound no-fallback guard must run before the procedural stub"
+    );
     assert!(
         pose_reject_dispatch < stub_fallback,
         "PoseReject dispatch must execute before the procedural-stub fallback"
@@ -8520,6 +8735,73 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     )
     .expect_err("dispatch rejects a retargeted prepared entry");
     assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
+}
+
+/// A direct legacy adapter must retain its lexical entry even when confinement resolves a
+/// filesystem alias. A distinct sibling and an alias retarget must never pass as that entry.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("directory symlink fixture");
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("create directory junction fixture");
+            assert!(
+                result.status.success(),
+                "junction creation failed: {result:?}"
+            );
+        }
+    }
+    fn unlink_directory(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory junction without traversing it");
+    }
+
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+    let first = data.path().join("loras").join("first");
+    let second = data.path().join("loras").join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    write_min_lora(&first.join("adapter.safetensors"));
+    write_min_lora(&second.join("adapter.safetensors"));
+    let alias = data.path().join("loras").join("selected");
+    link_directory(&first, &alias);
+    let lexical = alias.join("adapter.safetensors");
+    let sibling = second.join("adapter.safetensors");
+    let pin = resolve_prepared_adapter_file(
+        &json!({ "path": lexical.display().to_string() }),
+        &settings,
+        "imported_krea_control_route_pin",
+    )
+    .expect("validated legacy adapter is pinned");
+    assert_eq!(pin.loader_path(), lexical);
+    assert_eq!(
+        pin.canonical_target_path(),
+        first.join("adapter.safetensors").canonicalize().unwrap()
+    );
+    assert_ne!(pin.canonical_target_path(), sibling.canonicalize().unwrap());
+    pin.ensure_unchanged().expect("original alias is unchanged");
+
+    unlink_directory(&alias);
+    link_directory(&second, &alias);
+    let refused = pin.ensure_unchanged().is_err();
+    unlink_directory(&alias);
+    assert!(
+        refused,
+        "retargeted lexical adapter must invalidate its token"
+    );
 }
 
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,

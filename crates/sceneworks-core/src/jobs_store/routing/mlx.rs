@@ -113,7 +113,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
             mage_flow_edit_mlx_eligible(payload)
         }
         "iris_3b" => iris_mlx_eligible(payload),
-        "flux3_klein" => flux3_mlx_eligible(payload),
+        "flux3_klein" | "flux3_klein_base" => flux3_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -503,7 +503,7 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
-/// FLUX 3 Image Klein, distilled: plain text-to-image on the native MLX provider in one of the
+/// FLUX 3 Image Klein base and distilled: text-to-image on the native MLX provider in one of the
 /// packages it serves — bf16, or the locally converted MLX affine q4/q8 (sc-26241). The publisher
 /// FP8R/NVFP4 packages are CUDA formats the MLX descriptor does not advertise, so they keep the
 /// job off MLX. Every other carrier is judged by [`flux3_surface_eligible`].
@@ -524,7 +524,7 @@ pub(crate) fn flux3_payload_tier(payload: &Map<String, Value>) -> Result<Flux3Ti
 
 /// The FLUX 3 request surface other than precision, shared by both lanes: the `flux3_klein`
 /// engine takes no source, reference, mask, control or pose on this route (references and boxes
-/// are sc-26236/7), no adapter (sc-26239), and refuses an enabled hires fix for the same reason as
+/// are sc-26236/7), admits identity-checked LoRA (sc-26239), and refuses hires fix like
 /// Iris (its second pass is an img2img refinement the engine refuses). Judged with the precision
 /// carriers removed, since [`flux3_payload_tier`] owns them.
 pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
@@ -534,7 +534,18 @@ pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
             advanced.remove(*carrier);
         }
     }
-    iris_mlx_eligible(&surface) && !has_nonempty_or_malformed_array(payload, "loras")
+    iris_mlx_eligible(&surface)
+        && payload.get("loras").is_none_or(|value| {
+            value.is_null()
+                || value.as_array().is_some_and(|loras| {
+                    loras.iter().all(|lora| {
+                        lora.as_str()
+                            .or_else(|| lora.get("id").and_then(Value::as_str))
+                            .or_else(|| lora.get("loraId").and_then(Value::as_str))
+                            .is_some_and(|id| !id.trim().is_empty())
+                    })
+                })
+        })
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

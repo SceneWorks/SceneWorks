@@ -1662,13 +1662,18 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
+    model_repo_with_default(request, model.default_repo())
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String {
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(model.default_repo())
+        .unwrap_or(default_repo)
         .to_owned()
 }
 
@@ -1995,6 +2000,21 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    // Canonical FLUX3 identities must be proved by the worker-owned exact-revision receipt.
+    // Never let an arbitrary cache HEAD, a distilled snapshot, or a modelPath override impersonate
+    // the training base an adapter declares. Other families retain their historical resolution.
+    let flux3_identity = match request.model.as_str() {
+        "flux3_klein" => Some(("black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68")),
+        "flux3_klein_base" => Some(("black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4")),
+        _ => None,
+    };
+    if let Some((repo, revision)) = flux3_identity {
+        if model_repo_with_default(request, repo) != repo {
+            return Err(WorkerError::InvalidPayload(format!("{} requires pinned {repo}@{revision}; a different repo is not this checkpoint", request.model)));
+        }
+        let explicit = model_path_override(request).map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath")).transpose()?;
+        return Ok(Some(resolve_pinned_native_package(&settings.data_dir, repo, revision, &request.model, explicit.as_deref())?));
+    }
     if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
@@ -5330,7 +5350,7 @@ fn resolve_prepared_adapters(
     let mut specs = Vec::with_capacity(request.loras.len());
     let mut pins = BTreeMap::<PathBuf, gen_core::PinnedWeightsFile>::new();
     for lora in &request.loras {
-        let pin = resolve_prepared_adapter_file(lora, settings)?;
+        let pin = resolve_prepared_adapter_file(lora, settings, &request.model)?;
         let kind = classify_prepared_adapter(&pin)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(pin.loader_path().to_path_buf(), scale, kind));
@@ -5356,7 +5376,7 @@ fn resolve_adapters(request: &ImageRequest, settings: &Settings) -> WorkerResult
     }
     let mut specs = Vec::with_capacity(request.loras.len());
     for lora in &request.loras {
-        let file = resolve_adapter_file(lora, settings)?;
+        let file = resolve_adapter_file(lora, settings, &request.model)?;
         let kind = classify_adapter(&file)?;
         let scale = lora_weight(lora) as f32;
         specs.push(AdapterSpec::new(file, scale, kind));
@@ -10825,7 +10845,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1" => "candle_qwen_2_1",
         // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
-        "flux3_klein" => "candle_flux3",
+        "flux3_klein" | "flux3_klein_base" => "candle_flux3",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -12095,8 +12115,10 @@ mod candle_resolved_tier_contract_tests {
     /// identity, FP8R as FP8R — never relabelled bf16.
     #[test]
     fn flux3_shared_memory_tier_is_the_loaded_package() {
-        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
-            assert_eq!(candle_shared_memory_tier("flux3_klein", tier), tier);
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+                assert_eq!(candle_shared_memory_tier(model, tier), tier, "{model}/{tier}");
+            }
         }
         assert_eq!(candle_shared_memory_tier("iris_3b", "fp8r"), "bf16");
         assert_eq!(candle_shared_memory_tier("z_image", "q4"), "q4");
@@ -13257,9 +13279,13 @@ async fn generate_candle_stream_using(
         memory_width,
         memory_height,
     )?;
+    let source_activation_bytes = crate::vram_gate::flux3_source_activation_allowance_bytes(
+        engine_id, memory_width, memory_height,
+    );
     let adapter_resident_bytes =
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
-            .saturating_add(batch_overlay_bytes);
+            .saturating_add(batch_overlay_bytes)
+            .saturating_add(source_activation_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13271,7 +13297,9 @@ async fn generate_candle_stream_using(
     // providers retain their established source-byte accounting.
     let provider_receipt_priced = matches!(
         engine_id,
-        "chroma1_hd"
+        "flux3_klein"
+            | "flux3_klein_base"
+            | "chroma1_hd"
             | "chroma1_base"
             | "chroma1_flash"
             | "ideogram_4"
@@ -13283,7 +13311,12 @@ async fn generate_candle_stream_using(
             | "sd3_5_medium"
     );
     let shared_predicted_peak_gb = if provider_receipt_priced {
-        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
+        let base = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        if matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
+            // Provider receipts replace only adapter/PUP weights. Keep source-derived activation
+            // work exactly once in the base peak; never re-label it as adapter residency.
+            base.map(|peak| peak + batch_overlay_bytes.saturating_add(source_activation_bytes) as f64 / 1_073_741_824.0)
+        } else { base }
     } else {
         needed
     };

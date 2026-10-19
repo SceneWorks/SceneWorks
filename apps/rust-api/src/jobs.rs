@@ -1134,6 +1134,21 @@ pub(crate) async fn canonicalize_image_model_payload(
         )));
     }
 
+    // Tier capability does not certify an installable artifact. This check is shared by create,
+    // retry and duplicate after resolving the authoritative catalog (never caller metadata).
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+        &model_id,
+        advanced,
+        &model_manifest_entry,
+    ) {
+        return Err(ApiError::bad_request(reason));
+    }
+
     // Overwrite rather than merge. The selected id was path-confined above; imported/custom
     // workers independently confine the authoritative entry's `modelPath` / `paths.model` before
     // opening it, preserving the established two-boundary defense.

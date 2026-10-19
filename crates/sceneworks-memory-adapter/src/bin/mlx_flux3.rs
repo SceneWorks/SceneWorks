@@ -17,7 +17,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
     let generator = catalog
         .media()
-        .load(common::PROVIDER, &spec)
+        .load(plan.checkpoint.provider, &spec)
         .map_err(|error| format!("load native FLUX3 {} (no substitution): {error}", plan.tier))?;
     let context = common::admit(generator.as_ref(), &plan, request)?;
     let contract = generator
@@ -35,7 +35,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     // The native provider fences its image stream at conditioning/decoding and
     // returns materialized host images. Do not mix process RSS or CUDA counters
     // into MLX's allocator-active/cache observations.
-    common::render(generator.as_ref(), &context, &mut |next| {
+    common::render(&plan, generator.as_ref(), &context, &mut |next| {
         match next {
             protocol::ReferencePhase::Denoise => conditioning = Some(phase_now()),
             protocol::ReferencePhase::Decode => denoise = Some(phase_now()),
@@ -80,6 +80,31 @@ mod tests {
                     engine::MEMORY_CALIBRATION_FINGERPRINT,
                     common::quant("mlx", tier).unwrap(),
                     group,
+                )
+            );
+        }
+    }
+    #[test]
+    fn flux3_base_fingerprints_come_from_its_distinct_native_contract() {
+        use runtime_macos::providers::flux3::memory_strategy as engine;
+        let spec = common::load_spec(
+            "mlx",
+            "bf16",
+            PathBuf::from("unused"),
+            PathBuf::from("unused"),
+        )
+        .unwrap();
+        let contract =
+            engine::weights_free_memory_strategy_contract(common::BASE_PROVIDER, &spec).unwrap();
+        assert_eq!(contract.provider_id, common::BASE_PROVIDER);
+        let base = contract.calibration.unwrap().fingerprint;
+        for tier in ["bf16", "q4", "q8"] {
+            assert_eq!(
+                common::fingerprint_for("mlx", tier, common::BASE_PROVIDER).unwrap(),
+                engine::tier_fingerprint(
+                    &base,
+                    common::quant("mlx", tier).unwrap(),
+                    if tier == "bf16" { None } else { Some(64) }
                 )
             );
         }

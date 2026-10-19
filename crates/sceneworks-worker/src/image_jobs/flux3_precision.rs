@@ -304,6 +304,14 @@ mod native {
             })
             .collect();
         let [row] = rows.as_slice() else {
+            if rows.is_empty() && model_id == "flux3_klein_base" {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{model_id}: the {} package is unavailable until base repository file access \
+                     (HTTP 403) permits verified conversion output size and SHA-256 pins. \
+                     Distilled pins and dense fallback are not accepted.",
+                    tier.key()
+                )));
+            }
             return Err(WorkerError::InvalidPayload(format!(
                 "{model_id}: the catalog declares {} {} derivations for {platform}; exactly one \
                  is required",
@@ -574,7 +582,7 @@ mod tests {
         let fp8r = advanced(json!({"quantTier": "fp8r"}));
         assert!(validate_image_quant_tier_request("flux3_klein", &fp8r, ImageLane::Candle).is_ok());
         assert!(validate_image_quant_tier_request("flux3_klein", &fp8r, ImageLane::Mlx).is_err());
-        for model in ["z_image", "flux2_klein_9b", "flux3_klein_base"] {
+        for model in ["z_image", "flux2_klein_9b"] {
             for lane in [ImageLane::Candle, ImageLane::Mlx] {
                 let error = validate_image_quant_tier_request(model, &fp8r, lane)
                     .expect_err("non-flux3 fp8r refused");
@@ -830,6 +838,84 @@ mod tests {
                 row(json!(["macos"]), "flux3-mlx-affine-q8-g64-v1"),
             ]
         }))
+    }
+
+    #[test]
+    fn flux3_base_native_tiers_use_platform_specific_pins_and_never_dense_fallback() {
+        use sha2::{Digest, Sha256};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("snapshot");
+        write_root(&root);
+        let data = temp.path().join("data");
+        let base = crate::tests::builtin_model_entry("flux3_klein_base");
+        for tier in [Flux3Tier::Q4, Flux3Tier::Q8] {
+            for lane in [ImageLane::Candle, ImageLane::Mlx] {
+                let error = plan_flux3_load(tier, lane, &root, &data, base.as_object().unwrap())
+                    .unwrap_err();
+                let reason = format!("{error:?}");
+                assert!(
+                    reason.contains("SHA-256")
+                        && reason.contains("403")
+                        && reason.contains(tier.key()),
+                    "{reason}"
+                );
+                // SYNTHETIC one-byte pins exercise routing/readiness only. No assertion here
+                // claims a real base conversion or supplies production catalog pins.
+                let mut manifest = derived_manifest(&format!("{:x}", Sha256::digest(b"x")), 1);
+                manifest.insert("id".into(), json!("flux3_klein_base"));
+                for row in manifest
+                    .get_mut("downloads")
+                    .unwrap()
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    if row["variant"] == "q8" {
+                        row["variant"] = json!(tier.key());
+                        let id = row["localDerivation"]["conversion"]
+                            .as_str()
+                            .unwrap()
+                            .to_owned();
+                        row["localDerivation"]["conversion"] = json!(if tier == Flux3Tier::Q4 {
+                            id.replace("q8_0", "q4_1").replace("q8-", "q4-")
+                        } else {
+                            id
+                        });
+                    }
+                }
+                let conversion = match (lane, tier) {
+                    (ImageLane::Candle, Flux3Tier::Q4) => "flux3-candle-ggml-q4_1-v1",
+                    (ImageLane::Candle, _) => "flux3-candle-ggml-q8_0-v1",
+                    (ImageLane::Mlx, Flux3Tier::Q4) => "flux3-mlx-affine-q4-g64-v1",
+                    (ImageLane::Mlx, _) => "flux3-mlx-affine-q8-g64-v1",
+                };
+                let dir = data
+                    .join("models/derived/flux3_klein_base")
+                    .join(tier.key())
+                    .join(conversion);
+                assert!(plan_flux3_load(tier, lane, &root, &data, &manifest).is_err());
+                write_package(&dir, json!({"format":conversion}));
+                let plan = plan_flux3_load(tier, lane, &root, &data, &manifest).unwrap();
+                assert_eq!(plan.weights_dir, canonical(&dir));
+                assert_eq!(plan.quant(), super::native::flux3_quant(tier));
+                assert!(plan.components.is_some());
+                std::fs::write(dir.join("model.safetensors"), b"tampered").unwrap();
+                assert!(plan_flux3_load(tier, lane, &root, &data, &manifest).is_err());
+            }
+        }
+        for tier in [Flux3Tier::Fp8Rowwise, Flux3Tier::Nvfp4] {
+            let dir = root.join("variants").join(tier.key());
+            write_package(&dir, json!(tier.key()));
+            let plan = plan_flux3_load(
+                tier,
+                ImageLane::Candle,
+                &root,
+                &data,
+                base.as_object().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(plan.weights_dir, canonical(&dir));
+            assert_eq!(plan.quant(), super::native::flux3_quant(tier));
+        }
     }
 
     #[test]

@@ -526,6 +526,8 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("iris_3b", true, true),
         // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.
         ("flux3_klein", false, false),
+        // S6: the independent base CFG checkpoint owns both conditioning axes.
+        ("flux3_klein_base", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());

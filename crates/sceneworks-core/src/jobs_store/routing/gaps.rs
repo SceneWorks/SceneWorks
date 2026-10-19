@@ -996,17 +996,16 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         ),
         CandleImageRefusal::Flux3Surface => UnsupportedReason::new(
             Some(model),
-            "distilled FLUX 3 request outside plain text-to-image",
+            "FLUX 3 request outside supported text-to-image",
             &format!(
-                "FLUX 3 Image Klein serves plain text_to_image on both native backends. \
-                 References, boxes, controls, adapters and hires fix are not supported by this \
-                 distilled route, and the precision must name exactly one installed package: \
-                 bf16, q4 or q8 (advanced.mlxQuantize 0/4/8 or advanced.quantTier), or the \
-                 CUDA-only publisher fp8r / nvfp4 (advanced.quantTier). Re-submit without those \
-                 carriers and select the pinned distilled checkpoint, rather than the base \
-                 checkpoint.{also}"
+                "FLUX 3 Image Klein base and distilled checkpoints serve text_to_image on both \
+                 native backends, including exact-identity compatible LoRA. References, boxes, \
+                 controls and hires fix are not supported by this route. Select one installed \
+                 package: bf16, q4 or q8 on both backends, or publisher fp8r / nvfp4 on Candle. \
+                 Use an explicit adapter id for each LoRA and select the model's pinned checkpoint. \
+                 Adapter base_model/base_revision must match that checkpoint.{also}"
             ),
-            Some("sc-26235"),
+            Some("sc-26239"),
         ),
         CandleImageRefusal::Fp8rTier => UnsupportedReason::new(
             Some(model),

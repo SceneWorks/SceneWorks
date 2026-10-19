@@ -5648,6 +5648,36 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "flux3-klein-candle-derived-2026-10-15-v1-nvfp4",
       "fixture": "flux3-klein-candle-nvfp4-1024-seed26243-step16"
+    },
+    "flux3_klein_base:bf16:candle": {
+      "provider": "flux3_klein_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux3-klein-base-candle-cfg-source-v1",
+      "fixture": "flux3-klein-base-candle-bf16-1024-seed26243-step50"
+    },
+    "flux3_klein_base:bf16:mlx": {
+      "provider": "flux3_klein_base",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "flux3-klein-base-mlx-cfg-source-v1",
+      "fixture": "flux3-klein-base-mlx-bf16-1024-seed26243-step50"
     }
   }
 }

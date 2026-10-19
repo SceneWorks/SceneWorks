@@ -710,7 +710,8 @@ def test_control_weight_authority_audit_detects_absence_and_fallback_mutations()
 
 
 AUDITED_TOP_LEVEL_MANIFEST_REPO_LANES = {
-    "image_jobs/base.rs": "model.default_repo()",
+    # Shared resolver receives MODEL_TABLE's default (or the frozen canonical FLUX3 identity).
+    "image_jobs/base.rs": "unwrap_or(default_repo)",
     "image_jobs/flux1_control_candle.rs": "crate::engines::default_repo_for(&request.model)",
     "image_jobs/flux_ipadapter.rs": "flux_ipadapter_default_repo(&request.model)",
     "image_jobs/instantid.rs": "INSTANTID_SDXL_REPO",
@@ -4925,3 +4926,58 @@ def test_managed_file_schema_reader_is_utf8_under_a_windows_default(tmp_path, mo
     monkeypatch.setattr(Path, "read_text", windows_default)
     # Execute the real identity audit, not only the already-correct generic loader.
     test_managed_file_schema_rejects_partial_or_unpinned_identity()
+
+
+def test_flux3_base_and_distilled_have_separate_defaults_and_adapter_identity():
+    models = {row["id"]: row for row in _load_builtin_models_manifest()["models"]}
+    base = models["flux3_klein_base"]
+    distilled = models["flux3_klein"]
+    assert base["family"] == distilled["family"] == "flux3"
+    assert base["defaults"]["steps"] == 50
+    assert base["defaults"]["guidanceScale"] == 3.5
+    assert distilled["defaults"]["steps"] == 16
+    assert distilled["defaults"]["guidanceScale"] == 0
+    # The product's established polarity: absence means both controls are supported.
+    assert base["image"].get("supportsGuidance", True) is True
+    assert base["image"].get("supportsNegativePrompt", True) is True
+    assert distilled["image"]["supportsGuidance"] is False
+    assert distilled["image"]["supportsNegativePrompt"] is False
+    for model, repo, revision in [
+        (base, "black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"),
+        (distilled, "black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68"),
+    ]:
+        primary = next(row for row in model["downloads"] if row.get("default"))
+        assert primary["repo"] == repo
+        assert primary["revision"] == revision
+        assert model["paths"]["model"] == "${HF_CACHE}/" + repo
+        assert model["loraCompatibility"]["families"] == ["flux3"]
+        assert model["loraCompatibility"]["baseModel"] == repo
+        assert model["loraCompatibility"]["baseRevision"] == revision
+        assert model["loraCompatibility"]["adapterKinds"] == ["lora"]
+        assert model["gated"] is True
+        assert model["credentialHost"] == "huggingface.co"
+    assert base["downloads"][0]["files"] == []
+    proof = json.loads((ROOT / "tests/fixtures/flux3-base-hub-metadata.json").read_text(encoding="utf-8"))
+    assert proof["repository"] == base["downloads"][0]["repo"]
+    assert proof["revision"] == base["downloads"][0]["revision"]
+    assert len(proof["files"]) == proof["repository_file_count"] == 39
+    assert any(row["rfilename"].startswith("variants/") for row in proof["files"])
+    size = sum(row["size"] for row in proof["files"])
+    assert size == proof["repository_size_bytes"] == 43229093855
+    assert base["downloads"][0]["estimatedSizeBytes"] == size
+    assert base["downloads"][0]["footprint"]["diskSizeBytes"] == size
+    primary = [row for row in base["downloads"] if not row.get("coRequisite")]
+    assert [row["variant"] for row in primary] == ["bf16", "fp8r", "nvfp4"]
+    # Public metadata proves paths and claimed sizes, NOT downloaded weight bytes. Converted
+    # q4/q8 rows must stay absent until real base conversions provide independent size/hash pins.
+    metadata_paths = {row["rfilename"] for row in proof["files"]}
+    for row in primary:
+        assert row["repo"] == proof["repository"] and row["revision"] == proof["revision"]
+        assert row["files"] == [] and row["estimatedSizeBytes"] == size
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+        if row["variant"] != "bf16":
+            assert row["platforms"] == ["windows", "linux"]
+            for name in ["config.json", "hf_quant_config.json", "manifest.json", "model.safetensors"]:
+                assert f"variants/{row['variant']}/{name}" in metadata_paths
+    assert all("localDerivation" not in row for row in primary)

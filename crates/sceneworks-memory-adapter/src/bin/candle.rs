@@ -32,6 +32,7 @@ mod candle_flux3;
 #[path = "flux3_common.rs"]
 mod flux3_common;
 const FLUX3_ID: &str = "flux3_klein";
+const FLUX3_BASE_ID: &str = "flux3_klein_base";
 
 #[path = "candle_iris.rs"]
 mod candle_iris;
@@ -7705,7 +7706,7 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let provider = planned_provider(request)?;
-    if matches!(provider, FLUX3_ID) {
+    if matches!(provider, FLUX3_ID | FLUX3_BASE_ID) {
         return candle_flux3::run(request);
     }
     if provider == LTX25_ID {

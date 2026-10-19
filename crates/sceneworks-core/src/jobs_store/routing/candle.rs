@@ -505,7 +505,7 @@ fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> boo
 /// scheduler's `required_capability`, not this lane predicate. A malformed or conflicting
 /// precision request is refused here by name.
 fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "flux3_klein"
+    FLUX3_TIERED_MODEL_IDS.contains(&model)
         && !(flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_candle)
             && flux3_surface_eligible(payload))
 }

@@ -238,6 +238,15 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 0.0,
         adapter_label: "mlx_flux3",
     },
+    // S6: separate native CFG checkpoint, default50steps/3.5; never a distilled cache alias.
+    ModelRow {
+        sceneworks_id: "flux3_klein_base",
+        engine_id: "flux3_klein_base",
+        default_repo: "black-forest-labs/flux-3-image-klein-base",
+        default_steps: 50,
+        default_guidance: 3.5,
+        adapter_label: "mlx_flux3",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1154,6 +1163,31 @@ mod tests {
     use sceneworks_core::contracts::WorkerCapability as Cap;
 
     #[test]
+    fn flux3_base_defaults_and_engine_identity_are_not_distilled_aliases() {
+        let base = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein_base")
+            .unwrap();
+        let distilled = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein")
+            .unwrap();
+        assert_eq!(base.engine_id, "flux3_klein_base");
+        assert_ne!(base.engine_id, distilled.engine_id);
+        assert_eq!(
+            base.default_repo,
+            "black-forest-labs/flux-3-image-klein-base"
+        );
+        assert_ne!(base.default_repo, distilled.default_repo);
+        assert_eq!((base.default_steps, base.default_guidance), (50, 3.5));
+        assert_eq!(
+            (distilled.default_steps, distilled.default_guidance),
+            (16, 0.0)
+        );
+        assert_eq!(base.adapter_label, "mlx_flux3");
+    }
+
+    #[test]
     fn training_inventory_names_every_sc18479_provider_id() {
         for id in [
             "anima_base",
@@ -1790,6 +1824,7 @@ mod tests {
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
         "flux3_klein",
+        "flux3_klein_base",
         "iris_3b",
         "mage_flow_base",
         "mage_flow",
@@ -1925,9 +1960,8 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
-            // FLUX 3 Image Klein (sc-26234): the pinned contract publishes its packed-token grid.
-            // The provider envelope test reads `size_floor` live on the lane that links it.
-            "flux3_klein" => gen_core::flux3::DOWNSAMPLING_RATIO,
+            // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
+            "flux3_klein" | "flux3_klein_base" => gen_core::flux3::DOWNSAMPLING_RATIO,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1979,7 +2013,7 @@ mod tests {
             // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
             // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
             // which replaces it with that provider's constant.
-            "flux3_klein" => 16,
+            "flux3_klein" | "flux3_klein_base" => 16,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2245,6 +2279,7 @@ mod tests {
             ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
             ("flux3_klein", 16),
+            ("flux3_klein_base", 16),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

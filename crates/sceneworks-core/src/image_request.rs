@@ -403,7 +403,7 @@ pub const FP8R_QUANT_TIER: &str = "fp8r";
 /// Klein (distilled) is the only catalog FLUX 3 model; it is also the only model that ships a
 /// publisher FP8R package, so `quantTier: "fp8r"` anywhere else is refused rather than run at some
 /// other precision.
-pub const FLUX3_TIERED_MODEL_IDS: &[&str] = &["flux3_klein"];
+pub const FLUX3_TIERED_MODEL_IDS: &[&str] = &["flux3_klein", "flux3_klein_base"];
 
 /// The `advanced` keys that select a FLUX 3 precision. A consumer that judges the rest of the
 /// request surface strips exactly these once [`flux3_requested_tier`] has accepted them.
@@ -589,6 +589,49 @@ pub fn image_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<St
              {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
         )
     })
+}
+
+/// Refuse a FLUX 3 package absent from the authoritative catalog. Tier routing is a native
+/// capability, not proof that an artifact has verified pins. In particular, base q4/q8 cannot
+/// borrow distilled conversion hashes or silently fall through to the default dense row.
+/// The API applies this after preset/model canonicalization; workers independently verify the
+/// selected package and its conversion pins before loading it.
+pub fn flux3_catalog_tier_refusal(
+    model: &str,
+    advanced: &JsonObject,
+    manifest: &Value,
+) -> Option<String> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    let tier = match flux3_requested_tier(advanced) {
+        Ok(tier) => tier,
+        Err(reason) => return Some(format!("{model}: {reason}")),
+    };
+    let declared =
+        manifest
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+            row.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                && row.get("variant").and_then(Value::as_str) == Some(tier.key())
+                && !crate::model_artifacts::artifact_selection::is_pending_artifact_download(row)
+                && (!matches!(tier, Flux3Tier::Q4 | Flux3Tier::Q8)
+                    || crate::model_artifacts::artifact_selection::local_derivation(row).is_some())
+        })
+            });
+    if declared {
+        return None;
+    }
+    let evidence = if model == "flux3_klein_base" && matches!(tier, Flux3Tier::Q4 | Flux3Tier::Q8) {
+        " Base repository file access is blocked (HTTP 403); verified base conversion output size \
+         and SHA-256 pins are required before installation can be offered. Distilled pins cannot \
+         be reused."
+    } else {
+        " Install a catalog-declared package with verified artifact pins."
+    };
+    Some(format!("{model}: the {} package has no verified catalog artifact.{evidence} No dense fallback is permitted.", tier.key()))
 }
 
 #[cfg(test)]
@@ -887,6 +930,50 @@ mod tests {
     }
 
     #[test]
+    fn flux3_catalog_requires_a_real_row_for_the_requested_package() {
+        let advanced = |tier| payload(json!({"quantTier":tier}));
+        let dense_only = json!({"downloads":[{"variant":"bf16","default":true}]});
+        assert!(
+            flux3_catalog_tier_refusal("flux3_klein_base", &advanced("bf16"), &dense_only)
+                .is_none()
+        );
+        for tier in ["q4", "q8"] {
+            let reason =
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
+                    .unwrap();
+            assert!(
+                reason.contains(tier) && reason.contains("SHA-256") && reason.contains("403"),
+                "{reason}"
+            );
+            assert!(reason.contains("No dense fallback"), "{reason}");
+            let malformed = json!({"downloads":[{"variant":tier,"localDerivation":{}}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &malformed)
+                    .is_some()
+            );
+            // SYNTHETIC pins test the shared path only, never production base weight evidence.
+            let pinned = json!({"downloads":[{"variant":tier,"localDerivation":{
+                "fromVariant":"bf16","conversion":"fixture-only","weightsFile":"model.safetensors",
+                "weightsBytes":1,"weightsSha256":"a".repeat(64)
+            }}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &pinned).is_none()
+            );
+        }
+        for tier in ["fp8r", "nvfp4"] {
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
+                    .is_some()
+            );
+            let declared = json!({"downloads":[{"variant":tier}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &declared)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn image_quant_tier_refusal_is_flux3_shaped_and_fp8r_is_flux3_only() {
         let advanced = |value: Value| value.as_object().cloned().unwrap();
         assert_eq!(
@@ -901,12 +988,11 @@ mod tests {
             image_quant_tier_refusal("flux3_klein", &advanced(json!({"quantTier": "fp8r"}))),
             None
         );
-        for model in [
-            "flux3_klein_base",
-            "flux2_klein_9b",
-            "krea_2_turbo",
-            "z_image",
-        ] {
+        assert_eq!(
+            image_quant_tier_refusal("flux3_klein_base", &advanced(json!({"quantTier": "fp8r"}))),
+            None
+        );
+        for model in ["flux2_klein_9b", "krea_2_turbo", "z_image"] {
             let reason = image_quant_tier_refusal(model, &advanced(json!({"quantTier": "fp8r"})))
                 .expect("non-FLUX3 fp8r must be refused");
             assert!(reason.contains(model), "{reason}");
