@@ -7150,10 +7150,11 @@ mod supra2_convert_tests {
     }
 
     /// Real-weight install-time conversion from the local HF cache (CPU only: SHA-256 + tensor
-    /// validation + safetensors write). `cargo test -p sceneworks-worker supra2_real_weight_convert
-    /// -- --ignored` with the three pinned snapshots in `~/.cache/huggingface/hub`.
+    /// validation + safetensors write). `HF_HUB_CACHE=~/.cache/huggingface/hub cargo test -p
+    /// sceneworks-worker supra2_real_weight_convert -- --ignored` with the three pinned snapshots in
+    /// that hub (the resolver reads the env-selected hub, else the data dir's library).
     #[test]
-    #[ignore = "needs the pinned Supra2-IMG, Flan-T5-Base and SD VAE snapshots in the HF cache"]
+    #[ignore = "needs HF_HUB_CACHE holding the pinned Supra2-IMG, Flan-T5-Base and SD VAE snapshots"]
     fn supra2_real_weight_convert_writes_a_loadable_bundle() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let snapshot = |pin: gen_core::supra2::ComponentPin| {
