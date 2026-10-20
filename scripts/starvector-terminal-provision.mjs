@@ -540,10 +540,10 @@ export function upstreamPipProgress(line) {
   return null;
 }
 
-export async function runUpstreamPip(python, args, bounds, { emit = console.log, heartbeatMs = 30_000, noProgressMs = 300_000 } = {}) {
-  const start = Date.now();
+export async function runUpstreamPip(python, args, bounds, { emit = console.log, heartbeatMs = 30_000, noProgressMs = 300_000, now = Date.now } = {}) {
+  const start = now();
   let latest = null, transfer = null, lastProgressAt = start, installing = false, stopReason = null;
-  const report = event => emit(JSON.stringify({ kind: "upstream-package-install", elapsed_seconds: Math.floor((Date.now() - start) / 1000), ...event }));
+  const report = event => emit(JSON.stringify({ kind: "upstream-package-install", elapsed_seconds: Math.floor((now() - start) / 1000), ...event }));
   report({ event: "started", timeout_seconds: bounds.timeout / 1000, no_progress_timeout_seconds: noProgressMs / 1000 });
   return new Promise((resolve, reject) => {
     const partial = { stdout: "", stderr: "" };
@@ -556,7 +556,7 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
         outcome.killed = error?.killed === true;
         outcome.signal = ["SIGTERM", "SIGKILL"].includes(error?.signal) ? error.signal : null;
         outcome.exit_code = Number.isInteger(error?.code) ? error.code : null;
-        outcome.failure = stopReason ?? (error.killed && Date.now() - start >= bounds.timeout ? "process_deadline" : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit" : "process_exit");
+        outcome.failure = stopReason ?? (error.killed && now() - start >= bounds.timeout ? "process_deadline" : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "output_limit" : "process_exit");
       }
       report(outcome);
       if (failed) reject(new Error(`upstream package acquisition failed: ${JSON.stringify(outcome)}`));
@@ -571,11 +571,11 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
         // Repeated counts do not prove progress. A completed transfer followed by
         // a new file starts a new bounded observation window.
         if (!transfer || event.bytes > transfer.bytes || (transfer.total_bytes && transfer.bytes === transfer.total_bytes && event.bytes < transfer.bytes)) {
-          lastProgressAt = Date.now();
+          lastProgressAt = now();
           transfer = event;
         }
       } else if (event.event === "download_started" || event.event === "cached_download") {
-        lastProgressAt = Date.now();
+        lastProgressAt = now();
         transfer = null;
       }
       if (event.event !== "download") report(event);
@@ -590,7 +590,7 @@ export async function runUpstreamPip(python, args, bounds, { emit = console.log,
     child.stdout.on("data", consume("stdout"));
     child.stderr.on("data", consume("stderr"));
     const heartbeat = setInterval(() => {
-      const silence = Date.now() - lastProgressAt;
+      const silence = now() - lastProgressAt;
       report({ event: "waiting", phase: installing ? "installing" : "acquiring", seconds_since_progress: Math.floor(silence / 1000), ...(latest ? { last_progress: latest } : {}) });
       if (!installing && silence >= noProgressMs && !stopReason) {
         stopReason = transfer ? "download_stalled" : "no_observable_download_progress";

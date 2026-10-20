@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1134,19 +1135,33 @@ test("upstream pip diagnostics reflect only numeric progress and public locked w
 });
 
 test("upstream pip child reports byte progress while suppressing secret-like stdout and stderr", async () => {
-  const events = [];
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-heartbeat-"));
+  const acknowledged = path.join(root, "one-byte-observed"), events = [];
+  // Advance only after the REAL heartbeat observes the first complete progress line. Fixed child
+  // timers could coalesce both progress lines before a loaded parent sampled the intermediate one.
   const script = `process.stdout.write('Authorization: Bearer FIXTURE_PRIVATE\\nProgress 1');
     process.stderr.write('config.json FIXTURE_PRIVATE\\n');
-    setTimeout(() => process.stdout.write(' of 10\\n'), 30);
-    setTimeout(() => process.stdout.write('Progress 10 of 10\\nInstalling collected packages: fixture\\n'), 80);
-    setTimeout(() => process.exit(0), 140);`;
-  // The no-progress window opens at spawn, so a short one measured how long a loaded runner took
-  // to start Node. Neither bound is the property here; both are hang backstops.
-  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 60_000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 60_000 });
-  assert.ok(events.some(event => event.last_progress?.bytes === 1));
-  assert.equal(events.at(-1).event, "completed");
-  assert.equal(events.at(-1).last_transfer.bytes, 10);
-  assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE|Authorization|config.json/);
+    setTimeout(() => {
+      process.stdout.write(' of 10\\n');
+      const wait = setInterval(() => {
+        if (!require('node:fs').existsSync(${JSON.stringify(acknowledged)})) return;
+        clearInterval(wait);
+        process.stdout.write('Progress 10 of 10\\nInstalling collected packages: fixture\\n');
+      }, 20);
+    }, 30);`;
+  try {
+    await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 4096 }, {
+      emit: line => {
+        const event = JSON.parse(line); events.push(event);
+        if (event.event === "waiting" && event.last_progress?.bytes === 1) writeFileSync(acknowledged, "observed");
+      },
+      heartbeatMs: 20, noProgressMs: 60_000,
+    });
+    assert.ok(events.some(event => event.last_progress?.bytes === 1));
+    assert.equal(events.at(-1).event, "completed");
+    assert.equal(events.at(-1).last_transfer.bytes, 10);
+    assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE|Authorization|config.json/);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("upstream pip watchdog closes its owned child on repeated or decreasing transfer counts", async (t) => {
@@ -1190,6 +1205,29 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
       assert.throws(() => process.kill(pid, 0), /ESRCH/);
       assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("upstream pip spawn watchdog remains active before any recognized download", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-startup-stall-"));
+  const pidPath = path.join(root, "child.pid"), events = [];
+  let clock = 0;
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    console.log('Unrecognized startup FIXTURE_PRIVATE'); setInterval(() => {}, 20);`;
+  try {
+    await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 4096 }, {
+      now: () => clock,
+      emit: line => {
+        const event = JSON.parse(line); events.push(event);
+        // The filesystem handshake is not pip progress: advancing this invocation's clock past
+        // its spawn deadline must still stop the child WITHOUT a recognized download event.
+        if (event.event === "waiting" && existsSync(pidPath)) clock = 101;
+      },
+      heartbeatMs: 10, noProgressMs: 100,
+    }), /no_observable_download_progress/);
+    const pid = Number(await readFile(pidPath, "utf8"));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -1257,10 +1295,15 @@ test("both corpus workflows validate reuse before acquisition and validate new m
 
 
 test("upstream pip resets progress for a smaller second wheel without masking a stalled transfer", async () => {
-  const events = [];
-  // pip25.0.1 logs Downloading before each response and its raw renderer starts
-  // current at zero for each wheel. Keep wheel2 advancing longer than the
-  // watchdog interval, with every count smaller than wheel1's final count.
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-second-wheel-"));
+  const acknowledged = path.join(root, "five-bytes-observed"), events = [];
+  const origin = Date.now();
+  let firstDownloadAt = null;
+  // This invocation's clock excludes ONLY child startup. Once the first recognized download
+  // arrives it advances in real time, keeping the 2500ms progress budget and 5000ms process bound.
+  const now = () => origin + (firstDownloadAt === null ? 0 : Date.now() - firstDownloadAt);
+  // pip starts each wheel at zero. Hold the asserted midpoint until the real parent heartbeat
+  // samples it, rather than assuming the parent is scheduled between two fixed child timers.
   const script = `
     console.log('Downloading https://download-r2.pytorch.org/whl/cu128/torch-2.7.1%2Bcu128-cp312-cp312-win_amd64.whl');
     console.log('Progress 5000 of 5000');
@@ -1268,17 +1311,33 @@ test("upstream pip resets progress for a smaller second wheel without masking a 
       console.log('Downloading https://download-r2.pytorch.org/whl/cu128/torchvision-0.22.1%2Bcu128-cp312-cp312-win_amd64.whl');
       console.log('Progress 0 of 10');
       let bytes = 0;
-      const timer = setInterval(() => {
+      const next = () => {
         console.log('Progress '+(++bytes)+' of 10');
-        if (bytes === 10) { clearInterval(timer); console.log('Installing collected packages: torch, torchvision'); }
-      }, 80);
+        if (bytes === 10) { console.log('Installing collected packages: torch, torchvision'); return; }
+        if (bytes === 5) {
+          const wait = setInterval(() => {
+            if (!require('node:fs').existsSync(${JSON.stringify(acknowledged)})) return;
+            clearInterval(wait); setTimeout(next, 80);
+          }, 20);
+        } else setTimeout(next, 80);
+      };
+      setTimeout(next, 80);
     }, 80);`;
-  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 16384 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 25, noProgressMs: 2500 });
-  assert.deepEqual(events.filter(event => event.event === "download_started").map(event => event.package), ["torch", "torchvision"]);
-  assert.ok(events.some(event => event.last_progress?.bytes === 5 && event.last_progress?.total_bytes === 10));
-  assert.equal(events.at(-1).event, "completed");
-  assert.equal(events.at(-1).last_transfer.bytes, 10);
-  assert.equal(events.at(-1).last_transfer.total_bytes, 10);
+  try {
+    await runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 16384 }, {
+      emit: line => {
+        const event = JSON.parse(line); events.push(event);
+        if (event.event === "download_started" && firstDownloadAt === null) firstDownloadAt = Date.now();
+        if (event.event === "waiting" && event.last_progress?.bytes === 5 && event.last_progress?.total_bytes === 10) writeFileSync(acknowledged, "observed");
+      },
+      heartbeatMs: 25, noProgressMs: 2500, now,
+    });
+    assert.deepEqual(events.filter(event => event.event === "download_started").map(event => event.package), ["torch", "torchvision"]);
+    assert.ok(events.some(event => event.last_progress?.bytes === 5 && event.last_progress?.total_bytes === 10));
+    assert.equal(events.at(-1).event, "completed");
+    assert.equal(events.at(-1).last_transfer.bytes, 10);
+    assert.equal(events.at(-1).last_transfer.total_bytes, 10);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 
