@@ -64,7 +64,7 @@ pub fn verified_converted_artifact_problem(converter: &str, dir: &Path) -> Optio
     if !CONTRACT_CONVERTERS.contains(&converter) {
         return None;
     }
-    static VERIFIED: OnceLock<Mutex<HashSet<(PathBuf, Vec<FileStamp>)>>> = OnceLock::new();
+    static VERIFIED: OnceLock<Mutex<HashSet<ArtifactStamp>>> = OnceLock::new();
     let key = (dir.to_path_buf(), file_stamps(dir));
     let verified = VERIFIED.get_or_init(Mutex::default);
     if verified
@@ -84,6 +84,8 @@ pub fn verified_converted_artifact_problem(converter: &str, dir: &Path) -> Optio
 }
 
 type FileStamp = (String, u64, Option<SystemTime>);
+/// One artifact state: its directory plus the stamps of every top-level file.
+type ArtifactStamp = (PathBuf, Vec<FileStamp>);
 
 fn file_stamps(dir: &Path) -> Vec<FileStamp> {
     let mut stamps: Vec<FileStamp> = std::fs::read_dir(dir)
