@@ -162,6 +162,15 @@ temp directory, not ambient shared TEMP. The launcher verifies current producer 
 source/pin/recipe, and actual sealed binary bytes. Arbitrary older executables,
 mixed pins, source changes during build and re-labelled receipts are rejected.
 
+The fixed `binaryRole` is `api-worker` (default) or `resource-adapter`, not a caller
+build command. The resource role builds package `sceneworks-memory-adapter`, bin
+`memory-candle-adapter` with feature `candle` on Windows, or bin
+`memory-mlx-adapter` with feature `mlx` on the secondary Mac, using the same locked
+offline native-target release recipe. Its separately sealed receipt is bound in
+`approvedPlan.resourceBuildReceipts[backend]`; an API/worker build receipt cannot
+stand in for the actual resource adapter executable. Both role receipts are needed
+before the combined physical campaign is approved.
+
 ### Immutable global budget and local single-use ledgers
 
 `approved-plan.json` has `schemaVersion:1`, `kind:"flux3-terminal-plan-approval"`,
@@ -210,7 +219,24 @@ before EACH actual native `Generator.generate`, with `kind:"resource_anchor"` or
 `"resource_supplemental"`, exact approved invocation/backend/case ID and normalized
 `requestSha256`. Resource reservation refuses the current BLOCKED boundary state;
 a self-reported one-call flag is insufficient. This contract is **not** a claim
-that the unverified native harness already enforces it. Return the latest audited
+that the unverified native harness already enforces it.
+
+The synchronous adapter-child permit CLI must first call shared
+`verifyResourceProducerHardware(admission, context)`, with exact `adapterPid`,
+`caseId`, `invocationId`, normalized `requestSha256`, `approvedPlanSha256`,
+`sourceSha` and `binarySha256`. It verifies that its **actual parent PID** is the
+adapter, inspects that process's real executable path/start identity, verifies
+that executable against the sealed resource-role build, and observes hardware
+using the existing guard. Candle requires that actual adapter PID in GPU1's
+compute-apps UUID observation; Mac requires the observed secondary host/arm64
+runtime and monitored exclusive lease. Re-labelled metadata alone never passes.
+A second process observation rejects exited/reused PIDs. The returned bound
+hardware observation is retained with the reservation, before native generation;
+this verifier never spends a second permit. A missing collector/proof blocks
+resource execution rather than accepting request labels. Real boundary/hardware/
+build verification remains required before resource rows become READY.
+
+Return the latest audited
 receipt per backend to the coordinator, who aggregates unique IDs against the same
 global plan and total <=38 approved / <=48 hard ceiling. Full exact manifests,
 contiguous event sequences/hash chains, unique backend receipts, final state

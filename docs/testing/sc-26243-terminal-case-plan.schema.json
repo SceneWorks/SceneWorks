@@ -37,6 +37,7 @@
         "ledgerRoots": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "type": "string", "minLength": 1 }, "candle": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
         "inputSpecSha256": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/sha256" }, "candle": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
         "buildReceipts": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/buildBinding" }, "candle": { "$ref": "#/$defs/buildBinding" } }, "additionalProperties": false },
+        "resourceBuildReceipts": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/buildBinding" }, "candle": { "$ref": "#/$defs/buildBinding" } }, "additionalProperties": false },
         "plan": { "allOf": [{ "$ref": "#" }, { "properties": { "kind": { "const": "flux3-installed-product-representative-plan" } } }] }
       }, "additionalProperties": false
     },

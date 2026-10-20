@@ -53,7 +53,7 @@ export function offlineChildEnv(env, admission, identity, url) {
 const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class TerminalCudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); }'; if([TerminalCudaIdentity]::cuInit(0) -ne 0){throw "CUDA init"}; $n=0; if([TerminalCudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA mask"}; $d=0; if([TerminalCudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal"}; $u=New-Object byte[] 16; if([TerminalCudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12))`;
 export async function observeProcessTable(checked, platform) {
   if (platform === 'win32') {
-    const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}} | ConvertTo-Json -Compress';
+    const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}},@{n="executable";e={$_.ExecutablePath}},@{n="startedAt";e={$_.CreationDate.ToUniversalTime().ToString("o")}} | ConvertTo-Json -Compress';
     const value = JSON.parse((await checked('powershell.exe', ['-NoProfile','-Command',script], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout); return Array.isArray(value) ? value : [value];
   }
   const text = (await checked('ps', ['-axo','pid=,ppid=,lstart=,comm='], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout;
@@ -80,7 +80,7 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     assert.deepEqual([...runners.map(p => p.pid)].sort(), [...(lease.ancestorRunnerPids ?? [])].sort(), 'runner lease must identify the actual hosting ancestors, not foreign runners');
     assert(Array.isArray(lease.baselineProcesses));
     for (const p of table.filter(p => p.pid > 0)) { if (processAncestors(table, p.pid).has(controllerPid) || ownPids.includes(p.pid)) continue; assert(lease.baselineProcesses.some(old => old.pid === p.pid && old.ppid === p.ppid && old.command === p.command && old.startedAt === p.startedAt && p.startedAt), 'new/reused foreign process invalidates exclusive Metal lease; return admission to coordinator'); }
-    return { runner: a.runner, runnerTarget: a.runnerTarget, runnerLabel: a.runnerLabel, host, backend: 'mlx', coordinatorLeaseId: lease.coordinatorApprovalId, exclusivity: 'coordinator-attested-and-process-monitored' };
+    return { runner: a.runner, runnerTarget: a.runnerTarget, runnerLabel: a.runnerLabel, host, runtime: { platform, arch }, backend: 'mlx', coordinatorLeaseId: lease.coordinatorApprovalId, exclusivity: 'coordinator-attested-and-process-monitored' };
   }
   assert.equal(platform, 'win32');
     const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
@@ -97,6 +97,30 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   const apps = (await smi(['--query-compute-apps=pid,gpu_uuid', '--format=csv,noheader,nounits'])).split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(x => x.trim()));
   for (const [pid, device] of apps) { assert(Number.isInteger(Number(pid)) && Number(pid) > 0 && /^GPU-/i.test(device), 'compute-app identity unavailable'); if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0'); else assert.notEqual(device.toLowerCase(), uuid.toLowerCase(), 'foreign process actually computing on GPU1 (including C+G)'); }
   return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)) };
+}
+// Called ONLY by the adapter's synchronous native-boundary child CLI, before reservation.
+// No resource template can supply its own process/build/hardware observation.
+export async function verifyResourceProducerHardware(a, context, dependencies = {}) {
+  const io = { validate: validateAdmission, verifyBuild: async admission => (await import('./flux3-image-klein-terminal-build.mjs')).verifyTerminalBuild(admission, { role: 'resource-adapter' }), guard: guardHardware, exec: execFile, hash: fileHash, realpath, parentPid: process.ppid, controllerPid: process.pid, platform: process.platform, env: process.env, ...dependencies };
+  assert(Number.isInteger(context.adapterPid) && context.adapterPid > 0 && context.adapterPid === io.parentPid, 'native-boundary CLI must be the ACTUAL adapter child, not a caller-labelled PID');
+  await io.validate(a, a.backend); await io.verifyBuild(a);
+  const approved = validateApprovedPlan(a.approvedPlan); assert.equal(context.approvedPlanSha256, approved.approvedPlanSha256); assert.equal(a.approvedPlanSha256, approved.approvedPlanSha256);
+  assert.equal(a.approvedPlan.sourceSha, a.sourceSha); assert.equal(a.approvedPlan.inferenceMainSha, a.inferenceMainSha);
+  for (const key of ['sourceSha','binarySha256']) assert.equal(context[key], a[key], 'adapter context does not match sealed source/build');
+  const invocation = a.approvedPlan.plan.generationInvocations.find(i => i.invocationId === context.invocationId);
+  assert(invocation && invocation.backend === a.backend && invocation.caseId === context.caseId && ['resource_anchor','resource_supplemental'].includes(invocation.kind), 'actual resource invocation is absent from immutable backend plan');
+  assert(digestPattern.test(context.requestSha256) && invocation.requestSha256 === context.requestSha256, 'actual resource request differs from immutable normalized request');
+  const checked = (command, args, options = {}) => io.exec(command, args, { ...options, env: { ...safeEnvironment(io.env), ...options.env } });
+  const observe = io.processTable ?? (() => observeProcessTable(checked, io.platform));
+  const before = await observe(), producer = before.find(p => p.pid === context.adapterPid);
+  assert(producer?.startedAt && before.some(p => p.pid === io.controllerPid && p.ppid === context.adapterPid), 'actual adapter/inner CLI process identity unavailable');
+  const executable = producer.executable ?? producer.command; assert(path.isAbsolute(executable ?? ''), 'actual adapter executable path unavailable; process name is not compiled identity');
+  const resolved = await io.realpath(executable); assert.equal(resolved, await io.realpath(a.binary), 'actual adapter process is not the sealed admitted executable'); assert.equal(await io.hash(resolved), a.binarySha256, 'actual running adapter executable bytes differ from owned build');
+  const proof = await io.guard(a, [context.adapterPid]);
+  if (a.backend === 'candle') { assert.equal(proof.physicalGpuId, '1'); assert.equal(proof.gpuUuid?.toLowerCase(), a.gpuUuid.toLowerCase()); assert.equal(proof.logicalCudaOrdinal, 0); assert(proof.ownComputePids?.includes(context.adapterPid), 'actual adapter PID/GPU1 UUID compute observation missing'); }
+  else { assert.equal(proof.runner, 'nax-macos-2'); assert.equal(proof.host?.split('.')[0], a.hostName); assert.deepEqual(proof.runtime, { platform: 'darwin', arch: 'arm64' }); assert(proof.coordinatorLeaseId && proof.exclusivity === 'coordinator-attested-and-process-monitored', 'actual secondary Mac exclusive runtime observation missing'); }
+  const after = (await observe()).find(p => p.pid === context.adapterPid); assert.deepEqual(after, producer, 'adapter exited/changed identity during hardware observation');
+  return { kind: 'flux3-resource-producer-hardware-observation', backend: a.backend, adapterPid: context.adapterPid, caseId: context.caseId, invocationId: context.invocationId, requestSha256: context.requestSha256, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt.sha256, approvedPlanSha256: approved.approvedPlanSha256, observedAt: new Date().toISOString(), adapterProcess: producer, proof };
 }
 export class ProvisioningBlocked extends Error {}
 export async function launchTerminalSession(a, dependencies = {}) {
