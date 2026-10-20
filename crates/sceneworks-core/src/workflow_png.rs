@@ -1507,10 +1507,16 @@ mod tests {
         // NUL in a small chunk: nothing before the inflate can refuse it, so if the second pass
         // reached a laxer decompress this would cost 8 MiB for a few kB of theirs.
         let bomb = "\0".repeat(8 * 1024 * 1024);
+        let bomb_len = bomb.len();
         let tail = framed(&workflow_chunk(bomb));
         let spliced = splice_before_iend(&png_with(&[]), &tail);
+        // At least 64:1 is the property under test; the exact size is the deflate backend's.
+        // Feature unification can select flate2's zlib-rs backend workspace-wide (inference
+        // 46c22c01e's gen-core links `zip`, whose deflate feature candle-core enables), which takes
+        // 8 MiB of NUL to ~80 KB rather than miniz_oxide's few kB — still a bomb by two orders of
+        // magnitude, so the bound is the ratio rather than one backend's output.
         assert!(
-            spliced.len() < 64 * 1024,
+            spliced.len() < bomb_len / 64,
             "the bomb must stay small on disk or it is not testing the ratio: {} bytes",
             spliced.len()
         );
@@ -2218,8 +2224,10 @@ mod tests {
         // only thing standing between this and 8 MiB of our memory for a few kB of theirs.
         let bomb = "\0".repeat(8 * 1024 * 1024);
         let png = png_with_workflow_text(&bomb);
+        // A ratio, not one deflate backend's output size: see
+        // `a_zip_bomb_after_the_image_data_refuses_instead_of_inflating`.
         assert!(
-            png.len() < 64 * 1024,
+            png.len() < bomb.len() / 64,
             "the bomb must stay small on disk or it is not testing the ratio: {} bytes",
             png.len()
         );
