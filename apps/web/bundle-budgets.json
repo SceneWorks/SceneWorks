@@ -6,8 +6,8 @@
   },
   "total": {
     "rawBytes": 3200000,
-    "gzipBytes": 862405,
-    "brotliBytes": 736096
+    "gzipBytes": 863429,
+    "brotliBytes": 737120
   },
   "largestRoute": {
     "rawBytes": 1100000,
