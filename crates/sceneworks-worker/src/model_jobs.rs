@@ -3862,6 +3862,96 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     )
 }
 
+/// Exact PUP package handoff: every file the native package can consume must belong to the
+/// verified download inventory, including an optional shipped system-prompt override. A compatible
+/// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
+    use gen_core::flux3::pup::{
+        SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
+    };
+    let resolved = huggingface_receipt_weights_with_revision(
+        data_dir,
+        UPSAMPLER_REPO,
+        Some("flux3_image_klein_pup"),
+        None,
+        Some(UPSAMPLER_REVISION),
+        ProvenanceRepair::Allow,
+    )?;
+    let identity = &resolved.provenance.as_ref()?.identity;
+    if identity.repository != UPSAMPLER_REPO || identity.revision != UPSAMPLER_REVISION {
+        return None;
+    }
+    let root = &resolved.snapshot;
+    let repo = huggingface_repo_cache_path(data_dir, UPSAMPLER_REPO)?;
+    let canonical_repo = std::fs::canonicalize(&repo).ok()?;
+    if !canonical_repo.starts_with(std::fs::canonicalize(huggingface_hub_cache_dir(data_dir)).ok()?)
+        || !std::fs::canonicalize(root)
+            .ok()?
+            .starts_with(canonical_repo.join("snapshots"))
+    {
+        return None;
+    }
+    let files = resolved.receipt.get("resolvedFiles")?.as_array()?;
+    for file in files {
+        let file = file.as_str()?;
+        let path = safe_join(root, file).ok()?;
+        crate::flux3_snapshot_member(root, &path, false).ok()?;
+    }
+    for name in UPSAMPLER_REQUIRED_FILES.into_iter().chain(
+        root.join(SYSTEM_PROMPTS_FILE)
+            .exists()
+            .then_some(SYSTEM_PROMPTS_FILE),
+    ) {
+        if !files.iter().any(|file| file.as_str() == Some(name)) {
+            return None;
+        }
+        crate::flux3_snapshot_member(root, &root.join(name), false).ok()?;
+    }
+    // Both native LLM loaders discover *all* root safetensors, and optional sidecars such as
+    // generation_config.json change inference behavior. Bind the complete discovered tree, not
+    // an allowlist of required names. Download receipts and HF metadata live outside snapshots;
+    // no hidden file or other snapshot member is exempt from this inventory comparison.
+    fn consume_inventory(
+        root: &Path,
+        dir: &Path,
+        inventory: &mut std::collections::HashSet<String>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+    ) -> Option<()> {
+        crate::flux3_snapshot_member(root, dir, true).ok()?;
+        if !visited.insert(std::fs::canonicalize(dir).ok()?) {
+            return None;
+        }
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                consume_inventory(root, &path, inventory, visited)?;
+            } else {
+                crate::flux3_snapshot_member(root, &path, false).ok()?;
+                let relative = path.strip_prefix(root).ok()?.to_str()?.replace('\\', "/");
+                if !path.is_file() || !inventory.remove(&relative) {
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+    let mut inventory = files
+        .iter()
+        .map(|file| file.as_str().map(str::to_owned))
+        .collect::<Option<std::collections::HashSet<_>>>()?;
+    if inventory.len() != files.len() {
+        return None;
+    }
+    consume_inventory(
+        root,
+        root,
+        &mut inventory,
+        &mut std::collections::HashSet::new(),
+    )?;
+    inventory.is_empty().then(|| root.clone())
+}
+
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,

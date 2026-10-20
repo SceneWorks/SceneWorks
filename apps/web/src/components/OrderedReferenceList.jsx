@@ -22,8 +22,8 @@ import { moveReference, referenceOrdinalLabel } from "../imageReferenceLimits.js
 //  * the order is EDITABLE in place, because the only alternative was to remove every reference and
 //    re-add them in the right sequence.
 //
-// Renders nothing for an empty or single-item list: with one reference there is no order to show or
-// change, and an empty rail is noise next to a picker that already says "none selected".
+// Ordering-only callers hide empty/single lists. An instance-removal owner keeps its rail mounted
+// through 2 -> 1 -> 0 so the last attachment remains removable without changing selection modes.
 export function OrderedReferenceList({
   assetIds = [],
   onChange,
@@ -35,7 +35,7 @@ export function OrderedReferenceList({
   onMove,
   onRemove,
 }) {
-  if (!Array.isArray(assetIds) || assetIds.length < 2) {
+  if (!Array.isArray(assetIds) || (assetIds.length < 2 && !onRemove)) {
     return null;
   }
   const move = (from, to) => onMove ? onMove(from, to) : onChange(moveReference(assetIds, from, to));

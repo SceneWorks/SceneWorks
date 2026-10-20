@@ -8277,10 +8277,10 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     .unwrap_err()
     .to_string()
     .contains("duplicate"));
-    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+    let fact = take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .expect("the report remains available for its image");
     assert_eq!(fact["effectivePrompt"], "a red fox");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("no prompt-enhancement report"));
@@ -8294,7 +8294,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("another prompt", "a red fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not match"));
@@ -8308,7 +8308,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("a fox", "a fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not rewrite"));
@@ -8334,11 +8334,11 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     )
     .expect("first image report is accepted second");
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev").unwrap()["effectivePrompt"],
         "a fox in snowfall"
     );
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 1, "flux2_dev").unwrap()["effectivePrompt"],
         "a moonlit owl"
     );
 }

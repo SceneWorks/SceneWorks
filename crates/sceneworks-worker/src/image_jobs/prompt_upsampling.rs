@@ -93,25 +93,28 @@ pub(super) fn attach_prompt_upsampler(
             "FLUX 3 enhancement requires the pinned optional {UPSAMPLER_COMPONENT} component: {UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}; refresh the model catalog"
         )));
     }
-    let source = crate::model_jobs::resolve_optional_component(&manifest, UPSAMPLER_COMPONENT, settings)
+    let dir = crate::model_jobs::flux3_prompt_upsampler_snapshot(&settings.data_dir)
         .ok_or_else(|| WorkerError::InvalidPayload(format!(
-            "Install FLUX 3 Prompt Upsampler ({UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}) in Models before enabling Enhance prompt, or turn enhancement off"
+            "Install or reinstall FLUX 3 Prompt Upsampler ({UPSAMPLER_REPO} @ {UPSAMPLER_REVISION}) in Models: its exact receipt, complete inventory and contained files must verify before enabling Enhance prompt; or turn enhancement off"
         )))?;
-    let WeightsSource::Dir(dir) = &source else {
-        return Err(WorkerError::InvalidPayload(
-            "FLUX 3 prompt_upsampler must be a complete package directory, not a single file"
-                .to_owned(),
-        ));
-    };
-    UpsamplePackage::check(dir).map_err(|error| WorkerError::InvalidPayload(format!(
+    UpsamplePackage::check(&dir).map_err(|error| WorkerError::InvalidPayload(format!(
         "FLUX 3 prompt_upsampler is incomplete or incompatible: {error}; reinstall FLUX 3 Prompt Upsampler or turn enhancement off"
     )))?;
-    Ok(spec.with_component(UPSAMPLER_COMPONENT, source))
+    Ok(spec.with_component(UPSAMPLER_COMPONENT, WeightsSource::Dir(dir)))
 }
 
+#[cfg(test)]
 pub(super) fn prompt_enhancement_fact(
     report: gen_core::PromptEnhancementReport,
     requested_prompt: &str,
+) -> WorkerResult<Value> {
+    prompt_enhancement_fact_for_model(report, requested_prompt, "flux2_dev")
+}
+
+pub(super) fn prompt_enhancement_fact_for_model(
+    report: gen_core::PromptEnhancementReport,
+    requested_prompt: &str,
+    model: &str,
 ) -> WorkerResult<Value> {
     if report.original_prompt != requested_prompt {
         return Err(WorkerError::Engine(
@@ -150,9 +153,29 @@ pub(super) fn prompt_enhancement_fact(
             ("enhanced", None)
         }
         gen_core::PromptEnhancementOutcome::Fallback => {
-            if report.effective_prompt != report.original_prompt {
+            // FLUX 3's native aspect-ratio bypass still appends the trusted locked canvas
+            // table. Legacy FLUX.2 has no locked annotations and must preserve the prompt exactly.
+            let expected = match report.locked_annotations.as_deref() {
+                Some(rows) if matches!(model, "flux3_klein" | "flux3_klein_base") => {
+                    let rows = gen_core::flux3::pup::loads(rows).map_err(|error| {
+                        WorkerError::Engine(format!("invalid fallback locked annotations: {error}"))
+                    })?;
+                    if !rows.as_array().is_some_and(|rows| !rows.is_empty()) {
+                        return Err(WorkerError::Engine(
+                            "fallback locked annotations must be a nonempty array".to_owned(),
+                        ));
+                    }
+                    format!(
+                        "{} {}",
+                        gen_core::flux3::pup::py_rstrip(&report.original_prompt),
+                        gen_core::flux3::pup::dumps(&rows)
+                    )
+                }
+                _ => report.original_prompt.clone(),
+            };
+            if report.effective_prompt != expected {
                 return Err(WorkerError::Engine(
-                    "fallback prompt report did not preserve the original prompt".to_owned(),
+                    "fallback prompt report did not preserve the canonical original prompt and locked annotations".to_owned(),
                 ));
             }
             let reason = report
@@ -265,6 +288,40 @@ mod tests {
         .unwrap();
     }
 
+    fn receipt_fixture(settings: &Settings, snapshot: &Path, revision: &str) -> PathBuf {
+        fn members(root: &Path, dir: &Path, files: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    members(root, &path, files);
+                } else {
+                    files.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
+        }
+        let mut files = Vec::new();
+        members(snapshot, snapshot, &mut files);
+        files.sort();
+        let marker = settings
+            .data_dir
+            .join("models")
+            .join(crate::paths::safe_download_dir("flux3_image_klein_pup"))
+            .join(crate::INSTALL_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": UPSAMPLER_REPO, "modelId": "flux3_image_klein_pup",
+            "variant": "default", "snapshotRevision": revision, "resolvedFiles": files,
+            "artifactTreeStamp": crate::model_jobs::resolved_files_tree_stamp(snapshot, &files).unwrap(),
+        })).unwrap()).unwrap();
+        marker
+    }
+
     #[test]
     fn bypass_and_other_engines_never_require_or_attach_the_optional_model() {
         let (_root, settings, _env) = setup();
@@ -299,11 +356,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            missing.contains("Install FLUX 3 Prompt Upsampler"),
+            missing.contains("FLUX 3 Prompt Upsampler") && missing.contains("receipt"),
             "{missing}"
         );
         let pinned = repo.join("snapshots").join(UPSAMPLER_REVISION);
         package_shape(&pinned);
+        assert!(
+            attach_prompt_upsampler(spec(), "flux3_klein", &req, &settings).is_err(),
+            "a directory named after the pin is not receipt proof"
+        );
+        receipt_fixture(&settings, &repo.join("snapshots").join(stale), stale);
+        assert!(
+            attach_prompt_upsampler(spec(), "flux3_klein", &req, &settings).is_err(),
+            "another revision receipt cannot authorize the pinned package"
+        );
+        // Explicit synthetic receipt fixture: marker weights are never model-load authorization
+        // outside this isolated data directory; production requires the downloader-owned receipt.
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
         for engine_id in ["flux3_klein", "flux3_klein_base"] {
             let mut model_request = req.clone();
             model_request.model = engine_id.to_owned();
@@ -328,7 +397,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            incomplete.contains("chat_template.jinja") && incomplete.contains("reinstall"),
+            incomplete.contains("inventory") && incomplete.contains("reinstall"),
             "{incomplete}"
         );
         package_shape(&pinned);
@@ -337,6 +406,7 @@ mod tests {
             br#"{"model_type":"llama","vision_config":{}}"#,
         )
         .unwrap();
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
         assert!(
             attach_prompt_upsampler(spec(), "flux3_klein", &req, &settings)
                 .unwrap_err()
@@ -350,6 +420,140 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("pinned optional")
+        );
+    }
+
+    #[test]
+    fn pup_receipt_covers_every_consumed_weight_tokenizer_and_sidecar() {
+        let (_root, settings, _env) = setup();
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        let system = gen_core::flux3::pup::SYSTEM_PROMPTS_FILE;
+        for name in UPSAMPLER_REQUIRED_FILES.into_iter().chain([system]) {
+            package_shape(&pinned);
+            std::fs::write(pinned.join(system), b"receipted system prompt fixture").unwrap();
+            receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_ok(),
+                "{name}: positive receipt control"
+            );
+            std::fs::write(pinned.join(name), b"changed after verified install").unwrap();
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+                "{name}: mutated consumed member must fail before load"
+            );
+        }
+        package_shape(&pinned);
+        std::fs::remove_file(pinned.join(system)).unwrap();
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+        std::fs::write(pinned.join(system), b"unreceipted override").unwrap();
+        assert!(
+            attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+            "a newly added system override cannot bypass the inventory stamp"
+        );
+    }
+
+    #[test]
+    fn pup_receipt_rejects_added_shards_generation_config_and_other_unlisted_members() {
+        let (_root, settings, _env) = setup();
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        package_shape(&pinned);
+        for name in [
+            "z-override.safetensors",
+            "generation_config.json",
+            "model.safetensors.index.json",
+            "processor_config.json",
+            ".unlisted-sidecar",
+        ] {
+            receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_ok()
+            );
+            std::fs::write(pinned.join(name), br#"{"eos_token_id":[7,17]}"#).unwrap();
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+                "{name}: an unlisted discovered input cannot bypass the receipt"
+            );
+            receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_ok(),
+                "{name}: the complete genuine fixture inventory is accepted"
+            );
+            std::fs::write(pinned.join(name), b"changed receipted discovered member").unwrap();
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+                "{name}: newly covered members retain stamp validation"
+            );
+            std::fs::remove_file(pinned.join(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn pup_receipt_rejects_snapshot_directory_escape_before_load() {
+        let (_root, settings, _env) = setup();
+        let external = tempfile::tempdir().unwrap();
+        package_shape(external.path());
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        std::fs::create_dir_all(pinned.parent().unwrap()).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(pinned.to_string_lossy().replace('/', "\\"))
+            .arg(external.path().to_string_lossy().replace('/', "\\"))
+            .status()
+            .unwrap()
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &pinned).unwrap();
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+        assert!(attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(), "even a stamped inventory cannot authorize a snapshot redirected outside its repository");
+    }
+
+    #[test]
+    fn pup_receipt_rejects_receipted_shard_through_directory_escape() {
+        let (_root, settings, _env) = setup();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("z-override.safetensors"),
+            b"external shard fixture",
+        )
+        .unwrap();
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        package_shape(&pinned);
+        let escape = pinned.join("escaped");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(escape.to_string_lossy().replace('/', "\\"))
+            .arg(external.path().to_string_lossy().replace('/', "\\"))
+            .status()
+            .unwrap()
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &escape).unwrap();
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+        assert!(
+            attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+            "a listed and stamped shard must still remain in the snapshot or its own HF blob store"
         );
     }
 
@@ -714,6 +918,137 @@ mod tests {
                         "missing {detail}: {posts:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_aspect_fallback_with_layout_survives_real_consumer_but_not_annotation_tampering(
+    ) {
+        use crate::image_jobs::*;
+        use gen_core::flux3::pup::{
+            self, UpsampleDecision, UpsampleOptions, UpsamplePackage, UpsamplerInput,
+        };
+        let package_dir = tempfile::tempdir().unwrap();
+        package_shape(package_dir.path());
+        std::fs::write(package_dir.path().join("tokenizer.json"), serde_json::to_vec(&json!({
+            "version":"1.0", "truncation":null, "padding":null, "added_tokens":[],
+            "normalizer":null, "pre_tokenizer":{"type":"Whitespace"}, "post_processor":null, "decoder":null,
+            "model":{"type":"WordLevel", "vocab":{"[UNK]":0,"budget":1}, "unk_token":"[UNK]"}
+        })).unwrap()).unwrap();
+        std::fs::write(package_dir.path().join("chat_template.jinja"), "budget").unwrap();
+        let package = UpsamplePackage::open(package_dir.path()).unwrap();
+        let input = UpsamplerInput {
+            prompt: "move the vase  ".to_owned(),
+            references: vec![pup::ReferenceImage::Rgb8 {
+                width: 16,
+                height: 4096,
+                pixels: vec![127; 16 * 4096 * 3],
+            }],
+            boxes: Some(
+                pup::BoxSpec::parse_list(
+                    r#"[{"id":"obj_1","desc":"locked vase","bbox":[0.1,0.2,0.3,0.4]}]"#,
+                )
+                .unwrap(),
+            ),
+            mode: UpsampleMode::EditingWithBoxes,
+            bypass: false,
+        };
+        let UpsampleDecision::Bypass(outcome) =
+            pup::decide(&input, &package, &UpsampleOptions::default()).unwrap()
+        else {
+            panic!("extreme valid reference aspect must use native fallback");
+        };
+        assert_eq!(
+            outcome.report.fallback_reason.as_deref(),
+            Some("reference_aspect_ratio")
+        );
+        assert_ne!(outcome.caption, input.prompt);
+        assert!(
+            prompt_enhancement_fact(outcome.report.clone(), &input.prompt).is_err(),
+            "FLUX.2 fallback remains original-prompt-only"
+        );
+        for tamper in ["none", "caption", "locked"] {
+            let dir = tempfile::tempdir().unwrap();
+            let payload = json!({"projectId":"p", "model":"flux3_klein", "mode":"edit_image",
+                "prompt":input.prompt, "advanced":{"enhancePrompt":true}});
+            let request = ImageRequest::from_payload(payload.as_object().unwrap());
+            let plan = ImagePlan::with_count(&request, 1, None);
+            let (url, _) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+            let mut settings = crate::tests::test_settings(url.clone(), None);
+            settings.api_url = url.clone();
+            assert_eq!(settings.api_url, url, "use only the owned API stub");
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-1", false)).unwrap();
+            let mut report = outcome.report.clone();
+            if tamper == "caption" {
+                report.effective_prompt = report
+                    .effective_prompt
+                    .replace("locked vase", "forged vase");
+            }
+            if tamper == "locked" {
+                report.locked_annotations = report
+                    .locked_annotations
+                    .map(|rows| rows.replace("locked vase", "forged vase"));
+            }
+            let expected_prompt = input.prompt.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            let blocking = tokio::task::spawn_blocking(move || {
+                tx.blocking_send(GenEvent::PromptEnhancement {
+                    index: 0,
+                    expected_prompt,
+                    report,
+                })
+                .unwrap();
+                tx.blocking_send(GenEvent::Image {
+                    index: 0,
+                    seed: 17,
+                    width: 64,
+                    height: 64,
+                    pixels: vec![128; 64 * 64 * 3],
+                    face_likeness: None,
+                })
+                .unwrap();
+                Ok(())
+            });
+            let mut assets = Vec::new();
+            let result = consume_gen_events(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                dir.path(),
+                "candle",
+                "flux3",
+                &request.advanced,
+                1,
+                rx,
+                CancelFlag::new(),
+                blocking,
+                &mut assets,
+            )
+            .await;
+            if tamper == "none" {
+                result.unwrap();
+                let fact = &assets[0]["rawAdapterSettings"]["promptEnhancement"];
+                assert_eq!(fact["outcome"], "fallback");
+                assert_eq!(fact["originalPrompt"], input.prompt);
+                assert_eq!(fact["effectivePrompt"], outcome.caption);
+                assert_eq!(
+                    fact["lockedAnnotations"],
+                    outcome.report.locked_annotations.clone().unwrap()
+                );
+            } else {
+                assert!(
+                    result.unwrap_err().to_string().contains("canonical"),
+                    "{tamper}"
+                );
+                assert!(
+                    assets.is_empty(),
+                    "tampered annotations never reach asset persistence"
+                );
             }
         }
     }

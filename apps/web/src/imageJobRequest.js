@@ -44,9 +44,13 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText 
 
 // Canonical emitted references, also used by Studio geometry eligibility. Hidden picker state
 // must never grant a reference-only sizing policy to a request that does not emit that input.
-export function imageJobReferences({ mode, multiReference, sourceWithMultiReference, editSecondPair,
+export function imageJobReferences({ model, mode, multiReference, orderedCharacterReferences = false, sourceWithMultiReference, editSecondPair,
   sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
   supportsImg2img, img2imgReferenceAssetId }) {
+  if (mode === "character_image" && orderedCharacterReferences &&
+      (model === "flux3_klein" || model === "flux3_klein_base")) {
+    return { sourceAssetId: null, referenceAssetIds, referenceAssetId: null };
+  }
   const edit = mode === "edit_image";
   return {
     sourceAssetId: edit && !multiReference
