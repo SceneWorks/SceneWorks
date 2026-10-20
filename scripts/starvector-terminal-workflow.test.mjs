@@ -33,6 +33,16 @@ async function availableLoopbackPort() {
 
 async function executableAlias(destination) {
   await mkdir(path.dirname(destination), { recursive: true });
+  if (process.platform === "win32") {
+    // Node 20/libuv cannot unlink another hardlink of its own live executable on Windows.
+    // An independent equal-byte copy keeps fixture cleanup independent of the test runner.
+    await copyFile(process.execPath, destination);
+    const [source, target] = await Promise.all([stat(process.execPath), stat(destination)]);
+    assert.notEqual(target.ino, source.ino, "Windows executable fixture must not hardlink the live test runner");
+    assert.equal(target.nlink, 1, "Windows executable fixture must own its file identity");
+    assert.equal(hash(await readFile(destination)), hash(await readFile(process.execPath)));
+    return;
+  }
   let copied = false;
   try { await link(process.execPath, destination); } catch (error) {
     if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error;
@@ -41,6 +51,24 @@ async function executableAlias(destination) {
   }
   if (copied && process.platform !== "win32") await chmod(destination, 0o755);
 }
+
+test("Windows executable fixture copies retain exact bytes with independent identity and clean up", { timeout: 15_000, skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-executable-copy-"));
+  let verifiedCopy = false;
+  try {
+    const alias = path.join(sandbox, "fixture.exe");
+    await executableAlias(alias);
+    verifiedCopy = true;
+    assert.notEqual((await stat(alias)).ino, (await stat(process.execPath)).ino);
+    assert.equal((await stat(alias)).nlink, 1);
+    assert.equal(hash(await readFile(alias)), hash(await readFile(process.execPath)));
+  } finally {
+    // Retain any failed identity fixture as evidence rather than trying to unlink a live-image
+    // hardlink. Valid independent copies must clean up under the ordinary bounded test runtime.
+    if (verifiedCopy) await rm(sandbox, { recursive: true, force: true });
+  }
+  await assert.rejects(stat(sandbox), { code: "ENOENT" });
+});
 
 async function productServiceFixture({ tamperRelocation = false, tuple = process.platform === "win32" ? "candle-cuda:1b" : "mlx:1b" } = {}) {
   const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
