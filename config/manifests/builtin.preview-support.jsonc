@@ -8,10 +8,10 @@
   "generatedFrom": {
     "candle": {
       "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
-      "audioInferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
+      "audioInferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc"
     },
     "mlx": {
-      "inferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
+      "inferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc"
     }
   },
   "models": {
@@ -278,6 +278,9 @@
     },
     "stable_audio_3_small_sfx_base": {
       "candle": false
+    },
+    "supra2_img": {
+      "mlx": false
     },
     "yue2": {
       "candle": false
