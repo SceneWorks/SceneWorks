@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1082,
-    "mlxOnlyCellCount": 44,
+    "cellCount": 1083,
+    "mlxOnlyCellCount": 46,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -15,12 +15,12 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "e677b5caa4fc1e1d3e5d39e5203fd4bb69bc6b6ac980bd45866a44b5ca21a9b5",
-    "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
-    "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
-    "descriptorMlxFacts": "1ae25631931a6dbfa8da77b5f2f694983ca17f54d08e44218a01bc7b5235c2be",
-    "descriptorMlxRuntime": "ca5b0f3da96af240c9810633b19a9586e0edeb082ad47d6527c7b628791db64f",
-    "descriptorPreviewFacts": "c24bf449402a7d7a1d43e0a063fe6828d0304cf793bbee89ac152eac4a3561a7",
+    "descriptorAudioFacts": "52ce1c2fdef390f05fb29d946f149fb536d7e676c2e1b5c3dcfbfaef264b2484",
+    "descriptorCandleFacts": "f7ee4c251284a7274fa58bf6c1810329b08f05d8b3c9c89d0299b60969ef987c",
+    "descriptorCandleRuntime": "d3d0c8972c26a8dc7811d4053bddc645690b23a7086abf60c8be7f1a3bb2f616",
+    "descriptorMlxFacts": "c812061ed49c1009c04adccdb64b79934c9894560b95588926028f7109e5c668",
+    "descriptorMlxRuntime": "d8aa1c62b4395fcb72d4c17bf7d2694e19cb5bff98b39431b74ae7333585e44e",
+    "descriptorPreviewFacts": "0ff333a69065d1ae63a6dfbed74930f774d4d3a86579dfbcad4e2c2e79aca3e4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "de42c35eab5b63cdecf7e6e256538a12489c764ec3d5e8c55ba112d3f84d9fbc",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
@@ -44,12 +44,12 @@
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
-    "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
+    "workerAudioDispatch": "fc18db4e29212d32d240e3b76f08f3d38f194034a44cd911bc6e6b7c3da69544",
     "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
-    "workerEngineTable": "7e0f00c20f0b426100a31beb3e8ed2934b5bf49d164155bc34e4b730ae08eabf",
+    "workerEngineTable": "14de886ba30b7e908be1f96cd9a04449d51ff01b963aa16bd933a787182388f9",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "3b71abc3af987165956a36ce44af1e06eaf5b94a9654ab252ebe7c4cbef5421d",
-    "workerImageKreaImported": "badaa28f1889864095e9f14b6af34f0040ee7aaa101f464345aab99774646b79",
+    "workerImageDispatch": "e7285e97fda0cde883b61fffa33fd0bcdb9e621f62091ed416dab57faae8ecb4",
+    "workerImageKreaImported": "52ab0f4bbba5eaedc5dfd8eb23de9d7bb1d973c9a7278d8669e110f763dd0bfe",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "dbd3edacbfff16154b010fe7be463c7b118e7ceccb5a3b09365a7529124ade25"
+    "workerVideoWan": "e78ce3f8010d5d8e39dc109bdc5de1480a2ab07d0033a29a8726bf2f6b70750f"
   },
   "models": [
     {
@@ -6436,8 +6436,12 @@
       "operationAndMode": [
         {
           "capability": "text_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         }
       ],
       "conditioningShape": [],
@@ -6453,12 +6457,23 @@
           "candle": false
         }
       ],
-      "precisionTier": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
-        "candle": null
+        "mlx": false,
+        "candle": false
       }
     },
     {
