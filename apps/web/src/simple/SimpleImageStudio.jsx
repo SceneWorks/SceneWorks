@@ -17,7 +17,6 @@ import {
   simpleNativeControls,
   simpleRewriteReferenceIds,
   simpleRewriteResolutionTarget,
-  workerAdvertises,
 } from "./simpleJobs.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
 // sc-24113 — Qwen-Image 2.1's controls in the Simple shell. Simple exposes the model, so it gets
@@ -25,6 +24,7 @@ import { useSimpleRefine } from "./useSimpleRefine.js";
 // simplified version of either, which is why both reuse the advanced modules verbatim.
 import { showTransparencyToggle, transparencyPromptSuggestion } from "../qwenAlpha.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
+import { nativeTierEligibility } from "../quantTier.js";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
 import {
   dimensionConstraintMessage,
@@ -142,8 +142,7 @@ export function SimpleImageStudio() {
   const tier = useMemo(
     () =>
       resolveSimpleTier(selectedModel, TIER_SCREEN, {
-        convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
-        nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
+        ...nativeTierEligibility(selectedModel, visibleWorkers),
         unifiedMemoryGb,
         backend: memoryBackend,
       }),
