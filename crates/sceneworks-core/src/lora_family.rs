@@ -2500,6 +2500,8 @@ pub struct AdapterFileMetadata {
     /// The base model id an Iris adapter's `baseModel` stamp names. Read ONLY alongside an
     /// `irisTask` stamp, so no other family's import is described differently than before.
     pub iris_base_model: Option<String>,
+    /// Exact Base/SFT parent from a native MOSS adapter, never inferred across checkpoints.
+    pub moss_base_model: Option<String>,
 }
 
 impl AdapterFileMetadata {
@@ -2509,6 +2511,7 @@ impl AdapterFileMetadata {
             && self.alpha.is_none()
             && self.iris_task.is_none()
             && self.iris_base_model.is_none()
+            && self.moss_base_model.is_none()
     }
 }
 
@@ -2572,7 +2575,11 @@ pub fn apply_adapter_metadata_to_manifest_entry(
             .entry("irisTask")
             .or_insert_with(|| Value::String(task.clone()));
     }
-    if let Some(base_model) = &metadata.iris_base_model {
+    if let Some(base_model) = metadata
+        .iris_base_model
+        .as_ref()
+        .or(metadata.moss_base_model.as_ref())
+    {
         entry
             .entry("baseModel")
             .or_insert_with(|| Value::String(base_model.clone()));
@@ -2672,7 +2679,12 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     };
     let iris_task = stamp(IRIS_ADAPTER_TASK_KEY);
     let iris_base_model = iris_task.as_ref().and_then(|_| stamp("baseModel"));
+    let moss_base_model = (stamp("sceneworks_adapter_format").as_deref()
+        == Some("moss_transformer_adapter_v1"))
+    .then(|| stamp("baseModel"))
+    .flatten();
     AdapterFileMetadata {
+        moss_base_model,
         network_type,
         rank,
         alpha,
@@ -2931,7 +2943,7 @@ fn lora_declared_model_ids(lora: &Value) -> Vec<&str> {
 /// `ltx-video` family while their adapter contracts differ (2.5 has no FF bias targets and uses a
 /// strict rank/alpha metadata contract), so a trained output must stay on its recorded generation.
 fn is_base_model_gated_family(family: &str) -> bool {
-    matches!(family, "wan-video" | "ltx-video")
+    matches!(family, "wan-video" | "ltx-video" | "moss-image")
 }
 
 fn same_ltx_generation(model_id: &str, base: &str) -> bool {
@@ -3100,6 +3112,9 @@ pub fn validate_lora_compatibility(
                          LTX-2.5 as the base model."
                     ));
                 }
+                if families.iter().any(|family| family == "moss-image") && base.is_none() {
+                    return Err(format!("LoRA {lora_id} must record its exact MOSS Base/SFT parent; re-import the native adapter."));
+                }
                 if let Some(base) = base {
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
@@ -3108,6 +3123,8 @@ pub fn validate_lora_compatibility(
                     {
                         let detail = if families.iter().any(|family| family == "ltx-video") {
                             "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
+                        } else if families.iter().any(|family| family == "moss-image") {
+                            "MOSS Base and SFT adapters are not interchangeable."
                         } else {
                             "Wan 5B and 14B LoRAs are not interchangeable."
                         };
@@ -7075,5 +7092,43 @@ mod tests {
         );
         // Passed directly as a file path, a sidecar is still not a safetensors file.
         assert_eq!(first_safetensors_path(&sidecar), None);
+    }
+}
+
+#[cfg(test)]
+mod moss_training_adapter_tests {
+    use super::*;
+    #[test]
+    fn native_moss_import_keeps_exact_base_and_refuses_cross_checkpoint_use() {
+        let header = json!({"__metadata__":{"family":"moss-image","baseModel":"moss_image_base","sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":"lokr","rank":"8","alpha":"12"}});
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
+        let metadata = read_adapter_metadata(&header);
+        assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_base"));
+        let mut entry = serde_json::Map::new();
+        entry.insert("family".into(), json!("moss-image"));
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(entry["baseModel"], json!("moss_image_base"));
+        let adapter = Value::Object(entry);
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&adapter),
+            Some("moss_image"),
+            "moss_image_base",
+            Some("moss_image_base")
+        )
+        .is_ok());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&adapter),
+            Some("moss_image"),
+            "moss_image_sft",
+            Some("moss_image_sft")
+        )
+        .is_err());
+        assert!(validate_lora_compatibility(
+            &[json!({"family":"moss-image"})],
+            Some("moss_image"),
+            "moss_image_base",
+            Some("moss_image_base")
+        )
+        .is_err());
     }
 }

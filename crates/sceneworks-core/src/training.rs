@@ -891,6 +891,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
+            moss_image_lora_target(false),
+            moss_image_lora_target(true),
             qwen_image_2_1_lora_target(),
             qwen_image_2_1_edit_lora_target(),
             ltx_video_lora_target(),
@@ -5160,5 +5162,96 @@ mod tests {
         );
         // Empty caption yields just the (unique) trigger words.
         assert_eq!(caption_with_trigger_words("", &["tok1".to_owned()]), "tok1");
+    }
+}
+
+/// Exact official MOSS checkpoints; Base is the default MOSS target, SFT is an explicit choice.
+fn moss_image_lora_target(sft: bool) -> TrainingTarget {
+    let (base, repo, name) = if sft {
+        (
+            "moss_image_sft",
+            "OpenMOSS-Team/MOSS-Image-SFT",
+            "MOSS-Image SFT",
+        )
+    } else {
+        (
+            "moss_image_base",
+            "OpenMOSS-Team/MOSS-Image-Base",
+            "MOSS-Image Base",
+        )
+    };
+    TrainingTarget {
+        id: format!("{base}_lora"),
+        name: format!("{name} LoRA / LoKr"),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: "moss-image".to_owned(),
+        base_model: base.to_owned(),
+        base_model_repo: Some(repo.to_owned()),
+        kernel: "moss_image_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("finite"),
+            steps: 1000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            optimizer: "adamw".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({"mixedPrecision":"bf16", "cacheLatents":true,
+                "cacheTextEmbeddings":true,"gradientCheckpointing":true,"networkType":"lora",
+                "timestepType":"moss_stage3_v1","timestepBias":"balanced","lossType":"mse",
+                "lrScheduler":"constant","weightDecay":0.0,
+                "modelOptions":{"vae_posterior":"posterior_mean_v1"},
+                "sampleEvery":0,"sampleSteps":50,"sampleGuidanceScale":3.0,
+                "qualityPreset":"balanced","outputScope":"project","requestedGpu":"auto"})),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({"rank":[1,128],"alpha":[1,128],"steps":[1,10000],
+            "resolutions":[256,512,768,1024],"batchSize":[1,4],
+            "optimizers":["adamw","adam","prodigyopt","rose"],"networkTypes":["lora","lokr"],
+            "mixedPrecisions":["bf16","f32"],"timestepTypes":["moss_stage3_v1","sigmoid","linear","uniform","weighted"],
+            "timestepBiases":["balanced","high_noise","low_noise"],"lossTypes":["mse","mae"],
+            "lrSchedulers":["constant","linear","cosine"],"outputScopes":["project","global"],
+            "supportsWeightNoise":true,"supportsGradientNoise":true,"supportsSubjectMaskLoss":true,
+            "appleSiliconOnly":true,"requiresBackend":"mlx"})),
+        ui: object(
+            json!({"label":format!("{name} LoRA / LoKr"),"datasetModality":"image",
+            "description":"Native MLX transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
+            "recommendedFor":["character","style"],"appleSiliconOnly":true,"requiresBackend":"mlx"}),
+        ),
+        extra: ExtraFields::new(),
+    }
+}
+
+#[cfg(test)]
+mod moss_training_s1_tests {
+    use super::*;
+    #[test]
+    fn moss_targets_keep_explicit_checkpoint_and_method_choices() {
+        let registry = builtin_training_targets();
+        let moss: Vec<_> = registry
+            .targets
+            .iter()
+            .filter(|t| t.kernel == "moss_image_lora")
+            .collect();
+        assert_eq!(moss.len(), 2);
+        assert_eq!(moss[0].base_model, "moss_image_base");
+        assert_eq!(moss[1].base_model, "moss_image_sft");
+        assert_ne!(moss[0].base_model_repo, moss[1].base_model_repo);
+        for target in moss {
+            assert_eq!(
+                target.defaults.advanced["timestepType"],
+                json!("moss_stage3_v1")
+            );
+            assert_eq!(
+                target.defaults.advanced["modelOptions"]["vae_posterior"],
+                json!("posterior_mean_v1")
+            );
+            assert_eq!(target.limits["networkTypes"], json!(["lora", "lokr"]));
+        }
     }
 }

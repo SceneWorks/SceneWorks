@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision f63f561f for replacement final native MOSS-Image pin: 772 provenance candidates and 113 production-Rust crate prefixes. The two marker-free MOSS MLX/Candle provider crates remain classified as native architecture reimplementations of frozen Base/SFT and DMD behavior; the Candle attention-layout fix changes no scanned population. Four pre-existing, marker-free body/perceptual crate prefixes are now classified by their concrete Rust source: the body twins implement ViTPose+, HybrIK and Sapiens architecture/loss behavior, while the perceptual twins compose SceneWorks trainer loss arms. These source dispositions do not settle separately reported model-weight license gaps. Official Base/SFT Apache-2.0 LICENSE texts and the optional DMD README Apache-2.0 declaration are disclosed in About; DMD publishes no standalone LICENSE, and no MIT grant is inferred. Other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "f63f561f764958d462a56e0694250265d761a523",
-  "auditDigest": "4866f452d3469abb6402a77aaaafbdd53efaafadb5f4b4bf0906e6c7afbb79b7",
+  "_comment": "Audit inventory reviewed at inference revision 7d23633b (exact feature merge 7d23633b23c10b8f7d312643c42002fcc2a0c029) for native MOSS-Image Base/SFT adapter training. This actual regenerated inventory contains 772 provenance candidates and 113 production-Rust crate prefixes; these are current scanner outputs, not historical findings. The advance adds native MLX LoRA/LoKr training, structured FP32 adapter application, and structural training admission within existing provider crates. The candidate and crate inventory entries have no additions or removals, and existing MOSS native-architecture source dispositions remain applicable. Generated revisions and digests describe this exact source. This descriptive review makes no new model-weight license grant or real-weight acceptance claim. Existing disclosures and advisory compliance work remain unchanged; historical source and measurement records retain their own provenance.",
+  "inferenceRevision": "7d23633b23c10b8f7d312643c42002fcc2a0c029",
+  "auditDigest": "d83287dcdd14f9d2dc301a5ba236363fbc4f848ce89721f1346b89f4dd7854cc",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "f63f561f764958d462a56e0694250265d761a523",
+    "revision": "7d23633b23c10b8f7d312643c42002fcc2a0c029",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -980,7 +980,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "f63f561f764958d462a56e0694250265d761a523",
+    "revision": "7d23633b23c10b8f7d312643c42002fcc2a0c029",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 113,
     "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"

@@ -2197,6 +2197,7 @@ pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
 /// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
 pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2269,6 +2270,7 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
 /// intentional Candle-only exception; the historical constant name remains for compatibility.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "ltx_mlx_lora",
     "krea_lora",
     "sd3_lora",
@@ -2629,6 +2631,7 @@ mod tests {
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -2673,6 +2676,7 @@ mod tests {
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "ltx_mlx_lora",
         "krea_lora",
         "sd3_lora",
