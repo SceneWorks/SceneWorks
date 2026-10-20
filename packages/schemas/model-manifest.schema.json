@@ -1989,6 +1989,15 @@
                 "type": "integer",
                 "minimum": 2,
                 "description": "The engine renders a LIST of prompts as one batched pass (upstream Iris-3B `generate(prompts=[…])`, sc-25681): a job's top-level `prompts` (with `prompt` = `prompts[0]`) renders `prompts × count` images in prompt-minor order on seeds seed, seed+1, …, at most this many per job (the engine's max_count). ABSENT MEANS NONE: the API refuses `prompts`, and Image Studio's prompt batch stays one job per prompt. When present, Image Studio packs its prompt batch into native jobs of up to floor(this / count) prompts."
+              },
+              "maxPromptTokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The engine's prompt context in text-encoder tokens (the linked descriptor's `max_prompt_tokens`; Supra2-IMG's Flan-T5 context is 128, sc-24216). A longer prompt is truncated by the engine and reported as a `prompt_truncated` warning, never refused. The Model Manager states it among the model's supported limits. ABSENT MEANS UNDECLARED."
+              },
+              "nativeCountBatch": {
+                "type": "boolean",
+                "description": "The engine renders a job's `count` images of its ONE prompt in a single call (GenerationRequest::count), image k on seed seed + k (Supra2-IMG's published multi-image generation, sc-24215). The worker sends one native call through the native-batch driver, bounded by the engine's max_count; a per-image lane feature (hires fix, a reference, prompt enhancement) is refused before load. ABSENT MEANS FALSE: one engine call per image."
               }
             }
           },

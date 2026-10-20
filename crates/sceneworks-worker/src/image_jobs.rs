@@ -487,6 +487,18 @@ pub(crate) async fn run_image_generate_job(
             .unwrap_or_default(),
     )
     .map_err(WorkerError::InvalidPayload)?;
+    // sc-24215: Supra2-IMG's published interface, re-applied before load (the API refuses the same
+    // request before the job exists), so a replayed or hand-built payload never reaches the engine
+    // with an input the generic lane would silently drop.
+    sceneworks_core::supra2::validate_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let request = ImageRequest::from_payload(&job.payload);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(

@@ -170,17 +170,21 @@ mod tests {
 
     type Posts = Arc<Mutex<Vec<Value>>>;
 
-    async fn spawn_job_api() -> (String, Posts) {
-        async fn job_route(AxumPath(job_id): AxumPath<String>) -> Response {
-            Json(crate::tests::job_snapshot_json(&job_id, false)).into_response()
+    /// A job API stub: the job GET reports `cancel_requested`, every progress POST is recorded.
+    async fn spawn_job_api(cancel_requested: bool) -> (String, Posts) {
+        async fn job_route(
+            State((_, cancel)): State<(Posts, bool)>,
+            AxumPath(job_id): AxumPath<String>,
+        ) -> Response {
+            Json(crate::tests::job_snapshot_json(&job_id, cancel)).into_response()
         }
         async fn progress_route(
-            State(posts): State<Posts>,
+            State((posts, cancel)): State<(Posts, bool)>,
             AxumPath(job_id): AxumPath<String>,
             Json(body): Json<Value>,
         ) -> Response {
             posts.lock().unwrap().push(body);
-            Json(crate::tests::job_snapshot_json(&job_id, false)).into_response()
+            Json(crate::tests::job_snapshot_json(&job_id, cancel)).into_response()
         }
         async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
             Json(json!({
@@ -198,7 +202,7 @@ mod tests {
                 "/api/v1/workers/:worker_id/heartbeat",
                 post(heartbeat_route),
             )
-            .with_state(posts.clone());
+            .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -264,7 +268,7 @@ mod tests {
             .unwrap();
         let started = std::time::Instant::now();
         let (outcome, posts, asset_writes) = runtime.block_on(async {
-            let (base_url, posts) = spawn_job_api().await;
+            let (base_url, posts) = spawn_job_api(false).await;
             let mut settings = settings_at(data.path());
             settings.api_url = base_url;
             let api = ApiClient::new(&settings);
@@ -315,5 +319,330 @@ mod tests {
             std::fs::copy(&pngs[0], &target).unwrap();
             eprintln!("render saved: {}", target.display());
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-24215: the published controls and multi-image batch through the production MLX arm,
+    // against a probe engine (no weights): ONE engine call carries prompt / seed / steps /
+    // guidance / count, and every image becomes its own asset with reproducibility metadata.
+    // ---------------------------------------------------------------------------------------
+
+    use gen_core::{GenerationOutput, GenerationRequest, Generator, Progress};
+    use std::time::Duration;
+
+    /// Every request field the published interface maps onto.
+    #[derive(Clone, Debug, PartialEq)]
+    struct Seen {
+        prompt: String,
+        prompt_batch: Vec<String>,
+        negative_prompt: Option<String>,
+        width: u32,
+        height: u32,
+        count: u32,
+        seed: Option<u64>,
+        steps: Option<u32>,
+        guidance: Option<f32>,
+    }
+
+    struct Supra2Probe {
+        descriptor: gen_core::ModelDescriptor,
+        cancel_aware: bool,
+        seen: Arc<Mutex<Vec<Seen>>>,
+        stopped_on_cancel: Arc<Mutex<bool>>,
+    }
+
+    impl Generator for Supra2Probe {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        /// Like the engine: progress per step, the request's own cancel flag checked, and
+        /// `count` images back from the one call (image `k`'s pixels are all `k`).
+        fn generate(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            self.seen.lock().unwrap().push(Seen {
+                prompt: req.prompt.clone(),
+                prompt_batch: req.prompt_batch.clone(),
+                negative_prompt: req.negative_prompt.clone(),
+                width: req.width,
+                height: req.height,
+                count: req.count,
+                seed: req.seed,
+                steps: req.steps,
+                guidance: req.guidance,
+            });
+            on_progress(Progress::Step {
+                current: 1,
+                total: req.steps.unwrap_or(1),
+            });
+            if self.cancel_aware {
+                // Outlive the consumer's 2-second cancel-poll throttle, then stop on the flag.
+                std::thread::sleep(Duration::from_millis(2_300));
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while !req.cancel.is_cancelled() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if req.cancel.is_cancelled() {
+                    *self.stopped_on_cancel.lock().unwrap() = true;
+                    return Err(gen_core::Error::Canceled);
+                }
+            }
+            Ok(GenerationOutput::Images(
+                (0..req.count)
+                    .map(|k| gen_core::Image {
+                        width: req.width,
+                        height: req.height,
+                        pixels: vec![k as u8; (req.width * req.height * 3) as usize],
+                    })
+                    .collect(),
+            ))
+        }
+
+        /// The engine's primary path: the output plus its over-long-prompt warning.
+        fn generate_with_report(
+            &self,
+            req: &GenerationRequest,
+            on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            let mut report =
+                gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
+            report
+                .warnings
+                .extend(gen_core::supra2::prompt_truncated_warning(
+                    140,
+                    gen_core::supra2::MAX_PROMPT_TOKENS as usize,
+                ));
+            Ok(report)
+        }
+    }
+
+    struct ArmRun {
+        outcome: crate::error::WorkerResult<()>,
+        seen: Vec<Seen>,
+        stopped_on_cancel: bool,
+        posts: Vec<Value>,
+        asset_writes: Vec<Value>,
+    }
+
+    /// Drive `generate_stream_using` for one Supra2 job on the installed (staged) components;
+    /// `extra` is merged into the job payload.
+    fn run_supra2_arm(cancel_aware: bool, cancel_requested: bool, extra: Value) -> ArmRun {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+        ]);
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        stage(
+            data.path(),
+            T5_REPO,
+            T5_REVISION,
+            &["config.json", "model.safetensors", "tokenizer.json"],
+        );
+        stage(
+            data.path(),
+            VAE_REPO,
+            VAE_REVISION,
+            &["config.json", "diffusion_pytorch_model.safetensors"],
+        );
+        let bundle = data.path().join("models/mlx/supra2_img");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join(gen_core::supra2::BUNDLE_MANIFEST), b"{}").unwrap();
+        let mut entry = shipped_supra2_entry();
+        entry.insert("modelPath".to_owned(), json!(bundle));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stopped_on_cancel = Arc::new(Mutex::new(false));
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (outcome, posts, asset_writes) = runtime.block_on(async {
+            let (base_url, posts) = spawn_job_api(cancel_requested).await;
+            let mut settings = settings_at(data.path());
+            settings.api_url = base_url;
+            settings.heartbeat_seconds = 5;
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
+                    .unwrap();
+            let mut payload = json!({
+                "projectId": "project-supra2",
+                "model": "supra2_img",
+                "mode": "text_to_image",
+                "prompt": "a red fox sitting in fresh snow",
+                "width": 256,
+                "height": 256,
+                "count": 1,
+                "modelManifestEntry": Value::Object(entry),
+            });
+            for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+                payload[key] = value;
+            }
+            let request = sceneworks_core::image_request::ImageRequest::from_payload(
+                payload.as_object().unwrap(),
+            );
+            let plan = super::super::ImagePlan::with_count(&request, request.image_count(), None);
+            let descriptor = crate::engines::mlx_model("supra2_img")
+                .expect("supra2_img is linked")
+                .descriptor;
+            let loader_seen = Arc::clone(&seen);
+            let loader_stopped = Arc::clone(&stopped_on_cancel);
+            let loader = move |_engine: &str, _spec: &LoadSpec| {
+                Ok(Box::new(Supra2Probe {
+                    descriptor,
+                    cancel_aware,
+                    seen: loader_seen,
+                    stopped_on_cancel: loader_stopped,
+                }) as Box<dyn Generator>)
+            };
+            let mut asset_writes = Vec::new();
+            let arm = super::super::generate_stream_using(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                project.path(),
+                "mlx",
+                &mut asset_writes,
+                loader,
+            );
+            let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
+                .await
+                .expect("the supra2 arm finished");
+            let posts = posts.lock().unwrap().clone();
+            (outcome, posts, asset_writes)
+        });
+        let seen = seen.lock().unwrap().clone();
+        let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
+        ArmRun {
+            outcome,
+            seen,
+            stopped_on_cancel,
+            posts,
+            asset_writes,
+        }
+    }
+
+    /// A count-3 job is ONE engine call carrying the prompt (no prompt batch), the base seed, the
+    /// steps, the guidance and `count: 3`, published as three assets on seeds 40, 41, 42 — the
+    /// seeds the engine drew image k's noise from (`image_seed(seed, k)`) — each recording its
+    /// prompt, seed, steps, guidance, the pinned component revisions and the truncation warning.
+    ///
+    /// *Mutations that red this:* drop `image.nativeCountBatch` (three calls, count 1 each); send
+    /// the one-prompt batch as `prompt_batch`; publish image k on the base seed.
+    #[test]
+    fn a_count_n_job_is_one_engine_call_published_as_one_asset_per_image() {
+        let run = run_supra2_arm(
+            false,
+            false,
+            json!({ "seed": 40, "count": 3, "advanced": { "steps": 12, "guidanceScale": 4.5 } }),
+        );
+        assert!(run.outcome.is_ok(), "{:?}\n{:#?}", run.outcome, run.posts);
+        assert_eq!(
+            run.seen,
+            vec![Seen {
+                prompt: "a red fox sitting in fresh snow".to_owned(),
+                prompt_batch: Vec::new(),
+                negative_prompt: None,
+                width: 256,
+                height: 256,
+                count: 3,
+                seed: Some(40),
+                steps: Some(12),
+                guidance: Some(4.5),
+            }],
+            "one native call with every published control"
+        );
+        let entry = shipped_supra2_entry();
+        let published: Vec<(Value, Value)> = run
+            .asset_writes
+            .iter()
+            .map(|asset| (asset["seed"].clone(), asset["index"].clone()))
+            .collect();
+        assert_eq!(
+            published,
+            vec![
+                (json!(40), json!(0)),
+                (json!(41), json!(1)),
+                (json!(42), json!(2))
+            ]
+        );
+        for asset in &run.asset_writes {
+            assert_eq!(asset["prompt"], "a red fox sitting in fresh snow");
+            assert_eq!(asset["model"], "supra2_img");
+            assert_eq!(
+                (&asset["width"], &asset["height"]),
+                (&json!(256), &json!(256))
+            );
+            let settings = &asset["rawAdapterSettings"];
+            assert_eq!(settings["numInferenceSteps"], 12, "{settings}");
+            assert_eq!(settings["guidanceScale"], 4.5, "{settings}");
+            assert_eq!(
+                settings[sceneworks_core::supra2::MODEL_REVISIONS_KEY],
+                sceneworks_core::supra2::pinned_revisions(&entry),
+                "{settings}"
+            );
+            assert_eq!(
+                settings[sceneworks_core::supra2::MODEL_REVISIONS_KEY]
+                    .as_array()
+                    .map(Vec::len),
+                Some(3),
+                "denoiser + text encoder + VAE: {settings}"
+            );
+            assert_eq!(
+                settings["generationWarnings"][0]["code"],
+                gen_core::supra2::PROMPT_TRUNCATED_WARNING,
+                "{settings}"
+            );
+        }
+        assert!(
+            run.posts.iter().any(|post| post["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Batch of 3 — step 1/12")),
+            "progress names the batch: {:#?}",
+            run.posts
+        );
+    }
+
+    /// A seeded single image is the same engine request as image 0 of a batch on that seed: the
+    /// seed + k contract means a count-1 job on seed 41 reproduces image 1 of the seed-40 batch.
+    #[test]
+    fn a_single_image_on_seed_k_is_the_batchs_image_k_request() {
+        let run = run_supra2_arm(false, false, json!({ "seed": 41, "count": 1 }));
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(run.seen.len(), 1);
+        assert_eq!((run.seen[0].seed, run.seen[0].count), (Some(41), 1));
+        assert_eq!(
+            gen_core::supra2::image_seed(40, 1),
+            41,
+            "image k of a batch draws its noise from seed + k"
+        );
+        assert_eq!(run.asset_writes.len(), 1);
+        assert_eq!(run.asset_writes[0]["seed"], 41);
+    }
+
+    /// A cancel mid-batch publishes NOTHING: the one engine call stops on its own request flag.
+    #[test]
+    fn a_cancelled_batch_publishes_no_asset() {
+        let run = run_supra2_arm(true, true, json!({ "seed": 40, "count": 4 }));
+        assert!(
+            matches!(run.outcome, Err(crate::error::WorkerError::Canceled(_))),
+            "{:?}",
+            run.outcome
+        );
+        assert_eq!(run.seen.len(), 1);
+        assert!(run.stopped_on_cancel);
+        assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
     }
 }

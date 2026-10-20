@@ -6671,7 +6671,9 @@
       // (default 50, uniform Euler flow) + guidance (default 3.0; CFG only above 1) + count; it
       // refuses negative prompts, other sizes, quantization, adapters and conditioning, so the entry
       // declares one resolution, no negative prompt, no sampler/scheduler menu, no tier axis and no
-      // LoRA family. Product controls/progress/limits beyond these defaults are sc-24215/sc-24216.
+      // LoRA family. sc-24215: the API and the worker refuse anything else before execution
+      // (`sceneworks_core::supra2::validate_request`), and `image.nativeCountBatch` sends `count`
+      // to the engine as one call.
       "id": "supra2_img",
       "name": "Supra2-IMG",
       "family": "supra2",
@@ -6681,7 +6683,13 @@
       "macOnly": true,
       "capabilities": ["text_to_image"],
       "image": {
-        "supportsNegativePrompt": false
+        "supportsNegativePrompt": false,
+        // The Flan-T5 context the engine reads (gen_core::supra2::MAX_PROMPT_TOKENS = the
+        // descriptor's `max_prompt_tokens`); longer prompts are truncated and reported (sc-24216).
+        "maxPromptTokens": 128,
+        // `count` images of the one prompt render in ONE engine call, image k on seed + k — the
+        // published multi-image interface (sc-24215).
+        "nativeCountBatch": true
       },
       "license": "Apache-2.0 AND MIT",
       "licenseUrl": "https://huggingface.co/SupraLabs/Supra2-IMG/blob/10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b/README.md",
@@ -6739,7 +6747,7 @@
       },
       "limits": {
         "resolutions": ["256x256"],
-        "count": [1, 2, 4],
+        "count": [1, 2, 4, 8],
         "minDimension": 256,
         "maxDimension": 256
       },

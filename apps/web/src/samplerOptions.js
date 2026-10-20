@@ -205,6 +205,25 @@ export function guidanceIsOff(model, guidanceOverride) {
   return effective === 1;
 }
 
+// sc-24215: a model with ONE native size (`limits.minDimension === limits.maxDimension`,
+// Supra2-IMG's 256×256) says so beside the size picker, so the fixed output is never a surprise.
+export function nativeResolutionHint(model) {
+  const min = model?.limits?.minDimension;
+  const max = model?.limits?.maxDimension;
+  return Number.isInteger(min) && min > 0 && min === max
+    ? `${model.name} renders at its native ${min}×${max} only.`
+    : null;
+}
+
+// sc-24215: `image.maxPromptTokens` — the engine reads that many prompt tokens and truncates the
+// rest (never refused; the image records a `prompt_truncated` warning).
+export function promptTokenLimitHint(model) {
+  const tokens = model?.image?.maxPromptTokens;
+  return Number.isInteger(tokens) && tokens > 0
+    ? `${model.name} reads up to ${tokens} prompt tokens; anything longer is truncated and the image is flagged.`
+    : null;
+}
+
 // The patch-grid hint (sc-25681): `image.patchGridVisibleBelow` (Iris-3B, 1024) — informational,
 // the size is never restricted.
 export function patchGridHint(model, width, height) {
