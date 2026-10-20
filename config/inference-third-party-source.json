@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision f63f561f for replacement final native MOSS-Image pin: 772 provenance candidates and 113 production-Rust crate prefixes. The two marker-free MOSS MLX/Candle provider crates remain classified as native architecture reimplementations of frozen Base/SFT and DMD behavior; the Candle attention-layout fix changes no scanned population. Four pre-existing, marker-free body/perceptual crate prefixes are now classified by their concrete Rust source: the body twins implement ViTPose+, HybrIK and Sapiens architecture/loss behavior, while the perceptual twins compose SceneWorks trainer loss arms. These source dispositions do not settle separately reported model-weight license gaps. Official Base/SFT Apache-2.0 LICENSE texts and the optional DMD README Apache-2.0 declaration are disclosed in About; DMD publishes no standalone LICENSE, and no MIT grant is inferred. Other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "f63f561f764958d462a56e0694250265d761a523",
-  "auditDigest": "4866f452d3469abb6402a77aaaafbdd53efaafadb5f4b4bf0906e6c7afbb79b7",
+  "_comment": "Audit inventory reviewed at inference revision 46c22c01 (epic sc-24212 final pin, inference main): 786 provenance candidates and 117 production-Rust crate prefixes. The Supra2-IMG MLX and Candle provider crates are classified as native architecture reimplementations of the frozen SupraLabs/Supra2-IMG SupraDiT, with the Supra2-IMG/Flan-T5-Base Apache-2.0 and SD VAE ft-MSE MIT terms disclosed in About. The FLUX.3 crates that arrived with the main sync are left to their own epic and remain reported as open advisory items under sc-19751. Earlier MOSS-Image and body/perceptual dispositions are unchanged; other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc",
+  "auditDigest": "6a3886f6b0fb3706bb6a186b6b0dcf543d3f673693e4c8109ecb37a546bbab40",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "f63f561f764958d462a56e0694250265d761a523",
+    "revision": "46c22c01e717f3595ac77a598142ad16a799e2cc",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 772,
-    "populationSha256": "9cc69521b01c6c52c738c75d37573a8db4471a5438a7e588337bedcf4bf919f7"
+    "matchedFiles": 786,
+    "populationSha256": "79854ddd07fa0f8d66a8c38924698afbe236e5852b24c465f710a30e3c8e75f4"
   },
   "portedSourceAreas": [
     {
@@ -812,6 +812,20 @@
       "provenance": "InstantID keypoint rasterizers faithfully port OpenCV drawing primitives and the literal SinTable.",
       "disposition": "about-license",
       "component": "opencv-source"
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-supra2",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-supra2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Native Supra2-IMG provider (sc-24213 MLX, epic sc-24212 Candle): independently written Rust reimplements the SupraLabs/Supra2-IMG SupraDiT architecture and sampling loop at revision 10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b (Apache-2.0 model card), conditioned on google/flan-t5-base (Apache-2.0) and decoded by stabilityai/sd-vae-ft-mse (MIT). No upstream Python is compiled into production. The supra2-img About component displays the Apache-2.0 text and the MIT declaration for exactly these components."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-supra2",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-supra2/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Native Supra2-IMG provider (sc-24213 MLX, epic sc-24212 Candle): independently written Rust reimplements the SupraLabs/Supra2-IMG SupraDiT architecture and sampling loop at revision 10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b (Apache-2.0 model card), conditioned on google/flan-t5-base (Apache-2.0) and decoded by stabilityai/sd-vae-ft-mse (MIT). No upstream Python is compiled into production. The supra2-img About component displays the Apache-2.0 text and the MIT declaration for exactly these components."
     }
   ],
   "includeSites": [
@@ -980,10 +994,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "f63f561f764958d462a56e0694250265d761a523",
+    "revision": "46c22c01e717f3595ac77a598142ad16a799e2cc",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 113,
-    "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"
+    "cratePrefixes": 117,
+    "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
   },
   "crateDispositions": [
     {
