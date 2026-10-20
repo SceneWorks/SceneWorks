@@ -10,12 +10,23 @@ import { selectSteps } from "./preflight.mjs";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const modulePath = process.env.REMOTE_MACOS_CONTROLLER_UNDER_TEST ?? path.join(ROOT, "scripts/remote-macos-verification.mjs");
 const policy = await import(pathToFileURL(modulePath));
-const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, requireFreshStamp, sha256, unitKind, unitRunner, validateCapabilityFile, validateFacts, validateMachine, validateRequest, validateStamp, validateUnits } = policy;
+const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, CACHE_FLAGS, ASSERTION_DRIVER, acquireTargetLease, validateCacheContext, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, requireFreshStamp, sha256, unitKind, unitRunner, validateCapabilityFile, validateFacts, validateMachine, validateRequest, validateStamp, validateUnits } = policy;
+const { loadRegistry, TESTS: ASSERTION_TESTS, MUTABLE_FILES, REGISTRY_PATH } = await import("./moss-consumer-assertions.mjs");
 const SOURCE = "a".repeat(40), PIN = "b".repeat(40), BASE = "c".repeat(40), DISPATCHER = "d".repeat(40);
 const sourceRef = "story/sc-26585-epic-26584-moss-image-training", base = "feature/sc-26584-moss-image-training";
 const machine = () => ({ runner_name: "nax-macos-2", platform: "darwin", arch: "arm64", runtime: "26.5.2", sdk: "26.5", deployment_target: "26.2", chip: "Apple M5 Max", developer_dir: "/Applications/Xcode.app/Contents/Developer", metal_compiler: "/Applications/Xcode.app/Contents/Developer/usr/bin/metal" });
 const request = (profile = "canonical-preflight") => ({ repository: REPOSITORY, profile, source_sha: SOURCE, source_ref: sourceRef, inference_sha: PIN, base_ref: base, allow_nax_unit: profile === "canonical-preflight", legacy_device_inputs: false });
 const unitLedger = () => ({ limit_seconds: 300, rss_limit_bytes: 8 * 1024 ** 3, used_seconds: 3, runs: ["adapter-library", "adapter-bin", "nax-gpu"].map((kind, index) => ({ kind, pid: 100 + index, exit_code: 0, peak_rss_bytes: 1024, rss_samples: 1, seconds: 1, violation: null })) });
+function cacheContext() {
+  const value = { serialized: true, released: true, runner_name: "nax-macos-2", toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: "26.5", target_directory_sha256: "1".repeat(64), rustc_sha256: "2".repeat(64), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), build_flags: { ...CACHE_FLAGS } };
+  return { ...value, context_sha256: sha256(JSON.stringify(value)) };
+}
+function syntheticAssertionResult() {
+  const spec = loadRegistry(ROOT);
+  const green = key => ({ test_id: key, passed: 1, failed: 0, ignored: 0, exit_code: 0 });
+  const hashes = Object.fromEntries(MUTABLE_FILES.map(file => [file, "1".repeat(64)]));
+  return { schema_version: 1, status: "passed", elapsed_seconds: 1, source_sha: SOURCE, registry_sha256: spec.registry_sha256, driver_sha256: sha256(readFileSync(path.join(ROOT, ASSERTION_DRIVER))), test_ids: Object.keys(ASSERTION_TESTS), baseline: Object.keys(ASSERTION_TESTS).map(green), final_green: Object.keys(ASSERTION_TESTS).map(green), cases: spec.cases.map(item => ({ id: item.id, killed: true, restored: true, red: item.tests.map(test_id => ({ test_id, passed: 0, failed: 1, ignored: 0, exit_code: 101 })), green: item.tests.map(green) })), source_before: hashes, source_after: { ...hashes }, restored: true, clean_after: true, head_after: SOURCE, carried: { status: "carried-prior-proof-not-executed", source_revision: spec.carried.source_revision, case_ids: spec.carried.case_ids, fingerprints: spec.carried.fingerprints } };
+}
 function capability(backend, kind) {
   const generatedFrom = { inferenceRevision: PIN };
   return kind === "runtime"
@@ -23,18 +34,21 @@ function capability(backend, kind) {
     : { generatedFrom, backend, ...(kind === "audio" ? { registry: "audio" } : {}), engines: [{ id: "fixture", modality: kind === "audio" ? "audio" : "image", supportsPreview: false }] };
 }
 function fixture(profile = "canonical-preflight") {
-  const context = { ...request(profile), base_sha: BASE, merge_base: BASE, changed_files: ["Cargo.toml", "config/manifests/builtin.models.jsonc"], selection_platform: profile === "canonical-preflight" ? "darwin" : null, selected_steps: profile === "canonical-preflight" ? ["rust:check (tier docs, fmt, clippy, test, build)", "candle build (not-macOS + candle)"] : [] };
+  const context = { ...request(profile), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), base_sha: BASE, merge_base: BASE, changed_files: ["Cargo.toml", "config/manifests/builtin.models.jsonc"], selection_platform: profile === "canonical-preflight" ? "darwin" : null, selected_steps: profile === "canonical-preflight" ? ["rust:check (tier docs, fmt, clippy, test, build)", "candle build (not-macOS + candle)"] : [] };
   const files = {};
   if (profile === "canonical-preflight") {
     files["stamp.txt"] = Buffer.from(`preflight summary @ ${SOURCE.slice(0, 9)}, base origin/${base}:\n${context.selected_steps.map(step => `  PASS  ${step} (1s)`).join("\n")}\n`);
     files["native-units.json"] = Buffer.from(JSON.stringify(unitLedger()));
     files["preflight.log"] = Buffer.from("actual canonical command output\n");
+  } else if (profile === "consumer-assertions") {
+    files["assertions.json"] = Buffer.from(JSON.stringify(syntheticAssertionResult()));
+    files["assertions.log"] = Buffer.from("synthetic assertion protocol fixture, not remote execution\n");
   } else {
     OUTPUTS.forEach((file, index) => { files[`payload/${file}`] = Buffer.from(index < 3 ? JSON.stringify(capability(index === 1 ? "candle" : "mlx", ["media", "audio", "runtime"][index])) : file.endsWith(".md") ? "# Static generated fixture\n" : file.endsWith(".jsonc") ? "// generated fixture\n{}\n" : "{}\n"); });
   }
   if (profile === "facts-and-projections") files["facts.log"] = Buffer.from("actual static producer output\n");
-  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), clean_before: true, clean_after: profile === "canonical-preflight", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
-  const controls = Object.fromEntries([WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs"].map(file => [file, sha256(Buffer.from(`trusted implementation: ${file}`))]));
+  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
+  const controls = Object.fromEntries([WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH].map(file => [file, sha256(readFileSync(path.join(ROOT, file)))]));
   const run = { id: 41, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", repository: { id: 9, full_name: REPOSITORY }, head_repository: { id: 9, full_name: REPOSITORY }, head_branch: sourceRef, head_sha: DISPATCHER, path: WORKFLOW };
   const ownedJob = { name: JOB, run_id: 41, run_attempt: 2, head_sha: DISPATCHER, conclusion: "success", runner_name: "nax-macos-2", labels: ["self-hosted", "macOS", "ARM64", "rw-llm"], steps: ["Run exact remote verification", "Upload remote verification artifact"].map(name => ({ name, conclusion: "success" })) };
   const jobs = { total_count: 2, jobs: [ownedJob, { name: "nax-worker", conclusion: "skipped" }] };
@@ -51,7 +65,7 @@ function fixture(profile = "canonical-preflight") {
       if (endpoint.includes(`/compare/${BASE}...`)) return structuredClone(f.baseHistory);
       throw new Error(`unexpected API endpoint: ${endpoint}`);
     },
-    file: async (file, ref) => Buffer.from(f.alteredControl === `${ref}:${file}` ? "different code" : `trusted implementation: ${file}`),
+    file: async (file, ref) => f.alteredControl === `${ref}:${file}` ? Buffer.from("different code") : readFileSync(path.join(ROOT, file)),
   };
   f.sync = () => { f.files["receipt.json"] = Buffer.from(JSON.stringify(f.receipt)); };
   f.verify = () => { f.sync(); return authenticateReceipt({ ...f, runId: 41, attempt: 2, artifactId: 83 }); };
@@ -59,7 +73,7 @@ function fixture(profile = "canonical-preflight") {
 }
 function replaceMember(f, name, bytes) { f.files[name] = Buffer.from(bytes); f.receipt.files[name] = sha256(f.files[name]); }
 
-for (const profile of ["facts-and-projections", "canonical-preflight"]) test(`authenticated ${profile} accepts a different valid dispatcher SHA, not a relabeled checkout`, async () => { const f = fixture(profile); await f.verify(); assert.notEqual(f.receipt.workflow_sha, f.context.source_sha); });
+for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) test(`authenticated ${profile} accepts a different valid dispatcher SHA, not a relabeled checkout`, async () => { const f = fixture(profile); await f.verify(); assert.notEqual(f.receipt.workflow_sha, f.context.source_sha); });
 
 const requestFaults = {
   "foreign repository": value => { value.repository = "fork/SceneWorks"; },
@@ -112,6 +126,10 @@ const faults = {
   "dispatcher code": f => { f.alteredControl = `${DISPATCHER}:${CONTROLLER}`; },
   "workflow code": f => { f.alteredControl = `${DISPATCHER}:${WORKFLOW}`; },
   "parser dependency code": f => { f.alteredControl = `${DISPATCHER}:scripts/lib/jsonc.mjs`; },
+  "assertion driver code": f => { f.alteredControl = `${DISPATCHER}:${ASSERTION_DRIVER}`; },
+  "case registry code": f => { f.alteredControl = `${DISPATCHER}:${REGISTRY_PATH}`; },
+  "cache not released": f => { f.receipt.cache_context.released = false; },
+  "cache compiler": f => { f.receipt.cache_context.toolchain = "other"; },
   "candidate selector code": f => { f.alteredControl = `${SOURCE}:scripts/preflight.mjs`; },
   "unowned source ancestry": f => { f.sourceHistory.merge_base_commit.sha = BASE; },
   "foreign base ancestry": f => { f.baseHistory.merge_base_commit.sha = SOURCE; },
@@ -191,7 +209,7 @@ for (const [name, entries] of Object.entries({ traversal: [["../stamp.txt", "bad
 
 function localFixture(f) {
   const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-import-test-"));
-  for (const file of Object.keys(f.controls)) { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), `trusted implementation: ${file}`); }
+  for (const file of Object.keys(f.controls)) { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), readFileSync(path.join(ROOT, file))); }
   const bytes = zip(Object.entries(f.files));
   f.artifact.digest = `sha256:${sha256(bytes)}`; f.artifact.size_in_bytes = bytes.length;
   f.api.archive = async () => bytes;
@@ -210,6 +228,36 @@ for (const [name, change] of Object.entries({ "failed actual run": (f) => { f.ru
   const f = fixture(); change(f, { options: {} }); const local = localFixture(f); if (name === "local changed during authentication") change(f, local);
   try { await assert.rejects(() => importReceipt(local.root, request(), local.options)); assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false); }
   finally { rmSync(local.root, { recursive: true, force: true }); }
+});
+test("consumer assertion evidence is authenticated but can never create a canonical stamp", async () => {
+  const f = fixture("consumer-assertions"), local = localFixture(f);
+  try {
+    await importReceipt(local.root, request("consumer-assertions"), local.options);
+    assert.equal(existsSync(path.join(local.root, ".git/sceneworks-consumer-assertions", SOURCE, "41-2-83.json")), true);
+    assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false);
+  } finally { rmSync(local.root, { recursive: true, force: true }); }
+});
+for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { value.cases[0].green[0].test_id = "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried.status = "executed-remotely"; } })) test(`consumer evidence rejects ${name}`, async () => {
+  const f = fixture("consumer-assertions"), value = syntheticAssertionResult(); change(value);
+  replaceMember(f, "assertions.json", JSON.stringify(value)); await assert.rejects(f.verify);
+});
+test("dedicated target cache lease prevents overlap and never steals or releases another owner", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-cache-"));
+  const owner = { runner_name: "nax-macos-2", run_id: 41, run_attempt: 2 };
+  try {
+    const first = acquireTargetLease(root, owner);
+    assert.throws(() => acquireTargetLease(root, { ...owner, run_id: 42 }), /leased/);
+    const file = path.join(root, ".remote-verification-owner/owner.json"), bytes = readFileSync(file);
+    writeFileSync(file, JSON.stringify({ ...JSON.parse(bytes), token: "different" }));
+    assert.throws(() => first.release(), /another run/);
+    writeFileSync(file, bytes); first.release();
+    acquireTargetLease(root, { ...owner, run_id: 42 }).release();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("cache context rejects changed compiler flags even with a self-consistent data hash", () => {
+  const context = cacheContext(); validateCacheContext(context);
+  const { context_sha256: _hash, ...changed } = context; changed.build_flags.jobs = "3";
+  assert.throws(() => validateCacheContext({ ...changed, context_sha256: sha256(JSON.stringify(changed)) }), /flags/);
 });
 test("facts importer writes only authenticated derived outputs and no stamp", async () => {
   const f = fixture("facts-and-projections"), local = localFixture(f);
@@ -270,7 +318,7 @@ function condition(name, event, profile, relevant = "true", result = "success", 
   return Boolean(Function("github", "inputs", "needs", "cancelled", `return (${expression});`)(github, { verification_profile: profile }, { changes: { result, outputs: { relevant } } }, () => false));
 }
 test("manual profiles never run legacy jobs", () => {
-  for (const profile of ["facts-and-projections", "canonical-preflight", "unknown-unsafe-value"]) {
+  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight", "unknown-unsafe-value"]) {
     for (const name of ["changes", "macos-checks", "nax-worker"]) for (const result of ["success", "skipped", "failure"]) assert.equal(condition(name, "workflow_dispatch", profile, "true", result), false, `${profile}/${name}/${result}`);
     assert.equal(condition(JOB, "workflow_dispatch", profile), true);
   }
@@ -349,6 +397,9 @@ test("synthetic NAX-class CPU fixture drains safely on a budget violation and ca
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   const cases = [
+    ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, CACHE_FLAGS)', 'true'],
+    ["RV-cache-exclusion", "dedicated target cache lease prevents overlap and never steals or releases another owner", 'mkdirSync(lease);', 'mkdirSync(lease, { recursive: true });'],
+    ["RV-consumer-proof", "consumer evidence rejects survivor", 'validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);', 'void spec;'],
     ["RV-no-currency-gate", "provenance-only drift is not a canonical currency gate", 'pin === undefined || revision === pin', 'revision === pin'],
     ["RV-run-authority", "fault rejects run outcome", 'run.conclusion === "success"', 'true'],
     ["RV-scope", "fault rejects receipt scope", 'equal(receipt.changed_files, context.changed_files) && equal(receipt.selected_steps, context.selected_steps)', 'true'],
@@ -367,12 +418,12 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       mkdirSync(path.join(scratch, "scripts/lib"), { recursive: true });
       const mutated = path.join(scratch, CONTROLLER);
       writeFileSync(mutated, controller.replace(old, replacement)); utimesSync(mutated, new Date(), new Date());
-      for (const file of ["scripts/preflight.mjs", "scripts/lib/jsonc.mjs"]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
+      for (const file of ["scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_CONTROLLER_UNDER_TEST: mutated };
       // A new test-runner process must not inherit the outer worker's private IPC protocol.
       delete childEnv.NODE_TEST_CONTEXT;
       const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
-      assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.match(result.stdout, /(?:ℹ|#) fail 1/); assert.doesNotMatch(result.stderr, /SyntaxError/);
+      assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/); assert.doesNotMatch(result.stderr, /SyntaxError|ERR_MODULE_NOT_FOUND/);
       writeFileSync(mutated, controller); utimesSync(mutated, new Date(), new Date());
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
@@ -387,7 +438,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: mutated }; delete childEnv.NODE_TEST_CONTEXT;
       const target = name === JOB ? "fork manual verification never queues a self-hosted runner" : "manual profiles never run legacy jobs";
       const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
-      assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.match(result.stdout, /(?:ℹ|#) fail 1/);
+      assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/);
       writeFileSync(mutated, workflow); utimesSync(mutated, new Date(), new Date());
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });

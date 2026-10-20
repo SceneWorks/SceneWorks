@@ -2,7 +2,7 @@
 // Manual secondary-Mac verification. A receipt is evidence from an authenticated run, never a
 // substitute for running preflight. Nothing here grants admission to dispatch a device job.
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
@@ -10,12 +10,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectSteps } from "./preflight.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { loadRegistry, validateAssertionReceipt, REGISTRY_PATH } from "./moss-consumer-assertions.mjs";
+export const ASSERTION_DRIVER = "scripts/moss-consumer-assertions.mjs";
 
 export const REPOSITORY = "SceneWorks/SceneWorks";
 export const WORKFLOW = ".github/workflows/macos-mlx.yml";
 export const CONTROLLER = "scripts/remote-macos-verification.mjs";
 export const JOB = "manual-verification";
-export const PROFILES = ["facts-and-projections", "canonical-preflight"];
+export const PROFILES = ["facts-and-projections", "consumer-assertions", "canonical-preflight"];
+export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
 export const OUTPUTS = [
   "config/engine-capabilities/capabilities.mlx.json",
   "config/engine-capabilities/audio/capabilities.candle.json",
@@ -26,7 +29,7 @@ export const OUTPUTS = [
   "docs/generated/memory-matrix.json",
   "docs/generated/memory-matrix.md",
 ];
-const CONTROL_FILES = [WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs"];
+const CONTROL_FILES = [WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH];
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_ARCHIVE = 128 * 1024 * 1024;
@@ -44,7 +47,7 @@ export function validateRequest(request) {
   requireFact(ownedRef(request.source_ref) && baseRef(request.base_ref), "owned story/feature source and main/feature base required");
   requireFact(request.legacy_device_inputs === false, "verification cannot share calibration/provisioning inputs");
   requireFact(request.profile !== "canonical-preflight" || request.allow_nax_unit === true, "canonical preflight requires explicit weights-free NAX unit admission");
-  requireFact(request.profile !== "facts-and-projections" || request.allow_nax_unit === false, "facts profile cannot request device execution");
+  requireFact(request.profile === "canonical-preflight" || request.allow_nax_unit === false, "CPU/metadata profiles cannot request device execution");
   return request;
 }
 
@@ -94,7 +97,7 @@ export function checkoutContext(root, request, { executeGit = git, readPin = inf
   const selection_platform = request.profile === "canonical-preflight" ? platform : null;
   const selected_steps = request.profile === "canonical-preflight" ? selectSteps(changed_files, false, root, platform).map(step => step.name) : [];
   requireFact(request.profile !== "canonical-preflight" || (platform === "darwin" && selected_steps.length > 0), "non-Mac or empty canonical verification scope refused");
-  return { ...request, base_sha, merge_base, changed_files, selected_steps, selection_platform };
+  return { ...request, base_sha, merge_base, changed_files, selected_steps, selection_platform, cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))) };
 }
 
 export function validateCapabilityFile(value, backend, kind, pin) {
@@ -149,15 +152,17 @@ export function validateUnits(ledger) {
 
 // Validate against authenticated GitHub responses AND locally recomputed source/scope, not receipt
 // claims alone. The API adapter and expected local context are injectable for hermetic policy tests.
-export async function authenticateReceipt({ receipt, files, context, api, runId, attempt, artifactId, controls, archiveDigest }) {
+export async function authenticateReceipt({ receipt, files, context, api, runId, attempt, artifactId, controls, archiveDigest, assertionRegistry }) {
   validateRequest(context);
   requireFact(receipt.schema_version === 1 && receipt.status === "passed" && receipt.repository === REPOSITORY, "invalid receipt schema/status/repository");
-  for (const key of ["profile", "source_sha", "source_ref", "base_ref", "inference_sha", "merge_base", "allow_nax_unit", "legacy_device_inputs"]) requireFact(receipt[key] === context[key], `receipt ${key} mismatch`);
+  for (const key of ["profile", "source_sha", "source_ref", "base_ref", "inference_sha", "merge_base", "allow_nax_unit", "legacy_device_inputs", "cargo_config_sha256"]) requireFact(receipt[key] === context[key], `receipt ${key} mismatch`);
   requireFact(receipt.selection_platform === context.selection_platform && (context.profile !== "canonical-preflight" || context.selection_platform === "darwin"), "receipt cannot satisfy a different host's canonical scope");
   requireFact(equal(receipt.changed_files, context.changed_files) && equal(receipt.selected_steps, context.selected_steps), "receipt scope differs from committed source");
-  requireFact(receipt.clean_before === true && typeof receipt.clean_after === "boolean" && (context.profile !== "canonical-preflight" || receipt.clean_after === true), "dirty canonical source cannot pass");
+  requireFact(receipt.clean_before === true && typeof receipt.clean_after === "boolean" && (context.profile === "facts-and-projections" || receipt.clean_after === true), "dirty canonical source cannot pass");
   requireFact(receipt.run_id === runId && receipt.run_attempt === attempt && receipt.job === JOB && receipt.runner_name === "nax-macos-2", "receipt execution identity mismatch");
   validateMachine(receipt.machine, context.profile);
+  validateCacheContext(receipt.cache_context);
+  requireFact(receipt.cache_context.sdk === receipt.machine.sdk && receipt.cache_context.cargo_config_sha256 === context.cargo_config_sha256, "cache SDK/config differs from observed source");
   const run = await api.json(`repos/${REPOSITORY}/actions/runs/${runId}/attempts/${attempt}`);
   requireFact(run.id === runId && run.run_attempt === attempt && run.event === "workflow_dispatch" && run.status === "completed" && run.conclusion === "success", "actual run did not complete successfully");
   requireFact(run.repository?.full_name === REPOSITORY && run.head_repository?.full_name === REPOSITORY && ownedRef(run.head_branch), "fork or external workflow ref rejected");
@@ -185,14 +190,18 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
   requireFact(/^sha256:[0-9a-f]{64}$/.test(archiveDigest ?? "") && artifact.digest === archiveDigest, "authenticated artifact archive changed");
   requireFact(artifact.id === artifactId && artifact.expired === false && artifact.name === artifactName(context.profile, context.source_sha, runId, attempt), "artifact identity/expiry mismatch");
   requireFact(artifact.workflow_run?.id === runId && artifact.workflow_run?.head_sha === run.head_sha && artifact.workflow_run?.repository_id === run.repository.id && artifact.workflow_run?.head_repository_id === run.head_repository.id, "artifact belongs to a different run/repository");
-  requireFact(receipt.command?.join("\0") === (context.profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${context.base_ref}`] : ["facts-and-projections"]).join("\0"), "receipt command mismatch");
-  const expected = context.profile === "canonical-preflight" ? ["stamp.txt", "native-units.json", "preflight.log"] : [...OUTPUTS.map(file => `payload/${file}`), "facts.log"];
+  requireFact(receipt.command?.join("\0") === (context.profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${context.base_ref}`] : context.profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"]).join("\0"), "receipt command mismatch");
+  const expected = context.profile === "canonical-preflight" ? ["stamp.txt", "native-units.json", "preflight.log"] : context.profile === "consumer-assertions" ? ["assertions.json", "assertions.log"] : [...OUTPUTS.map(file => `payload/${file}`), "facts.log"];
   requireFact(equal(Object.keys(receipt.files ?? {}).sort(), [...expected].sort()) && equal(Object.keys(files).sort(), ["receipt.json", ...expected].sort()), "unexpected or missing artifact members");
   for (const file of expected) requireFact(HASH.test(receipt.files[file]) && sha256(files[file]) === receipt.files[file], `artifact member digest mismatch: ${file}`);
   if (context.profile === "canonical-preflight") {
     requireFact(receipt.stamp_created_this_run === true, "older stamp cannot be relabeled as a new canonical run");
     validateStamp(files["stamp.txt"].toString(), context);
     validateUnits(JSON.parse(files["native-units.json"].toString()));
+  } else if (context.profile === "consumer-assertions") {
+    const spec = assertionRegistry ?? loadRegistry();
+    requireFact(spec.registry_sha256 === controls[REGISTRY_PATH], "consumer case registry differs from authenticated source");
+    validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);
   } else {
     for (const file of OUTPUTS.filter(file => /\.jsonc?$/.test(file))) JSON.parse(stripJsoncComments(files[`payload/${file}`].toString()));
     for (const [index, kind] of ["media", "audio", "runtime"].entries()) validateCapabilityFile(JSON.parse(files[`payload/${OUTPUTS[index]}`]), kind === "audio" ? "candle" : "mlx", kind, context.inference_sha);
@@ -262,7 +271,7 @@ export async function importReceipt(root, request, { runId, attempt, artifactId,
   const files = readArchive(await api.archive(artifactId), metadata.digest);
   requireFact(files["receipt.json"], "receipt missing");
   const receipt = JSON.parse(files["receipt.json"]);
-  await authenticateReceipt({ receipt, files, context, api, runId, attempt, artifactId, controls, archiveDigest: metadata.digest });
+  await authenticateReceipt({ receipt, files, context, api, runId, attempt, artifactId, controls, archiveDigest: metadata.digest, assertionRegistry: request.profile === "consumer-assertions" ? loadRegistry(root) : undefined });
   // Authentication can take time; reject local edits or ref/context changes before writing anything.
   const current = contextFor(root, request);
   requireFact(equal(current.changed_files, context.changed_files) && current.merge_base === context.merge_base, "local source/scope changed during import");
@@ -273,6 +282,10 @@ export async function importReceipt(root, request, { runId, attempt, artifactId,
     const evidence = path.join(common, "sceneworks-preflight-receipts", request.source_sha, `${runId}-${attempt}-${artifactId}.json`);
     atomicWrite(evidence, Buffer.from(`${JSON.stringify({ artifact_id: artifactId, archive_digest: metadata.digest, receipt }, null, 2)}\n`));
     atomicWrite(destination, files["stamp.txt"]);
+  } else if (request.profile === "consumer-assertions") {
+    const common = commonDirectory(root);
+    const destination = path.join(common, "sceneworks-consumer-assertions", request.source_sha, `${runId}-${attempt}-${artifactId}.json`);
+    atomicWrite(destination, Buffer.from(`${JSON.stringify({ artifact_id: artifactId, archive_digest: metadata.digest, receipt, assertions: JSON.parse(files["assertions.json"].toString()) }, null, 2)}\n`));
   } else {
     for (const file of OUTPUTS) {
       let cursor = root;
@@ -310,12 +323,58 @@ async function runLogged(root, args, log, env, append = false) {
   } finally { closeSync(output); }
 }
 
+// This protects ONLY this workflow's dedicated target directory, not the physical host/GPU.
+// Managed completion/failure releases it. Abrupt SIGKILL/job loss may leave an unknown owner;
+// refuse that state until the operator verifies release. Never auto-steal a stale directory.
+export function acquireTargetLease(directory, owner) {
+  requireFact(owner.runner_name === "nax-macos-2" && Number.isSafeInteger(owner.run_id) && owner.run_id > 0 && Number.isSafeInteger(owner.run_attempt) && owner.run_attempt > 0, "cache owner identity invalid");
+  mkdirSync(directory, { recursive: true });
+  requireFact(!lstatSync(directory).isSymbolicLink(), "shared target cannot be a symlink");
+  const lease = path.join(directory, ".remote-verification-owner");
+  try { mkdirSync(lease); } catch (error) { if (error.code === "EEXIST") fail("dedicated target cache already leased; verify prior run/process release, never steal a lock"); throw error; }
+  const token = randomUUID();
+  writeFileSync(path.join(lease, "owner.json"), JSON.stringify({ ...owner, token, pid: process.pid }));
+  return { release() {
+    const current = JSON.parse(readFileSync(path.join(lease, "owner.json")));
+    requireFact(current.token === token && current.run_id === owner.run_id && current.run_attempt === owner.run_attempt && current.pid === process.pid, "refusing another run's target lease");
+    rmSync(lease, { recursive: true });
+  } };
+}
+
+export function validateCacheContext(context) {
+  requireFact(context?.serialized === true && context.released === true && context.runner_name === "nax-macos-2", "target cache was not exclusively owned and released");
+  requireFact(context.toolchain === "1.97.1" && context.host === "aarch64-apple-darwin" && HASH.test(context.rustc_sha256 ?? "") && HASH.test(context.cargo_config_sha256 ?? "") && HASH.test(context.target_directory_sha256 ?? "") && /^\d+\.\d+(?:\.\d+)?$/.test(context.sdk ?? ""), "compiler/cache context mismatch");
+  requireFact(equal(context.build_flags, CACHE_FLAGS), "inconsistent cache build flags");
+  const { context_sha256, ...body } = context;
+  requireFact(HASH.test(context_sha256 ?? "") && sha256(JSON.stringify(body)) === context_sha256, "cache context fingerprint mismatch");
+}
+
+export async function executeRemote(root, output, env = process.env) {
+  const request = requestFromEnvironment(env), identity = dispatchIdentity(env);
+  const machine = validateMachine(machineFromHost(env), request.profile);
+  requireFact(path.isAbsolute(env.GITHUB_WORKSPACE ?? "") && path.resolve(root) === path.join(env.GITHUB_WORKSPACE, `candidate-${identity.run_id}-${identity.run_attempt}`), "fresh per-run/attempt candidate required");
+  const target = path.resolve(env.GITHUB_WORKSPACE, "..", "remote-verification-target");
+  requireFact(path.resolve(env.CARGO_TARGET_DIR ?? "") === target, "dedicated serialized target cache required");
+  requireFact(!env.RUSTFLAGS && !env.CARGO_ENCODED_RUSTFLAGS, "nonstandard compiler flags require a separate validated cache context");
+  const rustc = command(root, [path.join(os.homedir(), ".cargo/bin/rustup"), "run", "1.97.1", "rustc", "-vV"]);
+  requireFact(/^release: 1\.97\.1$/m.test(rustc) && /^host: aarch64-apple-darwin$/m.test(rustc), "native pinned compiler required");
+  const cache = { serialized: true, released: true, runner_name: env.RUNNER_NAME, toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: machine.sdk, target_directory_sha256: sha256(target), rustc_sha256: sha256(rustc), cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))), build_flags: { ...CACHE_FLAGS } };
+  const lease = acquireTargetLease(target, { ...identity, runner_name: env.RUNNER_NAME, source_sha: request.source_sha });
+  let receipt;
+  try { receipt = await executeRemoteWithinLease(root, output, env); }
+  finally { lease.release(); }
+  receipt.cache_context = { ...cache, context_sha256: sha256(JSON.stringify(cache)) };
+  validateCacheContext(receipt.cache_context);
+  writeFileSync(path.join(output, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
+  return receipt;
+}
+
 function validateControllerCheckout(root) {
   const controlRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   for (const file of CONTROL_FILES) requireFact(readFileSync(path.join(root, file)).equals(readFileSync(path.join(controlRoot, file))), `dispatcher and candidate implementation differ: ${file}`);
 }
 
-export async function executeRemote(root, output, env = process.env) {
+async function executeRemoteWithinLease(root, output, env = process.env) {
   validateControllerCheckout(root);
   const request = requestFromEnvironment(env);
   const machine = validateMachine(machineFromHost(env), request.profile);
@@ -323,7 +382,7 @@ export async function executeRemote(root, output, env = process.env) {
   const identity = dispatchIdentity(env);
   requireFact(!existsSync(output), "output directory must be new"); mkdirSync(output, { recursive: true });
   const receipt = { schema_version: 1, status: "running", ...context, ...identity, repository: REPOSITORY, job: JOB, runner_name: env.RUNNER_NAME, machine, clean_before: true, files: {} };
-  const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
+  const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
   delete runEnv.CARGO_BUILD_TARGET;
   delete runEnv.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER;
   if (request.profile === "facts-and-projections") {
@@ -350,6 +409,20 @@ export async function executeRemote(root, output, env = process.env) {
       for (const file of OUTPUTS) atomicWrite(path.join(output, "payload", file), readFileSync(path.join(root, file)));
       receipt.command = ["facts-and-projections"];
     } finally { rmSync(scratch, { recursive: true, force: true }); }
+  } else if (request.profile === "consumer-assertions") {
+    const scratch = mkdtempSync(path.join(os.tmpdir(), "moss-consumer-assertions-"));
+    const run = path.join(scratch, "run");
+    try {
+      await runLogged(root, [process.execPath, path.join(root, ASSERTION_DRIVER), root, run], path.join(output, "assertions.log"), runEnv);
+    } finally {
+      const result = path.join(run, "assertions.json");
+      if (existsSync(result)) writeFileSync(path.join(output, "assertions.json"), readFileSync(result));
+      rmSync(scratch, { recursive: true, force: true });
+    }
+    requireFact(clean(root) && git(root, "rev-parse", "HEAD") === request.source_sha, "consumer driver left changed source");
+    const spec = loadRegistry(root);
+    validateAssertionReceipt(JSON.parse(readFileSync(path.join(output, "assertions.json"))), spec, request.source_sha, sha256(readFileSync(path.join(root, ASSERTION_DRIVER))));
+    receipt.command = ["consumer-assertions", ASSERTION_DRIVER];
   } else {
     // Canonical comparison intentionally ignores provenance-only pin drift. Preserve that policy;
     // the actual build pin is authenticated separately by Cargo.toml/Cargo.lock and the source SHA.
@@ -375,9 +448,8 @@ export async function executeRemote(root, output, env = process.env) {
   }
   receipt.clean_after = clean(root);
   receipt.status = "passed";
-  const members = request.profile === "canonical-preflight" ? ["stamp.txt", "native-units.json", "preflight.log"] : [...OUTPUTS.map(file => `payload/${file}`), "facts.log"];
+  const members = request.profile === "canonical-preflight" ? ["stamp.txt", "native-units.json", "preflight.log"] : request.profile === "consumer-assertions" ? ["assertions.json", "assertions.log"] : [...OUTPUTS.map(file => `payload/${file}`), "facts.log"];
   receipt.files = Object.fromEntries(members.map(file => [file, sha256(readFileSync(path.join(output, file)))]));
-  writeFileSync(path.join(output, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;
 }
 

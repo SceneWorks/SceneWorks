@@ -122,7 +122,7 @@ on:
         type: choice
         required: false
         default: legacy
-        options: [legacy, facts-and-projections, canonical-preflight]
+        options: [legacy, facts-and-projections, consumer-assertions, canonical-preflight]
       source_sha:
         description: "Exact SceneWorks commit for explicit verification profiles"
         type: string

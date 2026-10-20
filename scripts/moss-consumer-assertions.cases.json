@@ -1,0 +1,896 @@
+{
+  "schema_version": 1,
+  "carried": {
+    "source_revision": "e1206ef7a5b556402b5fa5e4f3d4f6a800c8a026",
+    "case_ids": [
+      "SW-Base-official-source",
+      "SW-SFT-official-source",
+      "SW-compute-demoted"
+    ],
+    "fingerprints": {
+      "official_source_load": "9e47b9d6ead24bbc598aeb37a5cbe8255ce20a5a1ba77e95067903b7ca757565",
+      "moss_finalizer": "483e1303bf813cc12e0c6f3ddeba0de92c252e0c29b1bb02c2efed62053d17cd"
+    }
+  },
+  "cases": [
+    {
+      "id": "SW-target-count",
+      "tests": [
+        "target",
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "            moss_image_lora_target(true),\n",
+          "new": ""
+        }
+      ]
+    },
+    {
+      "id": "SW-Base-default",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "            moss_image_lora_target(false),\n            moss_image_lora_target(true),",
+          "new": "            moss_image_lora_target(true),\n            moss_image_lora_target(false),"
+        }
+      ]
+    },
+    {
+      "id": "SW-SFT-identity",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"moss_image_sft\",",
+          "new": "\"moss_image_base\",",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-exact-repository",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"OpenMOSS-Team/MOSS-Image-SFT\"",
+          "new": "\"OpenMOSS-Team/MOSS-Image-Base\"",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-default-sampler",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"timestepType\":\"moss_stage3_v1\"",
+          "new": "\"timestepType\":\"uniform\"",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-default-posterior",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"vae_posterior\":\"posterior_mean_v1\"",
+          "new": "\"vae_posterior\":\"sample\"",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-offered-methods",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"networkTypes\":[\"lora\",\"lokr\"]",
+          "new": "\"networkTypes\":[\"lora\"]",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-import-native-parent",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": "moss_base_model,\n        network_type,",
+          "new": "moss_base_model: None,\n        network_type,"
+        }
+      ]
+    },
+    {
+      "id": "SW-import-manifest-parent",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": ".or(metadata.moss_base_model.as_ref())",
+          "new": ".or(None)"
+        }
+      ]
+    },
+    {
+      "id": "SW-import-family",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": "    if let Some(stamp) = detect_metadata_family(header) {",
+          "new": "    if header[\"__metadata__\"][\"family\"] == \"moss-image\" { return None; }\n    if let Some(stamp) = detect_metadata_family(header) {",
+          "anchor": "pub fn detect_lora_family("
+        }
+      ]
+    },
+    {
+      "id": "SW-import-same-parent",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": "    if base == model_id {",
+          "new": "    if model_id.starts_with(\"moss_image_\") { return false; }\n    if base == model_id {",
+          "anchor": "pub fn base_model_satisfies_gate("
+        }
+      ]
+    },
+    {
+      "id": "SW-import-cross-parent",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": "if let Some(base) = base {\n                    // `base_model_satisfies_gate`",
+          "new": "if let Some(base) = base.filter(|_| !families.iter().any(|family| family == \"moss-image\")) {\n                    // `base_model_satisfies_gate`"
+        }
+      ]
+    },
+    {
+      "id": "SW-import-missing-parent",
+      "tests": [
+        "library"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/lora_family.rs",
+          "op": "replace",
+          "old": "family == \"moss-image\") && base.is_none()",
+          "new": "family == \"moss-image-disabled\") && base.is_none()"
+        }
+      ]
+    },
+    {
+      "id": "SW-MLX-route",
+      "tests": [
+        "catalog"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[\n    \"moss_image_lora\",\n",
+          "new": "pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[\n"
+        }
+      ]
+    },
+    {
+      "id": "SW-generic-refusal",
+      "tests": [
+        "catalog",
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[\n    \"moss_image_lora\",\n",
+          "new": "pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[\n"
+        }
+      ]
+    },
+    {
+      "id": "SW-matrix-base",
+      "tests": [
+        "matrix"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "op": "replace",
+          "old": "(\"moss_image_base\", \"moss_image_base\")",
+          "new": "(\"wrong\", \"wrong\")",
+          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+        }
+      ]
+    },
+    {
+      "id": "SW-matrix-sft",
+      "tests": [
+        "matrix"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+          "op": "replace",
+          "old": "(\"moss_image_sft\", \"moss_image_sft\")",
+          "new": "(\"wrong\", \"wrong\")",
+          "anchor": "pub(crate) fn expected_backend_local_trainer_id("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-compute-choices",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"mixedPrecisions\":[\"bf16\",\"f32\"]",
+          "new": "\"mixedPrecisions\":[\"bf16\"]",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-compute-default",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"mixedPrecision\":\"bf16\"",
+          "new": "\"mixedPrecision\":\"f32\"",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-limits-apple",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"supportsSubjectMaskLoss\":true}",
+          "new": "\"supportsSubjectMaskLoss\":true,\"appleSiliconOnly\":true}",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-ui-apple",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"recommendedFor\":[\"character\",\"style\"]",
+          "new": "\"recommendedFor\":[\"character\",\"style\"],\"appleSiliconOnly\":true",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-limits-backend",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"supportsSubjectMaskLoss\":true}",
+          "new": "\"supportsSubjectMaskLoss\":true,\"requiresBackend\":\"mlx\"}",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-target-ui-backend",
+      "tests": [
+        "target"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/training.rs",
+          "op": "replace",
+          "old": "\"recommendedFor\":[\"character\",\"style\"]",
+          "new": "\"recommendedFor\":[\"character\",\"style\"],\"requiresBackend\":\"mlx\"",
+          "anchor": "fn moss_image_lora_target("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-mlx-supported",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+          "op": "replace",
+          "old": "return super::catalog::moss_training_plan_is_supported(plan);",
+          "new": "return false;",
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-candle-supported",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "replace",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "new": "false",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-mlx-unsupported",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+          "op": "replace",
+          "old": "return super::catalog::moss_training_plan_is_supported(plan);",
+          "new": "return true;",
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-candle-unsupported",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "replace",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "new": "job.job_type == JobType::LoraTrain",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-foreign-base-mlx",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "if !matches!(base, Some(\"moss_image_base\" | \"moss_image_sft\"))",
+          "new": "if base.is_none()",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-foreign-base-candle",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "replace",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "new": "job.job_type == JobType::LoraTrain && (super::catalog::moss_training_plan_is_supported(plan) || (base_model == \"qwen_image_2_1\" && is_adapter))",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-control-mlx",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+          "op": "replace",
+          "old": "if !matches!(job.job_type, JobType::LoraTrain)",
+          "new": "if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)",
+          "anchor": "pub(crate) fn training_job_is_mlx_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-control-candle",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "replace",
+          "old": "job.job_type == JobType::LoraTrain\n                && super::catalog::moss_training_plan_is_supported(plan)",
+          "new": "super::catalog::moss_training_plan_is_supported(plan)",
+          "anchor": "pub(crate) fn training_job_is_candle_eligible("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-typed-method",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "_ => return false,",
+          "new": "_ => \"lora\",",
+          "anchor": "let method = match advanced.and_then(|advanced| advanced.get(\"networkType\"))"
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-trimmed-method",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "Some(Value::String(value)) => value.trim(),",
+          "new": "Some(Value::String(value)) => value.as_str(),",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+        }
+      ]
+    },
+    {
+      "id": "SW-scheduler-default-method",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "Some(Value::String(value)) if value.trim().is_empty() => \"lora\",",
+          "new": "Some(Value::String(value)) if value.trim().is_empty() => \"full\",",
+          "anchor": "pub(crate) fn moss_training_plan_is_supported("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-sampler",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.timestep_type=\"uniform\".into();}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-trigger",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.trigger_word=None;}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-method",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.network_type=NetworkType::Lora;}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-rank",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.rank=1;}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-alpha",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.alpha=1.;}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-targets",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.lora_target_modules=vec![\"q\".into()];}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-posterior",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"vae_posterior\".into(),json!(\"sample\"));}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-strict-options",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" {config.model_options.insert(\"foreign\".into(),json!(true));}\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-image-path",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "        items,\n        config,",
+          "new": "        items: items.into_iter().map(|mut item| { item.image_path=PathBuf::from(\"wrong.png\"); item }).collect(),\n        config,",
+          "anchor": "fn training_request_from_plan("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-caption",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "caption: item.caption.clone(),",
+          "new": "caption: String::new(),",
+          "anchor": "fn training_request_from_plan("
+        }
+      ]
+    },
+    {
+      "id": "SW-request-trigger-list",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "trigger_words: plan.output.trigger_words.clone(),",
+          "new": "trigger_words: Vec::new(),",
+          "anchor": "fn training_request_from_plan("
+        }
+      ]
+    },
+    {
+      "id": "SW-load-source",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "WeightsSource::Dir(self.weights_dir)",
+          "new": "WeightsSource::Dir(self.weights_dir.join(\"wrong\"))",
+          "anchor": "pub(crate) fn load_spec("
+        }
+      ]
+    },
+    {
+      "id": "SW-load-components",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": ".fold(spec, |spec, (id, source)| spec.with_component(id, source))",
+          "new": ".fold(spec, |spec, (_id, _source)| spec)",
+          "anchor": "pub(crate) fn load_spec("
+        }
+      ]
+    },
+    {
+      "id": "SW-load-text-encoder",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "spec.text_encoder = self.text_encoder;",
+          "new": "spec.text_encoder = Some(\"wrong\".into());",
+          "anchor": "pub(crate) fn load_spec("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-base",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(plan.target.base_model)",
+          "new": "json!(\"wrong\")",
+          "anchor": "fn training_result("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-method",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(advanced_str(&plan.config.advanced, \"networkType\", \"lora\"))",
+          "new": "json!(\"lora\")",
+          "anchor": "fn training_result("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-triggers",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(plan.output.trigger_words)",
+          "new": "json!([])",
+          "anchor": "fn training_result("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-dataset-count",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(plan.dataset.items.len())",
+          "new": "json!(0)",
+          "anchor": "fn training_result("
+        }
+      ]
+    },
+    {
+      "id": "SW-load-no-quantization",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "spec.precision = load_precision;",
+          "new": "spec.precision = load_precision; spec.quantize = Some(gen_core::Quant::Q4);",
+          "anchor": "pub(crate) fn load_spec("
+        }
+      ]
+    },
+    {
+      "id": "SW-worker-trainer-identity",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\"moss_image_sft\" => Some(\"moss_image_sft\"),",
+          "new": "\"moss_image_sft\" => Some(\"moss_image_base\"),",
+          "anchor": "pub(crate) fn engine_trainer_id_for("
+        }
+      ]
+    },
+    {
+      "id": "SW-thin-sampler-default",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "config.timestep_type = \"moss_stage3_v1\".to_owned();",
+          "new": "config.timestep_type = \"uniform\".to_owned();",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-thin-posterior-default",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": ".or_insert_with(|| json!(\"posterior_mean_v1\"))",
+          "new": ".or_insert_with(|| json!(\"sample\"))",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-thin-explicit-sampler",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "if !plan.config.advanced.contains_key(\"timestepType\")",
+          "new": "if plan.target.kernel == \"moss_image_lora\"",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-thin-explicit-options",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-backend",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(backend)",
+          "new": "json!(\"wrong\")",
+          "anchor": "fn training_result("
+        }
+      ]
+    }
+  ]
+}
