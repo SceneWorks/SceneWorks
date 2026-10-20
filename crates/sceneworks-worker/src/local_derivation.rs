@@ -198,6 +198,36 @@ impl Flux3Conversion {
     }
 }
 
+/// Bind the source's actual checkpoint configuration to its frozen repository identity before
+/// converting. Merely pointing the base environment variable at distilled weights is not base proof.
+fn validate_flux3_dense_identity(
+    root: &Path,
+    repository: &str,
+    revision: &str,
+) -> Result<(), String> {
+    use gen_core::flux3::{
+        BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
+        DISTILLED_WEIGHTS_REVISION,
+    };
+    let (model, expected_revision, flow_map) = match repository {
+        DISTILLED_WEIGHTS_REPO => ("flux-3-image-klein", DISTILLED_WEIGHTS_REVISION, true),
+        BASE_WEIGHTS_REPO => ("flux-3-image-klein-base", BASE_WEIGHTS_REVISION, false),
+        _ => return Err("FLUX3 conversion source is not a frozen checkpoint repository".into()),
+    };
+    if revision != expected_revision {
+        return Err(format!(
+            "FLUX3 {repository} requires revision {expected_revision}"
+        ));
+    }
+    let config = gen_core::flux3::Flux3Config::from_dir(root).map_err(|e| e.to_string())?;
+    if config.model != model || config.dit.flow_map != flow_map || config.quantization.is_some() {
+        return Err(format!(
+            "FLUX3 {repository}@{revision} requires its own dense {model} configuration; another checkpoint or packed source is not a substitute"
+        ));
+    }
+    Ok(())
+}
+
 /// The preparer [`derive_local_tier`] runs for a FLUX 3 conversion: the inference converter over
 /// the fetched original at `spec.source`, writing `spec.out_dir`. `repository`/`revision` are the
 /// original's Hub identity, which the converter validates against the frozen FLUX 3 checkpoints
@@ -215,6 +245,7 @@ pub(crate) fn flux3_preparer(
                 spec.quantize
             ));
         }
+        validate_flux3_dense_identity(&spec.source, &repository, &revision)?;
         let source = gen_core::flux3::native_convert::ConversionSource {
             root: spec.source.clone(),
             repository,
@@ -505,6 +536,351 @@ mod tests {
         .expect_err("q8 conversion asked for q4");
         assert!(error.contains("Q8"), "{error}");
         assert!(!spec.out_dir.exists());
+    }
+
+    /// Observe actual conversion bytes without promoting a self-reported receipt to trusted pins.
+    /// This seam is also used with tiny local fixture files; those observations are NOT model proof.
+    fn observe_flux3_conversion(
+        model_id: &str,
+        repository: &str,
+        revision: &str,
+        conversion_id: &str,
+        source: &Path,
+        output: &Path,
+    ) -> Result<Value, String> {
+        use gen_core::flux3::conversion::{hash_source_file, open_conversion};
+        let conversion = Flux3Conversion::from_id(conversion_id)
+            .ok_or_else(|| format!("unknown FLUX3 conversion {conversion_id}"))?;
+        let expected_model = match repository {
+            gen_core::flux3::DISTILLED_WEIGHTS_REPO => "flux3_klein",
+            gen_core::flux3::BASE_WEIGHTS_REPO => "flux3_klein_base",
+            _ => return Err("unknown FLUX3 checkpoint repository".into()),
+        };
+        if model_id != expected_model {
+            return Err("FLUX3 capture model/repository mismatch".into());
+        }
+        let receipt = open_conversion(output).map_err(|e| e.to_string())?;
+        if receipt.source_repository != repository || receipt.source_revision != revision {
+            return Err("FLUX3 capture source identity differs from the conversion receipt".into());
+        }
+        let (algorithm, bits, group, backend, format) = match conversion {
+            Flux3Conversion::CandleGgmlQ4_1 => ("ggml-q4_1", 4, 32, "candle", "ggml-q4_1"),
+            Flux3Conversion::CandleGgmlQ8_0 => ("ggml-q8_0", 8, 32, "candle", "ggml-q8_0"),
+            Flux3Conversion::MlxAffine { bits, group } => {
+                ("mlx-affine", bits, group, "mlx", "mlx-affine")
+            }
+        };
+        if receipt.algorithm != algorithm
+            || receipt.bits != Some(bits)
+            || receipt.group_size != Some(group)
+        {
+            return Err("FLUX3 capture conversion recipe differs from the actual package".into());
+        }
+        receipt.verify_external(source).map_err(|e| e.to_string())?;
+        let mut source_inventory = Vec::new();
+        for (name, expected) in &receipt.source_artifacts {
+            let actual = hash_source_file(&source.join(name)).map_err(|e| e.to_string())?;
+            if &actual.sha256 != expected {
+                return Err(format!("FLUX3 source checksum changed: {name}"));
+            }
+            source_inventory.push(json!({"path":name,"bytes":actual.bytes,"sha256":actual.sha256}));
+        }
+        let weights =
+            hash_source_file(&output.join("model.safetensors")).map_err(|e| e.to_string())?;
+        let tier = if bits == 4 { "q4" } else { "q8" };
+        Ok(json!({
+            "schemaVersion":1, "evidenceKind":"conversion_observation_not_trusted_pins",
+            "artifactKey":format!("{model_id}:{backend}:{tier}"),
+            "modelId":model_id,"backend":backend,"tier":tier,
+            "repository":repository,"resolvedRevision":revision,
+            "conversionId":conversion_id,"backendFormat":format,
+            "weightsFile":"model.safetensors","weightsBytes":weights.bytes,
+            "weightsSha256":weights.sha256,"sourceInventory":source_inventory,
+            "conversionReceipt":receipt.to_json().map_err(|e| e.to_string())?,
+        }))
+    }
+
+    #[test]
+    fn flux3_capture_refuses_distilled_config_presented_as_base_or_wrong_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = json!({
+            "format_version":1,"model":"flux-3-image-klein","quantization":null,"torch_dtype":"bfloat16",
+            "dit":{"hidden":64,"heads":2,"depth":1,"depth_single":1,"mlp_ratio":3.0,
+                "axes_dim":[8,8,8,8],"theta":10000,"in_channels":{"image":16,"image_cond":16,"text":256},
+                "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5,"flow_map":true},
+            "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder","layers":[1],"pad_multiple":80,"max_tokens":8192,"dtype":"bfloat16"},
+            "vae":{"path":"ae.safetensors","dtype":"float32"},
+            "sampler":{"steps":16,"guidance":null,"alpha":6.93,"size":[1024,1024]}
+        });
+        let write = |value: &Value| {
+            std::fs::write(
+                dir.path().join("config.json"),
+                serde_json::to_vec(value).unwrap(),
+            )
+            .unwrap()
+        };
+        write(&config);
+        use gen_core::flux3::{
+            BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
+            DISTILLED_WEIGHTS_REVISION,
+        };
+        assert!(validate_flux3_dense_identity(
+            dir.path(),
+            DISTILLED_WEIGHTS_REPO,
+            DISTILLED_WEIGHTS_REVISION
+        )
+        .is_ok());
+        assert!(validate_flux3_dense_identity(
+            dir.path(),
+            BASE_WEIGHTS_REPO,
+            BASE_WEIGHTS_REVISION
+        )
+        .is_err());
+        assert!(validate_flux3_dense_identity(
+            dir.path(),
+            DISTILLED_WEIGHTS_REPO,
+            BASE_WEIGHTS_REVISION
+        )
+        .is_err());
+        config["model"] = json!("flux-3-image-klein-base");
+        config["dit"]["flow_map"] = json!(false);
+        config["sampler"]["guidance"] = json!(3.5);
+        config["sampler"]["steps"] = json!(50);
+        write(&config);
+        assert!(validate_flux3_dense_identity(
+            dir.path(),
+            BASE_WEIGHTS_REPO,
+            BASE_WEIGHTS_REVISION
+        )
+        .is_ok());
+        assert!(validate_flux3_dense_identity(
+            dir.path(),
+            DISTILLED_WEIGHTS_REPO,
+            DISTILLED_WEIGHTS_REVISION
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn flux3_artifact_observations_bind_checkpoint_recipe_full_inventory_and_actual_bytes() {
+        use gen_core::flux3::conversion::{
+            hash_source_file, ComponentInventory, ComponentPlacement, ComponentRole,
+            ConversionReceipt,
+        };
+        use std::collections::BTreeMap;
+        // Deliberately NOT tensors or real-weight evidence: these tiny files exercise the capture
+        // seam's actual disk hashing and receipt validation, not the native quantizer's numerics.
+        for (model, repository, revision) in [
+            (
+                "flux3_klein",
+                gen_core::flux3::DISTILLED_WEIGHTS_REPO,
+                gen_core::flux3::DISTILLED_WEIGHTS_REVISION,
+            ),
+            (
+                "flux3_klein_base",
+                gen_core::flux3::BASE_WEIGHTS_REPO,
+                gen_core::flux3::BASE_WEIGHTS_REVISION,
+            ),
+        ] {
+            for (id, conversion) in Flux3Conversion::ALL {
+                let dir = tempfile::tempdir().unwrap();
+                let source = dir.path().join("source");
+                let output = dir.path().join("output");
+                std::fs::create_dir_all(source.join("text_encoder")).unwrap();
+                std::fs::create_dir(&output).unwrap();
+                std::fs::write(
+                    source.join("model.safetensors"),
+                    format!("fixture original {model}"),
+                )
+                .unwrap();
+                let mut components = Vec::new();
+                let mut source_artifacts = BTreeMap::new();
+                let source_weight = hash_source_file(&source.join("model.safetensors")).unwrap();
+                source_artifacts.insert("model.safetensors".to_owned(), source_weight.sha256);
+                for (role, names) in [
+                    (
+                        ComponentRole::TextEncoder,
+                        vec![
+                            "text_encoder/config.json",
+                            "text_encoder/tokenizer.json",
+                            "text_encoder/tokenizer_config.json",
+                            "text_encoder/model.safetensors",
+                        ],
+                    ),
+                    (ComponentRole::Autoencoder, vec!["ae.safetensors"]),
+                ] {
+                    let mut files: BTreeMap<String, _> = BTreeMap::new();
+                    for name in names {
+                        std::fs::write(source.join(name), format!("fixture {model} {name}"))
+                            .unwrap();
+                        let file = hash_source_file(&source.join(name)).unwrap();
+                        source_artifacts.insert(name.into(), file.sha256.clone());
+                        files.insert(name.into(), file);
+                    }
+                    components.push(ComponentInventory {
+                        role,
+                        placement: ComponentPlacement::External,
+                        source_repository: repository.into(),
+                        source_revision: revision.into(),
+                        source_artifacts: files
+                            .iter()
+                            .map(|(p, f)| (p.clone(), f.sha256.clone()))
+                            .collect(),
+                        representation: "fixture-dense-not-real-weights".into(),
+                        files,
+                        quantized_targets: vec![],
+                        dense_targets: vec![],
+                    });
+                }
+                std::fs::write(
+                    output.join("model.safetensors"),
+                    format!("fixture packed {model} {id}"),
+                )
+                .unwrap();
+                let weight = hash_source_file(&output.join("model.safetensors")).unwrap();
+                components.push(ComponentInventory {
+                    role: ComponentRole::Dit,
+                    placement: ComponentPlacement::Owned,
+                    source_repository: repository.into(),
+                    source_revision: revision.into(),
+                    source_artifacts: BTreeMap::from([(
+                        "model.safetensors".into(),
+                        source_artifacts["model.safetensors"].clone(),
+                    )]),
+                    representation: "fixture-packed-not-real-weights".into(),
+                    files: BTreeMap::from([("model.safetensors".into(), weight.clone())]),
+                    quantized_targets: vec!["fixture.weight".into()],
+                    dense_targets: vec![],
+                });
+                let mut package_files = BTreeMap::new();
+                for name in ["config.json", "LICENSE.md", "NOTICE.md"] {
+                    std::fs::write(output.join(name), b"fixture").unwrap();
+                    package_files
+                        .insert(name.into(), hash_source_file(&output.join(name)).unwrap());
+                }
+                let (algorithm, bits, group_size, backend) = match conversion {
+                    Flux3Conversion::CandleGgmlQ4_1 => ("ggml-q4_1", 4, 32, "candle"),
+                    Flux3Conversion::CandleGgmlQ8_0 => ("ggml-q8_0", 8, 32, "candle"),
+                    Flux3Conversion::MlxAffine { bits, group } => {
+                        ("mlx-affine", bits, group, "mlx")
+                    }
+                };
+                let receipt = ConversionReceipt {
+                    source_repository: repository.into(),
+                    source_revision: revision.into(),
+                    source_artifacts,
+                    algorithm: algorithm.into(),
+                    algorithm_version: 1,
+                    bits: Some(bits),
+                    group_size: Some(group_size),
+                    components,
+                    package_files,
+                };
+                std::fs::write(
+                    output.join("flux3-conversion-receipt.json"),
+                    serde_json::to_vec(&receipt.to_json().unwrap()).unwrap(),
+                )
+                .unwrap();
+                let observe =
+                    || observe_flux3_conversion(model, repository, revision, id, &source, &output);
+                let one = observe().unwrap();
+                assert_eq!(
+                    one,
+                    observe().unwrap(),
+                    "observations are reproducible, with no timestamp/path entropy"
+                );
+                assert_eq!(one["artifactKey"], format!("{model}:{backend}:q{bits}"));
+                assert_eq!(one["weightsBytes"], weight.bytes);
+                assert_eq!(one["weightsSha256"], weight.sha256);
+                assert_eq!(one["sourceInventory"].as_array().unwrap().len(), 6);
+                assert_eq!(
+                    one["conversionReceipt"]["components"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    3
+                );
+                let wrong = if model == "flux3_klein" {
+                    "flux3_klein_base"
+                } else {
+                    "flux3_klein"
+                };
+                assert!(observe_flux3_conversion(
+                    wrong, repository, revision, id, &source, &output
+                )
+                .is_err());
+                std::fs::write(source.join("ae.safetensors"), b"corrupted component").unwrap();
+                assert!(
+                    observe().is_err(),
+                    "external corruption must not be captured"
+                );
+                std::fs::write(
+                    source.join("ae.safetensors"),
+                    format!("fixture {model} ae.safetensors"),
+                )
+                .unwrap();
+                std::fs::write(output.join("model.safetensors"), b"corrupted packed bytes")
+                    .unwrap();
+                assert!(observe().is_err(), "owned corruption must not be captured");
+            }
+        }
+    }
+
+    /// Explicit local-only artifact preparation/capture for E5. Unlike the legacy pin verifier,
+    /// this does not require existing q4/q8 catalog rows (base rows MUST wait for genuine pins).
+    /// Every requested recipe must be linked; none is silently skipped. Existing outputs are
+    /// verified, never deleted/replaced. The report contains observations, not trusted expectations.
+    #[test]
+    #[ignore = "operator-only conversion; requires explicit model, local source/output and conversion IDs"]
+    fn flux3_capture_conversion_artifacts() {
+        let model = std::env::var("FLUX3_CAPTURE_MODEL_ID")
+            .expect("FLUX3_CAPTURE_MODEL_ID: flux3_klein or flux3_klein_base");
+        assert!(matches!(model.as_str(), "flux3_klein" | "flux3_klein_base"));
+        let source = PathBuf::from(
+            std::env::var("FLUX3_CAPTURE_SOURCE_DIR")
+                .expect("FLUX3_CAPTURE_SOURCE_DIR: caller-provisioned ORIGINAL dense path only"),
+        );
+        let out = PathBuf::from(
+            std::env::var("FLUX3_CAPTURE_OUT_DIR")
+                .expect("FLUX3_CAPTURE_OUT_DIR: caller-owned output directory"),
+        );
+        let recipes = std::env::var("FLUX3_CAPTURE_CONVERSIONS")
+            .expect("FLUX3_CAPTURE_CONVERSIONS: comma-separated exact conversion IDs");
+        let entry = crate::tests::builtin_model_entry(&model);
+        let original = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["variant"] == "bf16")
+            .expect("dense original");
+        let repository = original["repo"].as_str().unwrap();
+        let revision = original["revision"].as_str().unwrap();
+        validate_flux3_dense_identity(&source, repository, revision).unwrap();
+        let mut reports = std::collections::BTreeMap::new();
+        for id in recipes.split(',') {
+            let conversion = Flux3Conversion::from_id(id).expect("exact native conversion ID");
+            let tier = if conversion.quantize() == Quantize::Q4 {
+                "q4"
+            } else {
+                "q8"
+            };
+            let output = out.join(&model).join(tier).join(id);
+            assert!(!reports.contains_key(id), "duplicate recipe");
+            if !output.exists() {
+                flux3_preparer(conversion, repository.into(), revision.into())(&PrepareSpec {
+                    source: source.clone(),
+                    out_dir: output.clone(),
+                    quantize: Some(conversion.quantize()),
+                })
+                .unwrap_or_else(|error| panic!("{model}:{id}: {error}"));
+            }
+            crate::flux3_converted_bundle_check(&source, &output).unwrap();
+            let report =
+                observe_flux3_conversion(&model, repository, revision, id, &source, &output)
+                    .unwrap();
+            reports.insert(id.to_owned(), report);
+        }
+        println!("{}", serde_json::to_string_pretty(&reports).unwrap());
     }
 
     /// Reproducibility receipt for the catalog pins (sc-26241). Converts the real pinned dense

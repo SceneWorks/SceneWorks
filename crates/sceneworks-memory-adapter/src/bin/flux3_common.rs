@@ -6,6 +6,9 @@ use runtime_cuda::gen_core as core;
 #[cfg(target_os = "macos")]
 use runtime_macos::gen_core as core;
 
+#[path = "flux3_resource.rs"]
+mod resource;
+
 pub(super) const PROVIDER: &str = "flux3_klein";
 pub(super) const FLUX3_REPOSITORY: &str = "black-forest-labs/flux-3-image-klein";
 pub(super) const REVISION: &str = "8454017f9ebaada30c998fccd9f67a80c7580f68";
@@ -98,10 +101,12 @@ pub(super) fn fingerprint_for(lane: &str, tier: &str, provider: &str) -> Result<
 }
 
 pub(super) struct Plan {
+    pub lane: String,
     pub checkpoint: Checkpoint,
     pub tier: String,
     pub fingerprint: String,
     pub selection: MemorySelection,
+    resource_case: Option<resource::BoundCase>,
 }
 
 pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
@@ -175,11 +180,21 @@ pub(super) fn plan(request: &Value, lane: &str) -> Result<Plan, String> {
             selection.strategy
         ));
     }
+    let resource_case = request
+        .get("resourceCase")
+        .map(|case| -> Result<resource::BoundCase, String> {
+            let root = protocol::required_env("SCENEWORKS_FLUX3_RESOURCE_INPUT_ROOT")?;
+            let bound = resource::bind(case, lane, checkpoint, tier, std::path::Path::new(&root))?;
+            Ok(bound)
+        })
+        .transpose()?;
     Ok(Plan {
+        lane: lane.to_owned(),
         checkpoint,
         tier: tier.to_owned(),
         fingerprint,
         selection,
+        resource_case,
     })
 }
 
@@ -241,7 +256,17 @@ pub(super) fn spec(lane: &str, plan: &Plan) -> Result<LoadSpec, String> {
             original.display()
         ));
     }
-    load_spec(lane, &plan.tier, package, original)
+    let mut spec = load_spec(lane, &plan.tier, package, original)?;
+    if let Some(case) = &plan.resource_case {
+        spec.adapters = case.adapters.clone();
+        if let Some(root) = &case.pup_root {
+            spec.components.insert(
+                core::flux3::pup::UPSAMPLER_COMPONENT.into(),
+                WeightsSource::Dir(root.clone()),
+            );
+        }
+    }
+    Ok(spec)
 }
 
 pub(super) fn validate_package_root(
@@ -290,8 +315,118 @@ pub(super) fn load_spec(
     Ok(spec)
 }
 
+/// Snapshot the SAME borrowed object immediately before catalog.load. No reconstruction from
+/// caller intent and no physical-device assertion: LoadSpec does not expose that observation.
+pub(super) fn actual_spec_observation(plan: &Plan, spec: &LoadSpec) -> Result<Value, String> {
+    use sha2::{Digest, Sha256};
+    let expected_policy = if plan.lane == "candle" {
+        OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
+    };
+    if spec.precision != Precision::Bf16
+        || spec.quantize != quant(&plan.lane, &plan.tier)?
+        || spec.offload_policy != expected_policy
+        || spec.load_shape != LoadShape::EagerMaterialization
+    {
+        return Err("BLOCKED: actual LoadSpec differs from admitted native tier/residency".into());
+    }
+    fn source(value: &WeightsSource) -> Value {
+        match value {
+            WeightsSource::Dir(path) => json!({"kind":"Dir","path":path}),
+            WeightsSource::File(path) => json!({"kind":"File","path":path}),
+        }
+    }
+    let adapters = |values: &[core::AdapterSpec]| {
+        values
+            .iter()
+            .map(|a| {
+                json!({"path":a.path,"scale":a.scale,"kind":format!("{:?}",a.kind),
+            "passScales":a.pass_scales,"moeExpert":format!("{:?}",a.moe_expert)})
+            })
+            .collect::<Vec<_>>()
+    };
+    let intended_adapters = plan
+        .resource_case
+        .as_ref()
+        .map(|c| adapters(&c.adapters))
+        .unwrap_or_default();
+    if adapters(&spec.adapters) != intended_adapters {
+        return Err("BLOCKED: actual LoadSpec adapters differ from bound request".into());
+    }
+    let expected_components = 2 + usize::from(
+        plan.resource_case
+            .as_ref()
+            .is_some_and(|c| c.pup_root.is_some()),
+    );
+    if spec.components.len() != expected_components
+        || !spec.components.contains_key("text_encoder")
+        || !spec.components.contains_key("autoencoder")
+    {
+        return Err(
+            "BLOCKED: actual LoadSpec component inventory differs from bound request".into(),
+        );
+    }
+    if let Some(root) = plan
+        .resource_case
+        .as_ref()
+        .and_then(|c| c.pup_root.as_ref())
+    {
+        if spec
+            .components
+            .get(core::flux3::pup::UPSAMPLER_COMPONENT)
+            .map(source)
+            != Some(json!({"kind":"Dir","path":root}))
+        {
+            return Err("BLOCKED: actual PUP LoadSpec differs from bound inventory".into());
+        }
+    }
+    let components = spec
+        .components
+        .iter()
+        .map(|(name, value)| (name.clone(), source(value)))
+        .collect::<serde_json::Map<_, _>>();
+    let mut value = json!({"schemaVersion":1,"provenanceKind":"actual_borrowed_load_spec_before_catalog_load",
+        "backend":plan.lane,"provider":plan.checkpoint.provider,"tier":plan.tier,"weights":source(&spec.weights),
+        "components":components,"adapters":adapters(&spec.adapters),"precision":format!("{:?}",spec.precision),
+        "quantization":format!("{:?}",spec.quantize),"offloadPolicy":format!("{:?}",spec.offload_policy),
+        "loadShape":format!("{:?}",spec.load_shape),"nativeDebugFormatVersion":1,
+        "nativeDebugSha256":format!("{:x}",Sha256::digest(format!("{spec:?}").as_bytes()))});
+    value["sha256"] = json!(resource::json_digest(
+        b"flux3_actual_load_spec_v1\0",
+        &value
+    )?);
+    Ok(value)
+}
+
+pub(super) fn attach_loaded_spec(
+    mut fragment: Value,
+    actual: Value,
+    generator: &dyn Generator,
+) -> Result<Value, String> {
+    if fragment["evidenceKind"].as_str().is_some_and(|kind| {
+        kind == "flux3_supplemental_resource_observation_v1"
+            || kind == "flux3_native_resource_capture_envelope_v1"
+    }) {
+        fragment["actualLoadSpec"] = actual;
+        fragment["loadedGenerator"] =
+            json!({"provider":generator.descriptor().id,"backend":generator.descriptor().backend});
+        let invocation = fragment
+            .pointer("/nativeOutput/reservation/invocationId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "resource capture has no actual invocation receipt".to_owned())?
+            .to_owned();
+        fragment["captureId"] = json!(invocation);
+        fragment["captureBindingSha256"] = json!(resource::json_digest(
+            b"flux3_native_capture_binding_v1\0",
+            &fragment
+        )?);
+    }
+    Ok(fragment)
+}
+
 pub(super) fn context(plan: &Plan, abi: u32, hardware_bytes: u64) -> MemoryRunContext {
-    MemoryRunContext {
+    let mut context = MemoryRunContext {
         selection: plan.selection,
         optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: abi,
@@ -321,7 +456,24 @@ pub(super) fn context(plan: &Plan, abi: u32, hardware_bytes: u64) -> MemoryRunCo
         predicted_peak_bytes: 1,
         cache_state: MemoryCacheState::Cold,
         evidence_revision: format!("sc-26241@{}", protocol::INFERENCE_PIN),
+    };
+    if let Some(case) = &plan.resource_case {
+        let count = case.request.image_reference_count();
+        context.mode = if count == 0 {
+            MemoryMode::TextToImage
+        } else {
+            MemoryMode::Edit
+        };
+        context.has_reference = count > 0;
+        context.geometry.width = case.request.width;
+        context.geometry.height = case.request.height;
+        context.geometry.reference_count = count;
+        context.reference_resources = case.reference_resources.clone();
+        context.overlay = (!case.adapters.is_empty()).then(|| "lora".to_owned());
+        context.evidence_revision =
+            format!("supplemental:{}:{}", case.value["caseId"], case.digest);
     }
+    context
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -385,6 +537,9 @@ pub(super) fn boundary(
 }
 
 fn generation_request(plan: &Plan) -> GenerationRequest {
+    if let Some(case) = &plan.resource_case {
+        return case.request.clone();
+    }
     GenerationRequest {
         prompt: "a portrait of a person in a sunlit studio, editorial photograph".to_owned(),
         width: 1024,
@@ -397,12 +552,52 @@ fn generation_request(plan: &Plan) -> GenerationRequest {
     }
 }
 
+/// Identity of the returned native RGB8 host carrier, not a saved asset or quality claim.
+fn output_receipt(output: &GenerationOutput, width: u32, height: u32) -> Result<Value, String> {
+    use sha2::{Digest, Sha256};
+    let GenerationOutput::Images(images) = output else {
+        return Err("FLUX3 did not return an image carrier".to_owned());
+    };
+    if images.len() != 1 {
+        return Err("FLUX3 did not return exactly one real image".to_owned());
+    }
+    let image = &images[0];
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|n| n.checked_mul(3))
+        .ok_or_else(|| "FLUX3 RGB8 byte length overflow".to_owned())?;
+    if image.width != width || image.height != height || image.pixels.len() as u64 != expected {
+        return Err("FLUX3 returned image geometry/byte length differs from request".to_owned());
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"flux3_native_output_v1\0Images\0RGB8\0interleaved_host_u8\0");
+    hash.update(image.width.to_le_bytes());
+    hash.update(image.height.to_le_bytes());
+    hash.update(expected.to_le_bytes());
+    hash.update(&image.pixels);
+    Ok(
+        json!({"schemaVersion":1,"kind":"Images","width":image.width,"height":image.height,
+        "format":"RGB8","representation":"interleaved_host_u8","bytes":expected,
+        "sha256":format!("{:x}",hash.finalize()),"identityDomain":"flux3_native_output_v1"}),
+    )
+}
+
 pub(super) fn render(
     plan: &Plan,
     generator: &dyn Generator,
     context: &MemoryRunContext,
     observed: &mut dyn FnMut(protocol::ReferencePhase),
-) -> Result<(), String> {
+) -> Result<Value, String> {
+    render_guarded(plan, generator, context, observed, &mut resource::reserve)
+}
+
+fn render_guarded(
+    plan: &Plan,
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    observed: &mut dyn FnMut(protocol::ReferencePhase),
+    reserve: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
+) -> Result<Value, String> {
     let mut request = generation_request(plan);
     let mut scope = generator
         .begin_memory_strategy_request(context)
@@ -420,8 +615,29 @@ pub(super) fn render(
         let mut phase = protocol::ReferencePhase::Conditioning;
         let mut phase_error = None;
         let cancel = request.cancel.clone();
+        let reservation = reserve(plan, &request)?;
+        let mut pup_pending = request.enhance_prompt;
+        let mut pup_complete = false;
         let output = generator.generate(&request, &mut |progress| {
             if phase_error.is_some() {
+                return;
+            }
+            if matches!(progress, Progress::PromptUpsamplingComplete) {
+                if pup_pending {
+                    pup_pending = false;
+                    pup_complete = true;
+                    // Observation only: keep the native scope's complete conditioning envelope.
+                    observed(protocol::ReferencePhase::Conditioning);
+                } else if !pup_complete {
+                    phase_error = Some("unexpected_phase_boundary: PUP bypass emitted completion".to_owned());
+                    cancel.cancel();
+                }
+                return;
+            }
+            if pup_pending && matches!(progress, Progress::Loading(core::LoadPhase::TextEncoder)
+                | Progress::ConditioningComplete | Progress::Step { .. } | Progress::Decoding) {
+                phase_error = Some("missing_phase_boundary: PromptUpsamplingComplete required before text conditioning".to_owned());
+                cancel.cancel();
                 return;
             }
             let next = match boundary(&mut phase, &progress) {
@@ -462,14 +678,16 @@ pub(super) fn render(
         scope
             .leave_phase(MemoryPhase::Decode)
             .map_err(|error| error.to_string())?;
-        if !matches!(output, GenerationOutput::Images(ref images) if images.len() == 1 && images[0].width == 1024 && images[0].height == 1024)
-        {
-            return Err("FLUX3 fixture did not return exactly one real image".to_owned());
-        }
-        Ok(())
+        let mut receipt = output_receipt(&output, request.width, request.height)?;
+        receipt["reservation"] = reservation;
+        receipt["actualGenerationRequest"] = resource::actual_request_observation(&request);
+        receipt["promptUpsampling"] = json!({"requested":request.enhance_prompt,
+            "typedCompletionObserved":pup_complete,"positiveEnhancementAttested":false,
+            "scope":"whole-request residency/baseline; completion includes honest fallback, not positive enhancement proof"});
+        Ok(receipt)
     })();
     let outcome = match &result {
-        Ok(()) => MemoryRunOutcome::Complete,
+        Ok(_) => MemoryRunOutcome::Complete,
         Err(_) if canceled => MemoryRunOutcome::Canceled,
         Err(message) => MemoryRunOutcome::Error {
             message: message.clone(),
@@ -479,7 +697,8 @@ pub(super) fn render(
         .finish(outcome)
         .map_err(|error| format!("finish FLUX3 memory scope: {error}"));
     match (result, finished) {
-        (Ok(()), finished) => finished,
+        (Ok(receipt), Ok(())) => Ok(receipt),
+        (Ok(_), Err(error)) => Err(error),
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(finish)) => Err(format!("{error}; {finish}")),
     }
@@ -491,6 +710,9 @@ pub(super) fn admit(
     plan: &Plan,
     request: &Value,
 ) -> Result<MemoryRunContext, String> {
+    generator
+        .validate(&generation_request(plan))
+        .map_err(|error| format!("BLOCKED: native FLUX3 request validation: {error}"))?;
     let contract = generator
         .memory_strategy_contract()
         .ok_or_else(|| "loaded FLUX3 provider exposes no memory contract".to_owned())?;
@@ -554,7 +776,41 @@ pub(super) fn fragment(
     strategy: Value,
     observed: Value,
     diagnostics: Value,
+    output: Value,
 ) -> Result<Value, String> {
+    if let Some(case) = &plan.resource_case {
+        return Ok(json!({
+            "schemaVersion":1,"evidenceKind":"flux3_supplemental_resource_observation_v1",
+            "anchorEligible":false,"caseId":case.value["caseId"],"status":"OBSERVED",
+            "resourceCase":case.value,"requestSha256":case.digest,"inputInventory":case.inputs,
+            "nativeOutput":output,
+            "actualRequest":{
+                "prompt":case.request.prompt,"width":case.request.width,"height":case.request.height,
+                "count":case.request.count,"seed":case.request.seed,"steps":case.request.steps,
+                "guidance":case.request.guidance,"enhancePrompt":case.request.enhance_prompt,
+                "referenceCount":case.request.image_reference_count(),
+                "layout":case.value["generation"].get("layout"),
+                "adapters":case.value["adapters"],
+            },
+            "artifact":{"repository":plan.checkpoint.repository,"resolvedRevision":plan.checkpoint.revision,"variant":plan.tier},
+            "componentInventory":resource::model_inventory()?,
+            "coverage":{
+                "wholeRequestCheckpoint":plan.checkpoint.provider,"crossCheckpointPeakInheritance":false,
+                "imagePrecision":"bf16","imageQuantization":plan.tier,
+                "residencyPolicy":if lane=="candle" {"sequential"} else {"resident"},
+                "upsamplerPrecisionPolicy":"native-package-validated-no-override",
+                "scope":"only this exact input/layout/adapter/component inventory and request; auxiliary profiles never imply distilled whole-request peaks"
+            },
+            "observedMemory":observed,"strategy":strategy,"diagnostics":diagnostics,
+            "captureRequest":request,"inferencePin":protocol::INFERENCE_PIN,
+            "capturedAt":protocol::captured_at(),
+            "notAttested":["saved product assets","quality acceptance","canonical calibration anchor","warm repeat/cancellation/error scenarios"],
+        }));
+    }
+    let mut observed = observed;
+    if let Some(metrics) = observed.as_object_mut() {
+        metrics.remove("promptUpsampling");
+    }
     let blocker = "native FLUX3 anchor producer: real scoped generation and synchronized phase observations only; promotion quality, repeat/cancel/error lifecycle scenarios and fault injection have NOT been attested by this capture";
     let mut fragment = json!({
         "status": "gated", "strategy": strategy,
@@ -581,6 +837,17 @@ pub(super) fn fragment(
         &mut fragment,
         "the native FLUX3 text-to-image path",
     )?;
+    if request["resourceEnvelope"] == true {
+        // Accounting/spec/output evidence is NEVER inserted into a canonical anchor fragment.
+        return Ok(
+            json!({"schemaVersion":1,"evidenceKind":"flux3_native_resource_capture_envelope_v1",
+            "anchorEligible":false,"caseId":output["reservation"]["caseId"],
+            "requestSha256":output["reservation"]["requestSha256"],
+            "anchorFragmentSha256":resource::json_digest(b"flux3_canonical_anchor_fragment_v1\0", &fragment)?,
+            "anchorFragment":fragment,"nativeOutput":output,
+            "componentInventory":resource::model_inventory()?}),
+        );
+    }
     Ok(fragment)
 }
 
@@ -588,6 +855,18 @@ pub(super) fn fragment(
 mod tests {
     use super::core::LoadPhase;
     use super::*;
+
+    // Explicit CPU fixture seam; production render ALWAYS uses the real atomic ledger helper.
+    fn render(
+        plan: &Plan,
+        generator: &dyn Generator,
+        context: &MemoryRunContext,
+        observed: &mut dyn FnMut(protocol::ReferencePhase),
+    ) -> Result<Value, String> {
+        render_guarded(plan, generator, context, observed, &mut |_, _| {
+            Ok(json!({"fixtureOnly":true}))
+        })
+    }
 
     fn request(lane: &str, tier: &str) -> Value {
         json!({ "planned": {
@@ -740,6 +1019,7 @@ mod tests {
         lifecycle: std::cell::RefCell<Vec<String>>,
         outcomes: std::cell::RefCell<Vec<MemoryRunOutcome>>,
         cancel_seen: std::cell::Cell<bool>,
+        generate_calls: std::cell::Cell<usize>,
         sampling: std::cell::RefCell<Option<(Option<u32>, Option<f32>)>>,
     }
 
@@ -762,6 +1042,7 @@ mod tests {
                 lifecycle: Default::default(),
                 outcomes: Default::default(),
                 cancel_seen: Default::default(),
+                generate_calls: Default::default(),
                 sampling: Default::default(),
             }
         }
@@ -820,6 +1101,7 @@ mod tests {
             request: &GenerationRequest,
             progress: &mut dyn FnMut(Progress),
         ) -> core::Result<GenerationOutput> {
+            self.generate_calls.set(self.generate_calls.get() + 1);
             *self.sampling.borrow_mut() = Some((request.steps, request.guidance));
             for event in &self.events {
                 // Deliberately deliver late callbacks even after cancellation: the
@@ -836,6 +1118,229 @@ mod tests {
                 pixels: vec![0; 1024 * 1024 * 3],
             }]))
         }
+    }
+
+    #[test]
+    fn flux3_actual_generation_projection_includes_all_native_sampler_axes_and_restores() {
+        let p = plan(&request("candle", "bf16"), "candle").unwrap();
+        let req = generation_request(&p);
+        let original = resource::actual_request_observation(&req);
+        assert_eq!(original["guidance"], Value::Null);
+        assert_eq!(original["negativePrompt"], Value::Null);
+        for field in ["negative", "true_cfg", "sampler", "scheduler", "shift"] {
+            let mut changed = req.clone();
+            match field {
+                "negative" => changed.negative_prompt = Some("different".into()),
+                "true_cfg" => changed.true_cfg = Some(2.),
+                "sampler" => changed.sampler = Some("different".into()),
+                "scheduler" => changed.scheduler = Some("different".into()),
+                _ => changed.scheduler_shift = Some(2.),
+            }
+            assert_ne!(original, resource::actual_request_observation(&changed));
+        }
+        assert_eq!(original, resource::actual_request_observation(&req));
+    }
+
+    #[test]
+    fn flux3_anchor_request_digest_matches_shared_node_witness_for_both_checkpoints() {
+        let mut p = plan(&request("candle", "bf16"), "candle").unwrap();
+        for (provider, expected) in [
+            (
+                PROVIDER,
+                "144040ed814a0836315c27e126a027fd750fe74a2400aceb2406346befbb455f",
+            ),
+            (
+                BASE_PROVIDER,
+                "a5a90974bf6d058f30e6ca9899c3b58ca6053b006234fbd28b83237f19543760",
+            ),
+        ] {
+            p.checkpoint = checkpoint(provider).unwrap();
+            assert_eq!(
+                resource::anchor_digest(&p, &generation_request(&p)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            String::from_utf8(
+                resource::canonical_bytes(&json!({"z":1.0,"a":[-0.0,1e-7,1e-6,1e21]})).unwrap()
+            )
+            .unwrap(),
+            "{\"a\":[0,1e-7,0.000001,1e+21],\"z\":1}"
+        );
+    }
+
+    #[test]
+    fn flux3_actual_spec_projection_binds_real_quant_components_and_keeps_legacy_output_unchanged()
+    {
+        let mut p = plan(&request("candle", "bf16"), "candle").unwrap();
+        let mut actual = load_spec(
+            "candle",
+            "bf16",
+            PathBuf::from("fixture-package"),
+            PathBuf::from("fixture-original"),
+        )
+        .unwrap();
+        let baseline = actual_spec_observation(&p, &actual).unwrap();
+        actual.components.insert(
+            "text_encoder".into(),
+            WeightsSource::Dir(PathBuf::from("different-actual-component")),
+        );
+        let changed = actual_spec_observation(&p, &actual).unwrap();
+        assert_ne!(baseline["sha256"], changed["sha256"]);
+        assert_ne!(baseline["components"], changed["components"]);
+        actual.quantize = quant("candle", "q4").unwrap();
+        assert!(
+            actual_spec_observation(&p, &actual).is_err(),
+            "intended/actual tier mismatch refuses"
+        );
+        p.tier = "q4".into();
+        let packed = actual_spec_observation(&p, &actual).unwrap();
+        assert_ne!(changed["sha256"], packed["sha256"]);
+        let generator = ScriptedGenerator::new(vec![], false);
+        let legacy = json!({"status":"gated","quality":{"result":"not_run"},"fixtureOnly":true});
+        assert_eq!(
+            attach_loaded_spec(legacy.clone(), packed, &generator).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn flux3_actual_scripted_generate_loop_cannot_bypass_or_reuse_inner_permit() {
+        for canceled in [false, true] {
+            let plan = plan(&request("candle", "bf16"), "candle").unwrap();
+            let generator = ScriptedGenerator::new(
+                vec![
+                    Progress::ConditioningComplete,
+                    Progress::Step {
+                        current: 1,
+                        total: 16,
+                    },
+                    Progress::Decoding,
+                ],
+                canceled,
+            );
+            let mut spent = false;
+            let mut guard = |_: &Plan, _: &GenerationRequest| {
+                if spent {
+                    return Err("fixture permit already spent".to_owned());
+                }
+                spent = true;
+                assert_eq!(generator.generate_calls.get(), 0, "consume BEFORE generate");
+                Ok(json!({"fixtureOnly":true,"invocationId":"one"}))
+            };
+            for _ in 0..3 {
+                let _ = render_guarded(
+                    &plan,
+                    &generator,
+                    &context(&plan, 1, 1 << 34),
+                    &mut |_| {},
+                    &mut guard,
+                );
+            }
+            assert_eq!(
+                generator.generate_calls.get(),
+                1,
+                "failed/canceled attempts also spend the only permit"
+            );
+            assert!(spent);
+            let denied = ScriptedGenerator::new(vec![], false);
+            assert!(render_guarded(
+                &plan,
+                &denied,
+                &context(&plan, 1, 1 << 34),
+                &mut |_| {},
+                &mut |_, _| Err("missing immutable approval".to_owned())
+            )
+            .is_err());
+            assert_eq!(denied.generate_calls.get(), 0);
+        }
+    }
+
+    #[test]
+    fn flux3_pup_meter_requires_the_real_typed_boundary_before_conditioning() {
+        for include_boundary in [false, true] {
+            let mut plan = plan(&request("candle", "bf16"), "candle").unwrap();
+            let mut req = generation_request(&plan);
+            req.enhance_prompt = true;
+            plan.resource_case = Some(resource::BoundCase {
+                value: json!({"fixtureOnly":true}),
+                digest: "fixture".into(),
+                inputs: vec![],
+                request: req,
+                adapters: vec![],
+                pup_root: None,
+                reference_resources: None,
+            });
+            let mut events = vec![];
+            if include_boundary {
+                events.push(Progress::PromptUpsamplingComplete);
+            }
+            events.extend([
+                Progress::Loading(LoadPhase::TextEncoder),
+                Progress::ConditioningComplete,
+                Progress::Step {
+                    current: 1,
+                    total: 16,
+                },
+                Progress::Decoding,
+            ]);
+            let generator = ScriptedGenerator::new(events, false);
+            let mut observed = vec![];
+            let result = render(
+                &plan,
+                &generator,
+                &context(&plan, 1, 1 << 34),
+                &mut |phase| observed.push(phase),
+            );
+            if include_boundary {
+                let receipt = result.unwrap();
+                assert_eq!(
+                    observed,
+                    [
+                        protocol::ReferencePhase::Conditioning,
+                        protocol::ReferencePhase::Denoise,
+                        protocol::ReferencePhase::Decode
+                    ]
+                );
+                assert_eq!(receipt["promptUpsampling"]["typedCompletionObserved"], true);
+                assert_eq!(
+                    receipt["promptUpsampling"]["positiveEnhancementAttested"],
+                    false
+                );
+            } else {
+                assert!(result.unwrap_err().contains("PromptUpsamplingComplete"));
+                assert!(observed.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn flux3_native_output_receipt_binds_pixels_dimensions_and_real_carrier() {
+        let output = |width, height, pixels| {
+            GenerationOutput::Images(vec![core::Image {
+                width,
+                height,
+                pixels,
+            }])
+        };
+        let original = output(2, 1, vec![0, 1, 2, 3, 4, 5]);
+        let receipt = output_receipt(&original, 2, 1).unwrap();
+        assert_eq!(receipt["bytes"], 6);
+        assert_eq!(receipt["format"], "RGB8");
+        let changed = output(2, 1, vec![0, 1, 2, 3, 4, 6]);
+        assert_ne!(
+            receipt["sha256"],
+            output_receipt(&changed, 2, 1).unwrap()["sha256"]
+        );
+        let reshaped = output(1, 2, vec![0, 1, 2, 3, 4, 5]);
+        assert_ne!(
+            receipt["sha256"],
+            output_receipt(&reshaped, 1, 2).unwrap()["sha256"]
+        );
+        assert!(output_receipt(&reshaped, 2, 1).is_err());
+        assert!(output_receipt(&output(2, 1, vec![0; 5]), 2, 1).is_err());
+        assert!(output_receipt(&GenerationOutput::Images(vec![]), 2, 1).is_err());
+        assert_eq!(receipt, output_receipt(&original, 2, 1).unwrap());
     }
 
     #[test]

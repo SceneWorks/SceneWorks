@@ -11,6 +11,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let load_sample = vram.phase();
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
+    let actual_spec = common::actual_spec_observation(&plan, &spec)?;
     let generator = catalog
         .media()
         .load(plan.checkpoint.provider, &spec)
@@ -29,18 +30,19 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let mut phase_sample = Some(vram.phase());
     let mut conditioning = None;
     let mut denoise = None;
+    let mut pup = None;
     let result = common::render(&plan, generator.as_ref(), &context, &mut |next| {
         let peak = phase_sample.take().map(|sample| vram.end_observed(sample));
         match next {
+            protocol::ReferencePhase::Conditioning => pup = peak,
             protocol::ReferencePhase::Denoise => conditioning = peak,
             protocol::ReferencePhase::Decode => denoise = peak,
-            _ => {}
         }
         phase_sample = Some(vram.phase());
     });
     let decode = phase_sample.take().map(|sample| vram.end_observed(sample));
     vram.end_gen(run_sample);
-    result?;
+    let output = result?;
     let bytes = |peak: Option<f64>, phase| {
         peak.map(decimal_gb_to_bytes)
             .ok_or_else(|| format!("FLUX3 omitted the {phase} memory boundary"))
@@ -48,11 +50,14 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let conditioning = bytes(conditioning, "conditioning")?;
     let denoise = bytes(denoise, "denoise")?;
     let decode = bytes(decode, "decode")?;
+    let pup = pup.map(decimal_gb_to_bytes);
     let overall = conditioning
+        .max(pup.unwrap_or(0))
         .max(denoise)
         .max(decode)
         .max(decimal_gb_to_bytes(vram.report().peak_gb));
     common::fragment(request, "candle", &plan, strategy, json!({
+        "promptUpsampling": pup.map(cuda_phase_metrics),
         "conditioning": cuda_phase_metrics(conditioning),
         "denoise": cuda_phase_metrics(denoise),
         "decode": cuda_phase_metrics(decode),
@@ -63,7 +68,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             ("denoiseDevicePeakDelta", "bytes", denoise),
             ("decodeDevicePeakDelta", "bytes", decode),
             ("overallDevicePeakDelta", "bytes", overall),
-        ]))
+        ]), output).and_then(|fragment| common::attach_loaded_spec(fragment, actual_spec, generator.as_ref()))
 }
 
 #[cfg(test)]

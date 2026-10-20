@@ -15,6 +15,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     let spec = common::spec("mlx", &plan)?;
     let catalog =
         runtime_macos::catalog().map_err(|error| format!("build MLX catalog: {error}"))?;
+    let actual_spec = common::actual_spec_observation(&plan, &spec)?;
     let generator = catalog
         .media()
         .load(plan.checkpoint.provider, &spec)
@@ -32,14 +33,15 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let mut conditioning = None;
     let mut denoise = None;
+    let mut pup = None;
     // The native provider fences its image stream at conditioning/decoding and
     // returns materialized host images. Do not mix process RSS or CUDA counters
     // into MLX's allocator-active/cache observations.
-    common::render(&plan, generator.as_ref(), &context, &mut |next| {
+    let output = common::render(&plan, generator.as_ref(), &context, &mut |next| {
         match next {
+            protocol::ReferencePhase::Conditioning => pup = Some(phase_now()),
             protocol::ReferencePhase::Denoise => conditioning = Some(phase_now()),
             protocol::ReferencePhase::Decode => denoise = Some(phase_now()),
-            _ => {}
         }
         reset_peak_memory();
     })?;
@@ -52,8 +54,13 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             "FLUX3 reported a zero allocator-active phase peak; no capture attested".to_owned(),
         );
     }
-    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    let mut phases = vec![conditioning, denoise, decode];
+    if let Some(phase) = pup {
+        phases.push(phase);
+    }
+    let overall = PhaseMemory::overall(&phases);
     common::fragment(request, "mlx", &plan, strategy, json!({
+        "promptUpsampling": pup.map(|phase| phase.json()),
         "conditioning": conditioning.json(), "denoise": denoise.json(),
         "decode": decode.json(), "overall": overall.json(),
     }), protocol::diagnostics("memory-mlx-adapter:flux3-klein-native", "executed",
@@ -62,7 +69,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             ("denoiseActivePeak", "bytes", denoise.active),
             ("decodeActivePeak", "bytes", decode.active),
             ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
-        ]))
+        ]), output).and_then(|fragment| common::attach_loaded_spec(fragment, actual_spec, generator.as_ref()))
 }
 
 #[cfg(test)]

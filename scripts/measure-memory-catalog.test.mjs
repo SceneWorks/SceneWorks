@@ -825,6 +825,16 @@ test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without cla
       assert.deepEqual(row.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
       assert.equal(row.provider, "flux3_klein");
       assert.equal(row.loadShape, "eager_materialization");
+      const baseTier = plan.anchors[`flux3_klein_base:${tier}:${backend}`];
+      assert.ok(baseTier, `base ${backend}:${tier} remains a REQUIRED unmeasured obligation`);
+      assert.equal(baseTier.provider, "flux3_klein_base");
+      assert.equal(baseTier.fixture, `flux3-klein-base-${backend}-${tier}-1024-seed26243-step50`);
+      assert.deepEqual(baseTier.geometry, row.geometry);
+      const suffix = tier === "bf16" ? "" : tier === "q4" || tier === "q8"
+        ? backend === "candle" ? `-ggml-${tier === "q4" ? "q4-1" : "q8-0"}` : `-mlx-affine-${tier}-g64`
+        : `-${tier}`;
+      assert.equal(baseTier.calibrationFingerprint, `flux3-klein-base-${backend}-cfg-source-v1${suffix}`);
+      assert.equal(planAnchor(plan, `flux3_klein_base:${tier}:${backend}`).target.modelId, "flux3_klein_base");
     }
   }
 });

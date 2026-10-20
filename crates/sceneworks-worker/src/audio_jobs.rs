@@ -1462,7 +1462,9 @@ impl SynthesisProgress {
     fn engine(&mut self, progress: Progress) -> Option<SynthesisUpdate> {
         let (stage, candidate, message) = match progress {
             // Image prompt upsampling is not an audio synthesis phase.
-            Progress::ConditioningComplete | Progress::Upsampling { .. } => return None,
+            Progress::PromptUpsamplingComplete
+            | Progress::ConditioningComplete
+            | Progress::Upsampling { .. } => return None,
             Progress::Step { current, total } => {
                 if total == 0 {
                     return None;
