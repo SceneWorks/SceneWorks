@@ -1089,7 +1089,9 @@ const SUPRA2_MARKER: &str = "{\n  \"_class_name\": \"Supra2ImgBundle\"\n}\n";
 /// their pinned sizes + SHA-256 (`FLAN_T5_BASE` / `SD_VAE`), then `convert_pinned_checkpoint`
 /// verifies the pinned `model_final_ema.pt` SHA-256, validates the exact state dict and writes the
 /// native bundle (`denoiser.safetensors`, optional `conditioning.safetensors`, and
-/// `supra2_bundle.json` last). SceneWorks re-implements none of it; it only surfaces the failure.
+/// `supra2_bundle.json` last), and `read_pinned_bundle` re-reads it under the provider's pin
+/// contract (pinned denoiser + conditioning digests). SceneWorks re-implements none of it; it only
+/// surfaces the failure.
 /// The marker goes in after the bundle, so a failed convert never leaves a dir the catalog reads as
 /// installed (the caller also converts into a temp sibling and promotes it atomically).
 pub(crate) fn convert_supra2_bundle(
@@ -1098,7 +1100,9 @@ pub(crate) fn convert_supra2_bundle(
     vae_dir: &Path,
     out_dir: &Path,
 ) -> Result<(), String> {
-    use gen_core::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
+    use gen_core::supra2::{
+        convert_pinned_checkpoint, read_pinned_bundle, BundleCheck, FLAN_T5_BASE, SD_VAE,
+    };
     FLAN_T5_BASE
         .verify(text_encoder_dir)
         .map_err(|error| format!("Flan-T5-Base text encoder failed verification: {error}"))?;
@@ -1108,6 +1112,11 @@ pub(crate) fn convert_supra2_bundle(
     std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
     convert_pinned_checkpoint(source_file, out_dir)
         .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))?;
+    // Hold the written bundle to the provider's own pin contract (source identity, geometry,
+    // component revisions and the pinned denoiser/conditioning digests) before marking it
+    // installed, so a bundle the engine would refuse at load never reads as installed.
+    read_pinned_bundle(out_dir, BundleCheck::Digests)
+        .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))?;
     std::fs::write(out_dir.join("model_index.json"), SUPRA2_MARKER)
         .map_err(|error| error.to_string())
 }
@@ -7156,7 +7165,9 @@ mod supra2_convert_tests {
         let vae = snapshot(gen_core::supra2::SD_VAE);
         let out = data_dir.path().join("bundle");
         convert_supra2_bundle(&source, &t5, &vae, &out).expect("real conversion succeeds");
-        let bundle = gen_core::supra2::read_bundle(&out).expect("the bundle reads back");
+        let bundle =
+            gen_core::supra2::read_pinned_bundle(&out, gen_core::supra2::BundleCheck::Digests)
+                .expect("the bundle reads back under the pin contract");
         assert_eq!(bundle.manifest.provider_id, "supra2_img");
         assert!(
             out.join("model_index.json").is_file(),

@@ -74,6 +74,14 @@ mod tests {
             .expect("supra2_img is linked on macOS");
         assert_eq!(descriptor.required_components, &["text_encoder", "vae"]);
         assert!(!descriptor.capabilities.supports_negative_prompt);
+        // The 128-token Flan-T5 context the prompt guide documents is the engine's own published
+        // budget; an over-long prompt is truncated and reported as `prompt_truncated`, which the
+        // generic lane forwards onto the job and the asset like any engine warning.
+        assert_eq!(
+            descriptor.capabilities.max_prompt_tokens,
+            Some(gen_core::supra2::MAX_PROMPT_TOKENS)
+        );
+        assert_eq!(gen_core::supra2::MAX_PROMPT_TOKENS, 128);
         assert_eq!(descriptor.capabilities.min_size, 256);
         assert_eq!(descriptor.capabilities.max_size, 256);
         let entry = shipped_supra2_entry();
