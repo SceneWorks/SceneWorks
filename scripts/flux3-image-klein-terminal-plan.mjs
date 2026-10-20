@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripJsoncComments } from './lib/jsonc.mjs';
+import { validateFlux3AnchorPrerequisites } from './lib/flux3-resource-contract.mjs';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const digestPattern = /^[a-f0-9]{64}$/;
 export const shaPattern = /^[a-f0-9]{40}$/;
@@ -15,7 +16,10 @@ export async function loadProductTargets(root = ROOT) {
   const models = allModels.filter(m => ['flux3_klein', 'flux3_klein_base'].includes(m.id));
   assert.equal(models.length, 2);
   const upsampler = allModels.find(m => m.id === 'flux3_image_klein_pup'); assert(upsampler?.componentOnly);
-  return { models, capabilities, upsampler };
+  const calibrationPlan = JSON.parse(await readFile(path.join(root, 'config/memory-calibration-plan.json'), 'utf8'));
+  const artifactPrerequisites = JSON.parse(await readFile(path.join(root, 'docs/testing/sc-26243-terminal-artifact-prerequisites.json'), 'utf8'));
+  const classification = validateFlux3AnchorPrerequisites({ models, calibrationPlan, artifactPrerequisites });
+  return { models, capabilities, upsampler, artifactPrerequisites: { ...artifactPrerequisites, classification } };
 }
 function generators(value) {
   if (Array.isArray(value?.generator_capabilities)) return value.generator_capabilities;
@@ -89,7 +93,7 @@ export function terminalCatalog(sources) {
     if (c.kind === 'provision') c.expectedObservable.push('explicit per-repository user download/disk/account-gate approval', 'authenticated fixed pinned config response, no credential output', 'owned ordinary model_download job + matching schema-v2 job-bound receipt', 'whole repository inventory hashes + installed catalog identity');
     if (c.kind === 'installation-failure') c.expectedObservable.push('separate explicit empty-cache fault admission; no upstream requests/credentials; actionable rejection', 'injected failure is NOT evidence of successful runner authentication');
   }
-  return { schemaVersion: 1, kind: 'flux3-installed-product-diagnostic-catalog', diagnosticOnly: true, status: 'NOT_RUN', phases: PHASES, cases,
+  return { schemaVersion: 1, kind: 'flux3-installed-product-diagnostic-catalog', diagnosticOnly: true, status: 'NOT_RUN', phases: PHASES, cases, artifactPrerequisites: sources.artifactPrerequisites,
     policy: { downloads: 'never automatic; explicit per-repository approved provision cells only', captures: false, resourceAnchorsAreImageProof: false, visualProof: 'human/oracle inspection; HTTP completion is insufficient', training: 'dryRun:false, real bounded job only' } };
 }
 // Small representative CODE default, not permission to execute. Full catalog is diagnostic only.

@@ -1,14 +1,93 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm, mkdir } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, mkdir, readFile } from "node:fs/promises";
+import { stripJsoncComments } from "./jsonc.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { flux3AnchorRequestDigest, FLUX3_RESOURCE_OBLIGATIONS, missingFlux3ResourceObligations, normalizeResourceCase, resourceCaseDigest, bindResourceCaseInputs, flux3Checkpoint, flux3Conversion, flux3PackageRelativePath, assertSupplementalResourceObservation } from "./flux3-resource-contract.mjs";
+import { FLUX3_REQUIRED_CANONICAL_ANCHORS, validateFlux3AnchorPrerequisites, flux3AnchorRequestDigest, FLUX3_RESOURCE_OBLIGATIONS, missingFlux3ResourceObligations, normalizeResourceCase, resourceCaseDigest, bindResourceCaseInputs, flux3Checkpoint, flux3Conversion, flux3PackageRelativePath, assertSupplementalResourceObservation } from "./flux3-resource-contract.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 function fixture() {
   return { schemaVersion: 1, caseId: "candle.base.reference10.q4", scenario: "reference10", backend: "candle", modelId: "flux3_klein_base", tier: "q4", generation: { prompt: "move the red box", width: 1024, height: 1024 }, references: Array.from({length:10}, (_, index) => ({ instanceId: `attachment-${index}`, assetId: "same-asset", index, path: "ref.png", sha256: sha("reference") })) };
 }
+async function anchorPrerequisiteFixture() {
+  const read = name => readFile(new URL(`../../${name}`, import.meta.url), "utf8");
+  return {
+    models: JSON.parse(stripJsoncComments(await read("config/manifests/builtin.models.jsonc"))).models,
+    calibrationPlan: JSON.parse(await read("config/memory-calibration-plan.json")),
+    artifactPrerequisites: JSON.parse(await read("docs/testing/sc-26243-terminal-artifact-prerequisites.json")),
+  };
+}
+test("all sixteen REQUIRED canonical anchors partition into published active rows and explicit BLOCKED artifacts", async () => {
+  const input = await anchorPrerequisiteFixture();
+  const result = validateFlux3AnchorPrerequisites(input);
+  assert.equal(result.requiredCanonicalAnchors, 16);
+  assert.equal(result.activeCanonicalAnchors, 12);
+  assert.deepEqual(result.blockedArtifactCoordinates.sort(), [
+    "flux3_klein_base:q4:candle", "flux3_klein_base:q8:candle",
+    "flux3_klein_base:q4:mlx", "flux3_klein_base:q8:mlx",
+  ].sort());
+  assert.equal(result.terminalAcceptance, "BLOCKED");
+  assert.equal(result.measurementProven, false);
+  assert.equal(result.executionAuthorized, false);
+  assert.equal(new Set(FLUX3_REQUIRED_CANONICAL_ANCHORS).size, 16);
+  for (const obligation of input.artifactPrerequisites.obligations) {
+    assert.equal(input.calibrationPlan.anchors[obligation.coordinate], undefined);
+    assert.match(obligation.blocker, /HF403/);
+  }
+  const { loadProductTargets, terminalCatalog } = await import("../flux3-image-klein-terminal-plan.mjs");
+  const catalog = terminalCatalog(await loadProductTargets());
+  assert.equal(catalog.artifactPrerequisites.classification.terminalAcceptance, "BLOCKED");
+  assert.equal(catalog.artifactPrerequisites.obligations.length, 4);
+  const documentation = await readFile(new URL("../../docs/testing/sc-26243-terminal-case-plan.md", import.meta.url), "utf8");
+  for (const obligation of input.artifactPrerequisites.obligations) assert.ok(documentation.includes(obligation.coordinate));
+  assert.ok(documentation.includes("Overall terminal acceptance remains BLOCKED"));
+  for (const flag of ["hosted_only=true", "run_memory_calibration=false", "run_five_rung_reference=false", "provision_qwen_snapshot=false", "provision_z_image_snapshot=false"]) assert.ok(documentation.includes(`-f ${flag}`));
+  assert.ok(!documentation.includes('--ref "$BOOTSTRAP_REF" --json'), "do not recommend the proven-broken boolean-JSON CLI serialization");
+});
+test("missing blocked obligations and unpublished active anchors fail, rather than deleting unfinished acceptance", async () => {
+  const input = await anchorPrerequisiteFixture();
+  for (const mutate of [
+    v => v.artifactPrerequisites.obligations.shift(),
+    v => { v.artifactPrerequisites.obligations = []; },
+    v => v.artifactPrerequisites.obligations.push(v.artifactPrerequisites.obligations[0]),
+    v => { v.artifactPrerequisites.obligations[0].status = "PASS"; },
+    v => { v.artifactPrerequisites.overallTerminalAcceptance = "PASS"; },
+    v => { v.artifactPrerequisites.obligations[0].resolvedRevision = "0".repeat(40); },
+    v => { v.artifactPrerequisites.obligations[0].missingEvidence.pop(); },
+    v => { const o = v.artifactPrerequisites.obligations.shift(); v.calibrationPlan.anchors[o.coordinate] = o.plannedAnchor; },
+  ]) {
+    const changed = structuredClone(input); mutate(changed);
+    assert.throws(() => validateFlux3AnchorPrerequisites(changed), /BLOCKED/);
+  }
+});
+test("only a fully pinned SYNTHETIC publication fixture can activate its corresponding required canonical anchor", async () => {
+  // No real weights or production pins: this explicitly synthetic declaration tests classification.
+  const input = await anchorPrerequisiteFixture();
+  const obligation = input.artifactPrerequisites.obligations.shift();
+  input.calibrationPlan.anchors[obligation.coordinate] = obligation.plannedAnchor;
+  const model = input.models.find(m => m.id === obligation.modelId);
+  const row = { provider: "huggingface", repo: obligation.repository, revision: obligation.resolvedRevision,
+    variant: obligation.tier, platforms: ["windows", "linux"], files: [],
+    localDerivation: { fromVariant: "bf16", conversion: obligation.conversion,
+      weightsFile: "model.safetensors", weightsBytes: 123, weightsSha256: sha("DECLARED SYNTHETIC fixture, not actual weights") } };
+  model.downloads.push(row);
+  const result = validateFlux3AnchorPrerequisites(input);
+  assert.equal(result.activeCanonicalAnchors, 13);
+  assert.equal(result.blockedArtifactCoordinates.length, 3);
+  assert.equal(result.terminalAcceptance, "BLOCKED");
+  for (const mutate of [
+    d => { delete d.localDerivation.weightsSha256; },
+    d => { d.localDerivation.weightsBytes = 0; },
+    d => { d.revision = "0".repeat(40); },
+    d => { d.platforms = ["macos"]; },
+    d => { d.localDerivation = { pendingDerivation: true }; },
+  ]) {
+    const changed = structuredClone(input);
+    mutate(changed.models.find(m => m.id === obligation.modelId).downloads.at(-1));
+    assert.throws(() => validateFlux3AnchorPrerequisites(changed), /lacks published pinned artifact/);
+  }
+});
 test("canonical native anchor hashes match the independent Rust witnesses for both checkpoints", () => {
   assert.equal(flux3AnchorRequestDigest("candle","flux3_klein","bf16"),"144040ed814a0836315c27e126a027fd750fe74a2400aceb2406346befbb455f");
   assert.equal(flux3AnchorRequestDigest("candle","flux3_klein_base","bf16"),"a5a90974bf6d058f30e6ca9899c3b58ca6053b006234fbd28b83237f19543760");

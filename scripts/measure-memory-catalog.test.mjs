@@ -16,6 +16,7 @@ import {
 import { routedLanes } from "./check-tier-integrity.mjs";
 import { adapterCapturableProviders } from "./stale-lane-report.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { validateFlux3AnchorPrerequisites } from "./lib/flux3-resource-contract.mjs";
 import {
   ROOT,
   ADAPTER_LIB_PATH,
@@ -788,8 +789,15 @@ test("FLUX3 base probes retain base identity and refuse unpinned conversions on 
   }
 });
 
-test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without claiming execution", async () => {
+test("FLUX3 producer dispatch and unmeasured obligations partition published anchors from blocked artifacts", async () => {
   const plan = await readPlan();
+  const artifactPrerequisites = JSON.parse(await readFile(path.join(ROOT, "docs/testing/sc-26243-terminal-artifact-prerequisites.json"), "utf8"));
+  const classification = validateFlux3AnchorPrerequisites({ models: await readManifestModels(), calibrationPlan: plan, artifactPrerequisites });
+  assert.equal(classification.requiredCanonicalAnchors, 16);
+  assert.equal(classification.activeCanonicalAnchors, 12);
+  assert.equal(classification.blockedArtifactCoordinates.length, 4);
+  assert.equal(classification.terminalAcceptance, "BLOCKED");
+  const blocked = new Map(artifactPrerequisites.obligations.map(row => [row.coordinate, row]));
   for (const tier of ["fp8r", "nvfp4"]) {
     const key = `flux3_klein:${tier}:candle`;
     assert.equal(anchorParts(key).tier, tier);
@@ -825,7 +833,16 @@ test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without cla
       assert.deepEqual(row.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
       assert.equal(row.provider, "flux3_klein");
       assert.equal(row.loadShape, "eager_materialization");
-      const baseTier = plan.anchors[`flux3_klein_base:${tier}:${backend}`];
+      const baseKey = `flux3_klein_base:${tier}:${backend}`;
+      const activeBaseTier = plan.anchors[baseKey];
+      const blockedBaseTier = blocked.get(baseKey);
+      assert.notEqual(Boolean(activeBaseTier), Boolean(blockedBaseTier), `${baseKey} must be in exactly one required inventory`);
+      assert.equal(Boolean(blockedBaseTier), ["q4", "q8"].includes(tier), "unpublished base quants stay blocked, not executable");
+      if (blockedBaseTier) {
+        assert.equal(blockedBaseTier.status, "BLOCKED");
+        assert.equal(blockedBaseTier.required, true);
+      }
+      const baseTier = activeBaseTier ?? blockedBaseTier?.plannedAnchor;
       assert.ok(baseTier, `base ${backend}:${tier} remains a REQUIRED unmeasured obligation`);
       assert.equal(baseTier.provider, "flux3_klein_base");
       assert.equal(baseTier.fixture, `flux3-klein-base-${backend}-${tier}-1024-seed26243-step50`);
@@ -834,7 +851,8 @@ test("FLUX3 producer dispatch and unmeasured plans cover exact tiers without cla
         ? backend === "candle" ? `-ggml-${tier === "q4" ? "q4-1" : "q8-0"}` : `-mlx-affine-${tier}-g64`
         : `-${tier}`;
       assert.equal(baseTier.calibrationFingerprint, `flux3-klein-base-${backend}-cfg-source-v1${suffix}`);
-      assert.equal(planAnchor(plan, `flux3_klein_base:${tier}:${backend}`).target.modelId, "flux3_klein_base");
+      if (activeBaseTier) assert.equal(planAnchor(plan, baseKey).target.modelId, "flux3_klein_base");
+      else assert.equal(plan.anchors[baseKey], undefined, "blocked artifacts cannot enter the executable anchor plan");
     }
   }
 });
