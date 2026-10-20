@@ -6749,7 +6749,11 @@
         "resolutions": ["256x256"],
         "count": [1, 2, 4, 8],
         "minDimension": 256,
-        "maxDimension": 256
+        "maxDimension": 256,
+        // sc-24215: upstream has no steps cap; this is gen-core's shared sanity cap
+        // (`Capabilities::validate_request`, MAX_STEPS = 100000) — the most the provider accepts.
+        // Above it the API and the worker refuse; the generic 80-step clamp does not apply.
+        "hardMaxSteps": 100000
       },
       "loraCompatibility": {
         "families": [],

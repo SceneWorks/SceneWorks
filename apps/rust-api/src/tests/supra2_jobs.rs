@@ -68,14 +68,15 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
         "/api/v1/image/jobs",
         job(json!({
             "width": 256, "height": 256, "count": 8, "seed": 7,
-            "advanced": { "steps": 30, "guidanceScale": 1.0 }
+            "advanced": { "steps": 100_000, "guidanceScale": 1.0 }
         })),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{full}");
     assert_eq!(full["payload"]["count"], 8, "{full}");
     assert_eq!(full["payload"]["seed"], 7, "{full}");
-    assert_eq!(full["payload"]["advanced"]["steps"], 30, "{full}");
+    // The declared ceiling (gen-core's sanity cap) is accepted as-is, never clamped to 80.
+    assert_eq!(full["payload"]["advanced"]["steps"], 100_000, "{full}");
     assert_eq!(full["payload"]["advanced"]["guidanceScale"], 1.0, "{full}");
 
     for (extra, needle) in [
@@ -91,7 +92,7 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
         ),
         (json!({ "maskAssetId": "asset_1" }), "maskAssetId"),
         (json!({ "hiresFix": { "enabled": true } }), "hires fix"),
-        (json!({ "advanced": { "steps": 81 } }), "1..=80"),
+        (json!({ "advanced": { "steps": 100_001 } }), "100000"),
         (json!({ "advanced": { "steps": 0 } }), "steps"),
         (json!({ "advanced": { "sampler": "dpmpp_2m" } }), "sampler"),
         (json!({ "advanced": { "quantTier": "q4" } }), "quantTier"),

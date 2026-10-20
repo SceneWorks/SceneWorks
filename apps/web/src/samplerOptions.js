@@ -185,6 +185,9 @@ export function guidanceDefaultFromModel(model) {
 export const BASE_MAX_STEPS = 80;
 
 export function maxStepsForModel(model) {
+  // sc-24215: a declared `limits.hardMaxSteps` is the model's own ceiling (Supra2-IMG).
+  const declared = model?.limits?.hardMaxSteps;
+  if (Number.isInteger(declared) && declared > 0) return declared;
   return Math.max(BASE_MAX_STEPS, stepsDefaultFromModel(model) ?? 0);
 }
 

@@ -645,4 +645,63 @@ mod tests {
         assert!(run.stopped_on_cancel);
         assert!(run.asset_writes.is_empty(), "{:?}", run.asset_writes);
     }
+
+    /// sc-24215: the declared step ceiling. A request AT `limits.hardMaxSteps` reaches the engine
+    /// with exactly that count (the generic 80-step clamp does not apply to Supra2).
+    #[test]
+    fn a_request_at_the_declared_step_ceiling_runs_exactly_that_count() {
+        let ceiling = sceneworks_core::video_request::hard_max_steps(&shipped_supra2_entry())
+            .expect("supra2_img declares limits.hardMaxSteps");
+        let run = run_supra2_arm(
+            false,
+            false,
+            json!({ "seed": 1, "advanced": { "steps": ceiling } }),
+        );
+        assert!(run.outcome.is_ok(), "{:?}", run.outcome);
+        assert_eq!(run.seen.len(), 1);
+        assert_eq!(run.seen[0].steps, Some(ceiling));
+        assert_eq!(
+            run.asset_writes[0]["rawAdapterSettings"]["numInferenceSteps"],
+            ceiling
+        );
+    }
+
+    /// ...and one above it is refused by the boundary `run_image_generate_job` applies before
+    /// load, while every OTHER shipped model declares no ceiling and so keeps the lane's
+    /// historical clamp unchanged.
+    #[test]
+    fn above_the_ceiling_is_refused_and_other_models_keep_their_clamp() {
+        let entry = shipped_supra2_entry();
+        let ceiling = sceneworks_core::video_request::hard_max_steps(&entry).unwrap();
+        let payload = |steps: u32| {
+            json!({ "model": "supra2_img", "prompt": "a fox", "advanced": { "steps": steps } })
+                .as_object()
+                .cloned()
+                .unwrap()
+        };
+        assert!(sceneworks_core::supra2::validate_request(&payload(ceiling), &entry).is_ok());
+        let error = sceneworks_core::supra2::validate_request(&payload(ceiling + 1), &entry)
+            .expect_err("above the declared ceiling");
+        assert!(error.contains(&ceiling.to_string()), "{error}");
+
+        let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .unwrap()
+            .1;
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
+        for model in manifest["models"].as_array().unwrap() {
+            if model["id"] == "supra2_img" || model["type"] != "image" {
+                continue;
+            }
+            assert_eq!(
+                sceneworks_core::video_request::hard_max_steps(model.as_object().unwrap()),
+                None,
+                "{} must keep the generic clamp",
+                model["id"]
+            );
+        }
+        assert_eq!(super::super::max_requested_steps(50), 80);
+    }
 }

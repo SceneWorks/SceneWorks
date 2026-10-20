@@ -32,7 +32,13 @@ const SUPRA2 = {
   capabilities: ["text_to_image"],
   image: { supportsNegativePrompt: false, maxPromptTokens: 128, nativeCountBatch: true },
   defaults: { resolution: "256x256", steps: 50, guidanceScale: 3.0, count: 1 },
-  limits: { resolutions: ["256x256"], count: [1, 2, 4, 8], minDimension: 256, maxDimension: 256 },
+  limits: {
+    resolutions: ["256x256"],
+    count: [1, 2, 4, 8],
+    minDimension: 256,
+    maxDimension: 256,
+    hardMaxSteps: 100000,
+  },
   loraCompatibility: { families: [], types: [] },
   ui: { label: "Supra2-IMG" },
 };
@@ -119,7 +125,8 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
       "Supra2-IMG reads up to 128 prompt tokens; anything longer is truncated and the image is flagged.",
     );
     const steps = field(container, "Steps");
-    expect(steps.getAttribute("max")).toBe("80");
+    // The declared ceiling (gen-core's sanity cap), not the generic 80-step clamp.
+    expect(steps.getAttribute("max")).toBe("100000");
     expect(steps.getAttribute("placeholder")).toBe("50");
     expect(field(container, "Guidance")).toBeTruthy();
     expect(field(container, "Seed")).toBeTruthy();

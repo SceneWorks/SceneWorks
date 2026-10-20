@@ -4950,7 +4950,14 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
-        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
+        // A declared `limits.hardMaxSteps` (sc-24215) replaces the historical ceiling; the
+        // model's own boundary refuses a request above it before this point.
+        .map(|steps| {
+            let ceiling =
+                sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
+                    .unwrap_or_else(|| max_requested_steps(model.default_steps()));
+            (steps as u32).clamp(1, ceiling)
+        })
         .unwrap_or(model.default_steps())
 }
 

@@ -288,6 +288,12 @@ describe("Supra2-IMG interface hints (sc-24215)", () => {
     expect(nativeResolutionHint(undefined)).toBeNull();
   });
 
+  it("reads a declared step ceiling and keeps the generic one otherwise", () => {
+    expect(maxStepsForModel({ ...supra2, limits: { ...supra2.limits, hardMaxSteps: 100000 } })).toBe(100000);
+    expect(maxStepsForModel(supra2)).toBe(80);
+    expect(maxStepsForModel({ defaults: { steps: 100 } })).toBe(100);
+  });
+
   it("states the declared prompt-token budget and its truncation", () => {
     expect(promptTokenLimitHint(supra2)).toBe(
       "Supra2-IMG reads up to 128 prompt tokens; anything longer is truncated and the image is flagged.",

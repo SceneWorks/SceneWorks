@@ -135,10 +135,12 @@ pub fn pinned_revisions(entry: &JsonObject) -> Value {
     Value::Array(rows)
 }
 
-/// The largest `advanced.steps` the generic image lane forwards for Supra2 (the lane clamps above
-/// it, so a larger request is refused here instead of silently rendering fewer steps).
-pub fn max_steps() -> u32 {
-    s2::DEFAULT_STEPS.max(crate::image_request::BASE_MAX_IMAGE_STEPS)
+/// The largest `advanced.steps` Supra2 accepts: the entry's declared `limits.hardMaxSteps` (the
+/// shipped row declares the provider's own sanity cap, so the published interface is not narrowed),
+/// else the generic lane's clamp. A larger request is refused, never clamped.
+pub fn max_steps(entry: &JsonObject) -> u32 {
+    crate::video_request::hard_max_steps(entry)
+        .unwrap_or_else(|| s2::DEFAULT_STEPS.max(crate::image_request::BASE_MAX_IMAGE_STEPS))
 }
 
 /// Validate the FINAL (post-preset, post-merge) image payload. `Ok(None)` for any other model;
@@ -216,10 +218,10 @@ pub fn validate_request(
         .map_err(named)?;
     let steps = number(advanced, "steps").map_err(named)?;
     if let Some(steps) = steps {
-        if steps.fract() != 0.0 || steps < 1.0 || steps > f64::from(max_steps()) {
+        if steps.fract() != 0.0 || steps < 1.0 || steps > f64::from(max_steps(entry)) {
             return Err(named(format!(
                 "advanced.steps {steps} is outside 1..={}",
-                max_steps()
+                max_steps(entry)
             )));
         }
     }
@@ -274,7 +276,8 @@ mod tests {
         object(json!({
             "id": "supra2_img",
             "defaults": { "resolution": "256x256", "steps": 50, "guidanceScale": 3.0, "count": 1 },
-            "image": { "supportsNegativePrompt": false, "nativeCountBatch": true }
+            "image": { "supportsNegativePrompt": false, "nativeCountBatch": true },
+            "limits": { "hardMaxSteps": 100000 }
         }))
     }
 
@@ -331,8 +334,15 @@ mod tests {
         assert_eq!((resolved.steps, resolved.count), (12, 8));
         // CFG <= 1 is upstream's unguided branch, not an error.
         assert!(!resolved.use_cfg);
-        assert_eq!(max_steps(), 80);
-        assert!(validate(json!({ "advanced": { "steps": 80 } })).is_ok());
+        assert_eq!(max_steps(&entry()), 100_000);
+        let at_max = validate(json!({ "advanced": { "steps": 100_000 } }));
+        assert_eq!(
+            at_max.unwrap().unwrap().steps,
+            100_000,
+            "the ceiling itself renders"
+        );
+        // An entry declaring no ceiling keeps the generic lane's limit.
+        assert_eq!(max_steps(&JsonObject::new()), 80);
     }
 
     #[test]
@@ -343,7 +353,7 @@ mod tests {
             (json!({ "count": 65 }), "at most 64"),
             (json!({ "count": 0 }), "count"),
             (json!({ "advanced": { "steps": 0 } }), "advanced.steps"),
-            (json!({ "advanced": { "steps": 81 } }), "1..=80"),
+            (json!({ "advanced": { "steps": 100_001 } }), "1..=100000"),
             (json!({ "advanced": { "steps": 2.5 } }), "advanced.steps"),
             (
                 json!({ "advanced": { "guidanceScale": "x" } }),
