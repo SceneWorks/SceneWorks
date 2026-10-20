@@ -289,13 +289,25 @@ mod tests {
     }
 
     fn receipt_fixture(settings: &Settings, snapshot: &Path, revision: &str) -> PathBuf {
-        let mut files = UPSAMPLER_REQUIRED_FILES.to_vec();
-        if snapshot
-            .join(gen_core::flux3::pup::SYSTEM_PROMPTS_FILE)
-            .is_file()
-        {
-            files.push(gen_core::flux3::pup::SYSTEM_PROMPTS_FILE);
+        fn members(root: &Path, dir: &Path, files: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    members(root, &path, files);
+                } else {
+                    files.push(
+                        path.strip_prefix(root)
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .replace('\\', "/"),
+                    );
+                }
+            }
         }
+        let mut files = Vec::new();
+        members(snapshot, snapshot, &mut files);
+        files.sort();
         let marker = settings
             .data_dir
             .join("models")
@@ -446,6 +458,46 @@ mod tests {
     }
 
     #[test]
+    fn pup_receipt_rejects_added_shards_generation_config_and_other_unlisted_members() {
+        let (_root, settings, _env) = setup();
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        package_shape(&pinned);
+        for name in [
+            "z-override.safetensors",
+            "generation_config.json",
+            "model.safetensors.index.json",
+            "processor_config.json",
+            ".unlisted-sidecar",
+        ] {
+            receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_ok()
+            );
+            std::fs::write(pinned.join(name), br#"{"eos_token_id":[7,17]}"#).unwrap();
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+                "{name}: an unlisted discovered input cannot bypass the receipt"
+            );
+            receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_ok(),
+                "{name}: the complete genuine fixture inventory is accepted"
+            );
+            std::fs::write(pinned.join(name), b"changed receipted discovered member").unwrap();
+            assert!(
+                attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+                "{name}: newly covered members retain stamp validation"
+            );
+            std::fs::remove_file(pinned.join(name)).unwrap();
+        }
+    }
+
+    #[test]
     fn pup_receipt_rejects_snapshot_directory_escape_before_load() {
         let (_root, settings, _env) = setup();
         let external = tempfile::tempdir().unwrap();
@@ -469,6 +521,40 @@ mod tests {
         std::os::unix::fs::symlink(external.path(), &pinned).unwrap();
         receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
         assert!(attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(), "even a stamped inventory cannot authorize a snapshot redirected outside its repository");
+    }
+
+    #[test]
+    fn pup_receipt_rejects_receipted_shard_through_directory_escape() {
+        let (_root, settings, _env) = setup();
+        let external = tempfile::tempdir().unwrap();
+        std::fs::write(
+            external.path().join("z-override.safetensors"),
+            b"external shard fixture",
+        )
+        .unwrap();
+        let pinned = settings
+            .data_dir
+            .join(
+                "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
+            )
+            .join(UPSAMPLER_REVISION);
+        package_shape(&pinned);
+        let escape = pinned.join("escaped");
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(escape.to_string_lossy().replace('/', "\\"))
+            .arg(external.path().to_string_lossy().replace('/', "\\"))
+            .status()
+            .unwrap()
+            .success());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(external.path(), &escape).unwrap();
+        receipt_fixture(&settings, &pinned, UPSAMPLER_REVISION);
+        assert!(
+            attach_prompt_upsampler(spec(), "flux3_klein", &request(true), &settings).is_err(),
+            "a listed and stamped shard must still remain in the snapshot or its own HF blob store"
+        );
     }
 
     #[test]

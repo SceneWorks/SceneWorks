@@ -343,6 +343,95 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     },
   );
 
+  it.each(REAL_FLUX3_MODELS)("real $id character references retain explicit ordered ownership through 2 to 1 to 0, Use c and character switch", async (model) => {
+    const [a, b, c] = ["a", "b", "c"].map((id) => ({ ...FLUX3_REFERENCE, id: `distinct-${id}`, displayName: `Distinct ${id}` }));
+    const first = { id: "ordered-character", name: "Ordered character", looks: [], approvedReferences: [a, b, c].map((asset) => ({ assetId: asset.id, asset })) };
+    const second = { id: "new-character", name: "New character", looks: [], approvedReferences: [{ assetId: c.id, asset: c }] };
+    const box = { id: "old-source", desc: "remove old source", from: "ref_image_0", src_bbox: [0, 0, 1, 1], tgt_bbox: null };
+    const recipe = flux3Recipe(null, null);
+    recipe.model = model.id;
+    recipe.mode = "character_image";
+    recipe.normalizedSettings.characterId = first.id;
+    delete recipe.rawAdapterSettings.referenceAssetIds;
+    recipe.rawAdapterSettings.flux3_reference_ids = ["instance-a", "instance-b"];
+    recipe.rawAdapterSettings.flux3_layout = { version: 1, boxes: [box] };
+    recipe.rawAdapterSettings.flux3ReferenceEditing.references = [a, b].map((asset, ordinal) => ({ ordinal, assetId: asset.id, orientedSize: [83, 67] }));
+    const createImageJob = vi.fn(async () => ({ id: "ordered-transition" }));
+    const context = baseContext({ assets: [a, b, c], characters: [first, second], imageModels: [model], models: [model], createImageJob });
+    await render({ ...context, studioLaunch: launch(recipe) });
+    await click(document.querySelector('[aria-label="Select old-source"]'));
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(2);
+    await click(document.querySelector('[aria-label="Remove Image 1"]'));
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(1);
+    expect(persistedStudioSettings().referenceAssetIds).toEqual([b.id]);
+    expect(document.querySelector('[aria-label="Source reference"]').value).toBe("");
+    await click(buttonByText("Generate"));
+    const remaining = createImageJob.mock.calls.at(-1)[0];
+    expect(remaining.referenceAssetIds).toEqual([b.id]);
+    expect(remaining.referenceAssetId).toBeNull();
+    expect(remaining.advanced.flux3_reference_ids).toEqual(["instance-b"]);
+    expect(remaining.advanced.flux3_layout.boxes[0]).toEqual({ ...box, reference_id: "instance-a" });
+    await click(document.querySelector('[aria-label="Remove Image 1"]'));
+    expect(container.querySelector(".ordered-references")).not.toBeNull();
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(0);
+    expect(persistedStudioSettings().referenceAssetIds).toEqual([]);
+    expect(persistedStudioSettings().orderedCharacterReferences).toBe(true);
+    expect(buttonByText("Generate").disabled).toBe(true);
+    const beforeEmptySubmit = createImageJob.mock.calls.length;
+    await act(async () => container.querySelector("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(createImageJob).toHaveBeenCalledTimes(beforeEmptySubmit);
+    expect(container.textContent).toContain("Select at least one reference image for this character request.");
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(context);
+    expect(persistedStudioSettings().referenceAssetIds).toEqual([]);
+    expect(buttonByText("Generate").disabled).toBe(true);
+    await click(document.querySelector('[aria-label="Use Distinct c as reference"]'));
+    expect(container.querySelectorAll(".ordered-reference")).toHaveLength(1);
+    await click(buttonByText("Generate"));
+    const chosen = createImageJob.mock.calls.at(-1)[0];
+    expect(chosen.characterId).toBe(first.id);
+    expect(chosen.referenceAssetIds).toEqual([c.id]);
+    expect(chosen.referenceAssetId).toBeNull();
+    const cInstance = chosen.advanced.flux3_reference_ids[0];
+    expect(cInstance).not.toBe("instance-a");
+    expect(chosen.advanced.flux3_layout.boxes[0].reference_id).toBe("instance-a");
+    await editControl([...document.querySelectorAll("select")].find((node) => [...node.options].some(({ value }) => value === second.id)), second.id);
+    await click(buttonByText("Generate"));
+    const changed = createImageJob.mock.calls.at(-1)[0];
+    expect(changed.characterId).toBe(second.id);
+    expect(changed.referenceAssetIds ?? [changed.referenceAssetId]).toEqual([c.id]);
+    expect(changed.advanced.flux3_reference_ids[0]).not.toBe(cInstance);
+    expect(changed.advanced.flux3_layout.boxes[0].reference_id).toBe("instance-a");
+  });
+
+  it.each(REAL_FLUX3_MODELS.flatMap((model) => ["legacy recipe", "ordinary launch"].flatMap((kind) =>
+    ["empty", "stale", "other-model stale"].map((prior) => ({ model, kind, prior })))))(
+    "real $model.id migrates $kind source-only input over $prior ordered state", async ({ model, kind, prior }) => {
+      const [a, b, c] = ["old-a", "old-b", "new-c"].map((id) => ({ ...FLUX3_REFERENCE, id, displayName: id }));
+      seedOpenDisclosures({ model: prior === "other-model stale" ? OTHER_MODEL.id : model.id,
+        mode: prior === "other-model stale" ? "text_to_image" : "edit_image", prompt: "new source only",
+        referenceAssetIds: prior === "empty" ? [] : [a.id, b.id],
+        flux3ReferenceSlots: prior === "empty" ? [] : [{ assetId: a.id, id: "stale-a" }, { assetId: b.id, id: "stale-b" }],
+        flux3Layout: { version: 1, boxes: [{ id: "stale-box", desc: "old binding", from: "ref_image_0", src_bbox: [0, 0, 1, 1], tgt_bbox: null }] } });
+      const createImageJob = vi.fn(async () => ({ id: "source-migration" }));
+      const studioLaunch = kind === "legacy recipe"
+        ? launch({ mode: "edit_image", model: model.id, prompt: "new source only", normalizedSettings: { sourceAssetId: c.id, width: 80, height: 64 }, rawAdapterSettings: {} })
+        : { id: "ordinary-source", view: "Image", mode: "edit_image", model: model.id, assetId: c.id };
+      await render(baseContext({ assets: [a, b, c], selectedAsset: kind === "ordinary launch" ? c : null,
+        imageModels: [OTHER_MODEL, model], models: [OTHER_MODEL, model], createImageJob, studioLaunch }));
+      expect(buttonByText("Generate").disabled).toBe(false);
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([c.id]);
+      expect(persistedStudioSettings().flux3ReferenceSlots).toHaveLength(1);
+      expect(persistedStudioSettings().flux3ReferenceSlots[0].id).not.toMatch(/^stale-/);
+      expect(persistedStudioSettings().flux3Layout.boxes).toEqual([]);
+      await click(buttonByText("Generate"));
+      expect(createImageJob).toHaveBeenCalledTimes(1);
+      expect(createImageJob.mock.calls[0][0].mode).toBe("edit_image");
+      expect(createImageJob.mock.calls[0][0].referenceAssetIds).toEqual([c.id]);
+    },
+  );
+
   it.each([[null, null], [null, 768], [16, 48]])("persists scoped recipe axes %s / %s across a real studio unmount and hydration", async (width, height) => {
     const model = REAL_FLUX3_MODELS[0];
     const createImageJob = vi.fn(async () => ({ id: "hydrated-intent" }));
@@ -417,6 +506,12 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     recipe.rawAdapterSettings.flux3_reference_ids = ["original-instance"];
     recipe.rawAdapterSettings.flux3ReferenceEditing.references = [{ ordinal: 0, assetId: FLUX3_REFERENCE.id,
       orientedSize: [83, 67], contentSha256: "b".repeat(64) }];
+    if (change === "approved fallback") {
+      // Legacy singular selection remains character-owned; an explicit ordered recipe owns its
+      // attachments instead and must not be silently replaced by an approved-list refresh.
+      delete recipe.rawAdapterSettings.flux3ReferenceEditing.references;
+      recipe.rawAdapterSettings.referenceAssetId = FLUX3_REFERENCE.id;
+    }
     const createImageJob = vi.fn(async () => ({ id: "replacement-job" }));
     const context = baseContext({ assets: [FLUX3_REFERENCE, other], characters: [first, second], createImageJob, studioLaunch: launch(recipe) });
     await render(context);
@@ -437,7 +532,7 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(persistedStudioSettings().flux3Layout.boxes[0]).toEqual(expected);
     await click(buttonByText("Generate"));
     const payload = createImageJob.mock.calls[0][0];
-    expect(payload.referenceAssetId).toBe(other.id);
+    expect(payload.referenceAssetIds ?? [payload.referenceAssetId]).toEqual([other.id]);
     expect(payload.advanced.flux3_reference_ids).toHaveLength(1);
     expect(payload.advanced.flux3_reference_ids[0]).not.toBe("original-instance");
     expect(payload.advanced.flux3_layout.boxes[0]).toEqual(expected);

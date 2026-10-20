@@ -3908,7 +3908,48 @@ pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf
         }
         crate::flux3_snapshot_member(root, &root.join(name), false).ok()?;
     }
-    Some(root.clone())
+    // Both native LLM loaders discover *all* root safetensors, and optional sidecars such as
+    // generation_config.json change inference behavior. Bind the complete discovered tree, not
+    // an allowlist of required names. Download receipts and HF metadata live outside snapshots;
+    // no hidden file or other snapshot member is exempt from this inventory comparison.
+    fn consume_inventory(
+        root: &Path,
+        dir: &Path,
+        inventory: &mut std::collections::HashSet<String>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+    ) -> Option<()> {
+        crate::flux3_snapshot_member(root, dir, true).ok()?;
+        if !visited.insert(std::fs::canonicalize(dir).ok()?) {
+            return None;
+        }
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            if path.is_dir() {
+                consume_inventory(root, &path, inventory, visited)?;
+            } else {
+                crate::flux3_snapshot_member(root, &path, false).ok()?;
+                let relative = path.strip_prefix(root).ok()?.to_str()?.replace('\\', "/");
+                if !path.is_file() || !inventory.remove(&relative) {
+                    return None;
+                }
+            }
+        }
+        Some(())
+    }
+    let mut inventory = files
+        .iter()
+        .map(|file| file.as_str().map(str::to_owned))
+        .collect::<Option<std::collections::HashSet<_>>>()?;
+    if inventory.len() != files.len() {
+        return None;
+    }
+    consume_inventory(
+        root,
+        root,
+        &mut inventory,
+        &mut std::collections::HashSet::new(),
+    )?;
+    inventory.is_empty().then(|| root.clone())
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
