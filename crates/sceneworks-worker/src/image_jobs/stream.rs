@@ -148,7 +148,7 @@ fn prompt_enhancement_event_sink_for(
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::ConditioningComplete) {
+    if matches!(progress, Progress::PromptUpsamplingComplete | Progress::ConditioningComplete) {
         return;
     }
     let event = match progress {
@@ -157,7 +157,7 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
+        Progress::PromptUpsamplingComplete | Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
         Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling { index, tokens, max_tokens },
@@ -409,6 +409,7 @@ where
 #[test]
 fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(&tx, 2, Progress::PromptUpsamplingComplete);
     send_gen_progress(&tx, 2, Progress::ConditioningComplete);
     assert!(matches!(
         rx.try_recv(),
