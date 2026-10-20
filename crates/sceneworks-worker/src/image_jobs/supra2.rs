@@ -250,9 +250,18 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains(" step "));
             api.posts.lock().unwrap().push(body);
-            if api.cancel_on_first_step && is_step {
-                api.cancel_requested
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            if api.cancel_on_first_step
+                && is_step
+                && !api
+                    .cancel_requested
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // The cancel is requested AT the first progress event. Holding this response past
+                // the lane's 2 s cancel-poll throttle makes the next event the worker handles
+                // observe it — independent of GPU speed: while the event loop waits here, the
+                // engine can run at most the 64-event channel ahead (`blocking_send`
+                // back-pressure), far less than a 4 x 80-step batch.
+                tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
             }
             Json(crate::tests::job_snapshot_json(
                 &job_id,
@@ -405,7 +414,7 @@ mod tests {
         entry: &JsonObject,
         project: &Path,
         job_id: &str,
-        steps: u32,
+        (count, steps): (u32, u32),
         cancel_on_first_step: bool,
     ) -> (crate::WorkerResult<()>, Vec<Value>, Vec<Value>) {
         let (base_url, posts) = spawn_job_api_with(cancel_on_first_step).await;
@@ -421,7 +430,7 @@ mod tests {
             "prompt": "a red fox sitting in fresh snow, soft morning light",
             "width": 256,
             "height": 256,
-            "count": 1,
+            "count": count,
             "seed": 0,
             "advanced": { "steps": steps },
             "modelManifestEntry": Value::Object(entry.clone()),
@@ -462,12 +471,15 @@ mod tests {
     /// The installed-model job lifecycle (sc-24216) on real weights, fully OFFLINE: after the
     /// install-time conversion, with `HF_HUB_OFFLINE=1` and the Hub base URL pointed at a closed
     /// port (any network attempt fails the job), the production MLX arm
-    ///   1. reports per-step progress and is CANCELED mid-denoise by a user cancel — the job ends
-    ///      `Canceled`, posts the terminal canceled state, and writes no image;
+    ///   1. reports per-step progress and is CANCELED by a user cancel issued at its first progress
+    ///      event — the job ends `Canceled`, posts the terminal canceled state, and never renders
+    ///      the whole 4-image batch (deterministic: see `progress_route`; a Supra2 image takes only
+    ///      ~1.5 s, under the lane's 2 s cancel-poll throttle, so timing alone would race);
     ///   2. RECOVERS: the next job in the same process completes with step 1..N + decoding progress
     ///      and one 256x256 image, and the generator stays resident;
     ///   3. UNLOADS: evicting the cached generator frees it, and a job after the unload reloads
     ///      from the local files and renders the identical image (same seed, same pinned weights).
+    ///
     /// Env as [`supra2_real_weight_render_through_the_worker_arm`].
     #[test]
     #[ignore = "real weights + Metal: needs SUPRA2_HF_HUB_CACHE with the three pinned snapshots"]
@@ -504,14 +516,18 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            // 1. Cancel mid-denoise (a long schedule so the 2 s cancel poll lands mid-run).
+            // 1. Cancel issued at the first progress event (held past the poll throttle by the stub),
+            //    observed at the next event, long before 4 x 80 steps finish. The job only returns
+            //    once the blocking generation has actually stopped (`CancelJoinGuard`), so its
+            //    return is the release of the render's resources; the recovery job below proves the
+            //    worker is usable again.
             let canceled_project = tempfile::tempdir().unwrap();
-            let (outcome, posts, _) = run_lifecycle_job(
+            let (outcome, posts, canceled_assets) = run_lifecycle_job(
                 &settings,
                 &entry,
                 canceled_project.path(),
                 "job-supra2-cancel",
-                400,
+                (4, 80),
                 true,
             )
             .await;
@@ -520,18 +536,29 @@ mod tests {
                 "the user cancel ends the job Canceled: {outcome:?}\n{posts:#?}"
             );
             let text = messages(&posts);
-            assert!(text.iter().any(|m| m.contains("step 1/400")), "{text:#?}");
             assert!(
-                !text.iter().any(|m| m.contains("step 400/400")),
-                "canceled before the schedule ran out: {text:#?}"
+                text.iter().any(|m| m.contains("Image 1/4 — step 1/80")),
+                "{text:#?}"
+            );
+            assert!(
+                !text.iter().any(|m| m.contains("Image 4/4 — decoding")),
+                "canceled before the batch finished: {text:#?}"
             );
             assert_eq!(posts.last().unwrap()["status"], "canceled", "{posts:#?}");
-            assert!(pngs_under(canceled_project.path()).is_empty());
+            assert!(canceled_assets.len() < 4, "{canceled_assets:#?}");
+            assert!(pngs_under(canceled_project.path()).len() < 4);
 
             // 2. Recovery: the next job completes in the same process.
             let first = tempfile::tempdir().unwrap();
-            let (outcome, posts, assets) =
-                run_lifecycle_job(&settings, &entry, first.path(), "job-supra2-a", 50, false).await;
+            let (outcome, posts, assets) = run_lifecycle_job(
+                &settings,
+                &entry,
+                first.path(),
+                "job-supra2-a",
+                (1, 50),
+                false,
+            )
+            .await;
             outcome.unwrap_or_else(|error| panic!("recovery render failed: {error}\n{posts:#?}"));
             assert_eq!(assets.len(), 1, "{assets:#?}");
             let text = messages(&posts);
@@ -562,9 +589,15 @@ mod tests {
                 .unwrap()
                 .is_none());
             let second = tempfile::tempdir().unwrap();
-            let (outcome, posts, _) =
-                run_lifecycle_job(&settings, &entry, second.path(), "job-supra2-b", 50, false)
-                    .await;
+            let (outcome, posts, _) = run_lifecycle_job(
+                &settings,
+                &entry,
+                second.path(),
+                "job-supra2-b",
+                (1, 50),
+                false,
+            )
+            .await;
             outcome
                 .unwrap_or_else(|error| panic!("post-unload render failed: {error}\n{posts:#?}"));
             let second_png = pngs_under(second.path());
