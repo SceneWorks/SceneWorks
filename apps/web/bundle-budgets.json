@@ -1,8 +1,9 @@
 {
   "initial": {
+    "_comment": "2026-10-20: approved initial Brotli limit for the reviewed epic 26233 correctness fixes; total and other budgets unchanged.",
     "rawBytes": 500000,
     "gzipBytes": 150000,
-    "brotliBytes": 126000
+    "brotliBytes": 126500
   },
   "total": {
     "_comment": "2026-10-19: approved total gzip/Brotli headroom for epic 26233 layout authoring and general controls; all other budgets unchanged.",
