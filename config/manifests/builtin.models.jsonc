@@ -6649,7 +6649,10 @@
     {
       // Supra2-IMG (epic sc-24212, story sc-24213) — SupraLabs' 104.1M-parameter rectified-flow DiT
       // at 256x256, conditioned on google/flan-t5-base and decoded by stabilityai/sd-vae-ft-mse,
-      // served natively by inference's `mlx-gen-supra2` (engine id `supra2_img`, family `supra2`).
+      // served natively by inference's `mlx-gen-supra2` on Apple Silicon (sc-24213) and
+      // `candle-gen-supra2` on Windows/Linux (sc-24214; CUDA, or CPU where Candle CPU is allowed) —
+      // ONE engine id `supra2_img`, family `supra2`, loading the same converted bundle and the same
+      // two pinned components on both backends.
       //
       // INSTALL (E3). Three upstream components, each pinned to an immutable revision and NOT
       // re-hosted by SceneWorks:
@@ -6660,7 +6663,9 @@
       // The upstream checkpoint is a torch `.pt` pickle, so the install is convert-at-install
       // (`mlx.requiresConversion`): the `supra2_img` converter runs the inference-owned
       // `gen_core::supra2::convert_pinned_checkpoint` (sha256 + exact 237-tensor validation) into a
-      // local native bundle under <data>/models/mlx/supra2_img and re-verifies both component
+      // local native bundle under <data>/models/mlx/supra2_img (the same backend-neutral bundle on
+      // every OS; the `mlx` block name is historical — `supra2_img` is in CANDLE_NATIVE_CONVERTERS,
+      // so the convert affordance and converted-state probe apply off-Mac too) and re-verifies both component
       // snapshots against their pinned sizes + sha256 (`FLAN_T5_BASE` / `SD_VAE`). SceneWorks does
       // not re-implement any of it. Generation then reads only local files: the bundle is the
       // LoadSpec weights dir and the two co-requisites are staged as `LoadSpec::components`
@@ -6677,8 +6682,9 @@
       "family": "supra2",
       "type": "image",
       "adapter": "mlx_supra2",
-      // MLX-only at this story: the Candle provider registers in a later story of the epic.
-      "macOnly": true,
+      // Served on both lanes under the same engine id (sc-24213 MLX / sc-24214 Candle), so the entry
+      // is not platform-scoped and every download below applies on every OS.
+      "macOnly": false,
       "capabilities": ["text_to_image"],
       "image": {
         "supportsNegativePrompt": false
@@ -6697,7 +6703,6 @@
           "files": ["model_final_ema.pt"],
           "expectedSizeBytes": 416651529,
           "expectedSha256": "e96aa0537e0fd120af82b3a606dd50c90ae079ac7aa97b38a8da4882daeeee48",
-          "platforms": ["macos"],
           "estimatedSizeBytes": 416651529,
           "footprint": { "diskSizeBytes": 416651529, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -6710,7 +6715,6 @@
           "coRequisite": true,
           "componentId": "text_encoder",
           "files": ["config.json", "model.safetensors", "tokenizer.json"],
-          "platforms": ["macos"],
           "estimatedSizeBytes": 992770529
         },
         // `vae` (MIT): exactly the two files the engine reads at the pinned revision
@@ -6722,7 +6726,6 @@
           "coRequisite": true,
           "componentId": "vae",
           "files": ["config.json", "diffusion_pytorch_model.safetensors"],
-          "platforms": ["macos"],
           "estimatedSizeBytes": 334643823
         }
       ],
@@ -6757,9 +6760,34 @@
         "convertSourceRepo": "SupraLabs/Supra2-IMG",
         "convertSourceFile": "model_final_ema.pt"
       },
+      "candle": {
+        // Conservative DECLARED floor (no measurement campaign; `measured: false`), the Candle twin
+        // of the MLX value above. `candle-gen-supra2` is resident-only (no quantization, sequential
+        // offload or deferred materialization): every tensor is read once and lives on the device
+        // for the generator's lifetime. The resident f32 set is ~1.2 GB (the 416 MB denoiser, the
+        // Flan-T5-Base encoder half of the 990 MB checkpoint, the 335 MB VAE) plus 256x256
+        // activations (a 32x32 latent = 256 tokens; the decoder at 256x256). Like every padded
+        // Candle floor it folds in the 2 GB allocator reserve, because `vram_gate::predicted_peak_gb`
+        // adds no headroom to this scalar: ~1.2 GB + activations + 2.0 GB, rounded up to 4. Without
+        // a floor the fit gate has no prediction and admits a load on any card
+        // (FitDecision::Unknown). The terminal campaign (sc-24217) replaces it with measured evidence.
+        // * `imageActivationGbPerMegapixel` — DECLARED from architecture facts, not measured (no
+        //   peak was recorded by the inference `candle-supra2` CUDA run). The gate
+        //   (`lane_controls::declared_activation_overlay_bytes`) charges this ×
+        //   (images × max(1, MP) − 1); Supra2 renders only 256² (0.0625 MP, clamped up to 1), so the
+        //   term is charged once per EXTRA image of a native count batch (`image.nativeCountBatch`,
+        //   sc-24215) and is effectively the per-image activation at 256². That activation is small:
+        //   the f32 DiT runs 256 tokens × d_model 576 over 14 blocks (CFG doubles the rows; one 9-head
+        //   256×256 score map is 2.4 MB), and the SD VAE decoder's largest 256² feature map is
+        //   128 ch × 256² × 4 B = 33.5 MB with a handful alive at once — well under 0.25 GB per image.
+        //   Rounded up to 0.5 so a batch is never admitted on the single-image floor.
+        "minMemoryGb": 4,
+        "imageActivationGbPerMegapixel": 0.5,
+        "measured": false
+      },
       "ui": {
         "label": "Supra2-IMG",
-        "description": "SupraLabs Supra2-IMG text-to-image: a small 104M-parameter rectified-flow DiT conditioned on Flan-T5-Base and decoded by SD VAE ft-MSE, rendering 256x256 images. Native MLX on Apple Silicon; 50 Euler steps at CFG 3.0 by default. Downloads ~417 MB checkpoint (converted on install) + ~993 MB text encoder + ~335 MB VAE.",
+        "description": "SupraLabs Supra2-IMG text-to-image: a small 104M-parameter rectified-flow DiT conditioned on Flan-T5-Base and decoded by SD VAE ft-MSE, rendering 256x256 images. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 50 Euler steps at CFG 3.0 by default. Downloads ~417 MB checkpoint (converted on install) + ~993 MB text encoder + ~335 MB VAE.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "Supra2-IMG Prompt Guide",

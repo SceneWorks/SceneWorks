@@ -1009,6 +1009,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("sc-25680"),
         ),
+        CandleImageRefusal::Supra2Surface => UnsupportedReason::new(
+            Some(model),
+            "Supra2-IMG request outside plain text-to-image",
+            &format!(
+                "Supra2-IMG serves 256x256 text-to-image only — no source/reference/mask, controls, \
+                 poses, user LoRA, quant tier (advanced.mlxQuantize / advanced.quantTier) or hires \
+                 fix, on either backend. This request (mode {mode:?}) carries one of those, so it is \
+                 refused rather than rendered with the carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as plain text_to_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-24214"),
+        ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
             if matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
@@ -1304,9 +1320,15 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
 /// (`backend-candle`) twin of the MLX converter, not the `Err("… requires macOS")` stub every other
 /// converter compiles to on Windows/Linux (`sceneworks-worker`'s `convert_*` cfg arms).
 ///
-/// Today that is exactly one: `flux2_klein_diffusers`, whose candle twin
-/// (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459) performs the same single-file →
-/// diffusers key remap as the macOS converter so `flux2_klein_9b_true_v2` installs + converts off-Mac.
+/// Today that is two:
+/// - `flux2_klein_diffusers`, whose candle twin (`runtime_cuda::providers::flux2::convert_and_assemble`,
+///   sc-7459) performs the same single-file → diffusers key remap as the macOS converter so
+///   `flux2_klein_9b_true_v2` installs + converts off-Mac;
+/// - `supra2_img` (sc-24214), which needs no twin at all: its converter is inference's
+///   backend-neutral `gen_core::supra2::convert_pinned_checkpoint` (no MLX or Candle code), compiled
+///   on every platform, and `candle-gen-supra2` loads the very bundle it writes. Off-Mac Supra2 has
+///   no raw-source fallback (the upstream `.pt` pickle is not loadable), so the converted bundle is
+///   required here exactly as on macOS.
 ///
 /// This const exists because "does this model require a CONVERTED artifact here?" is a
 /// **per-platform** question, and answering it with [`NATIVE_CONVERTERS`] alone is wrong in a way
@@ -1321,7 +1343,7 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
 /// Drift guards (see their tests): the contents are pinned by
 /// `candle_native_converters_registry_contents_are_pinned`, and every id here must also be in
 /// [`NATIVE_CONVERTERS`] (`candle_native_converters_are_a_subset_of_native_converters`).
-pub const CANDLE_NATIVE_CONVERTERS: &[&str] = &["flux2_klein_diffusers"];
+pub const CANDLE_NATIVE_CONVERTERS: &[&str] = &["flux2_klein_diffusers", "supra2_img"];
 
 /// Whether a model declaring `mlx.converter = converter` loads from a **converted artifact** on the
 /// platform this build targets, so an absent conversion is a hard, actionable install gap rather
