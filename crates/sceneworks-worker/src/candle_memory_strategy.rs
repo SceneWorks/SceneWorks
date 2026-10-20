@@ -2798,6 +2798,7 @@ fn evaluate_shared_image_inner_priced(
             use_pid,
             has_phases: request_has_phases,
             geometry,
+            reference_resources: None,
             overlay: provider_overlay.map(str::to_owned),
             budget: gen_core::MemoryBudget {
                 total_bytes: to_bytes(budget.total_gb),
@@ -2988,6 +2989,7 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gib(48),

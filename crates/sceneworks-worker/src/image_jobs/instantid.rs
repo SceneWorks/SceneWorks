@@ -376,6 +376,7 @@ fn instantid_memory_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(identity.overlay_key()),
         budget,
         predicted_peak_bytes,

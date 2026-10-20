@@ -5979,6 +5979,7 @@ mod candle_image_load_shape_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: 24,
@@ -8156,6 +8157,9 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8217,6 +8221,9 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -14094,6 +14101,7 @@ async fn generate_candle_stream_using(
                 frames: 1,
                 reference_count,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
@@ -14786,6 +14794,7 @@ fn effective_quant_label_gated(
         Quant::Q4 => "q4",
         Quant::Q8 => "q8",
         Quant::Nvfp4 => NVFP4_TIER,
+        Quant::Fp8Rowwise => "fp8r",
     };
     let floors = active
         .iter()
@@ -14794,6 +14803,7 @@ fn effective_quant_label_gated(
                 Quant::Q4 => "q4",
                 Quant::Q8 => "q8",
                 Quant::Nvfp4 => NVFP4_TIER,
+                Quant::Fp8Rowwise => "fp8r",
             };
             format!("{}:{resident}", floor.component.as_str())
         })

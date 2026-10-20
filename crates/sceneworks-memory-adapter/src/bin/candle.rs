@@ -2243,6 +2243,7 @@ fn missing_contract_reason(generator: &dyn Generator, request: &Value) -> String
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: 0,
@@ -3162,6 +3163,7 @@ fn run_five_rung_reference_loaded(
             frames: 1,
             reference_count: u32::from(edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -4055,6 +4057,7 @@ fn pulid_flux_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -4555,6 +4558,7 @@ fn sensenova_candle_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -5279,6 +5283,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
             frames: target.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: adapter_stack_identity(&adapters),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6402,6 +6407,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
+        reference_resources: None,
         overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6918,6 +6924,7 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay.clone()),
         budget: MemoryBudget {
             total_bytes: budget_bytes,
@@ -7510,6 +7517,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         },
         // `validate_edit_route` requires this to be exactly `Some("lora")` when the load carries
         // adapters and `None` when it does not — so it is derived from the spec's own stack.
+        reference_resources: None,
         overlay: (loaded_adapters > 0).then(|| "lora".to_owned()),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -7894,6 +7902,7 @@ fn run(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -12235,6 +12244,7 @@ mod sc22738_arm_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: MemoryBudget {
                 total_bytes: 1 << 34,

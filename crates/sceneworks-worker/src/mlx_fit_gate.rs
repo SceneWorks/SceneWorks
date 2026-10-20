@@ -1150,6 +1150,7 @@ pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
         Some(gen_core::Quant::Q4) => "q4",
         Some(gen_core::Quant::Q8) => "q8",
         Some(gen_core::Quant::Nvfp4) => "nvfp4",
+        Some(gen_core::Quant::Fp8Rowwise) => "fp8r",
         None if tier.precision == gen_core::Precision::Fp32 => "fp32",
         None => "bf16",
     }
@@ -4759,6 +4760,7 @@ fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
+            reference_resources: None,
             overlay: inputs.overlay.clone(),
             budget,
             predicted_peak_bytes,
