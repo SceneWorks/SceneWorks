@@ -477,15 +477,18 @@ mod moss_consumer_tests {
         .as_object()
         .unwrap()
         .clone();
+        let mut pin_progress = Vec::new();
         moss_pin_spec(
             &mut spec,
             &entry,
             &Settings::for_test(temp.path().join("data")),
             mode,
-            &mut |_, _| {},
+            &mut |done, total| pin_progress.push((done, total)),
         )
         .unwrap();
         assert_eq!(spec.prepared_file_pins().len(), 1);
+        // sc-26610: one progress tick per selected file, before its (possibly cold) seal.
+        assert_eq!(pin_progress, vec![(0, 1)]);
         #[cfg(target_os = "macos")]
         let error = moss_memory::selected_asset_facts(MossImageVariant::Sft, &spec, mode)
             .unwrap_err()
