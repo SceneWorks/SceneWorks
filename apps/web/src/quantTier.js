@@ -220,6 +220,12 @@ function sortByTierOrder(a, b) {
 }
 
 export function installedTiers(model, options = {}) {
+  return selectModelTiers(model, options, true);
+}
+
+// Installed and displayed tiers use the same source precedence and host gates. Only the
+// installed-only predicate differs; keep it here so the two public views cannot drift.
+function selectModelTiers(model, options, installedOnly) {
   const hostEligible = (tier) => tierHostEligible(tier, options);
   // Imported same-shape providers can quantize the caller-owned checkpoint at load without a
   // separate downloaded tier. The API projects exactly the provider descriptor's supported set;
@@ -237,7 +243,7 @@ export function installedTiers(model, options = {}) {
           variant &&
           isSelectableTier(variant.variant) &&
           hostEligible(variant.variant) &&
-          variant.installState === "installed",
+          (!installedOnly || variant.installState === "installed"),
       )
       .map((variant) => variant.variant)
       .sort(sortByTierOrder);
@@ -255,7 +261,7 @@ export function installedTiers(model, options = {}) {
           state &&
           isSelectableTier(state.tier) &&
           hostEligible(state.tier) &&
-          state.installState === "installed",
+          (!installedOnly || state.installState === "installed"),
       )
       .map((state) => state.tier)
       .sort(sortByTierOrder);
@@ -310,30 +316,7 @@ function tierStateLookup(model) {
 //    than regressing to an empty picker.
 // Returns [] when the model exposes no tier information at all.
 export function allPossibleTiers(model, options = {}) {
-  const hostEligible = (tier) => tierHostEligible(tier, options);
-  if (Array.isArray(model?.runtimeQuantTiers) && model.runtimeQuantTiers.length > 0) {
-    return model.runtimeQuantTiers
-      .filter((tier) => isSelectableTier(tier) && hostEligible(tier))
-      .sort(sortByTierOrder);
-  }
-  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
-    return model.variants
-      .filter(
-        (variant) => variant && isSelectableTier(variant.variant) && hostEligible(variant.variant),
-      )
-      .map((variant) => variant.variant)
-      .sort(sortByTierOrder);
-  }
-  if (Array.isArray(model?.mlxTierStates) && model.mlxTierStates.length > 0) {
-    return model.mlxTierStates
-      .filter((state) => state && isSelectableTier(state.tier) && hostEligible(state.tier))
-      .map((state) => state.tier)
-      .sort(sortByTierOrder);
-  }
-  if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
-    return model.mlxTiers.filter((tier) => isSelectableTier(tier) && hostEligible(tier)).sort(sortByTierOrder);
-  }
-  return [];
+  return selectModelTiers(model, options, false);
 }
 
 // The studio tier-picker option list: every POSSIBLE tier as `{ tier, label, disabled }`, in display
