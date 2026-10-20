@@ -762,6 +762,7 @@ export function useGenerationStudio({
 export function useSavePreset({
   saved,
   selectedPreset,
+  presetApplicationId = null,
   setSelectedPresetId,
   presets,
   mode,
@@ -782,6 +783,7 @@ export function useSavePreset({
   const [savingPreset, setSavingPreset] = useState(false);
   const [presetSaveMessage, setPresetSaveMessage] = useState({ tone: "neutral", text: "" });
   const presetDefaultSnapshots = useRef({});
+  const appliedPresetId = useRef();
 
   // When restoring a snapshot, the saved knob values already reflect the user's last
   // state — skip the one preset-default pass that fires as the restored preset resolves
@@ -791,13 +793,17 @@ export function useSavePreset({
   );
 
   useEffect(() => {
+    const samePreset = appliedPresetId.current === selectedPreset?.id;
+    appliedPresetId.current = selectedPreset?.id;
+    // Leaving an explicit launch must not reapply defaults over a subsequent recipe.
+    if (samePreset && !presetApplicationId) return;
     // Only the snapshot's OWN preset skips the pass — its knob values are already
     // restored. A different preset resolving first (e.g. Presets → "Use in Studio",
     // sc-10516) must still apply its defaults, or the launch would select the preset
     // and silently ignore everything it carries.
     if (skipPresetDefaultsOnHydrate.current && selectedPreset) {
       skipPresetDefaultsOnHydrate.current = false;
-      if (selectedPreset.id === saved.selectedPresetId) {
+      if (!presetApplicationId && selectedPreset.id === saved.selectedPresetId) {
         return;
       }
     }
@@ -818,8 +824,9 @@ export function useSavePreset({
     if (modeIsPresetable(defaults.mode)) {
       setMode(defaults.mode);
     }
+    // An explicit launch can reapply an already selected preset after a sibling model reset.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPreset?.id]);
+  }, [selectedPreset?.id, presetApplicationId]);
 
   // Snapshot the current working config into a named recipe preset in the workspace
   // library. Captures the literal prompt + every visible knob + the selected LoRAs

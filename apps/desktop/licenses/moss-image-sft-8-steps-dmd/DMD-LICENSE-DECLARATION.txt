@@ -1,0 +1,16 @@
+MOSS-Image-SFT-8-steps-dmd — published license declaration
+Publisher: lodestones
+Frozen revision: 5ff314b4c1470876b114b810146085db8a181a6e
+Source: https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd/blob/5ff314b4c1470876b114b810146085db8a181a6e/README.md
+README SHA-256: 714b1072d9bd9667f6a6615164271d0eba78aad2930d3ccefa3b5741e09bb957
+
+Exact README frontmatter:
+---
+license: apache-2.0
+base_model: OpenMOSS-Team/MOSS-Image-SFT
+---
+
+The package publishes this model-card declaration and no standalone LICENSE.
+SceneWorks displays the Apache License 2.0 text corresponding to the declared
+license, together with this sourcing distinction. The text is not represented as
+an independently published DMD license file or an additional license grant.

@@ -1073,14 +1073,14 @@
               "properties": {
                 "componentId": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_]*$",
+                  "pattern": "^[a-z][a-z0-9_-]*$",
                   "description": "The engine's component key for these files (inference `ProviderComponents` / licence-row key)."
                 },
                 "requiredFor": {
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "items": { "enum": ["cover"] },
+                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32"] },
                   "description": "The purposes that need the component. Base generation is never one of them."
                 },
                 "provider": { "enum": ["huggingface"] },
@@ -2200,8 +2200,8 @@
                 },
                 "componentId": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_]*$",
-                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
+                  "pattern": "^[a-z][a-z0-9_-]*$",
+                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case or kebab-case matching the exact provider component id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
                 },
                 "subdir": {
                   "type": "string",

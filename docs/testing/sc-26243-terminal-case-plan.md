@@ -400,6 +400,181 @@ job. The product's real API/job must provide the intended actionable denial. Rec
 cannot stand in for a successful upstream login/download. Positive download/auth
 proof still comes from the separately approved provisioning run.
 
+## Proposed required-CI budget and final delivery — PLAN ONLY
+
+**No execution authorization is granted by this section.** The final MAIN PR and
+MAIN push remain held until the parent/user approves the complete expanded plan
+and GPU1 admission. The executable FLUX3 representative profile remains **38**
+physical attempts with its unchanged 17 MLX / 21 Candle single-use permits.
+
+The existing Windows workflow also automatically runs one **real-weight Krea**
+smoke after its ordinary Candle job succeeds. It is not a weightless fixture and
+is not silently outside the global budget:
+
+| Proposed additional attempt | Trigger | Exact native job |
+|---|---|---|
+| `ci.windows.imported-nvfp4.initial-main-pr` | First approved same-repository MAIN PR head | One linked Krea 2 Turbo NVFP4 image, 256×256, count 1, step 1, seed 42 |
+| `ci.windows.imported-nvfp4.main-push` | Approved resulting MAIN push | The same one-image mandatory smoke at the actual MAIN commit |
+
+**Proposed combined total: 38 FLUX3 + 2 required CI = 40; hard ceiling 48;
+8 unallocated and NOT automatically usable** (17 MLX + 23 Candle including CI).
+These Krea outputs do not substitute for any FLUX3 product, resource or semantic
+acceptance obligation. These two CI entries are separate
+from the 38 FLUX3 permit IDs, but are included in the same global pre-run
+accounting/admission. They do not consume the former ten spare slots implicitly.
+This proposal does not initialize or amend an approved FLUX3 ledger. The
+coordinator records each actual GitHub run ID, run attempt, event, source/checkout
+SHA, inference pin, runner identity and the one-call source proof; no CI ledger
+service/framework is added. A failed/canceled admitted CI attempt must not be
+silently refunded or retried. **Every additional qualifying PR-head update,
+workflow/job rerun or qualifying MAIN push requires a new explicit count and
+admission BEFORE pushing/rerunning.** If the user declines the additional two,
+retain the hold and obtain a newly approved smaller campaign or other explicit
+user decision; never disable mandatory checks or start an unbudgeted attempt.
+
+### Exact existing automatic CI behavior
+
+- `.github/workflows/windows-candle.yml` watches `push: main` and
+  `pull_request: main` with Candle path filters including `crates/**`,
+  `apps/rust-api/**`, Cargo files and model manifests. Its
+  `imported-nvfp4-worker-smoke` job needs `candle-worker` success and permits a push
+  or same-repository PR. It has no job matrix, seed/rung expansion, warmup loop or
+  automatic retry step. It invokes only
+  `cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1`.
+- That ignored test requires the real Comfy-Org Krea NVFP4 checkpoint at the
+  frozen `952f49d49653cb42e7d6cf7cbfad74738073ec7d` snapshot and the cached
+  `SceneWorks/krea-2-turbo-mlx` bf16 companions. It performs one linked import
+  followed by exactly one `run_image_generate_job` with the table's request.
+  The checkpoint-plan route creates a work list from `request.count` (one),
+  invokes one `generate_one`, and passes a `FnOnce` through
+  `memory_strategy::generate_with_scope` to the actual `Generator.generate`.
+  Import/load and kernel operations are not additional image generations.
+- This job selects `[self-hosted, Windows, X64, cuda, real-weights]`, masks
+  `CUDA_VISIBLE_DEVICES=1`, and serializes its real-weight group using
+  `windows-candle-gpu-real-weights` with cancellation disabled. **The mask and
+  labels are not an owned PID/GPU-UUID observation.** There is no terminal
+  single-use permit or actual GPU1 UUID/foreign-compute guard in this existing
+  smoke. The concurrency group serializes participating real-weight jobs, not
+  every ordinary Candle job: ordinary PR/push `candle-worker` uses a per-run
+  group and can otherwise share GPU1. The parent must establish the real runner,
+  GPU1 identity and an exclusive admitted execution window before delivery.
+- Normal Candle unit tests do not pass `--ignored`; their weightless CUDA-quant
+  kernel tests can touch GPU1 but do not generate model images. Other five-rung,
+  LTX, YuE2 and Iris real-weight campaigns in this workflow require explicit
+  `workflow_dispatch` booleans (default false), not an ordinary PR/push.
+- `.github/workflows/macos-mlx.yml` runs hosted `macos-checks` for MAIN and
+  feature PRs. Its self-hosted `nax-worker` is enabled for relevant same-repository
+  **MAIN-base** PRs and relevant MAIN pushes, never feature-base PRs or merge
+  groups. Normal NAX CI builds the worker, runs only `--test nax_guard`, and dumps
+  capabilities. The guard exercises random tensors (three attention shapes,
+  two layouts, three dtypes), not model weights or `Generator.generate`:
+  **zero image-generation attempts**. Real calibration/five-rung/provisioning
+  paths require explicit dispatch inputs and remain unauthorized here.
+
+### Mandatory secondary-Mac routing and parent-only commands
+
+Use the **existing** documented `[Mac2]` routing, not a workflow/policy change:
+put the operator-required exact `[Mac2]` prefix in the **initial PR title**, and also at the
+start of the **actual MAIN merge-commit subject**. The workflow tests
+`startsWith(PR.title, '[Mac2]')` / `startsWith(head_commit.message, '[Mac2]')` and
+selects `[self-hosted, macOS, ARM64, rw-mage]`; a body mention or later label does
+not suffice. Without the marker its bare `nax` pool may reach the forbidden
+primary `nax-macos`. Dispatch calibration routing uses `nax,weights` instead and
+is not covered by this marker. **Do not use a plain `macos-mlx.yml`
+`workflow_dispatch` as a hosted-only metadata rescue:** even with calibration and
+five-rung inputs false, its non-PR job condition enables `nax-worker` and the
+runner expression falls back to bare `nax`. A title/body `[Mac2]` marker does NOT
+route a `workflow_dispatch`. No such **unguarded/default** manual dispatch is authorized here. The normal
+**feature-base PR hosted producer** is the ordinary collection route. The one
+narrow c8 metadata-bootstrap profile described below was separately approved
+because the genuine local matrix gate cannot bootstrap without combined MLX
+facts; it is not a hook exception, a model campaign, or a NAX verdict. Verify the live runner-label/physical identity is
+actually **secondary `nax-macos-2` before execution**; labels alone are not proof.
+See the existing routing explanation in `docs/rust-mlx-build.md`.
+
+### Narrow hosted-only c8 metadata bootstrap
+
+One hosted build/lint/unit/facts capture is separately approved to resolve the
+real `matching-platform production model mappings differ` bootstrap gate. The
+new `workflow_dispatch.hosted_only` boolean defaults to **false**. Only an
+explicit dispatch with it true excludes the **entire NAX job before runner
+assignment**; normal PRs, pushes and default manual routing are unchanged. The
+early hosted guard rejects any true/unexpected value for
+`run_memory_calibration`, `run_five_rung_reference`, `provision_qwen_snapshot` or
+`provision_z_image_snapshot`. No self-hosted machine, weights, calibration,
+materialization or model-image generation is admitted by this profile. Its
+hosted `macos-26` build/test and `always()` facts/upload remain normal; a collected
+artifact is **not** a NAX verdict, a green preflight stamp or campaign acceptance.
+
+The source-only bootstrap may retain genuine old MLX facts and old SW-generated
+snapshots with their original provenance, explicitly stale pending that producer.
+For this bootstrap, the stale inputs are the two original MLX media/runtime
+files under `config/engine-capabilities/`, and the exact ce4 MAIN snapshots
+`config/backend-capabilities/matrix.json`,
+`config/manifests/builtin.preview-support.jsonc`, and
+`docs/generated/memory-matrix.{json,md}`. Their old source hashes/revision labels
+must not be relabeled as c8 or current. The local Candle media/runtime/audio files
+are actual compiled c8 producer outputs, not a cross-family JSON union.
+It must preserve the actual c8 Cargo edges, authoritative declarations and both
+merge parents. Commit/push the plain no-PR
+bootstrap ref through **normal hooks**. No-PR avoids the PR preflight-stamp
+requirement, but the actual pre-push hook still runs applicable tier, neither and
+Candle checks; it is not an exemption from those checks. If any normal hook
+blocks, stop and report it—never use skip flags, `--no-verify`, alternate API file
+writes or another session to push.
+
+The existing workflow must be present on default main, but the operator must
+explicitly select the **patched bootstrap ref** containing this input and NAX
+exclusion. Verify its remote YAML blob against that exact local commit before
+dispatch. Send typed JSON `hosted_only:true` and all four conflicting flags false.
+If the server rejects the ref/input schema, stop; never omit the flag or fall
+back to default-main dispatch. For the one approved run:
+
+```sh
+BOOTSTRAP_REF='bootstrap/sc-26243-hosted-facts-c8'
+printf '%s\n' '{"hosted_only":true,"run_memory_calibration":false,"run_five_rung_reference":false,"provision_qwen_snapshot":false,"provision_z_image_snapshot":false}' | gh workflow run macos-mlx.yml --repo SceneWorks/SceneWorks --ref "$BOOTSTRAP_REF" --json
+# Record the returned URL/id and exact checkout SHA. Verify actual jobs:
+# NAX must be skipped/unassigned; only hosted jobs may execute. No rerun without approval.
+# Follow this ONE run, uncapped, at the approved interval:
+gh run watch "$RUN_ID" --repo SceneWorks/SceneWorks --interval 120 --exit-status
+```
+
+Collect only its genuine `backend-capability-facts-mlx` artifact into a new empty
+external directory. Verify actual source/run/pin provenance, c8 stamps and both
+FLUX3+MOSS media/runtime entries; adopt raw producer JSON, never hand-union or
+relabel old snapshots. Then rerun the SW-source generators and genuine preflight
+on a clean committed head after the outstanding bundle-budget user decision.
+A failed hosted check may still produce valid evidence through `always()`; do
+not describe that metadata-bootstrap workflow as green certification.
+
+The following are parent-only **MAIN delivery** examples for after complete
+plan/GPU1 approval, not instructions to run them now:
+
+```sh
+# Inspect live label placement; admit only the actual secondary Mac and GPU1 runner.
+gh api repos/SceneWorks/SceneWorks/actions/runners --paginate --jq '.runners[] | {id,name,status,busy,labels:[.labels[].name]}'
+
+# The initial title must already contain the routing marker.
+gh pr create --base main --head '<parent-approved-final-head>' --title '[Mac2] FLUX3 terminal integration' --body-file '<approved-body-file>'
+
+# Record PR/source identity before admitting the first one-image CI attempt.
+gh pr view '<PR>' --json number,title,baseRefName,headRefName,headRefOid,url
+
+# Only after reviewed green checks and explicit MAIN-push attempt admission.
+# Do not rely on GitHub's default merge subject or a marker only in the body.
+gh pr merge '<PR>' --merge --subject '[Mac2] FLUX3 terminal integration'
+
+# Collect actual run/attempt/checkout and runner receipts, not assumed attempt counts.
+RUN_ID='<actual-run-id>'
+gh api "repos/SceneWorks/SceneWorks/actions/runs/$RUN_ID" --jq '{id,event,head_sha,run_attempt,conclusion,html_url}'
+gh api "repos/SceneWorks/SceneWorks/actions/runs/$RUN_ID/jobs" --jq '.jobs[] | {id,name,runner_id,runner_name,status,conclusion}'
+```
+
+The parent must reconcile both proposed CI attempts and the 38 FLUX3 ledger
+reservations against the approved global plan; normal weights-free CI must never
+be confused with the real-weight job above. No actual CI image attempt or
+production campaign execution is asserted by this document.
+
 ## Reports and evidence
 
 Each run retains a report under `outputRoot/terminal-<nonce>/report.json` including

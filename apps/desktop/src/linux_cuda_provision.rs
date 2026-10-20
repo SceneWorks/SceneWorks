@@ -333,18 +333,113 @@ fn install_from_staged(source: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Shared libraries the NVIDIA **driver** installs, which no distribution package will
+/// ever produce. Matched as a prefix so the versioned sonames (`libcuda.so.1`,
+/// `libnvidia-ml.so.1`) are covered.
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+const DRIVER_PROVIDED_SONAMES: &[&str] = &["libcuda.so", "libnvidia-ml.so"];
+
+/// The sonames `ldd` reported as unresolved, in report order and deduplicated.
+///
+/// `ldd` prints one `<soname> => not found` line per unresolved dependency, so the names
+/// are already sitting in the report the probe captures — they were simply never read.
+#[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
+fn unresolved_sonames(report: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in report.lines() {
+        let Some((name, _)) = line.split_once("=> not found") else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || names.iter().any(|known| known == name) {
+            continue;
+        }
+        names.push(name.to_owned());
+    }
+    names
+}
+
+/// Turn the dependency probe's `ldd` output into a remedy the user can actually carry out.
+///
+/// Three failures of the previous message, all the same shape as the NVML mismatch that
+/// told a user with a healthy driver to reinstall it (GH #1966, GH #3017):
+///
+/// 1. **The missing libraries are named.** It used to assert that `libgomp` was the thing
+///    to install whatever `ldd` had actually reported, so a host missing something else
+///    was sent after a library it already had.
+/// 2. **An immutable/atomic distribution is given an instruction that exists there.**
+///    `sudo dnf install` cannot run on Bazzite / Silverblue / Bluefin, and those are
+///    exactly the hosts this provisioner is most likely to stop: their users do not layer
+///    packages to make an AppImage start. Layering needs `rpm-ostree` and the reboot
+///    named, as the driver remedies in `setup.rs` already do.
+/// 3. **A driver-provided soname is not dressed up as a package.** `libcuda.so.1` comes
+///    from the NVIDIA driver; no `apt install` line will ever produce it.
+///
+/// A non-zero `ldd` with no `not found` line is reported as the probe failing rather than
+/// as a missing library — naming a dependency the report does not show would be the same
+/// wrong-advice defect pointing the other way.
 #[cfg(any(target_os = "linux", all(test, target_os = "windows")))]
 fn evaluate_ldd_report(success: bool, report: &str) -> Result<(), String> {
-    if success && !report.contains("not found") {
+    let missing = unresolved_sonames(report);
+    if success && missing.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "the Linux GPU runtime has unresolved shared-library dependencies. Install the \
-         GNU OpenMP runtime if it is missing (Debian/Ubuntu: `sudo apt install libgomp1`; \
-         Fedora/RHEL: `sudo dnf install libgomp`) and relaunch SceneWorks. ldd reported: \
-         {}",
-        report.trim()
-    ))
+    let report = report.trim();
+    if missing.is_empty() {
+        return Err(format!(
+            "the Linux GPU runtime's shared-library dependency check could not be \
+             completed, so SceneWorks cannot confirm the runtime will load. ldd \
+             reported: {report}"
+        ));
+    }
+    let (driver_provided, from_packages): (Vec<&String>, Vec<&String>) =
+        missing.iter().partition(|name| {
+            DRIVER_PROVIDED_SONAMES
+                .iter()
+                .any(|driver| name.starts_with(driver))
+        });
+    let mut message = format!(
+        "the Linux GPU runtime is missing shared libraries this machine has to provide: {}.",
+        missing.join(", ")
+    );
+    if !driver_provided.is_empty() {
+        message.push_str(&format!(
+            " {} is installed by the NVIDIA driver rather than by a distribution package, \
+             so install or update the driver and reboot.",
+            driver_provided
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !from_packages.is_empty() {
+        message.push_str(&format!(
+            " Install whichever of your distribution's packages provides {}.",
+            if driver_provided.is_empty() {
+                "them"
+            } else {
+                "the rest"
+            }
+        ));
+        if from_packages.iter().any(|name| name.starts_with("libgomp")) {
+            message.push_str(
+                " `libgomp` is the GNU OpenMP runtime: `sudo apt install libgomp1` on \
+                 Debian/Ubuntu, `sudo dnf install libgomp` on Fedora/RHEL.",
+            );
+        }
+        message.push_str(
+            " On an immutable/atomic Linux distribution (Bazzite, Silverblue, Bluefin, …) \
+             there is no `dnf`/`apt` writing into the running system: layer the package \
+             with `rpm-ostree install <package>` and reboot — a layered package only \
+             arrives on the NEXT boot — or start SceneWorks from a toolbox/distrobox \
+             container that already has it.",
+        );
+    }
+    message.push_str(&format!(
+        " Then relaunch SceneWorks. ldd reported: {report}"
+    ));
+    Err(message)
 }
 
 #[cfg(target_os = "linux")]
@@ -813,6 +908,87 @@ mod tests {
             .expect_err("missing libgomp must fail before worker spawn");
         assert!(error.contains("libgomp1"));
         assert!(error.contains("not found"));
+    }
+
+    /// `ldd` already names every unresolved soname; the remedy has to read them rather
+    /// than assert `libgomp` (GH #3017). A host missing a cuDNN engine was previously
+    /// sent to install an OpenMP runtime it already had.
+    #[test]
+    fn ldd_failure_names_the_libraries_that_are_actually_missing() {
+        let error = evaluate_ldd_report(
+            false,
+            "\tlibcudnn.so.9 => not found\n\tlibcublasLt.so.12 => not found\n",
+        )
+        .expect_err("unresolved dependencies must fail before worker spawn");
+        assert!(error.contains("libcudnn.so.9"), "got: {error}");
+        assert!(error.contains("libcublasLt.so.12"), "got: {error}");
+        assert!(
+            !error.contains("libgomp"),
+            "a host missing neither OpenMP library must not be sent after one: {error}"
+        );
+    }
+
+    /// The hosts this check stops hardest are the ones whose users never layer packages
+    /// at all, and `sudo dnf install` cannot run there. Mirrors the atomic-distro caveat
+    /// the driver remedies in `setup.rs` carry (GH #1966, GH #3017).
+    #[test]
+    fn the_missing_dependency_remedy_is_followable_on_an_immutable_distribution() {
+        let error = evaluate_ldd_report(false, "\tlibgomp.so.1 => not found")
+            .expect_err("missing libgomp must fail before worker spawn");
+        let lowered = error.to_ascii_lowercase();
+        assert!(lowered.contains("rpm-ostree"), "got: {error}");
+        assert!(lowered.contains("bazzite"), "got: {error}");
+        assert!(lowered.contains("reboot"), "got: {error}");
+        // The mutable-distro instruction is still there for the hosts that have it.
+        assert!(error.contains("libgomp1"), "got: {error}");
+    }
+
+    /// `libcuda.so.1` ships with the NVIDIA driver. Offering a package manager for it is
+    /// the same wrong advice as telling a healthy-driver host to reinstall its driver.
+    #[test]
+    fn a_driver_provided_soname_is_not_presented_as_a_distribution_package() {
+        let error = evaluate_ldd_report(false, "\tlibcuda.so.1 => not found")
+            .expect_err("an unresolved driver library must fail before worker spawn");
+        assert!(error.contains("libcuda.so.1"), "got: {error}");
+        assert!(
+            error.to_ascii_lowercase().contains("nvidia driver"),
+            "got: {error}"
+        );
+        assert!(
+            !error.contains("apt install") && !error.contains("rpm-ostree"),
+            "no package manager produces the driver's own library: {error}"
+        );
+    }
+
+    /// A non-zero `ldd` that reports no `not found` line is the probe failing, not a
+    /// missing library — claiming one would be the same defect pointing the other way.
+    #[test]
+    fn an_ldd_failure_with_no_missing_library_is_not_reported_as_one() {
+        let error = evaluate_ldd_report(false, "\tnot a dynamic executable")
+            .expect_err("a failed dependency probe must not be treated as a pass");
+        assert!(
+            !error.contains("libgomp") && !error.contains("missing shared libraries"),
+            "an inconclusive probe must not name a dependency: {error}"
+        );
+        assert!(error.contains("not a dynamic executable"), "got: {error}");
+    }
+
+    /// Every probe target is appended to one report, so the same soname recurs; the
+    /// remedy lists each name once, in the order `ldd` first reported it.
+    #[test]
+    fn unresolved_sonames_are_deduplicated_in_report_order() {
+        let report = "\
+            /gpu-runtime/onnxruntime/capi/libonnxruntime.so:\n\
+            \tlibgomp.so.1 => not found\n\
+            \tlibm.so.6 => /lib64/libm.so.6 (0x00007f00)\n\
+            /gpu-runtime/cudnn/lib/libcudnn.so.9:\n\
+            \tlibcudnn.so.9 => not found\n\
+            \tlibgomp.so.1 => not found\n";
+        assert_eq!(
+            unresolved_sonames(report),
+            vec!["libgomp.so.1".to_owned(), "libcudnn.so.9".to_owned()]
+        );
+        assert!(unresolved_sonames("\tlibm.so.6 => /lib64/libm.so.6").is_empty());
     }
 
     #[test]

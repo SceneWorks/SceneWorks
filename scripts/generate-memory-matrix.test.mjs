@@ -20,6 +20,7 @@ import {
   buildMatrix,
   buildStoryBackendScope,
   cellState,
+  COMPOSITE_STORY_OWNERSHIP,
   declarationModelForCoordinate,
   familyGroup,
   familyStory,
@@ -373,8 +374,8 @@ test("FLUX 3 Candle model and resource family have distinct existing owners", ()
   }), /exactly one owner and one backend/);
 });
 
-test("the ownership tables scope every story to exactly one backend", () => {
-  // One scope entry per (story, backend) across both tables, all distinct.
+test("the ownership tables resolve every story to one exact declared scope", () => {
+  // One scope entry per distinct story, with exact multi-owner claims only where declared.
   //
   // sc-22512 replaced the pinned `146` with that relation, derived from the tables themselves: the
   // number was 2*(53+20) and reddened on any catalog growth, while the claim worth keeping is that
@@ -386,8 +387,8 @@ test("the ownership tables scope every story to exactly one backend", () => {
   ].flatMap((stories) => Object.values(stories));
   assert.equal(
     scope.size,
-    scopedStoryIds.length - Object.keys(PAIRED_MODEL_STORIES).length,
-    "each logical owner resolves once; every checked same-model pair covers exactly two lanes",
+    new Set(scopedStoryIds).size,
+    "every distinct story resolves once, including exact declared paired and composite claims",
   );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
@@ -435,6 +436,69 @@ test("explicit paired same-model ownership covers both backends and no other sco
   assert.throws(() => buildStoryBackendScope(models, { 26233: { mlx: 26239 } }, pairs), /exactly one owner and one backend/);
   assert.throws(() => buildStoryBackendScope({ flux3_klein_base: { mlx: 26239, candle: 26240 } }, {}, pairs), /paired/);
   assert.throws(() => buildStoryBackendScope(models, families, { absent: 26239 }), /paired/);
+});
+
+test("paired FLUX3 and composite MOSS ownership coexist without widening either scope", () => {
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(PAIRED_MODEL_STORIES, { flux3_klein_base: 26239 });
+  assert.deepEqual(COMPOSITE_STORY_OWNERSHIP, [
+    { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+    { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+  ]);
+  assert.deepEqual(scope.get(26239), {
+    backend: "paired", backends: ["mlx", "candle"], role: "model story", owner: "flux3_klein_base",
+  });
+  for (const { story, backend, family, model_ids: modelIds } of COMPOSITE_STORY_OWNERSHIP) {
+    assert.deepEqual(scope.get(story), {
+      backend, role: "composite story", owner: `family SC-${family}`,
+      claims: [
+        ...modelIds.map((owner) => ({ role: "model story", owner })),
+        { role: "family story", owner: `family SC-${family}` },
+      ],
+    });
+  }
+  const cells = ["flux3_klein", "flux3_klein_base", "moss_image_base", "moss_image_sft"]
+    .flatMap((modelId) => ["mlx", "candle"].map((backend) => ({
+      id: `${modelId}:${backend}`, modelId, backend,
+      owningModelStory: modelStory(modelId, backend),
+      owningFamilyStory: familyStory(modelId, backend),
+    })));
+  assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped(cells, scope));
+  for (const cell of cells) {
+    const foreign = cell.modelId.startsWith("moss") ? 26239 : cell.backend === "mlx" ? 26323 : 26324;
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningModelStory: foreign },
+    ], scope), /this cell needs/);
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningFamilyStory: foreign },
+    ], scope), /this cell needs/);
+    if (cell.modelId.startsWith("moss")) {
+      const otherBackendStory = cell.backend === "mlx" ? 26324 : 26323;
+      for (const field of ["owningModelStory", "owningFamilyStory"]) {
+        assert.throws(() => assertCellOwnershipIsBackendScoped([
+          { ...cell, [field]: otherBackendStory },
+        ], scope), /is scoped to .* but the cell is/);
+      }
+    }
+  }
+  const models = structuredClone(MODEL_STORIES);
+  const families = structuredClone(FAMILY_STORIES);
+  assert.deepEqual(buildStoryBackendScope(models, families, PAIRED_MODEL_STORIES), scope);
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  for (const modelId of ["moss_image_base", "moss_image_sft"]) {
+    const missing = structuredClone(models);
+    delete missing[modelId].mlx;
+    assert.throws(() => buildStoryBackendScope(missing, families, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  }
+  const missingFamily = structuredClone(families);
+  delete missingFamily[26323].candle;
+  assert.throws(() => buildStoryBackendScope(models, missingFamily, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  assert.throws(() => buildStoryBackendScope(models, families, {
+    ...PAIRED_MODEL_STORIES, moss_image_base: 26323,
+  }), /paired model ownership must declare exactly/);
+  assert.throws(() => buildStoryBackendScope({
+    ...models, intruder: { mlx: 26323 },
+  }, families, PAIRED_MODEL_STORIES), /outside its declared composite scope/);
 });
 
 test("a cell may never name a story scoped to the other backend", () => {
@@ -2779,4 +2843,27 @@ test("every planned anchor of a matrix model names a tier its lane publishes", a
   }
   assert.ok(checked > 0, "the plan names matrix models");
   assert.deepEqual(offAxis, []);
+});
+
+
+test("approved MOSS composite ownership stays exact to both models, family and backend", () => {
+ const models={moss_image_base:{mlx:26323,candle:26324},moss_image_sft:{mlx:26323,candle:26324}};
+ const families={26323:{mlx:26323,candle:26324}};
+ const scope=buildStoryBackendScope(models,families);
+ assert.equal(scope.size,2);
+ const catalog=["moss_image_base","moss_image_sft"].map(id=>({id,modality:"image",backends:["mlx","candle"]}));
+ assert.deepEqual(assertTwinCoverage(catalog,models,families),{dualModels:2,dualFamilies:1});
+ for(const backend of ["mlx","candle"]) {
+  const story=backend==="mlx"?26323:26324;
+  for(const modelId of ["moss_image_base","moss_image_sft"]) assertCellOwnershipIsBackendScoped([{id:`${modelId}:${backend}`,modelId,backend,owningModelStory:story,owningFamilyStory:story}],scope);
+ }
+ const wrongBackend=structuredClone(models);wrongBackend.moss_image_base.mlx=26324;
+ assert.throws(()=>buildStoryBackendScope(wrongBackend,families),/outside its declared composite scope/);
+ const wrongModel=structuredClone(models);wrongModel.other={mlx:26323};
+ assert.throws(()=>buildStoryBackendScope(wrongModel,families),/outside its declared composite scope/);
+ const wrongFamily={...families,999:{mlx:26323}};
+ assert.throws(()=>buildStoryBackendScope(models,wrongFamily),/outside its declared composite scope/);
+ assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:26323}},{26323:{mlx:26323}}),/incomplete declared composite scope/);
+ assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:7},moss_image_sft:{mlx:7}},{26323:{mlx:7}}),/exactly one owner and one backend/);
+ assert.throws(()=>assertCellOwnershipIsBackendScoped([{id:"sibling",modelId:"boogu_image",backend:"mlx",owningModelStory:26323,owningFamilyStory:26323}],scope),/this cell needs/);
 });

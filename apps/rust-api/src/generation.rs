@@ -1944,6 +1944,32 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
         }
     }
+    // MOSS's model-specific controls survive headless preset expansion. Presence wins, including
+    // explicit OFF; never inherit an enabled preset over a caller's deliberate ordinary request.
+    if let Some(moss) = preset.get("defaults").and_then(|d| d.get("mossImage")) {
+        let advanced = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if !advanced.contains_key("mossImage") {
+            advanced.insert("mossImage".to_owned(), moss.clone());
+            if moss
+                .get("acceleration")
+                .and_then(Value::as_str)
+                .is_some_and(|v| v != "off")
+            {
+                if let Some(steps) = preset
+                    .get("defaults")
+                    .and_then(|d| d.get("mossDmdSteps").or_else(|| d.get("steps")))
+                {
+                    advanced
+                        .entry("steps".to_owned())
+                        .or_insert_with(|| steps.clone());
+                }
+            }
+        }
+    }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT
     // applied here — the studio seeds those into the form from the preset and the
     // user can override them, so the submitted values are authoritative.

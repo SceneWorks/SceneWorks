@@ -213,6 +213,22 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen_2_1_turbo",
     },
+    ModelRow {
+        sceneworks_id: "moss_image_base",
+        engine_id: "moss_image_base",
+        default_repo: "OpenMOSS-Team/MOSS-Image-Base",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_base",
+    },
+    ModelRow {
+        sceneworks_id: "moss_image_sft",
+        engine_id: "moss_image_sft",
+        default_repo: "OpenMOSS-Team/MOSS-Image-SFT",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_sft",
+    },
     // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
     // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
@@ -1833,6 +1849,8 @@ mod tests {
         "flux3_klein",
         "flux3_klein_base",
         "iris_3b",
+        "moss_image_base",
+        "moss_image_sft",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -1965,6 +1983,7 @@ mod tests {
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
@@ -2015,6 +2034,7 @@ mod tests {
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).

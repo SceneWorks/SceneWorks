@@ -20,7 +20,7 @@ import {
   describeOpenedImage,
   workflowStateFromInspect,
 } from "../editorSourceWorkflow.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";

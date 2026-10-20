@@ -272,6 +272,9 @@ export function buildImageJobRequest(state) {
       model,
       flux3Layout: state.flux3Layout,
       flux3ReferenceIds: state.flux3ReferenceIds,
+      mossImage: state.mossImage,
+      mossDmdSteps: state.mossDmdSteps,
+      mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride
         ? `${resolutionOverride.width}x${resolutionOverride.height}`
         : resolution,

@@ -180,10 +180,20 @@ import yue2SourceNotices from "../../../desktop/licenses/yue2-source/THIRD_PARTY
 import yue2SourceSnakeBetaMit from "../../../desktop/licenses/yue2-source/SnakeBeta-NVIDIA-MIT.txt?url&no-inline";
 import yue2SourceStableAudioToolsMit from "../../../desktop/licenses/yue2-source/stable-audio-tools-MIT.txt?url&no-inline";
 
+// MOSS official Apache snapshots and optional DMD's published model-card declaration.
+import mossImageBaseApache from "../../../desktop/licenses/moss-image-base/Apache-2.0.txt?url&no-inline";
+import mossImageSftApache from "../../../desktop/licenses/moss-image-sft/Apache-2.0.txt?url&no-inline";
+import mossImageProvenance from "../../../desktop/licenses/moss-image-base/PROVENANCE.txt?url&no-inline";
+import mossImageDmdDeclaration from "../../../desktop/licenses/moss-image-sft-8-steps-dmd/DMD-LICENSE-DECLARATION.txt?url&no-inline";
+
 // Maps each manifest document key to its bundled text asset URL. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
 // their keys here. Vite emits these with the app instead of embedding the full corpus in JavaScript.
 const DOCUMENT_URL = {
+  "moss-image-base-apache": mossImageBaseApache,
+  "moss-image-sft-apache": mossImageSftApache,
+  "moss-image-provenance": mossImageProvenance,
+  "moss-image-dmd-declaration": mossImageDmdDeclaration,
   "ffmpeg-notice": ffmpegNotice,
   "ffmpeg-gpl": ffmpegGpl,
   "onnxruntime-notice": onnxruntimeNotice,

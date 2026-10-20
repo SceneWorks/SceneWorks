@@ -913,6 +913,34 @@ async fn validate_and_canonicalize_merged_generation_payload(
     } else {
         validate_raw_job_payload(state, &job_type, &mut merged).await?;
     }
+    // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
+    // reach validation, so headless clients cannot silently drop a conflicting authored setting.
+    if merged.get("model") != persisted.get("model")
+        && (persisted
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            || merged
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss))
+        && !payload_changes.contains_key("advanced")
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            for key in [
+                "mossImage",
+                "sampler",
+                "scheduler",
+                "schedulerShift",
+                "guidanceScale",
+                "guidanceMethod",
+                "cfgInterval",
+                "steps",
+            ] {
+                advanced.remove(key);
+            }
+        }
+    }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
@@ -1199,6 +1227,51 @@ pub(crate) async fn canonicalize_image_model_payload(
         &model_manifest_entry,
     ) {
         return Err(ApiError::bad_request(reason));
+    }
+
+    // Every image entry point reaches this post-expansion/post-merge seam.
+    sceneworks_core::moss_image::scrub_reports(payload);
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
+            .map_err(ApiError::bad_request)?
+        {
+            let options = request
+                .moss_image
+                .as_ref()
+                .expect("MOSS request carries options");
+            if matches!(job_type, JobType::ImageDetail) {
+                return Err(ApiError::bad_request(
+                    "MOSS-Image supports text-to-image generation, not image_detail",
+                ));
+            }
+            payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                .insert(
+                    "mossImage".to_owned(),
+                    serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
+                );
+
+            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+                let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
+                    &model_manifest_entry,
+                    purpose,
+                )
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+                for row in rows {
+                    if crate::models::pinned_component_presence(&state.settings.data_dir, &row) != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+                        let component = row.get("componentId").and_then(Value::as_str).unwrap_or("selected component");
+                        return Err(ApiError::bad_request(format!("MOSS-Image {component} missing or incomplete at its frozen revision; install via /api/v1/models/{model_id}/conditional-components/{purpose}/download")));
+                    }
+                }
+            }
+            model_manifest_entry = Value::Object(
+                sceneworks_core::moss_image::selected_components(entry, options)
+                    .map_err(ApiError::bad_request)?,
+            );
+        }
     }
 
     // Overwrite rather than merge. The selected id was path-confined above; imported/custom

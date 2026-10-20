@@ -7,10 +7,11 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "50ff063612f79cd411f4e5b9748f7fff024ebf65"
+      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
+      "audioInferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
     },
     "mlx": {
-      "inferenceRevision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e"
+      "inferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
     }
   },
   "models": {
@@ -75,14 +76,6 @@
     "flux2_klein_9b_true_v2": {
       "candle": true,
       "mlx": true
-    },
-    "flux3_klein": {
-      "candle": false,
-      "mlx": false
-    },
-    "flux3_klein_base": {
-      "candle": false,
-      "mlx": false
     },
     "flux_dev": {
       "candle": true,
@@ -164,6 +157,14 @@
     },
     "mmaudio_small_16k": {
       "candle": false
+    },
+    "moss_image_base": {
+      "candle": false,
+      "mlx": false
+    },
+    "moss_image_sft": {
+      "candle": false,
+      "mlx": false
     },
     "moss_sfx_v2": {
       "candle": false

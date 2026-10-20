@@ -387,6 +387,8 @@ smuggled under a scalar key.
 | --- | --- | --- |
 | `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
 | `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
+| `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
+| `mossImageExecutionReport` | `MossImageReport` | Actual completed native MOSS execution receipt, including frozen asset hashes and adapter application. Local adapter location is replaced with its frozen relative filename. Imported receipts are display metadata; replay discards them and computes a new receipt. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
 | `sampler` | `Scalar` | Sampler choice. |
@@ -448,6 +450,7 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 
 | Key | Why it is withheld |
 | --- | --- |
+| `mossOrdinarySettings` | Inactive ordinary studio choices retained locally for switching acceleration OFF; these did not generate the accelerated image. |
 | `keypointCollectionId` | A local Key Point Library collection id. Resolves to nothing on another install. |
 | `flashAttn` | A backend kernel toggle — what this install's attention path can do. |
 | `mlxQuantize` | Quant tier: a memory accommodation for this machine. |

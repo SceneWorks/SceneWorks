@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
+    "inferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -19,8 +19,6 @@
     "flux2_klein_9b": "flux2_klein_9b",
     "flux2_klein_9b_kv": "flux2_klein_9b",
     "flux2_klein_9b_true_v2": "flux2_klein_9b",
-    "flux3_klein": "flux3_klein",
-    "flux3_klein_base": "flux3_klein_base",
     "flux_dev": "flux1_dev",
     "flux_schnell": "flux1_schnell",
     "ideogram_4": "ideogram_4",
@@ -39,6 +37,8 @@
     "mage_flow_edit_base": "mage_flow_edit_base",
     "mage_flow_edit_turbo": "mage_flow_edit_turbo",
     "mage_flow_turbo": "mage_flow_turbo",
+    "moss_image_base": "moss_image_base",
+    "moss_image_sft": "moss_image_sft",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
     "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
@@ -371,8 +371,6 @@
   ],
   "trainerMappings": {
     "anima_base_lora": "anima_base",
-    "flux3_klein_edit_lora": "flux3_klein_base",
-    "flux3_klein_lora": "flux3_klein_base",
     "illustrious_xl_v1_lora": "sdxl",
     "illustrious_xl_v2_lora": "sdxl",
     "iris_3b_depth": "iris_3b_depth",
@@ -450,8 +448,6 @@
       "flux2_dev",
       "flux2_dev_edit",
       "flux2_dev_control",
-      "flux3_klein",
-      "flux3_klein_base",
       "ideogram_4",
       "ideogram_4_turbo",
       "iris_3b",
@@ -474,6 +470,8 @@
       "mage_flow_edit_turbo",
       "minimax_h3",
       "mochi_1",
+      "moss_image_base",
+      "moss_image_sft",
       "pulid_flux",
       "qwen_image",
       "qwen_image_control",
@@ -1279,54 +1277,6 @@
         "supported_guidance_methods": []
       },
       {
-        "id": "flux3_klein",
-        "family": "flux3",
-        "backend": "mlx",
-        "modality": "image",
-        "conditioning": [
-          "reference",
-          "referenceRgba",
-          "multiReference"
-        ],
-        "supports_lora": true,
-        "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
-        "supports_preview": false,
-        "supports_prompt_enhancement": true,
-        "samplers": [
-          "euler"
-        ],
-        "schedulers": [],
-        "supported_guidance_methods": []
-      },
-      {
-        "id": "flux3_klein_base",
-        "family": "flux3",
-        "backend": "mlx",
-        "modality": "image",
-        "conditioning": [
-          "reference",
-          "referenceRgba",
-          "multiReference"
-        ],
-        "supports_lora": true,
-        "supports_lokr": false,
-        "supported_quants": [
-          "q4",
-          "q8"
-        ],
-        "supports_preview": false,
-        "supports_prompt_enhancement": true,
-        "samplers": [
-          "euler"
-        ],
-        "schedulers": [],
-        "supported_guidance_methods": []
-      },
-      {
         "id": "ideogram_4",
         "family": "ideogram",
         "backend": "mlx",
@@ -1950,6 +1900,48 @@
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
+      },
+      {
+        "id": "moss_image_base",
+        "family": "moss_image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
+      },
+      {
+        "id": "moss_image_sft",
+        "family": "moss_image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
       },
       {
         "id": "pulid_flux",
@@ -2922,7 +2914,6 @@
       "anima_base",
       "anima_aesthetic",
       "anima_turbo",
-      "flux3_klein_base",
       "iris_3b",
       "iris_3b_depth",
       "iris_3b_restore",
@@ -3011,30 +3002,6 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false,
-        "supports_training_adapter": false
-      },
-      {
-        "id": "flux3_klein_base",
-        "family": "flux3",
-        "backend": "mlx",
-        "modality": "image",
-        "supports_lora": true,
-        "supports_lokr": false,
-        "supports_control": false,
-        "supports_full_finetune": false,
-        "max_reference_images": 1,
-        "supports_weight_noise": false,
-        "supports_depth_anchoring": false,
-        "supports_gradient_noise": false,
-        "supports_resolution_buckets": false,
-        "supports_subject_mask_loss": false,
-        "supports_identity_loss": false,
-        "supports_face_landmark_loss": false,
-        "supports_body_proportion_loss": false,
-        "supports_body_shape_loss": false,
-        "supports_normal_loss": false,
-        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

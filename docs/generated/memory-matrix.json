@@ -1,35 +1,35 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:646e84cb1ac7308cc178254c24d3cd0d432496dfbeafcfa9c5361cdf55cfa20a",
+    "sceneWorksRevision": "source-tree:094481eb601bdedc28dfd42d694b171bdf6122530b10f08ce38463306ba11ac1",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "a6da4d1d86876d73a74a1bd5cc6d377c0947d593cffe7e7824be1057081cdb81"
+        "sha256": "153c2ef3ba3eea7aadb4b026ed245a1293dd81ab0a6fe9a56f932b79e569da16"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "3aedc9530474d0701be4f4e5ea12717b13263d44415dbf66f76e51fc8c69436c"
+        "sha256": "03d19eb3e5546276456cacb431ff0db5f049ebba601f71aa354af7de56d187ea"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "ff7a5e1da4871b411d11ffddb5034039acfaa17a5e2447967cf6abf4307057de"
+        "sha256": "fdeead21c2612ca19ecf0d28644050f822bcf1236780c11f4badf0472d474a4c"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "2c4086080344f14412f681bbe6b4e2c2e7d097f4fbaf7889e7e82a6c8aee8adb"
+        "sha256": "2b786b883d9de8ea55eb3e53dd86873af1d89a3e25957d4da481dc409ea19633"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "957cc0f444686cebce379d193010a56eefd7ddceb4eae8606d62366f0db3a81a"
+        "sha256": "1d364286fa9662cadb3427605b84bf59405879fa8774f924ddd653dedddd75e6"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "022d98325af8790596737b10b624277c68ffab68c6e14b279e2920c6f6535f99"
+        "sha256": "49c7dcbfaa348294f74eb5cfc914512e4990bdfdd3af63b674fb767bd5786051"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "dedbf888be74390f04bf122be26ecbb78105e12e8f3dbd54dc950410c8bb80e3"
+        "sha256": "183e98324c9be9288a40916c39a38249159e5343f3553691bca9af19799f07b7"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "d1f4af52060c96be62834730fb132b9fe4f56a60397ad52c2500b8ee31fe45be"
+        "sha256": "cd2b7f348f52ec8ba47018a9b6bd13ab9accd896a2e39220ee211d3abce36d76"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "34a204ca7425c2eb945f45f663d4448a32aa4b8eba040dbaa751c199650161aa"
+        "sha256": "34356c01aedcb5790335d5df2875b0ad24da2c5ea6a090e3cbb3676a79f4a160"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "02346d4adeb5bc267d9cb726b57b5320b536216b3cda522defbb3b8e0e8be143"
+        "sha256": "5bfe5d31b50e2c9f7b4faa45a4e628c086d622bdae8faa97fc34a35a1bcd6012"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "220b15278f3889f1276e9aef7f9de126f2c77ea613957e11d01f03221ba28d11"
+        "sha256": "aa286db7efc728ebc517a6f3c5b9f064e7bfa1d32ed257cadc677508b1d29880"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,15 +81,15 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "507a0f3785e5967f75115eb320cc94b857c6b8b8e6a8b365864a8ddc24b90394"
+        "sha256": "da1e8ef64d928c381e4dd56d9d28fe1889cbfc95cabf511d7bcd90fd9942bd60"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "3f293dcd1fdd4b4b1725c168c9f4d7b0aaa5366213e430bd44cb446048c28a0b"
+        "sha256": "84a884f1ee95359d8de99f4853ab5c8a796f1423da9f79ae2b82987b55dca576"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "4e22df245feb392f9360a06f8199b7bac5efd6af59ea5809b2420da243aa79ec"
+        "sha256": "b3fe32de612c2522955e97881446757b3a9c5f53b31a42058a0bb123c8fc429e"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
@@ -137,15 +137,15 @@
       "image": 58,
       "video": 11
     },
-    "cells": 10730,
+    "cells": 9790,
     "publishedCells": 3986,
-    "elidedCells": 6744,
+    "elidedCells": 5804,
     "elidedByState": {
-      "Implemented": 1520,
-      "Missing": 5224
+      "Implemented": 1236,
+      "Missing": 4568
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 52,
+    "mlxStagedStaticCoverage": 50,
     "mlxStagedStaticCoverageDenominator": 58,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
@@ -175,7 +175,7 @@
       }
     ],
     "anchors": 258,
-    "analyticOnlyCells": 115,
+    "analyticOnlyCells": 103,
     "anchoredCells": 3986,
     "staleAnchors": 258,
     "attestedAnchors": 0,
@@ -1363,164 +1363,6 @@
         "candle": {
           "tiers": [
             "default"
-          ],
-          "modes": [
-            "character_image",
-            "edit_image",
-            "image_to_image",
-            "text_to_image"
-          ],
-          "overlays": [
-            "identity",
-            "lora",
-            "none"
-          ],
-          "rungs": [
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency"
-          ]
-        }
-      }
-    },
-    {
-      "id": "flux3_klein",
-      "name": "FLUX 3 Image Klein",
-      "modality": "image",
-      "familyGroup": 26233,
-      "family": "flux3",
-      "resolvedRoute": "flux3_klein",
-      "resolvedRoutes": {
-        "mlx": "flux3_klein",
-        "candle": "flux3_klein"
-      },
-      "routeKind": "registry",
-      "backends": [
-        "mlx",
-        "candle"
-      ],
-      "owningFamilyStories": {
-        "mlx": 26233,
-        "candle": 26241
-      },
-      "owningModelStories": {
-        "mlx": 26234,
-        "candle": 26235
-      },
-      "axes": {
-        "mlx": {
-          "tiers": [
-            "bf16",
-            "fp8r",
-            "nvfp4",
-            "q4",
-            "q8"
-          ],
-          "modes": [
-            "character_image",
-            "edit_image",
-            "image_to_image",
-            "text_to_image"
-          ],
-          "overlays": [
-            "identity",
-            "lora",
-            "none"
-          ],
-          "rungs": [
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency"
-          ]
-        },
-        "candle": {
-          "tiers": [
-            "bf16",
-            "fp8r",
-            "nvfp4",
-            "q4",
-            "q8"
-          ],
-          "modes": [
-            "character_image",
-            "edit_image",
-            "image_to_image",
-            "text_to_image"
-          ],
-          "overlays": [
-            "identity",
-            "lora",
-            "none"
-          ],
-          "rungs": [
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency"
-          ]
-        }
-      }
-    },
-    {
-      "id": "flux3_klein_base",
-      "name": "FLUX 3 Image Klein Base",
-      "modality": "image",
-      "familyGroup": 26233,
-      "family": "flux3",
-      "resolvedRoute": "flux3_klein_base",
-      "resolvedRoutes": {
-        "mlx": "flux3_klein_base",
-        "candle": "flux3_klein_base"
-      },
-      "routeKind": "registry",
-      "backends": [
-        "mlx",
-        "candle"
-      ],
-      "owningFamilyStories": {
-        "mlx": 26233,
-        "candle": 26241
-      },
-      "owningModelStories": {
-        "mlx": 26239,
-        "candle": 26239
-      },
-      "axes": {
-        "mlx": {
-          "tiers": [
-            "bf16",
-            "fp8r",
-            "nvfp4"
-          ],
-          "modes": [
-            "character_image",
-            "edit_image",
-            "image_to_image",
-            "text_to_image"
-          ],
-          "overlays": [
-            "identity",
-            "lora",
-            "none"
-          ],
-          "rungs": [
-            "resident",
-            "staged_residency",
-            "bounded_decode",
-            "bounded_attention",
-            "bounded_transformer_residency"
-          ]
-        },
-        "candle": {
-          "tiers": [
-            "bf16",
-            "fp8r",
-            "nvfp4"
           ],
           "modes": [
             "character_image",
@@ -2987,6 +2829,132 @@
           ],
           "overlays": [
             "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_base",
+      "name": "MOSS-Image Base",
+      "modality": "image",
+      "familyGroup": 26323,
+      "family": "moss_image",
+      "resolvedRoute": "moss_image_base",
+      "resolvedRoutes": {
+        "mlx": "moss_image_base",
+        "candle": "moss_image_base"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "owningModelStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "name": "MOSS-Image SFT",
+      "modality": "image",
+      "familyGroup": 26323,
+      "family": "moss_image",
+      "resolvedRoute": "moss_image_sft",
+      "resolvedRoutes": {
+        "mlx": "moss_image_sft",
+        "candle": "moss_image_sft"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "owningModelStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
             "none"
           ],
           "rungs": [
@@ -12825,246 +12793,6 @@
       }
     },
     {
-      "modelId": "flux3_klein_base",
-      "backend": "candle",
-      "rung": "bounded_attention",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "candle",
-      "rung": "bounded_decode",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "candle",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "candle",
-      "rung": "resident",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 36,
-      "states": {
-        "Implemented": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "mlx",
-      "rung": "bounded_attention",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "mlx",
-      "rung": "bounded_decode",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 0,
-      "states": {
-        "Missing": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "mlx",
-      "rung": "resident",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 36,
-      "states": {
-        "Implemented": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein_base",
-      "backend": "mlx",
-      "rung": "staged_residency",
-      "coordinates": 36,
-      "published": 0,
-      "elided": 36,
-      "implemented": 36,
-      "states": {
-        "Implemented": 36
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "candle",
-      "rung": "bounded_attention",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "candle",
-      "rung": "bounded_decode",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "candle",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "candle",
-      "rung": "resident",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 60,
-      "states": {
-        "Implemented": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "candle",
-      "rung": "staged_residency",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "mlx",
-      "rung": "bounded_attention",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "mlx",
-      "rung": "bounded_decode",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "mlx",
-      "rung": "bounded_transformer_residency",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 0,
-      "states": {
-        "Missing": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "mlx",
-      "rung": "resident",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 60,
-      "states": {
-        "Implemented": 60
-      }
-    },
-    {
-      "modelId": "flux3_klein",
-      "backend": "mlx",
-      "rung": "staged_residency",
-      "coordinates": 60,
-      "published": 0,
-      "elided": 60,
-      "implemented": 60,
-      "states": {
-        "Implemented": 60
-      }
-    },
-    {
       "modelId": "ideogram_4_turbo",
       "backend": "candle",
       "rung": "bounded_attention",
@@ -16259,6 +15987,246 @@
       "implemented": 6,
       "states": {
         "Anchored/underived": 6
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
       }
     },
     {
@@ -250547,8 +250515,6 @@
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:staged_residency"
     ],
     "flux2_klein_9b_true_v2": [],
-    "flux3_klein": [],
-    "flux3_klein_base": [],
     "ideogram_4": [
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_attention",
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_decode",
@@ -252068,6 +252034,8 @@
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:resident",
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:staged_residency"
     ],
+    "moss_image_base": [],
+    "moss_image_sft": [],
     "pulid_flux_dev": [],
     "qwen_image": [
       "qwen_image:qwen_image:candle:bf16:text_to_image:control:resident",

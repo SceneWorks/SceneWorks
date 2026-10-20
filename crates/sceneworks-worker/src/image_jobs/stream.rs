@@ -46,7 +46,9 @@ enum GenEvent {
         not(all(not(target_os = "macos"), feature = "backend-candle")),
         allow(dead_code)
     )]
-    CheckpointWeightFacts { facts: Value },
+    CheckpointWeightFacts {
+        facts: Value,
+    },
     /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
     /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
     /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
@@ -58,7 +60,10 @@ enum GenEvent {
         )),
         allow(dead_code)
     )]
-    ImageFacts { index: usize, facts: JsonObject },
+    ImageFacts {
+        index: usize,
+        facts: JsonObject,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -557,9 +562,8 @@ where
               cancel| {
             // `start_cached_gen_stream` exposes only the generator, so this route has no
             // request-scoped memory block a policy switch could act through. Decline truthfully.
-            warm_policy.decline(
-                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
-            );
+            warm_policy
+                .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
             drive(generator, tx, cancel)
         },
     )
@@ -726,6 +730,48 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state_using_owned(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        load_generator,
+        move |generator, state, policy, warm, external, _owned, tx, cancel| {
+            drive(generator, state, policy, warm, external, tx, cancel)
+        },
+    )
+}
+
+fn start_cached_gen_stream_with_request_state_using_owned<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
@@ -746,7 +792,7 @@ where
                   loaded_policy,
                   warm_policy,
                   external_committed_bytes,
-                  _provider_resident_bytes| {
+                  provider_resident_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -759,6 +805,7 @@ where
                     loaded_policy,
                     warm_policy,
                     external_committed_bytes,
+                    provider_resident_bytes,
                     tx,
                     blocking_cancel,
                 )
@@ -790,7 +837,10 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
             // Turn that into an actionable pre-flight message naming the tier, directing the user to
             // Model Manager or to pick an installed tier, instead of a raw "No such file or directory".
             if !resolved_tier_is_complete(request, &dir) {
-                let tier = dir.file_name().and_then(|s| s.to_str()).unwrap_or("selected");
+                let tier = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("selected");
                 return Some(format!(
                     "{}: the '{tier}' quant tier isn't fully installed on this machine (some weight \
                      files are missing). Re-download or repair it in Model Manager, or pick a tier \
