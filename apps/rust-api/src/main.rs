@@ -38,44 +38,6 @@ fn flux3_witness_entry(
     Ok(witness)
 }
 
-#[cfg(test)]
-mod flux3_witness_tests {
-    use super::flux3_witness_entry;
-    use std::ffi::OsString;
-
-    #[test]
-    fn witness_refuses_visibility_arguments_and_unowned_or_unbounded_plan() {
-        let root = tempfile::tempdir().unwrap();
-        let other = tempfile::tempdir().unwrap();
-        let owned = root.path().join("plan.json");
-        std::fs::write(&owned, br#"{"caption":"private fixture text"}"#).unwrap();
-        let args = vec![
-            OsString::from("--flux3-training-config-witness"),
-            owned.into(),
-        ];
-        let call = |args: &[OsString], visibility| {
-            flux3_witness_entry(args, visibility, Some(root.path().as_os_str()))
-        };
-        for visibility in [None, Some(""), Some("1")] {
-            assert_eq!(call(&args, visibility).unwrap_err(), "refused");
-        }
-        assert_eq!(call(&args[..1], Some("-1")).unwrap_err(), "refused");
-        assert_eq!(call(&args, Some("-1")).unwrap_err(), "refused");
-        let foreign = other.path().join("plan.json");
-        std::fs::write(&foreign, b"{}").unwrap();
-        let foreign_args = vec![args[0].clone(), foreign.into()];
-        assert_eq!(call(&foreign_args, Some("-1")).unwrap_err(), "refused");
-        let large = root.path().join("large.json");
-        std::fs::write(&large, vec![b' '; 2 * 1024 * 1024 + 1]).unwrap();
-        let large_args = vec![args[0].clone(), large.into()];
-        assert_eq!(call(&large_args, Some("-1")).unwrap_err(), "refused");
-        assert_eq!(
-            flux3_witness_entry(&args, Some("-1"), None).unwrap_err(),
-            "refused"
-        );
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args
@@ -145,4 +107,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?
         .block_on(sceneworks_rust_api::run())
+}
+
+#[cfg(test)]
+mod flux3_witness_tests {
+    use super::flux3_witness_entry;
+    use std::ffi::OsString;
+
+    #[test]
+    fn witness_refuses_visibility_arguments_and_unowned_or_unbounded_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let owned = root.path().join("plan.json");
+        std::fs::write(&owned, br#"{"caption":"private fixture text"}"#).unwrap();
+        let args = vec![
+            OsString::from("--flux3-training-config-witness"),
+            owned.into(),
+        ];
+        let call = |args: &[OsString], visibility| {
+            flux3_witness_entry(args, visibility, Some(root.path().as_os_str()))
+        };
+        for visibility in [None, Some(""), Some("1")] {
+            assert_eq!(call(&args, visibility).unwrap_err(), "refused");
+        }
+        assert_eq!(call(&args[..1], Some("-1")).unwrap_err(), "refused");
+        assert_eq!(call(&args, Some("-1")).unwrap_err(), "refused");
+        let foreign = other.path().join("plan.json");
+        std::fs::write(&foreign, b"{}").unwrap();
+        let foreign_args = vec![args[0].clone(), foreign.into()];
+        assert_eq!(call(&foreign_args, Some("-1")).unwrap_err(), "refused");
+        let large = root.path().join("large.json");
+        std::fs::write(&large, vec![b' '; 2 * 1024 * 1024 + 1]).unwrap();
+        let large_args = vec![args[0].clone(), large.into()];
+        assert_eq!(call(&large_args, Some("-1")).unwrap_err(), "refused");
+        assert_eq!(
+            flux3_witness_entry(&args, Some("-1"), None).unwrap_err(),
+            "refused"
+        );
+    }
 }
