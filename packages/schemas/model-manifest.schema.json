@@ -1989,6 +1989,11 @@
                 "type": "integer",
                 "minimum": 2,
                 "description": "The engine renders a LIST of prompts as one batched pass (upstream Iris-3B `generate(prompts=[…])`, sc-25681): a job's top-level `prompts` (with `prompt` = `prompts[0]`) renders `prompts × count` images in prompt-minor order on seeds seed, seed+1, …, at most this many per job (the engine's max_count). ABSENT MEANS NONE: the API refuses `prompts`, and Image Studio's prompt batch stays one job per prompt. When present, Image Studio packs its prompt batch into native jobs of up to floor(this / count) prompts."
+              },
+              "maxPromptTokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The engine's prompt context in text-encoder tokens (the linked descriptor's `max_prompt_tokens`; Supra2-IMG's Flan-T5 context is 128, sc-24216). A longer prompt is truncated by the engine and reported as a `prompt_truncated` warning, never refused. The Model Manager states it among the model's supported limits. ABSENT MEANS UNDECLARED."
               }
             }
           },
@@ -2194,6 +2199,11 @@
                   "type": "string",
                   "pattern": "^[0-9a-f]{40}$",
                   "description": "Optional pinned 40-hex git commit SHA — the F-029 pin authority for this download (sc-13659). When present the download job forwards it so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/; absent means the worker resolves `main` at install time, so the ~200 existing non-pinned models need no migration. MUST be a full 40-char lowercase-hex commit: a branch/tag/short SHA is rejected by the pattern above because it resolves online but hard-fails the offline pinned-SHA resolver (hf_get_pinned reads snapshots/<sha>/). REQUIRED on coRequisite: true entries — the F-029 guarantee that a companion weight (e.g. chatterbox_tts's ve/perth) installs to a deterministic, offline-resolvable snapshot; that conditional is enforced by tests/test_builtin_manifest_audit.py and crates/sceneworks-core/src/builtin_manifests.rs rather than JSON Schema, which cannot grandfather the sc-13591 pin migration still in flight. See sc-13541, sc-13591."
+                },
+                "license": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "SPDX identifier of THIS download's own licence, for an entry assembled from components under different licences (sc-24216: Supra2-IMG's denoiser and Flan-T5-Base are Apache-2.0, its SD VAE ft-MSE decoder is MIT). The Model Manager lists it beside the component's repo, pinned revision and size. The entry-level `license` stays the whole-model summary; absent means the row carries no separate declaration."
                 },
                 "componentId": {
                   "type": "string",

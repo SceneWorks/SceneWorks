@@ -1953,6 +1953,50 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     )))
 }
 
+/// Typed, actionable preflight for an injected converted artifact that would not load (sc-24216).
+///
+/// The twin of [`unconverted_model_preflight`] for the case where the conversion DID run but its
+/// output is no longer what the engine accepts — truncated, edited, or written by an older build.
+/// For a converter with an engine-owned pin contract
+/// ([`sceneworks_core::converted_artifacts::CONTRACT_CONVERTERS`], e.g. `supra2_img`) the engine's
+/// own check runs here, including the SHA-256 of every converted file (once per process per
+/// unchanged artifact), so a damaged bundle is refused before any load with a message naming the
+/// remedy instead of the engine's raw refusal. Every other converter passes untouched.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn converted_artifact_preflight(
+    request: &ImageRequest,
+    dir: &std::path::Path,
+) -> WorkerResult<()> {
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let Some(problem) =
+        sceneworks_core::converted_artifacts::verified_converted_artifact_problem(converter, dir)
+    else {
+        return Ok(());
+    };
+    let name = request
+        .model_manifest_entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(request.model.as_str());
+    Err(WorkerError::InvalidPayload(format!(
+        "{name}'s converted model files are damaged or incomplete, so it cannot load. Open the \
+         Model Manager and run Convert again to rebuild them from the downloaded checkpoint; if \
+         the conversion then fails, delete {name} and download it again. Detail: {problem}"
+    )))
+}
+
 /// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
 /// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
 ///
@@ -1997,6 +2041,7 @@ pub(crate) fn resolve_weights_dir(
 ) -> WorkerResult<Option<PathBuf>> {
     if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+        converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
         // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested

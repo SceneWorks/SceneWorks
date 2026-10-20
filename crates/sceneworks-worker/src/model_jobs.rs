@@ -7024,6 +7024,23 @@ mod supra2_convert_tests {
         assert_eq!(primary["files"], json!([SUPRA2_SOURCE_FILE]));
         assert_eq!(primary["expectedSizeBytes"], source.files[0].bytes);
         assert_eq!(primary["expectedSha256"], source.files[0].sha256);
+        // sc-24216: the per-component licence the Model Manager lists is the engine pin's own, and
+        // the prompt limit it states is the engine's Flan-T5 context.
+        assert_eq!(primary["license"], source.license);
+        assert_eq!(
+            entry["image"]["maxPromptTokens"],
+            gen_core::supra2::MAX_PROMPT_TOKENS
+        );
+        for (component, pin) in [
+            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
+            ("vae", gen_core::supra2::SD_VAE),
+        ] {
+            let row = downloads
+                .iter()
+                .find(|download| download["componentId"] == component)
+                .unwrap_or_else(|| panic!("{component} co-requisite row"));
+            assert_eq!(row["license"], pin.license, "{component}");
+        }
         for (component, pin) in [
             ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
             ("vae", gen_core::supra2::SD_VAE),
