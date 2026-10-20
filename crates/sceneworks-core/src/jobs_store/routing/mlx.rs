@@ -106,6 +106,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
             crate::moss_image::native_request(payload, &entry).is_ok()
         }
         "iris_3b" => iris_mlx_eligible(payload),
+        "supra2_img" => supra2_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -490,6 +491,26 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .unwrap_or(false);
     !hires_fix_enabled
         && mage_flow_mlx_eligible(payload)
+        && !["mlxQuantize", "quantTier"]
+            .iter()
+            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+}
+
+/// Supra2-IMG (sc-24213) is plain text-to-image at 256x256: the `supra2_img` engine takes no source,
+/// reference, mask, control or pose, and refuses adapters, quantization and conditioning by name.
+/// So `loras`, an `mlxQuantize`/`quantTier` carrier or an enabled hires fix (an img2img second pass)
+/// keeps the job off MLX — an `mlx_unsupported` affordance — instead of reaching an engine that
+/// would refuse it after load.
+pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
+        && !has_nonempty_array(payload, "loras")
         && !["mlxQuantize", "quantTier"]
             .iter()
             .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))

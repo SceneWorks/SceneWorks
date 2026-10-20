@@ -5569,6 +5569,7 @@ fn native_converters_registry_contents_are_pinned() {
         "sd3_5_large_turbo_quant",
         "sd3_5_medium_quant",
         "anima_quant",
+        "supra2_img",
     ]
     .into_iter()
     .collect();

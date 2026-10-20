@@ -13107,6 +13107,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:supra2_img:mlx:default",
+      "modelId": "supra2_img",
+      "modelFamily": "supra2",
+      "route": "supra2_img",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:svd:candle:default",
       "modelId": "svd",
       "modelFamily": "svd",

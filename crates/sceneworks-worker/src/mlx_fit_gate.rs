@@ -20189,6 +20189,9 @@ mod tests {
         "moss_image_sft",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
+        // sc-24213: Supra2-IMG loads resident and eager; its loader refuses sequential offload and
+        // deferred materialization, so the descriptor advertises neither staging bit.
+        "supra2_img",
     ];
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a

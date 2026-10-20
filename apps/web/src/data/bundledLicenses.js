@@ -141,6 +141,8 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
 import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
+import supra2ImgApache20 from "../../../desktop/licenses/supra2-img/Apache-2.0.txt?url&no-inline";
+import supra2ImgSdVaeMit from "../../../desktop/licenses/supra2-img/SD-VAE-FT-MSE-MIT-DECLARATION.txt?url&no-inline";
 import irisRepaTeacherApache20 from "../../../desktop/licenses/iris-repa-teacher/Apache-2.0.txt?url&no-inline";
 // Iris restoration TRAINING-only resources (sc-25688): VGG16 / LPIPS / OpenCLIP critic trunk.
 import irisRestoreTrainingTorchvisionBsd3 from "../../../desktop/licenses/iris-restore-training/torchvision-BSD-3-Clause.txt?url&no-inline";
@@ -275,6 +277,8 @@ const DOCUMENT_URL = {
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "iris-3b-apache": iris3bApache20,
+  "supra2-img-apache": supra2ImgApache20,
+  "supra2-img-sd-vae-mit": supra2ImgSdVaeMit,
   "iris-repa-teacher-apache": irisRepaTeacherApache20,
   "iris-restore-training-torchvision-bsd-3-clause": irisRestoreTrainingTorchvisionBsd3,
   "iris-restore-training-lpips-bsd-2-clause": irisRestoreTrainingLpipsBsd2,

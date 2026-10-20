@@ -1295,6 +1295,9 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
     "sd3_5_large_turbo_quant",
     "sd3_5_medium_quant",
     "anima_quant",
+    // sc-24213: Supra2-IMG `.pt` checkpoint -> native bundle through inference's backend-neutral
+    // `gen_core::supra2::convert_pinned_checkpoint`.
+    "supra2_img",
 ];
 
 /// The subset of [`NATIVE_CONVERTERS`] that has a REAL implementation **off macOS** — i.e. a candle

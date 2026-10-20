@@ -3778,6 +3778,11 @@ include!("image_jobs/stream.rs");
 ))]
 mod iris;
 
+// Supra2-IMG (sc-24213): pins the generic MLX lane's wiring for `supra2_img` (bundle +
+// co-requisite staging) and carries the real-weight worker-arm render.
+#[cfg(target_os = "macos")]
+mod supra2;
+
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
 // warnings, adapter apply reports), resolved identically by both arms (sc-25681).

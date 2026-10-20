@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 139,
+    "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1078,
+    "cellCount": 1082,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -15,19 +15,19 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "6a4fb8bb8511613540e3be5ac8be4040226046a99b430bfd8e490d323e80c7a9",
+    "descriptorAudioFacts": "e677b5caa4fc1e1d3e5d39e5203fd4bb69bc6b6ac980bd45866a44b5ca21a9b5",
     "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
     "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
-    "descriptorMlxFacts": "2b0429ca7a70927f431491167fca3d286c2d32bdbec41a36c200405fd4e607af",
-    "descriptorMlxRuntime": "0aef06d6dfd337a60b868ab0ce571a7bc24596761494dba969cd3ef9f76a1ef1",
-    "descriptorPreviewFacts": "f56fc1a517641838466ab695aea26fae855a8cc21b2cb4fbdaf8f4637717376f",
+    "descriptorMlxFacts": "1ae25631931a6dbfa8da77b5f2f694983ca17f54d08e44218a01bc7b5235c2be",
+    "descriptorMlxRuntime": "ca5b0f3da96af240c9810633b19a9586e0edeb082ad47d6527c7b628791db64f",
+    "descriptorPreviewFacts": "c24bf449402a7d7a1d43e0a063fe6828d0304cf793bbee89ac152eac4a3561a7",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "a370752e7764acfdf2f0e7fe94a11650191d520056e7f46b06a29f2947e056ad",
+    "manifest": "de42c35eab5b63cdecf7e6e256538a12489c764ec3d5e8c55ba112d3f84d9fbc",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
     "routerCandle": "aefaabbd6210aef7c91775ef9ea22464189ca3576497531467f1278cc98f1910",
-    "routerCatalog": "7c15b7eaa510e9ac9ba0ef8c4fad44e5a46c54ffc4179e3a9a39edc658586022",
-    "routerGaps": "e553137bed2fb2880a66f8a9df72b326247708ab7e4d94776d4be68de8bdd6ad",
-    "routerMlx": "ccd9a5a746a0752a90691a9bc88594b288d5fc50670604397a51fbcf1aeb8a23",
+    "routerCatalog": "9d146e33a39e12f7570b9d8f3ce67a493cb080596ff08a6ac6783152e2312cd9",
+    "routerGaps": "ccf33e36095487cdc183a576163a0ad7f2c26548d0a7caa66a5977f1b880adb3",
+    "routerMlx": "6613d4174c44ff70cf611bb399d8d4c6c6571f2e2d48342a465ea7e5a7333069",
     "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
     "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
@@ -46,7 +46,7 @@
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
     "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
-    "workerEngineTable": "f8a32d610f5f6a54e7f9e1745a5da38a4714e59b461ea794f2b85e15b814855b",
+    "workerEngineTable": "7e0f00c20f0b426100a31beb3e8ed2934b5bf49d164155bc34e4b730ae08eabf",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
     "workerImageDispatch": "3b71abc3af987165956a36ce44af1e06eaf5b94a9654ab252ebe7c4cbef5421d",
     "workerImageKreaImported": "badaa28f1889864095e9f14b6af34f0040ee7aaa101f464345aab99774646b79",
@@ -6415,6 +6415,44 @@
       ],
       "conditioningShape": [],
       "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "supra2_img",
+      "family": "supra2",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
       "precisionTier": [],
       "guidanceMethod": [],
       "preview": {

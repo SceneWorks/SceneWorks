@@ -1169,6 +1169,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("moss_image_base", true, true, false, false, false),
     ModelCaps::new("moss_image_sft", true, true, false, false, false),
     ModelCaps::new("iris_3b", true, true, false, true, false),
+    // Supra2-IMG (sc-24213, epic 24212): MLX-only at this story (`mlx-gen-supra2`); no quant tier,
+    // no adapters (`supra2_mlx_eligible`). The Candle provider is a later story of the epic.
+    ModelCaps::new("supra2_img", true, false, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2424,6 +2427,7 @@ mod tests {
         "iris_3b",
         "moss_image_base",
         "moss_image_sft",
+        "supra2_img",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
