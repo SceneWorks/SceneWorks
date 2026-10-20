@@ -6405,6 +6405,7 @@
       "ui": {
         "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
+        "multiReference": true,
         "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "hideReferenceStrength": true,
@@ -6558,6 +6559,7 @@
       "ui": {
         "hideReferenceStrength": true,
         "label": "FLUX 3 Image Klein Base",
+        "multiReference": true,
         "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately. Base q4/q8 local conversion installation awaits verified output size/SHA pins after base repository access is granted; no dense substitution.",
         "recommendedFor": ["text_to_image", "edit_image", "character_image"],
         "promptGuide": {

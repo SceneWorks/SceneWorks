@@ -59,10 +59,10 @@ mod prompt_upsampling;
 // check compiles on every lane, so the worker trust-boundary refusal holds even without a native
 // backend; package resolution compiles with the native lanes.
 mod flux3_precision;
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+use prompt_upsampling::prompt_enhancement_fact;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-use prompt_upsampling::{
-    attach_prompt_upsampler, prompt_enhancement_fact, publish_upsampling_progress, PromptEnhance,
-};
+use prompt_upsampling::{attach_prompt_upsampler, publish_upsampling_progress, PromptEnhance};
 
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.

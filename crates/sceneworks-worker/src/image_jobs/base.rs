@@ -7460,13 +7460,14 @@ fn record_prompt_enhancement_report(
 fn take_prompt_enhancement_fact(
     reports: &mut PromptEnhancementReports,
     index: usize,
+    model: &str,
 ) -> WorkerResult<Value> {
     let (expected_prompt, report) = reports.remove(&index).ok_or_else(|| {
         WorkerError::Engine(format!(
             "provider emitted no prompt-enhancement report for image {index}"
         ))
     })?;
-    prompt_enhancement_fact(report, &expected_prompt)
+    prompt_upsampling::prompt_enhancement_fact_for_model(report, &expected_prompt, model)
 }
 
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
@@ -15345,7 +15346,7 @@ async fn consume_gen_events_with_disclosure(
                 if prompt_enhancement_expected {
                     image_raw_settings.insert(
                         PROMPT_ENHANCEMENT_FACT_KEY.to_owned(),
-                        take_prompt_enhancement_fact(&mut prompt_enhancement_reports, index)?,
+                        take_prompt_enhancement_fact(&mut prompt_enhancement_reports, index, &plan.request.model)?,
                     );
                 }
                 if let Some(block) = face_likeness {

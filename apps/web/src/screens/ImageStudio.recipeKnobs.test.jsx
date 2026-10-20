@@ -11,6 +11,8 @@
 // that asserted `rawAdapterSettings` would have passed against the broken build: the values were
 // always in the recipe: nothing read them.
 import React, { act } from "react";
+import { readFileSync } from "node:fs";
+import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
@@ -87,6 +89,9 @@ const FLUX3 = {
     maxDimension: 4096, requiresDimensionsMultipleOf: 16 },
   ui: { multiReference: true, hideReferenceStrength: true },
 };
+const REAL_FLUX3_MODELS = JSON5.parse(readFileSync("../../config/manifests/builtin.models.jsonc", "utf8"))
+  .models.filter(({ id }) => ["flux3_klein", "flux3_klein_base"].includes(id))
+  .map((model) => ({ ...model, installState: "installed" }));
 const FLUX3_REFERENCE = {
   id: "flux3-reference", type: "image", projectId: "project_1", displayName: "83 by 67 reference",
   width: 83, height: 67, status: {}, file: { path: "assets/images/reference.png", mimeType: "image/png" },
@@ -274,6 +279,94 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       node.value = value;
       node.dispatchEvent(new Event("change", { bubbles: true }));
     }
+  });
+
+  it.each(REAL_FLUX3_MODELS)("fresh real catalog $id exposes its ten-reference picker and submits all selections", async (model) => {
+    expect(model.ui.multiReference).toBe(true);
+    expect(model.limits.maxReferenceAssets).toBe(10);
+    const assets = Array.from({ length: 10 }, (_, i) => ({ ...FLUX3_REFERENCE, id: `fresh-${i}`, displayName: `Fresh ${i}` }));
+    seedOpenDisclosures({ model: model.id, mode: "edit_image", prompt: "combine these references" });
+    const createImageJob = vi.fn(async () => ({ id: "fresh-ten" }));
+    await render(baseContext({ assets, imageModels: [model], models: [model], createImageJob }));
+    await click(buttonByText("Select images"));
+    const choices = [...document.body.querySelectorAll('.asset-picker-grid [role="option"]')];
+    expect(choices).toHaveLength(10);
+    for (const choice of choices) await click(choice);
+    await click(buttonByText("Use Selection"));
+    await click(buttonByText("Generate"));
+    expect(createImageJob).toHaveBeenCalledTimes(1);
+    expect(createImageJob.mock.calls[0][0].referenceAssetIds).toEqual(assets.map(({ id }) => id));
+    expect(persistedStudioSettings().flux3ReferenceSlots).toHaveLength(10);
+    expect(new Set(persistedStudioSettings().flux3ReferenceSlots.map(({ id }) => id)).size).toBe(10);
+  });
+
+  it.each(REAL_FLUX3_MODELS.flatMap((model) => ["edit_image", "character_image", "text_to_image"].flatMap((mode) =>
+    [2, 10].flatMap((count) => ["flux3ReferenceEditing", "flux3Layout"].map((factKey) => ({ model, mode, count, factKey }))))))(
+    "real catalog $model.id replays $mode / $count references from $factKey without dropping duplicate bindings", async ({ model, mode, count, factKey }) => {
+      const ids = Array(count).fill(FLUX3_REFERENCE.id);
+      const slots = ids.map((_, i) => `instance-${i}`);
+      const layout = { version: 1, boxes: [{ id: "last-instance", desc: "remove last occurrence",
+        from: `ref_image_${count - 1}`, reference_id: slots.at(-1), src_bbox: [0, 0.123456789012345, 1, 1], tgt_bbox: null }] };
+      const recipe = flux3Recipe(null, 768);
+      recipe.model = model.id;
+      recipe.mode = mode;
+      recipe.normalizedSettings.characterId = "saved-character";
+      delete recipe.rawAdapterSettings.referenceAssetIds;
+      recipe.rawAdapterSettings.enhancePrompt = true;
+      const references = ids.map((assetId, ordinal) => ({ ordinal, assetId, orientedSize: [83, 67] }));
+      if (factKey === "flux3Layout") {
+        delete recipe.rawAdapterSettings.flux3ReferenceEditing;
+        recipe.rawAdapterSettings.flux3Layout = { references, referenceInstanceIds: slots, authoring: layout };
+        recipe.rawAdapterSettings.flux3ReferenceEditing = { output: { requestedWidth: null, requestedHeight: 768 } };
+      } else {
+        recipe.rawAdapterSettings.flux3ReferenceEditing.references = references;
+        recipe.rawAdapterSettings.flux3_reference_ids = slots;
+        recipe.rawAdapterSettings.flux3_layout = layout;
+      }
+      const createImageJob = vi.fn(async () => ({ id: "all-mode-replay" }));
+      const character = { id: "saved-character", name: "Saved character", looks: [], approvedReferences: [{ assetId: FLUX3_REFERENCE.id, asset: FLUX3_REFERENCE }] };
+      await render(baseContext({ assets: [FLUX3_REFERENCE], characters: [character], imageModels: [model], models: [model], createImageJob, studioLaunch: launch(recipe) }));
+      await click(document.querySelector('[aria-label="Select last-instance"]'));
+      expect(document.querySelector('[aria-label="Source reference"]').value).toBe(slots.at(-1));
+      expect(buttonByText("Generate").disabled).toBe(false);
+      await click(buttonByText("Generate"));
+      const payload = createImageJob.mock.calls[0][0];
+      expect(payload.mode).toBe(mode === "text_to_image" ? "edit_image" : mode);
+      if (mode === "character_image") expect(payload.characterId).toBe("saved-character");
+      expect(payload.referenceAssetIds).toEqual(ids);
+      expect(payload.advanced.flux3_reference_ids).toEqual(slots);
+      expect(payload.advanced.flux3_layout).toEqual(layout);
+      expect(payload.advanced.enhancePrompt).toBe(true);
+      expect(payload).not.toHaveProperty("width");
+      expect(payload.height).toBe(768);
+      expect(payload.advanced).not.toHaveProperty("flux3ReferenceEditing");
+    },
+  );
+
+  it.each([[null, null], [null, 768], [16, 48]])("persists scoped recipe axes %s / %s across a real studio unmount and hydration", async (width, height) => {
+    const model = REAL_FLUX3_MODELS[0];
+    const createImageJob = vi.fn(async () => ({ id: "hydrated-intent" }));
+    const other = REAL_FLUX3_MODELS[1];
+    const context = baseContext({ assets: [FLUX3_REFERENCE], imageModels: [model, other], models: [model, other], createImageJob });
+    await render({ ...context, studioLaunch: launch(flux3Recipe(width, height)) });
+    expect(persistedStudioSettings().referenceDimensionIntent).toEqual({ width, height, model: model.id, mode: "edit_image" });
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    await render(context);
+    expect(buttonByText("Generate").disabled).toBe(false);
+    await click(buttonByText("Generate"));
+    const payload = createImageJob.mock.calls[0][0];
+    if (width == null) expect(payload).not.toHaveProperty("width"); else expect(payload.width).toBe(width);
+    if (height == null) expect(payload).not.toHaveProperty("height"); else expect(payload.height).toBe(height);
+    expect(payload.referenceAssetIds).toEqual([FLUX3_REFERENCE.id]);
+    await click([...document.querySelectorAll("button")].find((node) => node.textContent.trim() === "Text"));
+    expect(persistedStudioSettings().referenceDimensionIntent).toBeNull();
+    await click([...document.querySelectorAll("button")].find((node) => node.textContent.trim() === "Edit"));
+    expect(persistedStudioSettings().referenceDimensionIntent).toBeNull();
+    await render({ ...context, studioLaunch: launch(flux3Recipe(width, height)) });
+    expect(persistedStudioSettings().referenceDimensionIntent).not.toBeNull();
+    await editControl([...document.querySelectorAll("select")].find((node) => [...node.options].some(({ value }) => value === other.id)), other.id);
+    expect(persistedStudioSettings().referenceDimensionIntent).toBeNull();
   });
 
   it.each(["flux3ReferenceEditing", "flux3Layout"])("restores actual worker-shaped ordered references from %s without a raw referenceAssetIds field", async (factKey) => {
@@ -600,6 +693,8 @@ describe("a replayed recipe reaches every allow-listed control", () => {
       studioLaunch: launch(flux3Recipe(null, null)) });
     await render(context);
     const recipe = { ...flux3Recipe(16, 48), mode: "text_to_image" };
+    // This is genuinely unconditioned T2I, not an API-valid reference-conditioned text recipe.
+    delete recipe.rawAdapterSettings.referenceAssetIds;
     await render({ ...context, studioLaunch: launch(recipe) });
     expect(control("Width override").min).toBe("64");
     expect(buttonByText("Generate").disabled).toBe(true);

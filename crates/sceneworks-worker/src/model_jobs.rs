@@ -3862,6 +3862,55 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
     )
 }
 
+/// Exact PUP package handoff: every file the native package can consume must belong to the
+/// verified download inventory, including an optional shipped system-prompt override. A compatible
+/// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
+    use gen_core::flux3::pup::{
+        SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
+    };
+    let resolved = huggingface_receipt_weights_with_revision(
+        data_dir,
+        UPSAMPLER_REPO,
+        Some("flux3_image_klein_pup"),
+        None,
+        Some(UPSAMPLER_REVISION),
+        ProvenanceRepair::Allow,
+    )?;
+    let identity = &resolved.provenance.as_ref()?.identity;
+    if identity.repository != UPSAMPLER_REPO || identity.revision != UPSAMPLER_REVISION {
+        return None;
+    }
+    let root = &resolved.snapshot;
+    let repo = huggingface_repo_cache_path(data_dir, UPSAMPLER_REPO)?;
+    let canonical_repo = std::fs::canonicalize(&repo).ok()?;
+    if !canonical_repo.starts_with(std::fs::canonicalize(huggingface_hub_cache_dir(data_dir)).ok()?)
+        || !std::fs::canonicalize(root)
+            .ok()?
+            .starts_with(canonical_repo.join("snapshots"))
+    {
+        return None;
+    }
+    let files = resolved.receipt.get("resolvedFiles")?.as_array()?;
+    for file in files {
+        let file = file.as_str()?;
+        let path = safe_join(root, file).ok()?;
+        crate::flux3_snapshot_member(root, &path, false).ok()?;
+    }
+    for name in UPSAMPLER_REQUIRED_FILES.into_iter().chain(
+        root.join(SYSTEM_PROMPTS_FILE)
+            .exists()
+            .then_some(SYSTEM_PROMPTS_FILE),
+    ) {
+        if !files.iter().any(|file| file.as_str() == Some(name)) {
+            return None;
+        }
+        crate::flux3_snapshot_member(root, &root.join(name), false).ok()?;
+    }
+    Some(root.clone())
+}
+
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn huggingface_receipt_weights(
     data_dir: &Path,

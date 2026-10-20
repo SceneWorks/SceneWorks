@@ -596,7 +596,7 @@ export function ImageStudio() {
   const [widthOverride, setWidthOverride] = useState(saved.widthOverride ?? "");
   const [heightOverride, setHeightOverride] = useState(saved.heightOverride ?? "");
   // Recipe-only optional axes. Never infer authored intent from the actual output dimensions.
-  const [referenceDimensionIntent, setReferenceDimensionIntent] = useState(null);
+  const [referenceDimensionIntent, setReferenceDimensionIntent] = useState(saved.referenceDimensionIntent ?? null);
   const handleResolutionChange = (value) => {
     setReferenceDimensionIntent(null);
     setResolution(value);
@@ -1861,11 +1861,15 @@ export function ImageStudio() {
     setRecipeTierRequest(restoredTier ? { model: recipe.model, tier: restoredTier } : null);
     // Restore the authoring document, never the worker's rounded/locked caption table.
     setFlux3Layout(rawSettings.flux3_layout ?? rawSettings.flux3Layout?.authoring ?? { version: 1, boxes: [] });
-    const nextMode = recipeMode(recipe);
     const recordedReferences = isFlux3LayoutModel(recipe.model) ? recordedLayoutReferences(rawSettings) : null;
-    const restoredReferenceAssets = nextMode === "edit_image"
-      ? rawSettings.referenceAssetIds ?? recordedReferences?.assetIds ?? [launchRequest.sourceAssetId].filter(Boolean)
-      : [rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId].filter(Boolean);
+    const orderedReferences = rawSettings.referenceAssetIds ?? recordedReferences?.assetIds;
+    // Reference-conditioned text uses the existing edit UI. Character jobs retain their actual
+    // identity/mode while the existing plural reference carrier preserves every attachment.
+    const nextMode = isFlux3LayoutModel(recipe.model) && orderedReferences?.length && recipeMode(recipe) === "text_to_image"
+      ? "edit_image" : recipeMode(recipe);
+    const restoredReferenceAssets = orderedReferences ?? (nextMode === "edit_image"
+      ? [launchRequest.sourceAssetId].filter(Boolean)
+      : [rawSettings.referenceAssetId ?? launchRequest.referenceAssetId].filter(Boolean));
     setFlux3ReferenceSlots(reconcileLayoutReferences([], restoredReferenceAssets,
       rawSettings.flux3_reference_ids ?? recordedReferences?.referenceIds));
     const dimensionIntent = recipeImageDimensionIntent(recipe);
@@ -1967,7 +1971,7 @@ export function ImageStudio() {
     // Only a recipe with neither recorded input shape keeps the user's existing selection.
     if (Array.isArray(rawSettings.referenceAssetIds)) {
       setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
-    } else if (recordedReferences && nextMode === "edit_image") {
+    } else if (recordedReferences) {
       // A real worker recipe's provenance is the complete ordered sequence, including repeats.
       // Replace stale picker state instead of merging it or requiring a synthetic raw field.
       setReferenceAssetIds(recordedReferences.assetIds);
@@ -2065,7 +2069,7 @@ export function ImageStudio() {
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
   // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
-  const jobReferences = imageJobReferences({ mode, multiReference, sourceWithMultiReference,
+  const jobReferences = imageJobReferences({ model, mode, multiReference, sourceWithMultiReference,
     editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
     supportsImg2img, img2imgReferenceAssetId });
   const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
@@ -2370,6 +2374,7 @@ export function ImageStudio() {
     heightOverride,
     fitMode,
     referenceAssetIds,
+    referenceDimensionIntent,
     flux3Layout,
     flux3ReferenceSlots,
     ipAdapterScale,
@@ -3627,7 +3632,7 @@ export function ImageStudio() {
 
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
-            {mode === "edit_image" ? (
+            {mode === "edit_image" || (flux3LayoutAvailable && referenceAssetIds.length > 1) ? (
               <>
                 {multiReference ? (
                   // sc-6211: FLUX.2-dev multi-reference edit — pick 1–N reference images that the
