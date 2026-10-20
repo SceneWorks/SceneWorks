@@ -1,7 +1,7 @@
 // Terminal installed-product proof. CLI defaults to pure planning; no credentials or downloads.
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFile, mkdir, open, readFile, realpath, stat, statfs, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, open, readFile, readdir, realpath, stat, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
@@ -10,6 +10,8 @@ import { loadProductTargets, terminalPlan, terminalCatalog, targetRegistry, imag
 import { assertAccepted, assertSavedAsset, assertServedPng, assertClaimedWithin, assertDownloadWorker } from './flux3-image-klein-app-lifecycle.mjs';
 import { contained, fileHash, validateAdmission, launchTerminalSession, ProvisioningBlocked } from './flux3-image-klein-terminal-session.mjs';
 import { validateApprovedPlan, planHash, initializeLedger, auditLedger } from './flux3-image-klein-terminal-budget.mjs';
+import { verifyTerminalMapping, artifactStagingPlan, revalidateMappedArtifacts, invalidateArtifactVerification, ArtifactReadinessBlocked } from './flux3-image-klein-terminal-artifacts.mjs';
+import { bindTrainingExpectation, verifyNativeContinuation } from './flux3-image-klein-terminal-training-proof.mjs';
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const objectHash = object => sha256(JSON.stringify(object));
 export function pngCrc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); } return (crc ^ 0xffffffff) >>> 0; }
@@ -57,14 +59,20 @@ export async function assertCheckpoint(file, cell, step) {
   assert(digestPattern.test(identity.dataset ?? '') && digestPattern.test(identity.preprocessing ?? ''));
   assert(cursor.micro_step > 0 && cursor.update_step > 0 && cursor.rng_state?.length > 0 && cursor.update_step === step, 'checkpoint needs actual step/optimizer/RNG state');
   const factors = Object.keys(header).filter(key => key.startsWith('factor/')); assert(factors.length, 'checkpoint must contain learned factors');
+  const optimizer = {};
   if (cell.backend === 'candle') {
-    const order = JSON.parse(meta.optimizer_order); assert(Array.isArray(order) && order.length === factors.length);
-    order.forEach((name, index) => assert(header[`factor/${name}`] && header[`optim.${index}.m`] && header[`optim.${index}.v`], 'Candle AdamW checkpoint needs actual ordered m/v tensors'));
+    const order = JSON.parse(meta.optimizer_order); assert(Array.isArray(order) && order.length === factors.length && new Set(order).size === order.length);
+    order.forEach((name, index) => { assert(header[`factor/${name}`] && header[`optim.${index}.m`] && header[`optim.${index}.v`], 'Candle AdamW checkpoint needs actual ordered m/v tensors'); optimizer[name] = { first: `optim.${index}.m`, second: `optim.${index}.v`, step: cursor.update_step }; });
   } else {
     assert(/^adamw;lr=[0-9a-f]{8};wd=[0-9a-f]{8};/.test(meta.optimizer_config ?? ''));
-    const steps = JSON.parse(meta.optimizer_steps);
-    for (const key of factors.map(key => key.slice('factor/'.length))) assert(header[`moment_first/${key}`] && header[`moment_second/${key}`] && steps[key] > 0 && steps[key] <= cursor.update_step, 'MLX checkpoint needs actual per-factor moment tensors/steps');
+    const steps = JSON.parse(meta.optimizer_steps); assert(steps && typeof steps === 'object' && !Array.isArray(steps));
+    // Native MLX creates moments only when an active factor receives gradients. Captioned
+    // training intentionally leaves image_cond factors (and their absent moments) alone.
+    for (const [key, count] of Object.entries(steps)) { assert(header[`factor/${key}`] && header[`moment_first/${key}`] && header[`moment_second/${key}`] && Number.isInteger(count) && count > 0 && count <= cursor.update_step, 'MLX checkpoint needs actual declared per-factor moment tensors/steps'); optimizer[key] = { first: `moment_first/${key}`, second: `moment_second/${key}`, step: count }; }
+    assert(Object.keys(optimizer).length, 'native MLX checkpoint has no optimizer state');
   }
+  const declared = [...factors, ...Object.values(optimizer).flatMap(o => [o.first, o.second]), ...JSON.parse(meta.pending_keys).map(key => `pending/${key}`)].sort();
+  assert.deepEqual(Object.keys(header).filter(key => key !== '__metadata__').sort(), declared, 'undeclared/missing native optimizer or factor tensor');
   const manifest = JSON.parse(meta.tensor_manifest); assert.deepEqual(Object.keys(manifest).sort(), Object.keys(header).filter(key => key !== '__metadata__').sort());
   let nextOffset = 0; for (const tensor of Object.keys(manifest).map(key => header[key]).sort((a, b) => a.data_offsets[0] - b.data_offsets[0])) { assert.equal(tensor.data_offsets[0], nextOffset, 'native tensor payload ranges must be contiguous/nonoverlapping'); nextOffset = tensor.data_offsets[1]; } assert.equal(nextOffset, size - dataOffset);
   for (const [name, record] of Object.entries(manifest)) {
@@ -73,7 +81,7 @@ export async function assertCheckpoint(file, cell, step) {
     assert.equal(end - start, tensor.shape.reduce((n, side) => { assert(Number.isSafeInteger(side) && side > 0); return n * side; }, 1) * 4);
     const h = createHash('sha256'); for await (const bytes of createReadStream(file, { start: dataOffset + start, end: dataOffset + end - 1 })) h.update(bytes); assert.equal(h.digest('hex'), record.sha256, 'native checkpoint tensor payload differs from recorded optimizer/factor state');
   }
-  return { identity, cursor, format: meta.format, tensorManifest: manifest };
+  return { identity, cursor, format: meta.format, tensorManifest: manifest, optimizer, policy: meta.policy, gainBits: meta.gain_bits, pendingKeys: JSON.parse(meta.pending_keys) };
 }
 const need = (value, message) => { if (!value) throw new Blocked(message); };
 const safeId = id => { assert(/^[a-zA-Z0-9_.-]+$/.test(id), 'invalid API identity'); return encodeURIComponent(id); };
@@ -125,6 +133,7 @@ export async function provisionCell(session, cell, target, spec, report) {
   const authorization = session.authorizations?.find(a => a.repository === cell.repository && a.resolvedRevision === cell.resolvedRevision && a.httpStatus === 200);
   need(authorization && session.execution && authorization.sourceSha === session.execution.sourceSha && authorization.inferenceMainSha === session.execution.inferenceMainSha && authorization.runnerAccount === session.execution.runnerAccount, 'positive installation needs real matching MAIN/runner-account pinned-config authorization');
   const modelId = cell.options.provisionModelId, workers = await session.endpoint.call('GET', '/api/v1/workers'); assertDownloadWorker(workers, `flux3-app-${session.identity.nonce}`);
+  await revalidateMappedArtifacts(session.artifactMapping);
   const body = { licenseAcknowledged: true }, accepted = await session.endpoint.call('POST', `/api/v1/models/${safeId(modelId)}/download`, body);
   assert.equal(accepted.type, 'model_download'); assert.equal(accepted.payload?.modelId, modelId); assert.equal(accepted.payload?.repo, cell.repository); assert.equal(accepted.payload?.revision, cell.resolvedRevision); assert.deepEqual(accepted.payload?.files, [], 'positive provisioning must request whole pinned repository');
   report.requests.push({ body, sha256: objectHash(body), repository: cell.repository, resolvedRevision: cell.resolvedRevision });
@@ -137,6 +146,8 @@ export async function provisionCell(session, cell, target, spec, report) {
   const installed = (await session.endpoint.call('GET', '/api/v1/models')).find(m => m.id === modelId); assert.equal(installed?.installState, 'installed'); assert.equal(await realpath(installed.installedPath), await realpath(inventory.root));
   assert.equal(await fileHash(await contained(path.join(inventory.root, 'config.json'), inventory.containmentRoot ?? inventory.root)), authorization.configSha256, 'installed config must match actual authenticated pinned config');
   if (modelId !== 'flux3_image_klein_pup') { assert(/FLUX.*Kommunity/i.test(await readFile(await contained(path.join(inventory.root, 'LICENSE.md'), inventory.containmentRoot ?? inventory.root), 'utf8'))); }
+  const mapped = modelId === 'flux3_image_klein_pup' ? session.artifactMapping?.pup : session.artifactMapping?.snapshots[modelId]; if (mapped) mapped.install = { ...mapped.install, marker, receipt };
+  invalidateArtifactVerification(); await revalidateMappedArtifacts(session.artifactMapping);
   report.provisioning = { modelId, repository: cell.repository, resolvedRevision: cell.resolvedRevision, authorization, jobId: finished.id, receipt, receiptSha256: await fileHash(marker), inventory, credentialIncluded: false };
 }
 export async function assertPackage(session, cell, target, inventory) {
@@ -150,15 +161,16 @@ export async function assertPackage(session, cell, target, inventory) {
   assert.equal(inventory.repository, row.repo); assert.equal(inventory.resolvedRevision, row.revision);
   if (cell.tier === 'bf16') assert.equal(await realpath(model.installedPath), await realpath(inventory.root), 'installed product snapshot differs from pinned inventory');
   await verifyInventory(session, inventory);
+  const resolverMapping = await verifyTerminalMapping(session, cell, inventory); assert.equal(await realpath(model.installedPath), await realpath(resolverMapping.snapshotRoot), 'catalog/worker selected a different snapshot tree');
   const names = new Set(inventory.files.map(f => f.path));
-  for (const required of ['config.json', 'manifest.json', 'model.safetensors']) assert(names.has(required), `complete package inventory missing ${required}`);
+  for (const required of ['config.json', 'model.safetensors', ...(['q4','q8'].includes(cell.tier) ? ['flux3-conversion-receipt.json'] : ['manifest.json'])]) assert(names.has(required), `complete native package inventory missing ${required}`);
   if (!['fp8r', 'nvfp4'].includes(cell.tier)) for (const required of ['LICENSE.md', 'NOTICE.md']) assert(names.has(required), `package license inventory missing ${required}`);
   else { if (cell.tier === 'fp8r') assert(names.has('hf_quant_config.json'), 'FP8R publisher format configuration required'); const license = inventory.externalComponents?.find(c => c.role === 'license'); need(license && ['LICENSE.md', 'NOTICE.md'].every(name => license.files?.some(f => f.path === name)), 'publisher variant licenses/notices live at the pinned repository root, not inside variants; bind that real external license inventory'); assert.equal(license.repository, cell.repository); assert.equal(license.resolvedRevision, cell.resolvedRevision); await verifyInventory(session, license); assert.equal(await realpath(inventory.root), await realpath(path.join(model.installedPath, 'variants', cell.tier))); }
   if (cell.tier === 'bf16') for (const required of ['ae.safetensors', 'text_encoder/config.json', 'text_encoder/tokenizer.json', 'text_encoder/model.safetensors.index.json', 'text_encoder/model-00001-of-00002.safetensors', 'text_encoder/model-00002-of-00002.safetensors']) assert(names.has(required), `complete encoder/AE inventory missing ${required}`);
   else { need(inventory.externalComponents?.length >= 2, 'native tier must bind real external text encoder and autoencoder inventories'); for (const role of ['text_encoder', 'autoencoder']) { const component = inventory.externalComponents.find(c => c.role === role); need(component, `missing ${role} inventory`); assert.equal(component.repository, cell.repository); assert.equal(component.resolvedRevision, cell.resolvedRevision); await verifyInventory(session, component); } }
   if (cell.options.enhancePrompt) { const pup = inventory.components?.prompt_upsampler, row = target.model.downloads.find(d => d.componentId === 'prompt_upsampler'); need(pup && row, 'Install separately pinned optional PUP component, or leave PUP cases BLOCKED (never fallback PASS)'); assert.equal(pup.repository, row.repo); assert.equal(pup.resolvedRevision, row.revision); await verifyInventory(session, pup); }
   if (row.localDerivation) { const weight = inventory.files.find(f => f.path === row.localDerivation.weightsFile); assert(weight, 'converted primary weight missing'); assert.equal(weight.sha256, row.localDerivation.weightsSha256); assert.equal(weight.bytes, row.localDerivation.weightsBytes); }
-  return { modelId: model.id, installState: model.installState, artifactKey: cell.artifactKey, inventory };
+  return { modelId: model.id, installState: model.installState, artifactKey: cell.artifactKey, inventory, actualWorkerPackage: resolverMapping.root, actualWorkerComponents: resolverMapping.components };
 }
 export function assertImageObservations(cell, body, asset, inputs) {
   const raw = asset.recipe.rawAdapterSettings;
@@ -222,34 +234,51 @@ export async function trainingSequence(session, cell, target, project, inputs, i
   const trainingTarget = targets.targets?.find(t => t.id === (edit ? 'flux3_klein_edit_lora' : 'flux3_klein_lora')); need(trainingTarget?.baseModel === 'flux3_klein_base', 'shipped base training target unavailable');
   const config = { ...trainingTarget.defaults, steps: spec.steps, saveEvery: spec.saveEvery, rank: spec.rank ?? 4, alpha: spec.rank ?? 4, resolution: 512, advanced: { ...trainingTarget.defaults.advanced, resume: false, sampleEvery: 0 } };
   const body = { targetId: trainingTarget.id, datasetId: dataset.id, config, outputName: `S10 ${cell.options.trainingMode} adapter`, dryRun: false }; report.requests.push({ body, sha256: objectHash(body) });
+  await session.pauseWorker(); // Native config/data proof must precede the first actual training start.
   const accepted = await session.endpoint.call('POST', `/api/v1/projects/${safeId(project.id)}/training/jobs`, body);
   assert.equal(accepted.payload?.dryRun ?? accepted.payload?.plan?.dryRun, false, 'real training must not be dryRun');
+  let expected;
+  try {
+    const persisted = accepted.payload.plan; assert.equal(persisted.dataset.datasetId, dataset.id, 'persisted plan selected a different dataset'); if (dataset.version !== undefined) assert.equal(persisted.dataset.datasetVersion, dataset.version); assert.equal(persisted.target.targetId, trainingTarget.id);
+    const relative = path.relative(session.identity.state, persisted.output.outputDir); assert(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'training output escaped owned state');
+    let names; try { names = await readdir(persisted.output.outputDir); } catch (error) { if (error.code !== 'ENOENT') throw error; names = []; } assert(!names.some(name => name.endsWith('.safetensors')), 'fresh training output already contains checkpoint/export state');
+    const witness = await session.trainingWitness(persisted); expected = await bindTrainingExpectation(session, persisted, config, report.trainingInputs, witness, assertFinishedPng); report.initialTrainingExpectation = expected;
+  } catch (error) { await session.endpoint.call('POST', `/api/v1/jobs/${safeId(accepted.id)}/cancel`, {}); await waitJob(session, accepted.id, report, { until: j => j.status === 'canceled', allowCanceled: true }); session.failClosed(error); throw error; }
+  await session.restartWorker();
   const checkpointJob = await waitJob(session, accepted.id, report, { until: j => j.status === 'running' && j.result?.resumeCheckpointStep > 0 });
   assert(checkpointJob.result.resumeCheckpointStep < spec.steps, 'interrupt must happen before training finishes');
-  const plan = checkpointJob.payload.plan, stem = path.basename(plan.output.fileName, '.safetensors');
+  const plan = checkpointJob.payload.plan; assert.deepEqual(plan, accepted.payload.plan, 'running job changed the proved persisted training plan'); const stem = path.basename(plan.output.fileName, '.safetensors');
   // Worker checkpoint file names are persisted-plan-derived; retain the actual file, not a claimed step.
   const outputDir = plan.output.outputDir;
   const checkpoint = await contained(path.join(outputDir, `${stem}-step${String(checkpointJob.result.resumeCheckpointStep).padStart(6, '0')}.resume.safetensors`), outputDir);
   const checkpointHash = await fileHash(checkpoint); report.checkpoint = { path: checkpoint, sha256: checkpointHash, step: checkpointJob.result.resumeCheckpointStep, state: await assertCheckpoint(checkpoint, cell, checkpointJob.result.resumeCheckpointStep) };
+  verifyNativeContinuation(report.checkpoint.state, expected);
   await session.endpoint.call('POST', `/api/v1/jobs/${safeId(accepted.id)}/cancel`, {});
   await waitJob(session, accepted.id, report, { until: j => j.status === 'canceled', allowCanceled: true });
   const oldPid = session.workerPid; assert.equal(await fileHash(checkpoint), checkpointHash);
   session.checkpointJobs ??= {};
   session.checkpointJobs[cell.modelId] = { id: accepted.id, plan: structuredClone(plan), checkpoint, checkpointHash };
   const altered = structuredClone(plan); altered.config.rank += 1;
-  const { response: incompatible, restarted: next } = await ownedNegativeProbe(session, `/api/v1/jobs/${safeId(accepted.id)}/retry`, { resume: true, payloadChanges: { plan: altered } }, response => { assert.equal(response.status, 400); assert(/checkpoint identity mismatch/i.test(JSON.stringify(response.body)), 'incompatible checkpoint must produce actionable refusal'); }, report);
-  assert.notEqual(next.pid, oldPid);
+  const { response: incompatible } = await ownedNegativeProbe(session, `/api/v1/jobs/${safeId(accepted.id)}/retry`, { resume: true, payloadChanges: { plan: altered } }, response => { assert.equal(response.status, 400); assert(/checkpoint identity mismatch/i.test(JSON.stringify(response.body)), 'incompatible checkpoint must produce actionable refusal'); }, report, { resumeWorker: false });
   assert.equal(await fileHash(checkpoint), checkpointHash); report.checkpointCompatibility = incompatible;
   const resumeBody = { resume: true }; report.requests.push({ route: `/api/v1/jobs/${accepted.id}/retry`, body: resumeBody, sha256: objectHash(resumeBody) });
   const resumed = await session.endpoint.call('POST', `/api/v1/jobs/${safeId(accepted.id)}/retry`, resumeBody);
-  assert.equal(resumed.payload?.plan?.config?.advanced?.resume, true); assert.notEqual(resumed.id, accepted.id);
+  const expectedResumed = structuredClone(plan); expectedResumed.config.advanced.resume = true;
+  try { assert.equal(resumed.payload?.plan?.config?.advanced?.resume, true); assert.notEqual(resumed.id, accepted.id); assert.deepEqual(resumed.payload.plan, expectedResumed, 'resume must preserve exact original plan except the explicit resume choice'); }
+  catch (error) { try { await session.endpoint.call('POST', `/api/v1/jobs/${safeId(resumed.id)}/cancel`, {}); await waitJob(session, resumed.id, report, { until: j => j.status === 'canceled', allowCanceled: true }); } finally { session.failClosed(error); } throw error; }
+  const next = await session.restartWorker(); assert.notEqual(next.pid, oldPid);
   const finished = await waitJob(session, resumed.id, report); assert(finished.result?.loraId && finished.result?.outputPath, 'completed job must export and register adapter');
   const finalStep = finished.result.resumeCheckpointStep; assert(finalStep > report.checkpoint.step, 'resumed job must advance real checkpoint state');
   const finalCheckpoint = await contained(path.join(outputDir, `${stem}-step${String(finalStep).padStart(6, '0')}.resume.safetensors`), outputDir);
   report.finalCheckpoint = { sha256: await fileHash(finalCheckpoint), state: await assertCheckpoint(finalCheckpoint, cell, finalStep) };
+  await session.pauseWorker(); assert.deepEqual(finished.payload.plan, expectedResumed, 'completed resume job changed its persisted plan');
+  const finalWitness = await session.trainingWitness(finished.payload.plan), finalExpected = await bindTrainingExpectation(session, finished.payload.plan, expectedResumed.config, report.trainingInputs, finalWitness, assertFinishedPng);
+  for (const key of ['configSha256','configuration','factors','activeFactorKeys','trainingReference','baseRepository','baseRevision','artifacts','dataset','seed','policy','samplerLength']) assert.deepEqual(finalExpected[key], expected[key], 'final plan/dataset/component/config identity changed during resume');
+  report.finalTrainingExpectation = finalExpected; verifyNativeContinuation(report.finalCheckpoint.state, finalExpected, report.checkpoint.state);
   const before = report.checkpoint.state.tensorManifest, after = report.finalCheckpoint.state.tensorManifest;
   assert(Object.keys(before).filter(key => key.startsWith('factor/')).some(key => before[key].sha256 !== after[key]?.sha256), 'real learned adapter factors must change after resume');
-  const exported = await contained(finished.result.outputPath, outputDir), exportedHash = await fileHash(exported);
+  assert.equal(finished.result.loraId, plan.output.loraId, 'registered export is not the actual planned adapter identity');
+  const exported = await contained(finished.result.outputPath, outputDir); assert.equal(exported, await realpath(path.join(outputDir, plan.output.fileName)), 'export path is not the actual planned adapter file'); const exportedHash = await fileHash(exported);
   await mkdir(directory, { recursive: true }); await copyFile(checkpoint, path.join(directory, 'checkpoint.resume.safetensors')); await copyFile(exported, path.join(directory, 'exported-adapter.safetensors'));
   report.training = { firstJob: accepted.id, resumedJob: finished.id, oldPid, resumedPid: next.pid, checkpointSha256: checkpointHash, exportedSha256: exportedHash, loraId: finished.result.loraId };
   await session.restartWorker(); // Reload ordinary generation in another process, not the training session's cache.
@@ -260,7 +289,7 @@ export async function trainingSequence(session, cell, target, project, inputs, i
 }
 // Negative ingress probes are CPU/API checks. Stop ONLY this nonce's GPU worker.
 // If ingress unexpectedly creates any job, cancel and prove terminal while still paused.
-export async function ownedNegativeProbe(session, route, body, check, report) {
+export async function ownedNegativeProbe(session, route, body, check, report, { resumeWorker = true } = {}) {
   await session.pauseWorker();
   try {
     const before = await session.endpoint.call('GET', '/api/v1/jobs?limit=1000'); assert(before.length < 1000, 'cannot safely enumerate owned queue'); const known = new Set(before.map(j => j.id));
@@ -272,7 +301,7 @@ export async function ownedNegativeProbe(session, route, body, check, report) {
     }
     const remaining = await session.endpoint.call('GET', '/api/v1/jobs?limit=1000'); assert(!remaining.some(j => !known.has(j.id) && !['canceled', 'failed', 'completed'].includes(j.status)), 'unexpected queued jobs remain; never resume worker');
     assert.equal(unexpected.length, 0, 'negative probe unexpectedly accepted/mutated a job; it was canceled and terminal-verified with our GPU worker paused');
-    check(response); const restarted = await session.restartWorker(); return { response, restarted };
+    check(response); const restarted = resumeWorker ? await session.restartWorker() : undefined; return { response, restarted };
   } catch (error) { session.failClosed(error); throw error; }
 }
 export function replayRequest(recipe, projectId) {
@@ -344,7 +373,9 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
   assert.equal(new Set(caseIds).size, caseIds.length); assert.equal(cells.length, caseIds.length, 'unknown requested case ID'); assert(cells.length);
   await validateAdmission(admission, cells[0].backend, dependencies.admission);
   await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot });
-  (dependencies.print ?? console.log)(JSON.stringify({ kind: 'exact-approved-physical-run-budget', approvedPlanSha256: approvedBudget.approvedPlanSha256, userPlanApprovalId: approvedPlan.userPlanApprovalId, budget: plan.budget, invocations: plan.generationInvocations, trainingLifecycles: plan.trainingLifecycles, selectedCaseIds: caseIds, resourceBoundaryUnverified: plan.resourceCases.filter(c => c.status !== 'READY').map(c => c.caseId) }));
+  const staging = artifactStagingPlan(cells, registry, inputSpec);
+  for (const p of staging.derivedPackages) assert((admission.disk?.conversionOutputBytes?.[p.artifactKey] ?? 0) >= p.copyBytes, 'disk admission must include all actual unique owned package copies before any copy');
+  (dependencies.print ?? console.log)(JSON.stringify({ kind: 'exact-approved-physical-run-budget', approvedPlanSha256: approvedBudget.approvedPlanSha256, userPlanApprovalId: approvedPlan.userPlanApprovalId, budget: plan.budget, artifactStaging: staging, invocations: plan.generationInvocations, trainingLifecycles: plan.trainingLifecycles, selectedCaseIds: caseIds, resourceBoundaryUnverified: plan.resourceCases.filter(c => c.status !== 'READY').map(c => c.caseId) }));
   assert(cells.every(c => c.backend === admission.backend && admission.phases.includes(c.phase)), 'case outside backend/phase admission');
   if (cells.some(c => c.kind === 'training')) need(admission.trainingLicenseAcknowledged === true, 'explicit acknowledgment of actual adaptation license conditions required; output exceptions are not blanket commercial-training permission');
   if (admission.faultProfile) assert(admission.installationFaultAdmission === true && cells.every(c => c.kind === 'installation-failure' && c.options.failure === (admission.faultProfile === 'hf403' ? 'authentication-denied' : 'install-missing')), 'fault profile can select only its explicitly admitted failure cases');
@@ -362,7 +393,7 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
   await save();
   try {
     const approvedProvisioning = cells.filter(c => c.kind === 'provision').map(c => provisioningApproval(c, registry.find(t => t.backend === c.backend && t.modelId === c.modelId), admission));
-    session = await (dependencies.launch ?? launchTerminalSession)({ ...admission, approvedProvisioning, approvedPlan }); campaign.sessionIdentity = session.identity;
+    session = await (dependencies.launch ?? launchTerminalSession)({ ...admission, approvedProvisioning, approvedPlan, artifactInputs: inputSpec, artifactCells: cells, artifactTargets: registry }); campaign.sessionIdentity = session.identity; campaign.artifactStaging = session.artifactMapping?.stagingPlan ?? staging; campaign.artifactCopies = session.artifactMapping ? { files: session.artifactMapping.copies, bytes: session.artifactMapping.copiedBytes } : null;
     const project = await session.endpoint.call('POST', '/api/v1/projects', { name: 'S10 installed product terminal acceptance' });
     const rel = path.relative(await realpath(session.identity.state), await realpath(project.path)); assert(rel && !rel.startsWith('..') && !path.isAbsolute(rel), 'project escaped owned state');
     const inputs = {};
@@ -384,11 +415,11 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
         await executeCell(session, cell, target, project, inputs, inputSpec, path.join(output, cell.caseId), report);
         report.executionStatus = 'PASSED'; report.semanticAcceptance = report.outputs.length ? 'PENDING' : 'NOT_APPLICABLE';
         report.status = report.outputs.length ? 'AWAITING_VISUAL_INSPECTION' : 'PASSED';
-      } catch (e) { report.status = e instanceof Blocked ? 'BLOCKED' : 'FAILED'; report.executionStatus = report.status; report.error = e.message; }
+      } catch (e) { report.status = e instanceof Blocked || e instanceof ArtifactReadinessBlocked ? 'BLOCKED' : 'FAILED'; report.executionStatus = report.status; report.error = e.message; }
       await save(); session.alive();
     }
     campaign.status = campaign.cases.some(c => c.status === 'FAILED') ? 'FAILED' : 'INCOMPLETE';
-  } catch (error) { campaign.status = error instanceof Blocked || error instanceof ProvisioningBlocked ? 'BLOCKED' : 'FAILED'; campaign.error = error.message;
+  } catch (error) { campaign.status = error instanceof Blocked || error instanceof ProvisioningBlocked || error instanceof ArtifactReadinessBlocked ? 'BLOCKED' : 'FAILED'; campaign.error = error.message;
     if (campaign.status === 'BLOCKED') for (const c of campaign.cases.filter(c => caseIds.includes(c.caseId) && c.status === 'NOT_RUN')) { c.status = 'BLOCKED'; c.blocker = error.message; }
   }
   finally { try { await session?.close(); } catch (error) { campaign.status = 'FAILED'; campaign.cleanupError = error.message; } finally { campaign.cleanup = session?.cleanup ?? []; campaign.permits = session?.permits ?? []; try { campaign.ledgerReceipt = await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot }); } catch (error) { campaign.status = 'FAILED'; campaign.ledgerError = error.message; } await save(); } }
@@ -397,6 +428,7 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
 export async function main(args = process.argv.slice(2)) {
   const sources = await loadProductTargets();
   if (!args.length || args[0] === 'plan' || args[0] === 'catalog') { assert(args.length <= 1); console.log(JSON.stringify(args[0] === 'catalog' ? terminalCatalog(sources) : terminalPlan(sources), null, 2)); return; }
+  if (args[0] === 'produce-build') { assert(args.length === 2, 'produce-build requires one separately user-admitted build JSON'); const { produceTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); console.log(JSON.stringify(await produceTerminalBuild(JSON.parse(await readFile(args[1], 'utf8'))))); return; }
   if (args[0] === 'init-ledger') { assert(args.length === 3 && ['mlx', 'candle'].includes(args[2]), 'init-ledger APPROVED_PLAN.json mlx|candle is explicit CPU setup, never runtime reset'); const approval = JSON.parse(await readFile(args[1], 'utf8')); console.log(JSON.stringify(await initializeLedger({ approval, backend: args[2], ledgerRoot: approval.ledgerRoots[args[2]] }))); return; }
   assert(args[0] === 'run' && args.length === 5, 'usage: node scripts/flux3-image-klein-terminal-driver.mjs [plan | catalog | init-ledger APPROVED_PLAN.json mlx|candle | run ADMISSION.json INPUTS.json CASE_IDS.json APPROVED_PLAN.json]');
   const [admission, inputSpec, caseIds, approvedPlan] = await Promise.all(args.slice(1).map(async f => JSON.parse(await readFile(f, 'utf8'))));

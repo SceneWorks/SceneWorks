@@ -11,7 +11,7 @@ From the SceneWorks checkout, with Node 20:
 
 ```sh
 node scripts/flux3-image-klein-terminal-driver.mjs plan
-CUDA_VISIBLE_DEVICES=-1 node --test scripts/flux3-image-klein-terminal.test.mjs scripts/flux3-image-klein-terminal-budget.test.mjs scripts/flux3-image-klein-app-lifecycle.test.mjs scripts/flux3-image-klein-candle-app-lifecycle.test.mjs
+CUDA_VISIBLE_DEVICES=-1 node --test scripts/flux3-image-klein-terminal.test.mjs scripts/flux3-image-klein-terminal-budget.test.mjs scripts/flux3-image-klein-terminal-review-fixes.test.mjs scripts/flux3-image-klein-app-lifecycle.test.mjs scripts/flux3-image-klein-candle-app-lifecycle.test.mjs
 ```
 
 No arguments also means `plan`. Planning only reads the shipped model manifest and
@@ -50,7 +50,7 @@ The default named product list uses these suffixes with `mlx.` and `candle.`:
 This is **12 MLX + 14 Candle product generations**. Resource allocations are
 explicitly **5 MLX + 7 Candle**: bf16 distilled/base on each backend (four anchors),
 MLX distilled q4/q8 and Candle distilled q4/q8/nvfp4 plus base fp8r (six native
-package anchors), and base `resource-pup-edit-10.bf16` once per backend (two
+package anchors), and base `pup_edit.bf16` (exact native supplemental contract ID, ten references) once per backend (two
 supplemental PUP observations, never extra anchors). The exact names and expanded
 request templates are emitted as `generationInvocations`; each row is ONE actual
 inner `Generator.generate`, not one command that may hide multiple samples.
@@ -116,10 +116,16 @@ The admission file requires:
   `phases`, and bounded `timeoutSeconds` (60..10800). `runnerAccount` must match
   the actual OS account name; it is non-secret provenance, not a token.
 - Exact clean checkout `sourceSha`, exact `inferenceMainSha`, local
-  `inferenceRepository`, and `inferenceMainTipSha`. Git ancestry is checked against
-  locally fetched `origin/main` in **both** repositories. A feature-only SHA or a
-  field merely named MAIN is insufficient. The driver never fetches or merges.
-- Absolute `binary`, its `binarySha256`, and `binarySourceSha === sourceSha`.
+  `inferenceRepository`, and `inferenceMainTipSha`. SceneWorks source must be the
+  approved clean, frozen **feature** commit (SceneWorks MAIN ancestry is not
+  required). The actual resolved inference pin must be reachable from its locally
+  fetched `origin/main`; a field merely named MAIN is insufficient. The driver
+  never fetches or merges.
+- Absolute sealed `binary`, its `binarySha256`, redundant `binarySourceSha ===
+  sourceSha`, and `binaryBuildReceipt:{root,path,sha256}`. A caller source label or
+  current lock beside an old executable is not compiled provenance. The global
+  approval's `buildReceipts[backend]` binds the real producer receipt/transcript,
+  binary, lock, tool executables and flags (see below).
 - Existing absolute `outputRoot` outside the checkout and existing absolute
   `hfHome`. Stable repositories, retained PNGs, sidecars, and reports must survive
   worktree removal. Ordinary execution uses the installed cache offline and never
@@ -132,6 +138,29 @@ The admission file requires:
   outputs, 32 GiB build and 16 GiB state safety margins. Margins are **not
   measurements**. Actual free space is checked conservatively on both roots.
   Ordinary operation does not initiate a missing download even if disk permits it.
+
+### Separately admitted build producer — never executed by planning/run
+
+`flux3-image-klein-terminal-build.mjs` supplies the concrete future build producer;
+`produce-build /absolute/build-admission.json` requires separate explicit
+`actualBuild:true`, `userBuildApprovalId` and `resourceAdmissionId`. It observes
+clean exact source/manifests/lock before and after a fixed offline locked release
+build, jobs 2, CVD=-1, native platform target, Candle feature on Windows. Actual
+Cargo metadata must resolve every inference edge to the approved MAIN-reachable
+pin; real compiler-artifact/build-finished messages must identify the actual
+executable. Tool executable hashes, actual rustc host/version, flags, and on
+Windows actual MSVC 19.44 `/Bv` output bind the transcript. The admitted warm target
+and exclusive sealed-copy output stay outside the checkout. Nothing here grants
+permission to build or use the resource owner's target.
+
+The parent-approved `buildReceipts[backend]` includes `receiptSha256`,
+`transcriptSha256`, `binarySha256`, `cargoLockSha256`, `rustflagsSha256`,
+`cargoExecutableSha256`, `rustcExecutableSha256`, plus Windows
+`msvcCompilerSha256` and `cudaCompilerSha256` (actual nvcc 12.9 version/hash,
+selected CUDA_PATH/host compiler). Build scratch uses an exclusive producer-owned
+temp directory, not ambient shared TEMP. The launcher verifies current producer source/lock, observed
+source/pin/recipe, and actual sealed binary bytes. Arbitrary older executables,
+mixed pins, source changes during build and re-labelled receipts are rejected.
 
 ### Immutable global budget and local single-use ledgers
 
@@ -183,17 +212,40 @@ before EACH actual native `Generator.generate`, with `kind:"resource_anchor"` or
 a self-reported one-call flag is insufficient. This contract is **not** a claim
 that the unverified native harness already enforces it. Return the latest audited
 receipt per backend to the coordinator, who aggregates unique IDs against the same
-global plan and total <=38 approved / <=48 hard ceiling. Do not add cumulative
+global plan and total <=38 approved / <=48 hard ceiling. Full exact manifests,
+contiguous event sequences/hash chains, unique backend receipts, final state
+counts/head and single-use IDs are verified; truncated, replayed or contradictory
+receipts are rejected. This is `reservation-accounting-only` with
+`caseCompletionProven:false`, not case completion evidence. Do not add cumulative
 snapshots together as though their repeated event histories were new runs.
+Final `aggregateLedgerReceipts(approval, receipts, closure)` requires **both**
+backend snapshots and a separately trusted parent closure: `kind:
+"flux3-terminal-finalized-ledger-heads"`, `coordinatorClosureId`,
+`producersStopped:true`, `collectionManifestSha256`, exact `ledgerId` and
+`approvedPlanSha256`, and `backends:{mlx:{sequence,headSha256},candle:{sequence,
+headSha256}}`. The parent obtains those latest heads from observed finalized
+ledger closure/sealed collected artifact manifests after producers stop, never
+from the candidate receipt's own freshness label. A valid-chain older snapshot
+with a different trusted latest head is rejected. Partial run reports may still
+audit their local ledger, but missing backend accounting remains INCOMPLETE/unknown,
+never zero or campaign PASS. There is no network service or signing framework.
 
 Candle additionally requires `physicalGpuId:"1"`, `cudaVisibleDevices:"1"`,
 `logicalCudaOrdinal:0`, admitted `gpuUuid`, and `runner`. The controller checks
-physical GPU1 against masked CUDA0 UUID, rejects active Runner.Worker and foreign
-pure-compute processes, monitors the owned worker PID/device, and never selects
-user-reserved GPU0. MLX requires physical Apple Silicon, `runner:"nax-macos-2"`,
+physical GPU1 against masked CUDA0 UUID, rejects foreign Runner.Worker processes
+(only this controller's hosting ancestor is allowed) and every foreign GPU1
+compute-app PID, **including C+G**. Graphics-only desktop processes remain allowed.
+It monitors the owned worker PID/device and never selects user-reserved GPU0. MLX requires physical Apple Silicon, `runner:"nax-macos-2"`,
 `runnerTarget:"secondary"`, `runnerLabel:"rw-mage"`, and exact admitted `hostName`.
 `RUNNER_NAME` must be `nax-macos-2`; `rw-mage` is a label, not the runner name. The
-primary Mac is forbidden.
+primary Mac is forbidden. Labels alone never prove Metal exclusivity: MLX also
+requires `macWorkloadLease:{root,path,sha256}` binding a coordinator-issued
+`flux3-secondary-mac-exclusive-workload-lease`, exact admission/source/pin/account/
+host identity, `exclusiveGpuWorkload:true`, `noForeignGpuWorkload:true`,
+`observedAt`/`expiresAt` covering the fixed run deadline, actual
+`ancestorRunnerPids`, and `baselineProcesses:{pid,ppid,command,startedAt}[]`.
+New/reused foreign processes or another runner invalidate the lease. Unprovable
+exclusivity is BLOCKED, never a blind launch or permission to kill others.
 
 Each session uses fresh cryptographic nonce state, a real port-zero API listener
 announcement, canonical owned-health paths before **every** request, and only its
@@ -234,7 +286,19 @@ ambient credentials. No global process-name kill is used.
   files are stat-checked rather than rehashing tens of GB for every case. Where
   an ordinary HF snapshot links into its blob store, explicitly approved
   `containmentRoot` names that physical owned hub; the package `root` remains the
-  exact pinned snapshot, and escaping the admitted hub is refused.
+  exact pinned snapshot, and escaping the admitted hub is refused. Dense snapshots
+  and PUP additionally need the genuine original `installationReceipt:{root,path,
+  sha256}`: v2, actual completed download job ID, exact repo/revision/model ID,
+  `manifestFiles:[]`, and complete approved `resolvedFiles`. The launcher copies
+  that verified provenance into its nonce-owned marker, never fabricates a receipt.
+  q4/q8 require the real `flux3-conversion-receipt.json`, catalog weight hash/size,
+  source/component inventories, and exact native quantization config. Packages are
+  materialized **once** under `data/models/derived/<model>/<tier>/<conversion>`
+  before any service spawn; fresh workers reuse them. The printed staging plan
+  gives exact unique copy count/bytes and checks actual free space plus a 30 GiB
+  floor before copying. Dense snapshots are read-only, not copied. TE/AE/PUP roots
+  and used files must match the actual worker config/resolver-selected pinned
+  snapshot, not simply the same repo/revision labels on another tree.
 - `adapters`: model ID to `{root,path,sha256,bytes,rank,repository,resolvedRevision}`.
   The actual safetensors rank is read, and the ordinary LoRA import API verifies
   the file hash. No fixture is accepted as real adapter evidence. Run `lora-zero`
@@ -323,7 +387,23 @@ agree. A queued job or provider-only image is not evidence.
 Checkpoint proof retains actual safetensors format/identity, factor/optimizer/RNG
 state and content hashes, checkpoint-compatibility refusal, final advanced factor
 manifest, registered exported adapter, and fresh ordinary-generation image.
-Missing or unrelated errors do not pass negative tests.
+Missing or unrelated errors do not pass negative tests. Before first training and
+again after resume, the same sealed binary runs the model-less early CLI
+`--flux3-training-config-witness <owned-plan.json>` while this session's GPU worker
+is paused, with explicit CVD=-1. It returns the exact Rust-mapped Debug config SHA,
+input-file-bytes SHA, expected factor shapes/active workflow keys and RNG policy;
+no weights, tensors, registry, provider, API or GPU initialization occurs. Neither
+backend is typed unsupported. This is not a JS-emulated config hash.
+
+The driver binds that witness to the actual persisted native plan/config, dataset
+paths/order/captions/content, dense DIT/TE/AE inventories and immutable native
+identity in both checkpoints. Accumulation is fixed at one, pending gradients
+must be empty, sampler/update/micro-step and RNG seed/next-step lineage must agree,
+active factors and optimizer moments must advance, and inactive workflow factors
+must remain unchanged. Native MLX may legitimately omit optimizer moments for
+inactive captioned image_cond factors; no fake zero moments are invented. Synthetic
+Node fixtures test these checks but are **not** native Rust compile/CLI evidence;
+that CPU verification remains a separate admitted step.
 
 Images finish `AWAITING_VISUAL_INSPECTION`, **not PASSED**, with
 `executionStatus:PASSED` separate from `semanticAcceptance:PENDING`. Per-case

@@ -12,6 +12,8 @@ async function fixture(t) {
   const approval = { schemaVersion: 1, kind: 'flux3-terminal-plan-approval', approvalId: 'declared-fixture-approval', userPlanApprovalId: 'DECLARED_SYNTHETIC_NOT_USER_AUTHORIZATION', approvedBy: 'synthetic CPU test', sourceSha: 'a'.repeat(40), inferenceMainSha: 'b'.repeat(40), ledgerId: 'declared-fixture-ledger', ledgerRoots: { mlx: path.join(root, 'mlx-ledger'), candle: path.join(root, 'candle-ledger') }, inputSpecSha256: { mlx: digest, candle: digest }, plan: structuredClone(profile) };
   return { root, approval };
 }
+// Declared fixture coordinator observations, separate from candidate receipts under mutation.
+const heads = (approval, receipts) => ({kind:'flux3-terminal-finalized-ledger-heads',coordinatorClosureId:'DECLARED_SYNTHETIC_TRUSTED_CLOSURE',producersStopped:true,collectionManifestSha256:digest,ledgerId:approval.ledgerId,approvedPlanSha256:planHash(approval),backends:Object.fromEntries(receipts.map(r => [r.manifest.backend, { sequence:r.state.sequence,headSha256:r.state.headSha256 }]))});
 const reservation = (approval, backend, invocation = approval.plan.generationInvocations.find(i => i.backend === backend && i.kind === 'product_generation')) => ({ approval, backend, ledgerRoot: approval.ledgerRoots[backend], ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval), invocationId: invocation.invocationId, caseId: invocation.caseId, kind: invocation.kind, requestSha256: digest });
 test('representative default expands EXACTLY 26 product +12 resource =38 globally, no automatic repeats/spares', () => {
   assert.equal(profile.generationInvocations.length, 38); assert.equal(profile.generationInvocations.filter(i => i.kind === 'product_generation').length, 26); assert.equal(profile.resourceCases.length, 12);
@@ -33,10 +35,10 @@ test('disjoint backend ledgers enforce one GLOBAL immutable quota; coordinator a
   const { approval } = await fixture(t);
   for (const backend of ['mlx', 'candle']) { await initializeLedger({ approval, backend, ledgerRoot: approval.ledgerRoots[backend] }); await reserveInvocation(reservation(approval, backend)); }
   const receipts = await Promise.all(['mlx', 'candle'].map(backend => auditLedger({ approval, backend, ledgerRoot: approval.ledgerRoots[backend] })));
-  assert.equal(aggregateLedgerReceipts(approval, receipts).generationCount, 2); assert.equal(aggregateLedgerReceipts(approval, receipts).approvedTotal, 38);
+  assert.equal(aggregateLedgerReceipts(approval, receipts, heads(approval, receipts)).generationCount, 2); assert.equal(aggregateLedgerReceipts(approval, receipts, heads(approval, receipts)).approvedTotal, 38);
   await assert.rejects(reserveInvocation({ ...reservation(approval, 'mlx'), ...{ invocationId: approval.plan.generationInvocations.find(i => i.backend === 'candle').invocationId } }), /absent|consumed/);
-  assert.throws(() => aggregateLedgerReceipts(approval, [receipts[0], receipts[0]]), /duplicate/);
-  const corrupt = structuredClone(receipts[0]); corrupt.events[0].requestSha256 = 'e'.repeat(64); assert.throws(() => aggregateLedgerReceipts(approval, [corrupt]));
+  assert.throws(() => aggregateLedgerReceipts(approval, [receipts[0], receipts[0]], heads(approval, receipts)), /duplicate/);
+  const corrupt = structuredClone(receipts[0]); corrupt.events[0].requestSha256 = 'e'.repeat(64); assert.throws(() => aggregateLedgerReceipts(approval, [corrupt], heads(approval, receipts)));
 });
 test('failed/canceled reservations stay spent across resumed sessions; no automatic retry or spare-ten allocation', async t => {
   const { approval } = await fixture(t), backend = 'candle'; await initializeLedger({ approval, backend, ledgerRoot: approval.ledgerRoots[backend] });
@@ -81,4 +83,19 @@ test('resource permits remain BLOCKED without real owner-verified single-call bo
   const invocation = a.plan.generationInvocations.find(i => i.caseId === r.caseId); invocation.requestSha256 = digest; await initializeLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] });
   await assert.rejects(reserveInvocation({ ...reservation(a, backend, invocation), requestSha256: 'e'.repeat(64) }), /exact normalized/);
   await reserveInvocation(reservation(a, backend, invocation)); assert.equal((await auditLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] })).state.generationCount, 1);
+});
+test('aggregation validates complete ledger manifests, contiguous chains and final state; forged/truncated receipts never become zero-spend proof', async t => {
+  const { approval } = await fixture(t), backend = 'candle', ledgerRoot = approval.ledgerRoots[backend]; await initializeLedger({ approval, backend, ledgerRoot }); await reserveInvocation(reservation(approval, backend));
+  const receipt = await auditLedger({ approval, backend, ledgerRoot });
+  await initializeLedger({approval,backend:'mlx',ledgerRoot:approval.ledgerRoots.mlx});const other=await auditLedger({approval,backend:'mlx',ledgerRoot:approval.ledgerRoots.mlx}),closure=heads(approval,[receipt,other]);
+  assert.equal(aggregateLedgerReceipts(approval,[receipt,other],closure).caseCompletionProven,false);
+  assert.throws(()=>aggregateLedgerReceipts(approval,[receipt],closure),/partial backend/);
+  assert.throws(()=>aggregateLedgerReceipts(approval,[receipt,other]),/trusted coordinator closure/);
+  const rehash = r => { const {eventSha256,...event}=r.events[0];r.events[0].eventSha256=planHash(event);r.state.headSha256=r.events[0].eventSha256; };
+  for (const mutate of [r=>r.events=[],r=>r.state.generationCount=38,r=>r.manifest.ledgerId='different-ledger',r=>r.manifest.backend='mlx',r=>r.manifest.trainingIds=[],r=>r.manifest.permitIds=[],r=>{r.events[0].ledgerId='different';rehash(r);},r=>{r.events[0].sequence=7;rehash(r);},r=>{r.events[0].previousSha256=digest;rehash(r);},r=>{r.events[0].approvedPlanSha256=digest;rehash(r);},r=>r.state.consumedIds=[]]) { const bad=structuredClone(receipt);mutate(bad);assert.throws(()=>aggregateLedgerReceipts(approval,[bad,other],closure)); }
+  assert.throws(()=>aggregateLedgerReceipts(approval,[receipt,receipt],closure),/duplicate ledger\/backend/);
+  assert.throws(()=>aggregateLedgerReceipts(approval,[{state:{generationCount:38},events:[]},other],closure),/manifest/);
+  const next=approval.plan.generationInvocations.filter(i=>i.backend===backend&&i.kind==='product_generation')[1];await reserveInvocation(reservation(approval,backend,next));const latest=await auditLedger({approval,backend,ledgerRoot}),latestClosure=heads(approval,[latest,other]);
+  assert.throws(()=>aggregateLedgerReceipts(approval,[receipt,other],latestClosure),/replayed\/stale/);assert.equal(aggregateLedgerReceipts(approval,[latest,other],latestClosure).generationCount,2);
+  for(const mutate of [c=>c.producersStopped=false,c=>c.ledgerId='wrong',c=>c.approvedPlanSha256=digest,c=>delete c.backends.mlx]){const bad=structuredClone(latestClosure);mutate(bad);assert.throws(()=>aggregateLedgerReceipts(approval,[latest,other],bad));}
 });

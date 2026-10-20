@@ -36,8 +36,30 @@
         "sourceSha": { "$ref": "#/$defs/revision" }, "inferenceMainSha": { "$ref": "#/$defs/revision" }, "ledgerId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{12,100}$" },
         "ledgerRoots": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "type": "string", "minLength": 1 }, "candle": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
         "inputSpecSha256": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/sha256" }, "candle": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
+        "buildReceipts": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/buildBinding" }, "candle": { "$ref": "#/$defs/buildBinding" } }, "additionalProperties": false },
         "plan": { "allOf": [{ "$ref": "#" }, { "properties": { "kind": { "const": "flux3-installed-product-representative-plan" } } }] }
       }, "additionalProperties": false
+    },
+    "ledgerClosure": {
+      "description": "Parent-trusted finalized heads from stopped producers and a sealed collected artifact manifest, never candidate receipt self-attestation.",
+      "type": "object", "required": ["kind", "coordinatorClosureId", "producersStopped", "collectionManifestSha256", "ledgerId", "approvedPlanSha256", "backends"],
+      "properties": {
+        "kind": { "const": "flux3-terminal-finalized-ledger-heads" }, "coordinatorClosureId": { "type": "string", "minLength": 1 }, "producersStopped": { "const": true }, "collectionManifestSha256": { "$ref": "#/$defs/sha256" }, "ledgerId": { "type": "string", "minLength": 1 }, "approvedPlanSha256": { "$ref": "#/$defs/sha256" },
+        "backends": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/ledgerHead" }, "candle": { "$ref": "#/$defs/ledgerHead" } }, "additionalProperties": false }
+      }, "additionalProperties": false
+    },
+    "ledgerHead": { "type": "object", "required": ["sequence", "headSha256"], "properties": { "sequence": { "type": "integer", "minimum": 0 }, "headSha256": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
+    "fileBinding": { "type": "object", "required": ["root", "path", "sha256"], "properties": { "root": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1 }, "sha256": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
+    "buildBinding": {
+      "type": "object", "required": ["receiptSha256", "transcriptSha256", "binarySha256", "cargoLockSha256", "rustflagsSha256", "cargoExecutableSha256", "rustcExecutableSha256"],
+      "properties": {
+        "receiptSha256": { "$ref": "#/$defs/sha256" }, "transcriptSha256": { "$ref": "#/$defs/sha256" }, "binarySha256": { "$ref": "#/$defs/sha256" }, "cargoLockSha256": { "$ref": "#/$defs/sha256" }, "rustflagsSha256": { "$ref": "#/$defs/sha256" }, "cargoExecutableSha256": { "$ref": "#/$defs/sha256" }, "rustcExecutableSha256": { "$ref": "#/$defs/sha256" }, "msvcCompilerSha256": { "$ref": "#/$defs/sha256" }, "cudaCompilerSha256": { "$ref": "#/$defs/sha256" }
+      }, "additionalProperties": false
+    },
+    "runtimeProofBindings": {
+      "description": "Additional admission fields, required by concrete launch verification; this is not a complete resource admission schema.",
+      "type": "object", "required": ["binaryBuildReceipt"],
+      "properties": { "binaryBuildReceipt": { "$ref": "#/$defs/fileBinding" }, "macWorkloadLease": { "$ref": "#/$defs/fileBinding" } }, "additionalProperties": false
     },
     "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
     "revision": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
@@ -72,6 +94,7 @@
       "properties": {
         "root": { "type": "string", "minLength": 1 },
         "containmentRoot": { "type": "string", "minLength": 1 },
+        "installationReceipt": { "$ref": "#/$defs/fileBinding" },
         "repository": { "type": "string", "minLength": 1 },
         "resolvedRevision": { "$ref": "#/$defs/revision" },
         "authority": { "const": "parent-approved-pinned-inventory" },

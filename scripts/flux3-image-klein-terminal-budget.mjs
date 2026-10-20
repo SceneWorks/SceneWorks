@@ -32,6 +32,9 @@ function location(approval, backend, ledgerRoot) {
   validateApprovedPlan(approval); assert(['mlx', 'candle'].includes(backend));
   assert.equal(path.resolve(ledgerRoot), path.resolve(approval.ledgerRoots[backend]), 'alternate ledger root/reset is forbidden'); return path.resolve(ledgerRoot);
 }
+function expectedManifest(approval, backend) {
+  return { schemaVersion: 1, ledgerId: approval.ledgerId, backend, approvedPlanSha256: planHash(approval), approvalId: approval.approvalId, userPlanApprovalId: approval.userPlanApprovalId, permitIds: approval.plan.generationInvocations.filter(i => i.backend === backend).map(i => i.invocationId), trainingIds: approval.plan.trainingLifecycles.filter(t => t.backend === backend).flatMap(t => [t.startId, t.resumeId]) };
+}
 async function durableNew(file, value) { const h = await open(file, 'wx'); try { await h.writeFile(JSON.stringify(value) + '\n'); await h.sync(); } finally { await h.close(); } }
 // Explicit, separately invoked CPU setup ONLY. Runtime never initializes or resets a ledger.
 // The durable sibling initialization claim survives deletion of the ledger directory.
@@ -39,7 +42,7 @@ export async function initializeLedger({ approval, backend, ledgerRoot }) {
   const root = location(approval, backend, ledgerRoot), hash = planHash(approval);
   await durableNew(path.join(path.dirname(root), `.flux3-${approval.ledgerId}-${backend}.initialized`), { ledgerId: approval.ledgerId, backend, root, approvedPlanSha256: hash });
   await mkdir(root); await mkdir(path.join(root, 'events'));
-  const manifest = { schemaVersion: 1, ledgerId: approval.ledgerId, backend, approvedPlanSha256: hash, approvalId: approval.approvalId, userPlanApprovalId: approval.userPlanApprovalId, permitIds: approval.plan.generationInvocations.filter(i => i.backend === backend).map(i => i.invocationId), trainingIds: approval.plan.trainingLifecycles.filter(t => t.backend === backend).flatMap(t => [t.startId, t.resumeId]) };
+  const manifest = expectedManifest(approval, backend);
   await durableNew(path.join(root, 'manifest.json'), manifest);
   await durableNew(path.join(root, 'state.json'), { sequence: 0, generationCount: 0, consumedIds: [], headSha256: planHash(manifest) });
   return { ledgerId: approval.ledgerId, backend, approvedPlanSha256: hash, allocated: manifest.permitIds.length };
@@ -62,20 +65,25 @@ function approvedEvent(approval, event) {
   if (invocation.requestSha256) assert.equal(event.requestSha256, invocation.requestSha256, 'resource permit must bind exact normalized approved request');
   return true;
 }
-async function audited(approval, backend, root) {
-  const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')), state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8'));
-  assert.equal(manifest.ledgerId, approval.ledgerId); assert.equal(manifest.backend, backend); assert.equal(manifest.approvedPlanSha256, planHash(approval));
-  assert.deepEqual(manifest.permitIds, approval.plan.generationInvocations.filter(i => i.backend === backend).map(i => i.invocationId));
-  const files = (await readdir(path.join(root, 'events'))).sort(); let head = planHash(manifest), generations = 0; const events = [], ids = [];
-  for (let index = 0; index < files.length; index++) {
-    assert.equal(files[index], `${String(index + 1).padStart(6, '0')}.json`, 'ledger journal missing/foreign event');
-    const event = JSON.parse(await readFile(path.join(root, 'events', files[index]), 'utf8')), { eventSha256, ...record } = event;
-    assert.equal(eventSha256, planHash(record)); assert.equal(record.sequence, index + 1); assert.equal(record.previousSha256, head); assert.equal(record.approvedPlanSha256, planHash(approval)); assert.equal(record.backend, backend); assert(sha.test(record.requestSha256));
-    if (approvedEvent(approval, record)) generations++; assert(!ids.includes(record.invocationId), 'single-use permit reused'); ids.push(record.invocationId); events.push(event); head = eventSha256;
+export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt?.manifest?.backend) {
+  validateApprovedPlan(approval); assert(['mlx', 'candle'].includes(expectedBackend), 'complete ledger manifest/backend required');
+  const { manifest, state, events } = receipt ?? {}; assert.deepEqual(manifest, expectedManifest(approval, expectedBackend), 'complete ledger manifest/plan/backend identity mismatch'); assert(Array.isArray(events));
+  let head = planHash(manifest), generations = 0; const ids = [];
+  for (const [index, event] of events.entries()) {
+    const { eventSha256, ...record } = event;
+    assert.deepEqual(Object.keys(record).sort(), ['sequence','previousSha256','approvedPlanSha256','ledgerId','backend','caseId','invocationId','kind','requestSha256','reservedAt','controllerPid'].sort());
+    assert.equal(eventSha256, planHash(record)); assert.equal(record.sequence, index + 1); assert.equal(record.previousSha256, head); assert.equal(record.ledgerId, approval.ledgerId); assert.equal(record.approvedPlanSha256, planHash(approval)); assert.equal(record.backend, expectedBackend); assert(sha.test(record.requestSha256)); assert(Number.isInteger(record.controllerPid) && record.controllerPid > 0 && Number.isFinite(Date.parse(record.reservedAt)));
+    if (record.kind === 'training_resume') { const training = approval.plan.trainingLifecycles.find(t => t.resumeId === record.invocationId); assert(training && ids.includes(training.startId), 'resume precedes its initial training start'); }
+    if (approvedEvent(approval, record)) generations++; assert(!ids.includes(record.invocationId), 'single-use permit reused'); ids.push(record.invocationId); head = eventSha256;
   }
   assert(generations <= manifest.permitIds.length && generations <= GLOBAL_GENERATION_CEILING);
   assert.deepEqual(state, { sequence: events.length, generationCount: generations, consumedIds: ids, headSha256: head }, 'ledger crash/tamper mismatch; coordinator must reconcile, never reuse a reservation');
   return { manifest, state, events };
+}
+async function audited(approval, backend, root) {
+  const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')), state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')), files = (await readdir(path.join(root, 'events'))).sort(), events = [];
+  for (const [index, file] of files.entries()) { assert.equal(file, `${String(index + 1).padStart(6, '0')}.json`, 'ledger journal missing/foreign event'); events.push(JSON.parse(await readFile(path.join(root, 'events', file), 'utf8'))); }
+  return verifyLedgerReceipt(approval, { manifest, state, events }, backend);
 }
 export async function auditLedger({ approval, backend, ledgerRoot }) { const root = location(approval, backend, ledgerRoot); return lock(root, () => audited(approval, backend, root)); }
 export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256 }) {
@@ -92,9 +100,19 @@ export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approv
     return event;
   });
 }
-export function aggregateLedgerReceipts(approval, receipts) {
-  validateApprovedPlan(approval); const ids = new Set(); let generationCount = 0;
-  for (const receipt of receipts) for (const event of receipt.events) { const { eventSha256, ...record } = event; assert.equal(eventSha256, planHash(record)); assert.equal(event.approvedPlanSha256, planHash(approval)); assert(!ids.has(event.invocationId), 'duplicate receipt/permit across backend sessions'); ids.add(event.invocationId); if (approvedEvent(approval, event)) generationCount++; }
+export function aggregateLedgerReceipts(approval, receipts, closure) {
+  validateApprovedPlan(approval); const ids = new Set(), ledgers = new Set(); let generationCount = 0;
+  assert(closure?.kind === 'flux3-terminal-finalized-ledger-heads' && closure.coordinatorClosureId && closure.producersStopped === true && sha.test(closure.collectionManifestSha256 ?? ''), 'trusted coordinator closure from stopped producers/sealed collected artifacts required; receipts cannot attest their own freshness');
+  assert.equal(closure.ledgerId, approval.ledgerId); assert.equal(closure.approvedPlanSha256, planHash(approval));
+  const expectedHeads = closure.backends;
+  assert(expectedHeads && Object.keys(expectedHeads).sort().join(',') === 'candle,mlx', 'trusted latest coordinator-audited heads for BOTH backend ledgers required');
+  for (const candidate of receipts) {
+    const receipt = verifyLedgerReceipt(approval, candidate), key = `${receipt.manifest.ledgerId}:${receipt.manifest.backend}`; assert(!ledgers.has(key), 'duplicate ledger/backend receipt; use one complete latest receipt per backend'); ledgers.add(key);
+    assert.deepEqual({ sequence: receipt.state.sequence, headSha256: receipt.state.headSha256 }, expectedHeads[receipt.manifest.backend], 'replayed/stale receipt differs from trusted latest coordinator-audited head');
+    for (const event of receipt.events) { assert(!ids.has(event.invocationId), 'duplicate receipt/permit across backend sessions'); ids.add(event.invocationId); }
+    generationCount += receipt.state.generationCount;
+  }
+  assert.equal(ledgers.size, 2, 'partial backend aggregation is not a global campaign count; both complete latest receipts required');
   assert(generationCount <= approval.plan.generationInvocations.length && generationCount <= GLOBAL_GENERATION_CEILING);
-  return { ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval), generationCount, approvedTotal: approval.plan.generationInvocations.length, globalHardCeiling: GLOBAL_GENERATION_CEILING, unallocatedNotAuthorized: GLOBAL_GENERATION_CEILING - approval.plan.generationInvocations.length };
+  return { proofKind: 'reservation-accounting-only', caseCompletionProven: false, coordinatorClosureId: closure.coordinatorClosureId, collectionManifestSha256: closure.collectionManifestSha256, ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval), generationCount, approvedTotal: approval.plan.generationInvocations.length, globalHardCeiling: GLOBAL_GENERATION_CEILING, unallocatedNotAuthorized: GLOBAL_GENERATION_CEILING - approval.plan.generationInvocations.length };
 }

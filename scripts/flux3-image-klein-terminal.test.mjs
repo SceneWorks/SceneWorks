@@ -17,7 +17,7 @@ const find = (scenario, model = 'base', backend = 'candle') => plan.cases.find(c
 const target = cell => registry.find(t => t.backend === cell.backend && t.modelId === cell.modelId);
 const report = () => ({ events: [], requests: [], jobs: [], outputs: [], adapters: [], observations: [], timeoutSeconds: 10 });
 async function temporary(t) { const root = await mkdtemp(path.join(os.tmpdir(), 's10-terminal-declared-synthetic-')); t.after(() => rm(root, { recursive: true, force: true })); return root; }
-function admission(root) { return { actualRun: true, backend: 'candle', admissionId: 'parent-fixture-only', approvedBy: 'declared synthetic', phases: plan.phases, sourceSha: source, inferenceMainSha: inference, inferenceMainTipSha: tip, inferenceRepository: root, binary: path.join(root, 'api.exe'), binarySha256: digest, binarySourceSha: source, outputRoot: path.join(root, 'output'), hfHome: path.join(root, 'hf'), runner: 'fixture', runnerAccount: os.userInfo().username, physicalGpuId: '1', cudaVisibleDevices: '1', logicalCudaOrdinal: 0, gpuUuid: 'GPU-1234', timeoutSeconds: 60 }; }
+function admission(root) { return { actualRun: true, backend: 'candle', admissionId: 'parent-fixture-only', approvedBy: 'declared synthetic', phases: plan.phases, sourceSha: source, inferenceMainSha: inference, inferenceMainTipSha: tip, inferenceRepository: root, binary: path.join(root, 'api.exe'), binarySha256: digest, binarySourceSha: source, binaryBuildReceipt: { root, path: path.join(root, 'producer-receipt.json'), sha256: digest }, outputRoot: path.join(root, 'output'), hfHome: path.join(root, 'hf'), runner: 'fixture', runnerAccount: os.userInfo().username, physicalGpuId: '1', cudaVisibleDevices: '1', logicalCudaOrdinal: 0, gpuUuid: 'GPU-1234', timeoutSeconds: 60 }; }
 async function approvedFixture(root, a, inputSpec) {
   const approval = { schemaVersion: 1, kind: 'flux3-terminal-plan-approval', approvalId: 'declared-fixture-only', userPlanApprovalId: 'SYNTHETIC_NOT_EXECUTION_AUTHORIZATION', approvedBy: 'CPU fixture', sourceSha: source, inferenceMainSha: inference, ledgerId: 'fixture-terminal-ledger', ledgerRoots: { mlx: path.join(root, 'ledger-mlx'), candle: path.join(root, 'ledger-candle') }, inputSpecSha256: { mlx: objectHash(inputSpec), candle: objectHash(inputSpec) }, plan: representativePlan(sources) };
   Object.assign(a, { ledgerRoot: approval.ledgerRoots[a.backend], ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval) }); await initializeLedger({ approval, backend: a.backend, ledgerRoot: a.ledgerRoot }); return approval;
@@ -76,21 +76,25 @@ test('child environment is offline and scrubbed; no inherited token/cache/backen
   const env = offlineChildEnv({ HF_TOKEN: 'DECLARED_SYNTHETIC_DO_NOT_USE', HF_TOKEN_PATH: 'ambient', API_KEY: 'ambient', SCENEWORKS_GPU_ID: '0', CUDA_VISIBLE_DEVICES: '', HF_ENDPOINT: 'https://foreign.invalid', PATH: 'safe' }, a, identity, 'http://127.0.0.1:12345');
   assert.equal(env.CUDA_VISIBLE_DEVICES, '1'); assert.equal(env.SCENEWORKS_GPU_ID, '1'); assert.equal(env.HF_TOKEN, undefined); assert.equal(env.HF_TOKEN_PATH, undefined); assert.equal(env.API_KEY, undefined); assert.equal(env.HF_ENDPOINT, undefined); assert.equal(env.HF_HUB_OFFLINE, '1'); assert.equal(env.SCENEWORKS_API_PORT, '12345');
 });
-test('GPU guard rejects Runner.Worker, foreign compute, UUID mismatch and actual worker on GPU0', async () => {
-  const a = admission('D:/synthetic');
-  const exec = async (command, args) => { if (command === 'tasklist.exe') return { stdout: '' }; if (command === 'powershell.exe') return { stdout: a.gpuUuid }; if (args.includes('--query-gpu=index,uuid')) return { stdout: `1,${a.gpuUuid}` }; if (args.includes('-x')) return { stdout: `<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>123</pid><type>C</type></process_info></processes>` }; return { stdout: `123,${a.gpuUuid}` }; };
-  assert.deepEqual((await guardHardware(a, [123], { exec, platform: 'win32' })).ownComputePids, [123]);
-  await assert.rejects(guardHardware(a, [], { exec, platform: 'win32' }), /foreign pure-compute/);
-  await assert.rejects(guardHardware(a, [123], { platform: 'win32', exec: async (c, args) => c === 'tasklist.exe' ? { stdout: '"Runner.Worker.exe", "1"' } : exec(c, args) }), /Runner.Worker/);
-  await assert.rejects(guardHardware(a, [123], { platform: 'win32', exec: async (c, args) => c === 'powershell.exe' ? { stdout: 'GPU-other' } : exec(c, args) }), /masked CUDA0/);
-  await assert.rejects(guardHardware(a, [123], { platform: 'win32', exec: async (c, args) => args.includes('--query-compute-apps=pid,gpu_uuid') ? { stdout: '123,GPU-reserved0' } : exec(c, args) }), /reserved GPU0/);
+test('GPU guard rejects foreign Runner.Worker/compute, UUID mismatch and actual worker on GPU0', async () => {
+  const a = admission('D:/synthetic'), processTable = async () => [{ pid: process.pid, ppid: 0, command: 'node.exe' }];
+  const exec = async (command, args) => { if (command === 'powershell.exe') return { stdout: a.gpuUuid }; if (args.includes('--query-gpu=index,uuid')) return { stdout: `1,${a.gpuUuid}` }; if (args.includes('-x')) return { stdout: `<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>123</pid><type>C</type></process_info></processes>` }; return { stdout: `123,${a.gpuUuid}` }; };
+  const deps = { exec, platform: 'win32', processTable };
+  assert.deepEqual((await guardHardware(a, [123], deps)).ownComputePids, [123]);
+  await assert.rejects(guardHardware(a, [], deps), /foreign pure-compute/);
+  await assert.rejects(guardHardware(a, [123], { ...deps, processTable: async () => [...await processTable(), { pid: 99, ppid: 0, command: 'Runner.Worker.exe' }] }), /Runner.Worker/);
+  await assert.rejects(guardHardware(a, [123], { ...deps, exec: async (c, args) => c === 'powershell.exe' ? { stdout: 'GPU-other' } : exec(c, args) }), /masked CUDA0/);
+  await assert.rejects(guardHardware(a, [123], { ...deps, exec: async (c, args) => args.includes('--query-compute-apps=pid,gpu_uuid') ? { stdout: '123,GPU-reserved0' } : exec(c, args) }), /reserved GPU0/);
 });
-test('MLX guard admits physical secondary only, never primary/Windows runner', async () => {
-  const a = { backend: 'mlx', runner: 'nax-macos-2', runnerTarget: 'secondary', runnerLabel: 'rw-mage', hostName: 'nax-macos-2' }, deps = { platform: 'darwin', arch: 'arm64', env: { RUNNER_NAME: 'nax-macos-2' }, exec: async () => ({ stdout: 'nax-macos-2.local' }) };
+test('MLX guard requires coordinator exclusive lease in addition to physical secondary labels', async () => {
+  const a = { ...admission('D:/synthetic'), backend: 'mlx', runner: 'nax-macos-2', runnerTarget: 'secondary', runnerLabel: 'rw-mage', hostName: 'nax-macos-2' }, table = [{ pid: process.pid, ppid: 0, command: 'node', startedAt: 'fixture-start' }];
+  const lease = { kind: 'flux3-secondary-mac-exclusive-workload-lease', coordinatorApprovalId: 'SYNTHETIC_LEASE_ONLY', approvedBy: 'fixture', exclusiveGpuWorkload: true, noForeignGpuWorkload: true, admissionId: a.admissionId, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, runnerAccount: a.runnerAccount, hostName: a.hostName, observedAt: new Date(Date.now()-1000).toISOString(), expiresAt: new Date(Date.now()+120000).toISOString(), ancestorRunnerPids: [], baselineProcesses: table };
+  const deps = { platform: 'darwin', arch: 'arm64', env: { RUNNER_NAME: 'nax-macos-2' }, exec: async () => ({ stdout: 'nax-macos-2.local' }), processTable: async () => table, leaseReader: async () => lease };
   await guardHardware(a, [], deps);
   await assert.rejects(guardHardware(a, [], { ...deps, env: { RUNNER_NAME: 'rw-starvector' } }));
   await assert.rejects(guardHardware({ ...a, runner: 'primary' }, [], deps));
   await assert.rejects(guardHardware(a, [], { ...deps, platform: 'win32' }));
+  await assert.rejects(guardHardware(a, [], { ...deps, leaseReader: async () => ({ ...lease, expiresAt: new Date(0).toISOString() }) }), /lease expired/);
 });
 test('concrete launcher control flow starts only owned binary, resolves port-zero listener, restarts fresh worker and cleans children', async t => {
   const root = await temporary(t), a = admission(root), launched = [], calls = []; let workerId, guardCount = 0;
@@ -175,13 +179,13 @@ function checkpointHeader(cell, step) {
   const manifest = Object.fromEntries(Object.entries(tensors).map(([key, value]) => [key, { dtype: value.dtype, shape: value.shape, sha256: sha256(data.subarray(...value.data_offsets)) }]));
   return { __metadata__: { format: cell.backend === 'candle' ? 'flux3-native-training-resume-v1' : 'flux3-mlx-training-resume-v1', policy: 'micro_steps=4;accumulation=1;sampler_len=1', gain_bits: '3ff0000000000000', pending_keys: '[]', identity: JSON.stringify({ schema: 1, training_reference: '7ecb1e1b4fe500be7fb7381a7bb79a24d7fa3941', base_repo: cell.repository, base_revision: cell.resolvedRevision, artifacts: { dit: digest }, dataset: digest, preprocessing: digest, configuration: { optimizer: 'adamw' }, factors: { test: [1, 1] } }), cursor: JSON.stringify({ schema: 1, micro_step: step, update_step: step, accumulation_count: 0, sampler_epoch: step - 1, sampler_cursor: 1, rng_state: [1, 2, 3], last_loss_bits: 1065353216 }), tensor_manifest: JSON.stringify(manifest), ...(cell.backend === 'candle' ? { optimizer_order: '["test"]' } : { optimizer_config: 'adamw;lr=38d1b717;wd=38d1b717;beta1=0.9;beta2=0.999;eps=1e-8;bias_correction=true', optimizer_steps: JSON.stringify({ test: step }) }) }, ...tensors };
 }
-test('bounded TRAIN -> saved checkpoint -> cancel -> fresh process resume -> advanced factors/export -> fresh reload uses shipped requests', async t => {
+test('training refuses reused checkpoint/export output before any model execution', async t => {
   const root = await temporary(t), cell = find('train-interrupt-resume-export-captioned'), outputDir = path.join(root, 'training'); await mkdir(outputDir);
   const initial = path.join(outputDir, 'lora-step000001.resume.safetensors'), final = path.join(outputDir, 'lora-step000004.resume.safetensors'), exported = path.join(outputDir, 'lora.safetensors');
   await writeFile(initial, encodedSafetensors(checkpointHeader(cell, 1))); await writeFile(final, encodedSafetensors(checkpointHeader(cell, 4, 'f'.repeat(64)))); await writeFile(exported, encodedSafetensors({ 'layer.lora_A.weight': { shape: [4, 4], dtype: 'F32', data_offsets: [0, 64] } }));
   const registryFixture = JSON.parse(await readFile(new URL('../tests/fixtures/rust_migration_contracts/training/target-registry.json', import.meta.url), 'utf8'));
   const calls = [], r = report(); let canceled = false, resumedPolls = 0, imagePolls = 0, fixture, restarted = 0, paused = false;
-  const persistedPlan = { output: { fileName: 'lora.safetensors', outputDir }, config: { rank: 4 }, target: { baseModel: 'flux3_klein_base' } };
+  const persistedPlan = { output: { fileName: 'lora.safetensors', outputDir }, dataset: { datasetId: 'dataset' }, config: { rank: 4 }, target: { targetId: 'flux3_klein_lora', baseModel: 'flux3_klein_base' } };
   const s = { identity: { workerId: 'w' }, worker: { gpuId: '1' }, workerPid: 100, wait: async fn => { for (let i = 0; i < 10; i++) { const j = await fn(); if (j) return j; } throw new Error('fixture exhausted'); }, assertDeviceProof: async () => ({ gpuUuid: 'declared synthetic' }), async pauseWorker() { paused = true; }, failClosed(error) { throw error; }, async restartWorker() { restarted++; paused = false; this.workerPid++; this.identity.workerId = `w-${restarted}`; return { pid: this.workerPid }; }, endpoint: {
     async exchange(method, route, body) { assert(paused); calls.push([method, route, body]); return { status: 400, body: { error: 'checkpoint identity mismatch' } }; },
     async call(method, route, body) {
@@ -200,11 +204,9 @@ test('bounded TRAIN -> saved checkpoint -> cancel -> fresh process resume -> adv
       if (route.endsWith('/assets')) return [fixture.asset]; throw new Error(`unexpected declared fixture route ${route}`);
     }, served: async () => ({ status: 200, bytes: fixture.png }),
   } };
-  await trainingSequence(s, cell, target(cell), { id: 'p', path: root }, { 'train-0': { assetId: 'owned' } }, { training: { captioned: { steps: 4, saveEvery: 1, items: [{ binding: 'train-0', caption: 'real user caption in actual run; synthetic here' }] } } }, path.join(root, 'retained'), r);
-  assert.equal(r.checkpoint.state.cursor.update_step, 1); assert.equal(r.finalCheckpoint.state.cursor.update_step, 4); assert.equal(r.training.oldPid, 100); assert.equal(r.training.resumedPid, 101); assert.equal(restarted, 2); assert.equal(r.outputs.length, 1); assert.equal(r.checkpointCompatibility.status, 400);
-  assert(calls.some(([method, route, body]) => method === 'POST' && route.endsWith('/retry') && body.payloadChanges));
-  assert.equal(sha256(await readFile(path.join(root, 'retained/checkpoint.resume.safetensors'))), r.training.checkpointSha256);
-  assert.equal(sha256(await readFile(path.join(root, 'retained/exported-adapter.safetensors'))), r.training.exportedSha256);
+  s.identity.state = root;
+  await assert.rejects(trainingSequence(s, cell, target(cell), { id: 'p', path: root }, { 'train-0': { assetId: 'owned' } }, { training: { captioned: { steps: 4, saveEvery: 1, items: [{ binding: 'train-0', caption: 'real user caption in actual run; synthetic here' }] } } }, path.join(root, 'retained'), r), /fresh training output already contains/);
+  assert.equal(restarted, 0); assert(canceled && paused); assert.equal(r.checkpoint, undefined);
 });
 test('checkpoint proof rejects wrong model, missing optimizer tensors, missing RNG and fabricated advancement', async t => {
   const root = await temporary(t), cell = find('train-interrupt-resume-export-captioned'), file = path.join(root, 'synthetic.safetensors');
@@ -386,14 +388,14 @@ test('retained reference bindings separate encoded SHA from exact native RGB/RGB
   const bytes = png(2, Buffer.alloc(12), [chunk('eXIf', Buffer.from('declared ambiguous fixture'))]), file = path.join(root, 'ambiguous.png'); await writeFile(file, bytes);
   await assert.rejects(uploadBinding(session, { id: 'p' }, { root, path: file, sha256: sha256(bytes) }), e => e instanceof Blocked && /EXIF/.test(e.message)); assert.equal(uploads.length, 2);
 });
-test('publisher variant verifies its actual subdirectory and external root license inventory, not invented variant license files', async t => {
+test('external publisher hashes never pass without owned resolver mapping and actual device-floor advertisement', async t => {
   const root = await temporary(t), cell = plan.cases.find(c => c.backend === 'candle' && c.modelId === 'flux3_klein_base' && c.tier === 'fp8r'), snapshot = path.join(root, 'snapshot'), variant = path.join(snapshot, 'variants/fp8r');
   async function inventory(directory, names, role) { await mkdir(directory, { recursive: true }); const files = []; for (const name of names) { const bytes = Buffer.from(`DECLARED SYNTHETIC ${name}`); await writeFile(path.join(directory, name), bytes); files.push({ path: name, bytes: bytes.length, sha256: sha256(bytes) }); } return { root: directory, repository: cell.repository, resolvedRevision: cell.resolvedRevision, authority: 'parent-approved-pinned-inventory', ...(role ? { role } : {}), files }; }
   const primary = await inventory(variant, ['config.json', 'manifest.json', 'model.safetensors', 'hf_quant_config.json']);
   const license = await inventory(snapshot, ['LICENSE.md', 'NOTICE.md'], 'license'), ae = await inventory(snapshot, ['ae.safetensors'], 'autoencoder'), encoder = await inventory(path.join(snapshot, 'text_encoder'), ['model.safetensors'], 'text_encoder'); primary.externalComponents = [license, ae, encoder];
   const s = { worker: { capabilities: ['gpu', 'candle', 'fp8r'] }, endpoint: { call: async () => [{ id: cell.modelId, installState: 'installed', installedPath: snapshot }] } };
-  assert.equal((await assertPackage(s, cell, target(cell), primary)).artifactKey, cell.artifactKey);
-  const noLicense = structuredClone(primary); noLicense.externalComponents = [ae, encoder]; await assert.rejects(assertPackage(s, cell, target(cell), noLicense), /root, not inside variants/);
+  await assert.rejects(assertPackage(s, cell, target(cell), primary), /no resolver-visible materialization/);
+  const noLicense = structuredClone(primary); noLicense.externalComponents = [ae, encoder]; await assert.rejects(assertPackage(s, cell, target(cell), noLicense));
   s.worker.capabilities = ['gpu', 'candle']; await assert.rejects(assertPackage(s, cell, target(cell), primary), e => e instanceof Blocked && /device floor/.test(e.message));
 });
 test('explicit public PUP-only provisioning does not read any account token and keeps the GPU worker offline', async t => {

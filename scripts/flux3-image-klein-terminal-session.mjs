@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { cp, mkdir, open, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -27,12 +27,11 @@ export async function validateAdmission(a, backend, { git = async (cwd, ...args)
   assert(shaPattern.test(a.sourceSha ?? '') && shaPattern.test(a.inferenceMainSha ?? ''), 'exact source and inference MAIN SHAs required');
   assert.equal(await git(root, 'rev-parse', 'HEAD'), a.sourceSha);
   assert.equal(await git(root, 'status', '--porcelain'), '', 'clean committed source required');
-  await git(root, 'merge-base', '--is-ancestor', a.sourceSha, 'refs/remotes/origin/main');
   assert(a.inferenceRepository && path.isAbsolute(a.inferenceRepository), 'local inference checkout required for MAIN ancestry proof');
   assert.equal(await git(a.inferenceRepository, 'rev-parse', 'refs/remotes/origin/main'), a.inferenceMainTipSha, 'record the locally fetched inference MAIN tip');
   await git(a.inferenceRepository, 'merge-base', '--is-ancestor', a.inferenceMainSha, 'refs/remotes/origin/main');
   assert(shaPattern.test(a.inferenceMainTipSha ?? ''));
-  assert(path.isAbsolute(a.binary ?? '') && digestPattern.test(a.binarySha256 ?? '') && a.binarySourceSha === a.sourceSha, 'prebuilt exact-source binary/hash required; no automatic build');
+  assert(path.isAbsolute(a.binary ?? '') && digestPattern.test(a.binarySha256 ?? '') && a.binarySourceSha === a.sourceSha && a.binaryBuildReceipt?.path && a.binaryBuildReceipt.root && digestPattern.test(a.binaryBuildReceipt.sha256), 'prebuilt sealed output and parent-approved actual producer receipt required; caller source labels are not proof');
   assert(path.isAbsolute(a.outputRoot ?? '') && path.isAbsolute(a.hfHome ?? ''), 'stable absolute output/cache roots required');
   const relative = path.relative(root, a.outputRoot); assert(relative.startsWith('..') || path.isAbsolute(relative), 'retained output must be outside checkout');
   assert(Number.isInteger(a.timeoutSeconds) && a.timeoutSeconds >= 60 && a.timeoutSeconds <= 10800, 'bounded run timeout required');
@@ -52,18 +51,39 @@ export function offlineChildEnv(env, admission, identity, url) {
 }
 // Driver API UUID query runs in a separate short process with the SAME visibility mask.
 const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class TerminalCudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); }'; if([TerminalCudaIdentity]::cuInit(0) -ne 0){throw "CUDA init"}; $n=0; if([TerminalCudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA mask"}; $d=0; if([TerminalCudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal"}; $u=New-Object byte[] 16; if([TerminalCudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12))`;
-export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env } = {}) {
+export async function observeProcessTable(checked, platform) {
+  if (platform === 'win32') {
+    const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}} | ConvertTo-Json -Compress';
+    const value = JSON.parse((await checked('powershell.exe', ['-NoProfile','-Command',script], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout); return Array.isArray(value) ? value : [value];
+  }
+  const text = (await checked('ps', ['-axo','pid=,ppid=,lstart=,comm='], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout;
+  return text.split(/\r?\n/).filter(line => line.trim()).map(line => { const m = /^\s*(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\S+\s+\d+)\s+(.+)$/.exec(line); assert(m, 'process identity observation unavailable'); return { pid: Number(m[1]), ppid: Number(m[2]), startedAt: m[3].replace(/\s+/g,' '), command: m[4].trim() }; });
+}
+export function processAncestors(table, pid) { const ids = new Set(); let current = pid; while (current > 0 && !ids.has(current)) { ids.add(current); current = table.find(p => p.pid === current)?.ppid ?? 0; } return ids; }
+export async function readMacWorkloadLease(a) {
+  assert(a.macWorkloadLease?.path && a.macWorkloadLease.root && digestPattern.test(a.macWorkloadLease.sha256), 'secondary Mac requires coordinator exclusive-workload attestation lease');
+  const file = await contained(a.macWorkloadLease.path, a.macWorkloadLease.root), bytes = await readFile(file); assert(bytes.length <= 1024 * 1024 && createHash('sha256').update(bytes).digest('hex') === a.macWorkloadLease.sha256, 'coordinator lease bytes changed'); return JSON.parse(bytes);
+}
+export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env, processTable, leaseReader = readMacWorkloadLease, controllerPid = process.pid, now = Date.now } = {}) {
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
+  const table = await (processTable ? processTable() : observeProcessTable(checked, platform)); assert(Array.isArray(table) && table.some(p => p.pid === controllerPid), 'cannot prove controller process ancestry');
+  const ancestors = processAncestors(table, controllerPid), runners = table.filter(p => /^Runner\.Worker(?:\.exe)?$/i.test(path.basename(p.command)));
+  assert(runners.every(p => ancestors.has(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job is allowed');
   if (a.backend === 'mlx') {
     assert(platform === 'darwin' && arch === 'arm64', 'physical Apple Silicon Mac required');
     assert.equal(a.runner, 'nax-macos-2'); assert.equal(a.runnerTarget, 'secondary'); assert.equal(a.runnerLabel, 'rw-mage'); assert.equal(env.RUNNER_NAME, 'nax-macos-2', 'secondary runner identity required (rw-mage is its label, not its runner name)');
     const host = (await checked('hostname', [], { timeout: 5000 })).stdout.trim(); assert.equal(host.split('.')[0], a.hostName, 'admitted secondary physical hostname mismatch');
-    assert(a.hostName, 'explicit admitted secondary hostname required'); return { runner: a.runner, runnerTarget: a.runnerTarget, runnerLabel: a.runnerLabel, host, backend: 'mlx' };
+    assert(a.hostName, 'explicit admitted secondary hostname required');
+    const lease = await leaseReader(a); assert.equal(lease.kind, 'flux3-secondary-mac-exclusive-workload-lease'); assert(lease.coordinatorApprovalId && lease.approvedBy && lease.exclusiveGpuWorkload === true && lease.noForeignGpuWorkload === true, 'exclusive Metal workload cannot be inferred from hostname; coordinator must attest it');
+    for (const key of ['admissionId','sourceSha','inferenceMainSha','runnerAccount','hostName']) assert.equal(lease[key], a[key], `Mac lease ${key} mismatch`);
+    assert(Date.parse(lease.observedAt) <= now() && Date.parse(lease.expiresAt) >= (a.runDeadline ?? now() + a.timeoutSeconds * 1000), 'exclusive-workload lease expired/does not cover the admitted run');
+    assert.deepEqual([...runners.map(p => p.pid)].sort(), [...(lease.ancestorRunnerPids ?? [])].sort(), 'runner lease must identify the actual hosting ancestors, not foreign runners');
+    assert(Array.isArray(lease.baselineProcesses));
+    for (const p of table.filter(p => p.pid > 0)) { if (processAncestors(table, p.pid).has(controllerPid) || ownPids.includes(p.pid)) continue; assert(lease.baselineProcesses.some(old => old.pid === p.pid && old.ppid === p.ppid && old.command === p.command && old.startedAt === p.startedAt && p.startedAt), 'new/reused foreign process invalidates exclusive Metal lease; return admission to coordinator'); }
+    return { runner: a.runner, runnerTarget: a.runnerTarget, runnerLabel: a.runnerLabel, host, backend: 'mlx', coordinatorLeaseId: lease.coordinatorApprovalId, exclusivity: 'coordinator-attested-and-process-monitored' };
   }
   assert.equal(platform, 'win32');
-  const runners = (await checked('tasklist.exe', ['/FI', 'IMAGENAME eq Runner.Worker.exe', '/FO', 'CSV', '/NH'], { timeout: 5000 })).stdout;
-  assert(!/^"Runner\.Worker\.exe"/im.test(runners), 'Runner.Worker active; stop and return admission to coordinator');
-  const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
+    const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
   const [index, uuid] = (await smi(['-i', '1', '--query-gpu=index,uuid', '--format=csv,noheader'])).split(',').map(s => s.trim());
   assert.equal(index, '1'); assert.equal(uuid.toLowerCase(), a.gpuUuid.toLowerCase());
   const masked = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: '1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim();
@@ -75,15 +95,17 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     assert(type !== 'C' || ownPids.includes(pid), 'foreign pure-compute process on GPU1');
   }
   const apps = (await smi(['--query-compute-apps=pid,gpu_uuid', '--format=csv,noheader,nounits'])).split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(x => x.trim()));
-  for (const [pid, device] of apps) if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0');
+  for (const [pid, device] of apps) { assert(Number.isInteger(Number(pid)) && Number(pid) > 0 && /^GPU-/i.test(device), 'compute-app identity unavailable'); if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0'); else assert.notEqual(device.toLowerCase(), uuid.toLowerCase(), 'foreign process actually computing on GPU1 (including C+G)'); }
   return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)) };
 }
 export class ProvisioningBlocked extends Error {}
 export async function launchTerminalSession(a, dependencies = {}) {
   // Dependency overrides are for weights-free tests; production CLI never accepts a launcher module.
-  const io = { mkdir, cp, open, readFile, writeFile, createServer, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, reserve: reserveInvocation, hash: fileHash, spawn, guard: guardHardware, controller: ownedApiController, sleep: ms => new Promise(r => setTimeout(r, ms)), now: Date.now, env: process.env, ...dependencies };
+  const io = { mkdir, cp, open, readFile, writeFile, createServer, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, reserve: reserveInvocation, execWitness: execFile, hash: fileHash, spawn, guard: guardHardware, controller: ownedApiController, sleep: ms => new Promise(r => setTimeout(r, ms)), now: Date.now, env: process.env, ...dependencies };
+  a = { ...a, runDeadline: io.now() + a.timeoutSeconds * 1000 };
   const identity = attemptIdentity(a.outputRoot), children = [], handles = [], abort = new AbortController();
-  const execution = { sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, runner: a.runner, runnerAccount: a.runnerAccount };
+  let artifactMapping;
+  const execution = { sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, runner: a.runner, runnerAccount: a.runnerAccount, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt?.sha256 };
   let endpoint, worker, currentCase, workerPaused = false, generation = 0, monitoring = false, restarting = false, closing = false, monitor, monitorTask, faultServer, faultUrl;
   const invocationIndexes = new Map(), permits = [];
   const faultRequests = [], authorizations = [], secrets = [], cleanup = []; let credential;
@@ -115,6 +137,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     if (!dependencies.fixtureOnly) {
       await validateAdmission(a, a.backend); const budget = validateApprovedPlan(a.approvedPlan); assert.equal(budget.approvedPlanSha256, a.approvedPlanSha256); assert.equal(a.ledgerId, a.approvedPlan.ledgerId);
       await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot });
+      const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a);
     }
     assert.equal(await io.hash(a.binary), a.binarySha256, 'prebuilt binary mismatch');
     if (!dependencies.skipPinReadForFixture) assertPins(await Promise.all(['Cargo.toml', 'crates/sceneworks-worker/Cargo.toml', 'crates/sceneworks-memory-adapter/Cargo.toml'].map(f => io.readFile(path.join(ROOT, f), 'utf8'))), await io.readFile(path.join(ROOT, 'Cargo.lock'), 'utf8'), a.inferenceMainSha);
@@ -127,6 +150,11 @@ export async function launchTerminalSession(a, dependencies = {}) {
       } catch (error) { throw new ProvisioningBlocked(redactSensitiveText(error.message, secrets)); }
     }
     await io.mkdir(identity.state); await io.mkdir(path.join(identity.state, 'data/projects'), { recursive: true }); await io.mkdir(path.join(identity.state, 'credentials')); await io.cp(path.join(ROOT, 'config'), path.join(identity.state, 'config'), { recursive: true });
+    if (!dependencies.fixtureOnly || a.artifactCells) {
+      assert(a.artifactCells?.length && a.artifactInputs && a.artifactTargets, 'concrete launcher requires exact approved artifact mapping inputs before any service launch');
+      assert.equal(planHash(a.artifactInputs), a.approvedPlan.inputSpecSha256[a.backend]);
+      const { stageTerminalArtifacts } = await import('./flux3-image-klein-terminal-artifacts.mjs'); artifactMapping = await stageTerminalArtifacts({ admission: a, identity, inputSpec: a.artifactInputs, cells: a.artifactCells, registry: a.artifactTargets });
+    }
     if (a.faultProfile) {
       assert(a.installationFaultAdmission === true && ['missing-install', 'hf403'].includes(a.faultProfile), 'explicit installation fault admission required');
       // Deliberately empty task-owned hub; never corrupt or remove an existing cache.
@@ -149,10 +177,12 @@ export async function launchTerminalSession(a, dependencies = {}) {
       if (image || retry || /\/training\/jobs$/.test(route)) assert(currentCase, 'begin an explicitly approved case before any job start');
       if (mutation || (image && (currentCase.kind === 'reject' || currentCase.status === 'BLOCKED'))) { assert(workerPaused && (worker.exitCode !== null || worker.signalCode !== null), 'negative probes require only OUR owned GPU worker stopped; never risk an uncounted generation'); return; }
       if (image) {
+        await guard();
         assert(!workerPaused && worker.exitCode === null); assert.equal(body.count, 1, 'batch generation requires individually named permits'); assert(!body.hiresFix?.enabled && !body.advanced?.hiresFix?.enabled, 'hidden extra generation passes are forbidden');
         const index = invocationIndexes.get(currentCase.caseId) ?? 0, invocation = a.approvedPlan.plan.generationInvocations.filter(i => i.backend === a.backend && i.caseId === currentCase.caseId && i.kind === 'product_generation')[index];
         assert(invocation, 'no approved single-use generation permit; no auto retry/repeat/spare allocation'); await consume(invocation.invocationId, invocation.kind, body); invocationIndexes.set(currentCase.caseId, index + 1);
       } else if (/\/training\/jobs$/.test(route) || retry) {
+        await guard();
         const training = a.approvedPlan.plan.trainingLifecycles.find(t => t.backend === a.backend && t.caseId === currentCase.caseId); assert(training, 'only the TWO explicitly listed bounded training lifecycles are allowed');
         if (retry) { assert.equal(body.resume, true); await consume(training.resumeId, 'training_resume', body); }
         else { assert.equal(body.dryRun, false); assert.equal(body.targetId, currentCase.options.trainingMode === 'edit' ? 'flux3_klein_edit_lora' : 'flux3_klein_lora'); assert.equal(body.config.batchSize, 1); assert.equal(body.config.gradientAccumulation, 1); for (const key of ['steps', 'rank', 'resolution', 'saveEvery']) assert.equal(body.config[key], training[key]); assert.equal(body.config.advanced.sampleEvery, 0, 'training previews are unallocated generations'); await consume(training.startId, 'training_start', body); }
@@ -167,7 +197,16 @@ export async function launchTerminalSession(a, dependencies = {}) {
     };
     const started = await startWorker();
     monitor = setInterval(() => { if (monitoring || restarting || closing) return; monitoring = true; monitorTask = (async () => { try { alive(); assert(api.exitCode === null && api.signalCode === null && worker.exitCode === null && worker.signalCode === null, 'owned service exited'); await guard(); } catch (e) { abort.abort(e); } finally { monitoring = false; } })(); }, 2000);
-    return { endpoint, identity, execution, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
+    return { endpoint, identity, execution, artifactMapping, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
+      async trainingWitness(plan) {
+        assert(workerPaused, 'CPU witness must run with only our GPU worker paused');
+        if (!dependencies.fixtureOnly) { const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a); }
+        const bytes = Buffer.from(JSON.stringify(plan)), file = path.join(identity.state, `native-plan-${randomBytes(16).toString('hex')}.json`); await io.writeFile(file, bytes, { flag: 'wx' });
+        const env = offlineChildEnv(io.env, a, identity); Object.assign(env, { CUDA_VISIBLE_DEVICES: '-1', SCENEWORKS_GPU_ID: 'cpu', SCENEWORKS_BACKEND_CANDLE_ENABLED: 'false', SCENEWORKS_BACKEND_MLX_ENABLED: 'false', SCENEWORKS_RUN_UTILITY_INPROCESS: '0', SCENEWORKS_FLUX3_WITNESS_ROOT: identity.state }); delete env.SCENEWORKS_WORKER_ONLY; delete env.SCENEWORKS_GPU_CHECK;
+        const result = await io.execWitness(a.binary, ['--flux3-training-config-witness', file], { cwd: ROOT, env, timeout: 30000, maxBuffer: 2 * 1024 * 1024 });
+        const value = JSON.parse(result.stdout); assert(value.status === 'ok' && value.witness?.formatVersion === 1 && value.witness.inputSha256 === createHash('sha256').update(bytes).digest('hex'), 'native CPU witness does not bind exact persisted plan bytes');
+        return { ...value.witness, sourceSha: execution.sourceSha, inferenceMainSha: execution.inferenceMainSha, binarySha256: execution.binarySha256, buildReceiptSha256: execution.buildReceiptSha256 };
+      },
       beginCase(cell) { alive(); const approved = a.approvedPlan?.plan.cases.find(c => c.caseId === cell.caseId && c.backend === a.backend); assert(dependencies.fixtureOnly || (approved && planHash(approved) === planHash(cell)), 'case/options not in immutable user-approved plan'); currentCase = cell; },
       failClosed(error) { abort.abort(error); },
       async pauseWorker() { restarting = true; await monitorTask; alive(); await stop(worker); workerPaused = true; return { pid: worker.pid }; },
