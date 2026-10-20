@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.app/testing/sc-26243-terminal-case-plan.schema.json",
+  "title": "FLUX3 installed-product terminal plan (not executed evidence)",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "status", "phases", "cases", "policy"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "enum": ["flux3-installed-product-representative-plan", "flux3-installed-product-diagnostic-catalog"] },
+    "diagnosticOnly": { "const": true },
+    "generationInvocations": { "type": "array", "maxItems": 48, "items": { "$ref": "#/$defs/invocation" } },
+    "resourceCases": { "type": "array", "items": { "type": "object", "required": ["caseId", "backend", "kind", "nativeGenerationCalls", "warmups", "repeats", "status"] } },
+    "trainingLifecycles": { "type": "array", "maxItems": 2, "items": { "type": "object", "required": ["lifecycleId", "caseId", "backend", "steps", "saveEvery", "rank", "resolution", "startId", "resumeId", "generationReloads"], "properties": { "steps": { "const": 4 }, "saveEvery": { "const": 1 }, "rank": { "const": 4 }, "resolution": { "const": 512 }, "generationReloads": { "const": 1 } } } },
+    "budget": { "type": "object", "required": ["globalHardCeiling", "totalGenerationInvocations", "byBackend", "unallocatedNotAuthorized"], "properties": { "globalHardCeiling": { "const": 48 }, "totalGenerationInvocations": { "type": "integer", "maximum": 48, "minimum": 0 }, "automaticWarmups": { "const": 0 }, "automaticRepeats": { "const": 0 }, "automaticRetries": { "const": 0 } } },
+    "uncovered": { "type": "array", "items": { "type": "object", "required": ["requirement", "status", "reason"] } },
+    "status": { "const": "NOT_RUN" },
+    "phases": { "type": "array", "items": { "$ref": "#/$defs/phase" }, "uniqueItems": true },
+    "cases": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/case" } },
+    "policy": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "invocation": {
+      "type": "object", "required": ["invocationId", "caseId", "backend", "kind", "purpose", "modelId", "tier", "options", "nativeGenerationCalls", "warmups", "repeats", "requestTemplate"],
+      "properties": {
+        "invocationId": { "type": "string", "minLength": 1 }, "caseId": { "type": "string", "minLength": 1 }, "backend": { "enum": ["mlx", "candle"] },
+        "kind": { "enum": ["product_generation", "resource_anchor", "resource_supplemental", "warmup", "repeat", "retry"] }, "purpose": { "type": "string" }, "modelId": { "type": "string" }, "tier": { "enum": ["bf16", "q4", "q8", "fp8r", "nvfp4"] },
+        "options": { "type": "object" }, "nativeGenerationCalls": { "const": 1 }, "warmups": { "const": 0 }, "repeats": { "const": 0 }, "requestTemplate": { "type": "object", "required": ["model", "mode", "seed", "width", "height", "count", "advanced"], "properties": { "count": { "const": 1 } } },
+        "requestSha256": { "$ref": "#/$defs/sha256" }, "parentRetryApprovalId": { "type": "string", "minLength": 1 }
+      }, "additionalProperties": false
+    },
+    "approval": {
+      "type": "object", "required": ["schemaVersion", "kind", "approvalId", "userPlanApprovalId", "approvedBy", "sourceSha", "inferenceMainSha", "ledgerId", "ledgerRoots", "inputSpecSha256", "plan"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "kind": { "const": "flux3-terminal-plan-approval" }, "approvalId": { "type": "string", "minLength": 1 }, "userPlanApprovalId": { "type": "string", "minLength": 1 }, "approvedBy": { "type": "string", "minLength": 1 },
+        "sourceSha": { "$ref": "#/$defs/revision" }, "inferenceMainSha": { "$ref": "#/$defs/revision" }, "ledgerId": { "type": "string", "pattern": "^[a-zA-Z0-9_-]{12,100}$" },
+        "ledgerRoots": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "type": "string", "minLength": 1 }, "candle": { "type": "string", "minLength": 1 } }, "additionalProperties": false },
+        "inputSpecSha256": { "type": "object", "required": ["mlx", "candle"], "properties": { "mlx": { "$ref": "#/$defs/sha256" }, "candle": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false },
+        "plan": { "allOf": [{ "$ref": "#" }, { "properties": { "kind": { "const": "flux3-installed-product-representative-plan" } } }] }
+      }, "additionalProperties": false
+    },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "revision": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+    "phase": { "enum": ["prerequisites", "ordinary", "references-layout", "upsampler", "adaptation", "native-tiers", "limits", "failures"] },
+    "case": {
+      "type": "object",
+      "required": ["schemaVersion", "caseId", "phase", "backend", "modelId", "tier", "kind", "artifactKey", "repository", "resolvedRevision", "inputBindings", "options", "expectedObservable", "semanticAcceptance", "visualObligations", "status", "blocker"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "caseId": { "type": "string", "pattern": "^(mlx|candle)\\.(distilled|base)\\.[a-z0-9_-]+\\.(bf16|q4|q8|fp8r|nvfp4)$" },
+        "phase": { "$ref": "#/$defs/phase" },
+        "backend": { "enum": ["mlx", "candle"] },
+        "modelId": { "enum": ["flux3_klein", "flux3_klein_base"] },
+        "tier": { "enum": ["bf16", "q4", "q8", "fp8r", "nvfp4"] },
+        "kind": { "enum": ["image", "installation", "provision", "cancel", "replay", "training", "reject", "installation-failure"] },
+        "artifactKey": { "type": "string", "pattern": "^(flux3_klein(_base)?|flux3_image_klein_pup):(mlx|candle):(bf16|q4|q8|fp8r|nvfp4)$" },
+        "repository": { "type": "string", "pattern": "^black-forest-labs/flux-3-image-klein(-base|-pup)?$" },
+        "resolvedRevision": { "$ref": "#/$defs/revision" },
+        "inputBindings": { "type": "array", "maxItems": 10, "items": { "type": "object", "required": ["role", "index", "binding", "instanceId"], "properties": { "role": { "const": "reference" }, "index": { "type": "integer", "minimum": 0, "maximum": 9 }, "binding": { "type": "string" }, "instanceId": { "type": "string", "minLength": 1 } }, "additionalProperties": false } },
+        "options": { "type": "object" },
+        "expectedObservable": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "semanticAcceptance": { "enum": ["PENDING", "NOT_APPLICABLE"] },
+        "visualObligations": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "status": { "enum": ["NOT_RUN", "BLOCKED"] },
+        "blocker": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "inventory": {
+      "type": "object",
+      "required": ["root", "repository", "resolvedRevision", "authority", "files"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "containmentRoot": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "minLength": 1 },
+        "resolvedRevision": { "$ref": "#/$defs/revision" },
+        "authority": { "const": "parent-approved-pinned-inventory" },
+        "role": { "enum": ["text_encoder", "autoencoder", "license"] },
+        "files": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["path", "bytes", "sha256"], "properties": { "path": { "type": "string", "minLength": 1 }, "bytes": { "type": "integer", "minimum": 1 }, "sha256": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false } },
+        "externalComponents": { "type": "array", "items": { "$ref": "#/$defs/inventory" } },
+        "components": { "type": "object", "properties": { "prompt_upsampler": { "$ref": "#/$defs/inventory" } }, "additionalProperties": false }
+      },
+      "additionalProperties": false
+    },
+    "inputSpec": {
+      "type": "object",
+      "properties": {
+        "images": { "type": "object", "additionalProperties": { "type": "object", "required": ["root", "path", "sha256"], "properties": { "root": { "type": "string" }, "path": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" } }, "additionalProperties": false } },
+        "packages": { "type": "object", "additionalProperties": { "$ref": "#/$defs/inventory" } },
+        "adapters": { "type": "object", "additionalProperties": { "type": "object", "required": ["root", "path", "sha256", "bytes", "rank", "repository", "resolvedRevision"], "properties": { "root": { "type": "string" }, "path": { "type": "string" }, "sha256": { "$ref": "#/$defs/sha256" }, "bytes": { "type": "integer", "minimum": 1 }, "rank": { "type": "integer", "minimum": 1, "maximum": 128 }, "repository": { "type": "string" }, "resolvedRevision": { "$ref": "#/$defs/revision" } }, "additionalProperties": false } },
+        "training": { "type": "object", "properties": { "captioned": { "$ref": "#/$defs/training" }, "edit": { "$ref": "#/$defs/training" } }, "additionalProperties": false }
+      },
+      "additionalProperties": false
+    },
+    "training": {
+      "type": "object",
+      "required": ["steps", "saveEvery", "items"],
+      "properties": {
+        "steps": { "const": 4 },
+        "saveEvery": { "const": 1 },
+        "rank": { "const": 4 },
+        "items": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["binding", "caption"], "properties": { "binding": { "type": "string", "minLength": 1 }, "caption": { "type": "string", "minLength": 1 }, "referenceBinding": { "type": "string", "minLength": 1 } }, "additionalProperties": false } }
+      },
+      "additionalProperties": false
+    }
+  }
+}
