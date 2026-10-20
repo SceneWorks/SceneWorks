@@ -61,8 +61,11 @@ export async function assertCheckpoint(file, cell, step) {
   const factors = Object.keys(header).filter(key => key.startsWith('factor/')); assert(factors.length, 'checkpoint must contain learned factors');
   const optimizer = {};
   if (cell.backend === 'candle') {
+    assert.equal(meta.optimizer, 'adamw', 'native Candle optimizer must match the proved AdamW profile');
+    assert(typeof meta.optimizer_config === 'string' && meta.optimizer_config.startsWith('adamw;lr='), 'actual native optimizer configuration required');
+    assert(/^[1-9][0-9]*$/.test(meta['optim.step'] ?? '') && Number.isSafeInteger(Number(meta['optim.step'])) && Number(meta['optim.step']) === cursor.update_step, 'actual native optimizer step differs from saved update cursor');
     const order = JSON.parse(meta.optimizer_order); assert(Array.isArray(order) && order.length === factors.length && new Set(order).size === order.length);
-    order.forEach((name, index) => { assert(header[`factor/${name}`] && header[`optim.${index}.m`] && header[`optim.${index}.v`], 'Candle AdamW checkpoint needs actual ordered m/v tensors'); optimizer[name] = { first: `optim.${index}.m`, second: `optim.${index}.v`, step: cursor.update_step }; });
+    order.forEach((name, index) => { assert(header[`factor/${name}`] && header[`optim.${index}.m`] && header[`optim.${index}.v`], 'Candle AdamW checkpoint needs actual ordered m/v tensors'); optimizer[name] = { first: `optim.${index}.m`, second: `optim.${index}.v`, step: Number(meta['optim.step']) }; });
   } else {
     assert(/^adamw;lr=[0-9a-f]{8};wd=[0-9a-f]{8};/.test(meta.optimizer_config ?? ''));
     const steps = JSON.parse(meta.optimizer_steps); assert(steps && typeof steps === 'object' && !Array.isArray(steps));
@@ -81,7 +84,7 @@ export async function assertCheckpoint(file, cell, step) {
     assert.equal(end - start, tensor.shape.reduce((n, side) => { assert(Number.isSafeInteger(side) && side > 0); return n * side; }, 1) * 4);
     const h = createHash('sha256'); for await (const bytes of createReadStream(file, { start: dataOffset + start, end: dataOffset + end - 1 })) h.update(bytes); assert.equal(h.digest('hex'), record.sha256, 'native checkpoint tensor payload differs from recorded optimizer/factor state');
   }
-  return { identity, cursor, format: meta.format, tensorManifest: manifest, optimizer, policy: meta.policy, gainBits: meta.gain_bits, pendingKeys: JSON.parse(meta.pending_keys) };
+  return { identity, cursor, format: meta.format, tensorManifest: manifest, optimizer, optimizerConfig: meta.optimizer_config, policy: meta.policy, gainBits: meta.gain_bits, pendingKeys: JSON.parse(meta.pending_keys) };
 }
 const need = (value, message) => { if (!value) throw new Blocked(message); };
 const safeId = id => { assert(/^[a-zA-Z0-9_.-]+$/.test(id), 'invalid API identity'); return encodeURIComponent(id); };

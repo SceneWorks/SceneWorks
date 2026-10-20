@@ -425,7 +425,9 @@ The driver binds that witness to the actual persisted native plan/config, datase
 paths/order/captions/content, dense DIT/TE/AE inventories and immutable native
 identity in both checkpoints. Accumulation is fixed at one, pending gradients
 must be empty, sampler/update/micro-step and RNG seed/next-step lineage must agree,
-active factors and optimizer moments must advance, and inactive workflow factors
+active factors and optimizer moments must advance, Candle's actual `optim.step`
+metadata must match the update cursor (never infer the counter from it), and
+initial/final optimizer configuration must remain identical. Inactive workflow factors
 must remain unchanged. Native MLX may legitimately omit optimizer moments for
 inactive captioned image_cond factors; no fake zero moments are invented. Synthetic
 Node fixtures test these checks but are **not** native Rust compile/CLI evidence;

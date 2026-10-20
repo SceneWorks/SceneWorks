@@ -69,6 +69,7 @@ export function verifyNativeContinuation(state, expected, previous) {
     if (active.has(name)) assert.equal(optim.step, cursor.update_step, 'active native optimizer did not update every accumulation-one step');
   }
   if (previous) {
+    assert.equal(state.optimizerConfig, previous.optimizerConfig, 'native optimizer configuration changed/reset after resume');
     const advanced = keys => keys.some(key => state.tensorManifest[key].sha256 !== previous.tensorManifest[key]?.sha256);
     assert(advanced([...active].map(key => `factor/${key}`)), 'active learned factors did not advance after resume');
     assert(advanced([...active].flatMap(key => [state.optimizer[key].first, state.optimizer[key].second])), 'active native optimizer moments did not advance after resume');

@@ -5157,6 +5157,67 @@ mod tests {
             1,
             "only config exists: no weight, tokenizer or dataset reads"
         );
+        // Compare the witness with the actual native identity builder, not another
+        // independently restated Debug/shape formula. Only a declared tiny byte fixture
+        // is read by request_fingerprint; no weights, preprocessing, tensors or device.
+        let bytes_file = temp.path().join("declared-fingerprint-fixture.bin");
+        std::fs::write(&bytes_file, b"DECLARED_SYNTHETIC_DATASET_BYTES").unwrap();
+        let cfg = gen_core::flux3::Flux3Config::from_dir(&base).unwrap();
+        for rank in [4, 8] {
+            plan.config.rank = rank;
+            let witness = flux3_training_config_witness(&plan).unwrap();
+            let request = TrainingRequest {
+                items: vec![TrainingItem {
+                    image_path: bytes_file.clone(),
+                    caption: "declared private fixture caption".into(),
+                    control_image_path: None,
+                    reference_image_paths: Vec::new(),
+                    subject_mask_path: None,
+                    model_options: Default::default(),
+                }],
+                config: engine_training_config(&plan),
+                output_dir: temp.path().join("never-written"),
+                file_name: "never-written.safetensors".into(),
+                trigger_words: plan.output.trigger_words.clone(),
+                cancel: CancelFlag::new(),
+            };
+            let options =
+                gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            let targets = gen_core::flux3::training::lora_targets(
+                &cfg.dit,
+                &request.config.lora_target_modules,
+            )
+            .unwrap();
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle-cuda"
+            };
+            let mut native = gen_core::flux3::training::identity::build(
+                &request,
+                &cfg,
+                &options,
+                BTreeMap::from([("DECLARED_FIXTURE_ONLY".into(), "d".repeat(64))]),
+                &targets,
+                &[],
+                backend,
+            )
+            .unwrap();
+            assert_eq!(
+                witness["configSha256"],
+                json!(native.configuration["config_sha256"])
+            );
+            assert_eq!(
+                witness["factors"],
+                serde_json::to_value(&native.factors).unwrap()
+            );
+            native.configuration.remove("recipe_sha256");
+            assert_eq!(
+                witness["configuration"],
+                serde_json::to_value(&native.configuration).unwrap()
+            );
+            assert!(!temp.path().join("never-written").exists());
+        }
         plan.target.base_model = "flux3_klein".into();
         assert!(flux3_training_config_witness(&plan).is_err());
     }
