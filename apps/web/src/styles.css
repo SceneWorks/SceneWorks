@@ -7364,6 +7364,53 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
 }
 
+/* Per-component installation details + supported limits (sc-24216). Same muted 12px disclosure as
+   the licence row above it, so the card gains no new visual idiom. */
+.model-component-details,
+.model-conversion-problem {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-component-details > summary,
+.model-conversion-problem > summary {
+  cursor: pointer;
+}
+
+.model-component-table {
+  width: 100%;
+  margin-top: 6px;
+  border-collapse: collapse;
+}
+
+.model-component-table th,
+.model-component-table td {
+  padding: 3px 6px 3px 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.model-component-table th {
+  font-weight: 600;
+}
+
+.model-component-repo {
+  overflow-wrap: anywhere;
+}
+
+.model-component-revision {
+  font-family: var(--font-mono);
+}
+
+.model-component-total,
+.model-component-limits {
+  margin: 6px 0 0;
+}
+
+.model-component-limits {
+  padding-left: 16px;
+}
+
 .su-license-note {
   padding: 0 12px 10px;
   margin-top: -4px;

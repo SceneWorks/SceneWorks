@@ -12225,6 +12225,70 @@ mod variant_install_tests {
         assert_eq!(converted_artifact_dir(&escaping, data_dir), None);
     }
 
+    /// sc-24216, end to end through the whole-model delete's removal: the converted bundle and the
+    /// source checkpoint go, the installed co-requisites (shareable with other models) stay, and
+    /// the catalog no longer reads the model as converted.
+    #[tokio::test]
+    async fn whole_model_delete_reclaims_the_converted_bundle_and_keeps_shared_components() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "supra2_img",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "supra2_img",
+                "convertSourceRepo": "SupraLabs/Supra2-IMG",
+                "convertSourceFile": "model_final_ema.pt"
+            },
+            "downloads": [
+                { "provider": "huggingface", "repo": "SupraLabs/Supra2-IMG", "default": true,
+                  "files": ["model_final_ema.pt"] },
+                { "provider": "huggingface", "repo": "google/flan-t5-base", "coRequisite": true,
+                  "componentId": "text_encoder", "files": ["config.json"] },
+                { "provider": "huggingface", "repo": "stabilityai/sd-vae-ft-mse",
+                  "coRequisite": true, "componentId": "vae", "files": ["config.json"] }
+            ]
+        });
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        seed_cache(data_dir, "google/flan-t5-base", &["config.json"]);
+        seed_cache(data_dir, "stabilityai/sd-vae-ft-mse", &["config.json"]);
+        let converted = data_dir.join("models").join("mlx").join("supra2_img");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(converted.join("denoiser.safetensors"), b"weights").unwrap();
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "supra2_img",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!converted.exists(), "the converted bundle is reclaimed");
+        assert!(
+            !huggingface_repo_cache_path(data_dir, "SupraLabs/Supra2-IMG")
+                .unwrap()
+                .exists()
+        );
+        for shared in ["google/flan-t5-base", "stabilityai/sd-vae-ft-mse"] {
+            assert!(
+                huggingface_repo_cache_path(data_dir, shared)
+                    .unwrap()
+                    .exists(),
+                "{shared} survives the delete"
+            );
+        }
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_source");
+    }
+
     /// Mark a convert-at-install model "converted" by writing its local MLX `config.json`.
     fn seed_converted(data_dir: &FsPath, model_id: &str) {
         let dir = data_dir.join("models").join("mlx").join(model_id);

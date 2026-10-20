@@ -156,6 +156,46 @@ mod tests {
         assert!(error.to_string().contains("missing"), "{error}");
     }
 
+    /// sc-24216: an injected converted bundle that fails the engine's pin contract (here: the
+    /// install marker survived but the bundle manifest did not) is refused at weight resolution
+    /// with an actionable message naming the Model Manager remedy — before any load and never as a
+    /// stubbed or downloaded fallback — and the dispatch gap surfaces that same message.
+    #[test]
+    fn a_damaged_converted_bundle_is_refused_with_an_actionable_message() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let bundle = data.path().join("models/mlx/supra2_img");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("model_index.json"), b"{}").unwrap();
+        let mut entry = shipped_supra2_entry();
+        entry.insert("modelPath".to_owned(), json!(bundle));
+        let payload = json!({
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "prompt": "a lighthouse",
+            "width": 256,
+            "height": 256,
+            "modelManifestEntry": Value::Object(entry),
+        });
+        let request = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().unwrap(),
+        );
+        let settings = settings_at(data.path());
+        let error = super::super::resolve_weights_dir(&request, &settings)
+            .expect_err("a damaged bundle never resolves");
+        let message = error.to_string();
+        assert!(
+            message.contains("Supra2-IMG's converted model files are damaged or incomplete")
+                && message.contains("run Convert again")
+                && message.contains(gen_core::supra2::BUNDLE_MANIFEST),
+            "{message}"
+        );
+        assert_eq!(
+            super::super::mlx_weights_gap(&request, &settings).as_deref(),
+            Some(message.as_str())
+        );
+    }
+
     // ---------------------------------------------------------------------------------------
     // Real weights: one 256x256 render through the production MLX job arm.
     // ---------------------------------------------------------------------------------------
@@ -170,17 +210,55 @@ mod tests {
 
     type Posts = Arc<Mutex<Vec<Value>>>;
 
+    /// The stub jobs API's state: every progress POST, plus a user-cancel that (when armed) is
+    /// requested the moment the first denoise step is reported — a cancel mid-denoise.
+    #[derive(Clone, Default)]
+    struct JobApi {
+        posts: Posts,
+        cancel_on_first_step: bool,
+        cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl JobApi {
+        fn cancel_requested(&self) -> bool {
+            self.cancel_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
     async fn spawn_job_api() -> (String, Posts) {
-        async fn job_route(AxumPath(job_id): AxumPath<String>) -> Response {
-            Json(crate::tests::job_snapshot_json(&job_id, false)).into_response()
+        spawn_job_api_with(false).await
+    }
+
+    async fn spawn_job_api_with(cancel_on_first_step: bool) -> (String, Posts) {
+        async fn job_route(
+            State(api): State<JobApi>,
+            AxumPath(job_id): AxumPath<String>,
+        ) -> Response {
+            Json(crate::tests::job_snapshot_json(
+                &job_id,
+                api.cancel_requested(),
+            ))
+            .into_response()
         }
         async fn progress_route(
-            State(posts): State<Posts>,
+            State(api): State<JobApi>,
             AxumPath(job_id): AxumPath<String>,
             Json(body): Json<Value>,
         ) -> Response {
-            posts.lock().unwrap().push(body);
-            Json(crate::tests::job_snapshot_json(&job_id, false)).into_response()
+            let is_step = body["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(" step "));
+            api.posts.lock().unwrap().push(body);
+            if api.cancel_on_first_step && is_step {
+                api.cancel_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Json(crate::tests::job_snapshot_json(
+                &job_id,
+                api.cancel_requested(),
+            ))
+            .into_response()
         }
         async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Response {
             Json(json!({
@@ -190,7 +268,11 @@ mod tests {
             }))
             .into_response()
         }
-        let posts: Posts = Arc::default();
+        let api = JobApi {
+            cancel_on_first_step,
+            ..JobApi::default()
+        };
+        let posts = api.posts.clone();
         let app = Router::new()
             .route("/api/v1/jobs/:job_id", get(job_route))
             .route("/api/v1/jobs/:job_id/progress", post(progress_route))
@@ -198,7 +280,7 @@ mod tests {
                 "/api/v1/workers/:worker_id/heartbeat",
                 post(heartbeat_route),
             )
-            .with_state(posts.clone());
+            .with_state(api);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -315,5 +397,186 @@ mod tests {
             std::fs::copy(&pngs[0], &target).unwrap();
             eprintln!("render saved: {}", target.display());
         }
+    }
+
+    /// One job through the production MLX arm against a fresh stub jobs API.
+    async fn run_lifecycle_job(
+        settings: &Settings,
+        entry: &JsonObject,
+        project: &Path,
+        job_id: &str,
+        steps: u32,
+        cancel_on_first_step: bool,
+    ) -> (crate::WorkerResult<()>, Vec<Value>, Vec<Value>) {
+        let (base_url, posts) = spawn_job_api_with(cancel_on_first_step).await;
+        let mut settings = settings.clone();
+        settings.api_url = base_url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(crate::tests::job_snapshot_json(job_id, false)).unwrap();
+        let payload = json!({
+            "projectId": "project-supra2",
+            "model": "supra2_img",
+            "mode": "text_to_image",
+            "prompt": "a red fox sitting in fresh snow, soft morning light",
+            "width": 256,
+            "height": 256,
+            "count": 1,
+            "seed": 0,
+            "advanced": { "steps": steps },
+            "modelManifestEntry": Value::Object(entry.clone()),
+        });
+        let request = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().unwrap(),
+        );
+        let plan = super::super::ImagePlan::with_count(&request, request.image_count(), None);
+        let mut asset_writes = Vec::new();
+        let outcome = super::super::generate_stream(
+            &api,
+            &settings,
+            &job,
+            &plan,
+            project,
+            "mlx",
+            &mut asset_writes,
+        )
+        .await;
+        let posts = posts.lock().unwrap().clone();
+        (outcome, posts, asset_writes)
+    }
+
+    fn messages(posts: &[Value]) -> Vec<String> {
+        posts
+            .iter()
+            .filter_map(|post| post["message"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    fn pngs_under(root: &Path) -> Vec<PathBuf> {
+        files_under(root)
+            .into_iter()
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect()
+    }
+
+    /// The installed-model job lifecycle (sc-24216) on real weights, fully OFFLINE: after the
+    /// install-time conversion, with `HF_HUB_OFFLINE=1` and the Hub base URL pointed at a closed
+    /// port (any network attempt fails the job), the production MLX arm
+    ///   1. reports per-step progress and is CANCELED mid-denoise by a user cancel — the job ends
+    ///      `Canceled`, posts the terminal canceled state, and writes no image;
+    ///   2. RECOVERS: the next job in the same process completes with step 1..N + decoding progress
+    ///      and one 256x256 image, and the generator stays resident;
+    ///   3. UNLOADS: evicting the cached generator frees it, and a job after the unload reloads
+    ///      from the local files and renders the identical image (same seed, same pinned weights).
+    /// Env as [`supra2_real_weight_render_through_the_worker_arm`].
+    #[test]
+    #[ignore = "real weights + Metal: needs SUPRA2_HF_HUB_CACHE with the three pinned snapshots"]
+    fn supra2_real_weight_offline_lifecycle_cancel_recover_unload() {
+        let hub = std::env::var("SUPRA2_HF_HUB_CACHE").expect("SUPRA2_HF_HUB_CACHE");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.as_str()),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("HF_HUB_OFFLINE", "1"),
+        ]);
+        let data = tempfile::tempdir().unwrap();
+        let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            crate::model_jobs::huggingface_pinned_snapshot_dir(data.path(), pin.repo, pin.revision)
+                .unwrap_or_else(|| panic!("{}@{} is not cached", pin.repo, pin.revision))
+        };
+        let bundle = data.path().join("models/mlx/supra2_img");
+        crate::model_jobs::convert_supra2_bundle(
+            &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+            &snapshot(gen_core::supra2::FLAN_T5_BASE),
+            &snapshot(gen_core::supra2::SD_VAE),
+            &bundle,
+        )
+        .expect("install-time conversion");
+        let mut entry = shipped_supra2_entry();
+        entry.insert("modelPath".to_owned(), json!(bundle));
+        let mut settings = settings_at(data.path());
+        // Offline: a Hub fetch anywhere on the load/generate path would hit a closed port.
+        settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // 1. Cancel mid-denoise (a long schedule so the 2 s cancel poll lands mid-run).
+            let canceled_project = tempfile::tempdir().unwrap();
+            let (outcome, posts, _) = run_lifecycle_job(
+                &settings,
+                &entry,
+                canceled_project.path(),
+                "job-supra2-cancel",
+                400,
+                true,
+            )
+            .await;
+            assert!(
+                matches!(outcome, Err(crate::WorkerError::Canceled(_))),
+                "the user cancel ends the job Canceled: {outcome:?}\n{posts:#?}"
+            );
+            let text = messages(&posts);
+            assert!(text.iter().any(|m| m.contains("step 1/400")), "{text:#?}");
+            assert!(
+                !text.iter().any(|m| m.contains("step 400/400")),
+                "canceled before the schedule ran out: {text:#?}"
+            );
+            assert_eq!(posts.last().unwrap()["status"], "canceled", "{posts:#?}");
+            assert!(pngs_under(canceled_project.path()).is_empty());
+
+            // 2. Recovery: the next job completes in the same process.
+            let first = tempfile::tempdir().unwrap();
+            let (outcome, posts, assets) =
+                run_lifecycle_job(&settings, &entry, first.path(), "job-supra2-a", 50, false).await;
+            outcome.unwrap_or_else(|error| panic!("recovery render failed: {error}\n{posts:#?}"));
+            assert_eq!(assets.len(), 1, "{assets:#?}");
+            let text = messages(&posts);
+            for expected in ["step 1/50", "step 50/50", "decoding"] {
+                assert!(
+                    text.iter().any(|m| m.contains(expected)),
+                    "{expected}: {text:#?}"
+                );
+            }
+            let first_png = pngs_under(first.path());
+            assert_eq!(first_png.len(), 1);
+            let first_image = image::open(&first_png[0]).unwrap().to_rgb8();
+            assert_eq!(first_image.dimensions(), (256, 256));
+            assert!(
+                crate::generator_cache::cached_generator_resident_bytes()
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the completed job leaves Supra2 resident for the next one"
+            );
+
+            // 3. Unload, then a job reloads from the local files.
+            assert!(crate::generator_cache::evict_cached_generator()
+                .await
+                .unwrap());
+            assert!(crate::generator_cache::cached_generator_resident_bytes()
+                .await
+                .unwrap()
+                .is_none());
+            let second = tempfile::tempdir().unwrap();
+            let (outcome, posts, _) =
+                run_lifecycle_job(&settings, &entry, second.path(), "job-supra2-b", 50, false)
+                    .await;
+            outcome
+                .unwrap_or_else(|error| panic!("post-unload render failed: {error}\n{posts:#?}"));
+            let second_png = pngs_under(second.path());
+            assert_eq!(second_png.len(), 1);
+            assert_eq!(
+                image::open(&second_png[0]).unwrap().to_rgb8(),
+                first_image,
+                "the reload renders the identical seed-0 image"
+            );
+            assert!(crate::generator_cache::evict_cached_generator()
+                .await
+                .unwrap());
+        });
     }
 }
