@@ -23,7 +23,6 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const isMac = process.platform === "darwin";
 
 const RUST = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$|^\.cargo\/.*\.toml$/;
 const WEB = /^(apps\/web\/|config\/|packages\/)/;
@@ -213,7 +212,9 @@ function run(command, env = {}) {
   return res.error ? 1 : res.status;
 }
 
-export function selectSteps(files, all, root = repoRoot) {
+export function selectSteps(files, all, root = repoRoot, platform = process.platform) {
+  // Receipt verification recomputes the producer's Mac selection without changing CLI defaults.
+  const isMac = platform === "darwin";
   const touches = (pattern) => all || files.some((file) => pattern.test(file));
   const steps = [];
   if (touches(RUST)) {

@@ -117,6 +117,30 @@ on:
     branches: [main, "feature/*"]
   workflow_dispatch:
     inputs:
+      verification_profile:
+        description: "Explicit secondary-Mac verification; legacy preserves the existing dispatch paths"
+        type: choice
+        required: false
+        default: legacy
+        options: [legacy, facts-and-projections, canonical-preflight]
+      source_sha:
+        description: "Exact SceneWorks commit for explicit verification profiles"
+        type: string
+        required: false
+      source_ref:
+        description: "Owned story/sc-* or feature/sc-* branch containing source_sha (or main)"
+        type: string
+        required: false
+      base_ref:
+        description: "Expected main or feature/sc-* PR target, without origin/"
+        type: string
+        required: false
+        default: main
+      allow_nax_unit:
+        description: "Separately admitted weights-free NAX GPU unit for canonical preflight, never a campaign"
+        type: boolean
+        required: false
+        default: false
       run_memory_calibration:
         description: "Build and run the authoritative MLX memory-strategy adapter"
         required: false
@@ -237,6 +261,7 @@ jobs:
   # push / pull_request runs reach this job already path-filtered by the triggers, so it re-answers
   # `true` for them; that is a couple of cheap seconds to keep one code path rather than two.
   changes:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy' }}
     uses: ./.github/workflows/changed-paths.yml
     with:
       lane: .github/workflows/macos-mlx.yml
@@ -333,7 +358,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy') && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
@@ -513,7 +538,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy') && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     # The default PR/main path needs only `nax`. A final same-repo PR to `main`
     # whose title starts with `[Mac2]`, and the resulting main push whose merge
     # subject starts with `[Mac2]`, use the `rw-mage` label to select nax-macos-2.
@@ -959,3 +984,144 @@ jobs:
           path: |
             ${{ runner.temp }}/sc-16059-mlx-fresh.json
           if-no-files-found: error
+
+  # No legacy job runs for an explicit verification profile. The receipt is produced by the exact
+  # canonical command, not by translating ordinary CI verdicts or skipping NAX on a hosted Mac.
+  manual-verification:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_profile != 'legacy' && github.repository == 'SceneWorks/SceneWorks' }}
+    runs-on: [self-hosted, macOS, ARM64, rw-llm]
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: "true"
+      MACOSX_DEPLOYMENT_TARGET: "26.2"
+      CARGO_BUILD_JOBS: "2"
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+      RUSTC_WRAPPER: ""
+      CARGO_NET_OFFLINE: "false"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../remote-verification-target
+      VERIFICATION_CANDIDATE_PATH: ${{ github.workspace }}/candidate-${{ github.run_id }}-${{ github.run_attempt }}
+      VERIFICATION_PROFILE: ${{ inputs.verification_profile }}
+      VERIFICATION_SOURCE_SHA: ${{ inputs.source_sha }}
+      VERIFICATION_SOURCE_REF: ${{ inputs.source_ref }}
+      VERIFICATION_BASE_REF: ${{ inputs.base_ref }}
+      VERIFICATION_INFERENCE_SHA: ${{ inputs.inference_revision }}
+      VERIFICATION_ALLOW_NAX_UNIT: ${{ inputs.allow_nax_unit }}
+      VERIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      VERIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
+      VERIFICATION_LEGACY_INPUTS: ${{ inputs.run_memory_calibration || inputs.run_five_rung_reference || inputs.provision_qwen_snapshot || inputs.provision_z_image_snapshot }}
+    steps:
+      - name: Require actual secondary Mac before setup
+        run: |
+          test "$RUNNER_NAME" = nax-macos-2
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+      - name: Checkout authenticated dispatcher
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Validate manual request before source execution
+        run: node "$GITHUB_WORKSPACE/control/scripts/remote-macos-verification.mjs" request
+      - name: Checkout exact owned source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require exact source and NAX runtime SDK hardware
+        run: node "$GITHUB_WORKSPACE/control/scripts/remote-macos-verification.mjs" check "$VERIFICATION_CANDIDATE_PATH"
+      - name: Initialize owned paths and exact SDK
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          {
+            echo "VERIFICATION_OUTPUT=$RUNNER_TEMP/macos-verification-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            echo "TMPDIR=$(mktemp -d "$RUNNER_TEMP/macos-verification-tmp.XXXXXX")"
+            echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)"
+          } >> "$GITHUB_ENV"
+          diskutil info / | grep -E 'Container Free Space|Volume Free Space|Available Space'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+          components: clippy,rustfmt
+      - name: Require real canonical cross checks
+        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
+        run: |
+          # Fail before Cargo, rather than accepting check-candle-build's developer allow-skip.
+          command -v x86_64-unknown-linux-gnu-gcc
+          rustup target add x86_64-unknown-linux-gnu
+      - name: Fetch exact prebuilt MLX or build its exact source
+        working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning::Exact prebuilt unavailable; this run will build the pinned MLX source"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Install locked Node tooling
+        working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix apps/web
+      - name: Prepare exact source fixtures for canonical Node checks
+        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
+        working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
+        run: |
+          # The same source-only prerequisites as check.yml's parity-scaffold job. These fetch
+          # retained source trees, NOT weights, measurements, attestation renewals or campaigns.
+          inference_root="$RUNNER_TEMP/macos-verification-inference-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          terminal_root="$RUNNER_TEMP/macos-verification-terminal-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          git init -q "$inference_root"
+          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference
+          git -C "$inference_root" fetch -q --depth=1 origin "$VERIFICATION_INFERENCE_SHA"
+          revisions="$RUNNER_TEMP/macos-verification-revisions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
+          node scripts/anchor-loader-closure.mjs --anchor-revisions > "$revisions"
+          while read -r revision; do
+            [ -n "$revision" ] || continue
+            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+            git -C "$inference_root" fetch -q --depth=1 origin "$revision"
+          done < "$revisions"
+          git -C "$inference_root" checkout -q --detach "$VERIFICATION_INFERENCE_SHA"
+          git init -q "$terminal_root"
+          git -C "$terminal_root" remote add origin https://github.com/SceneWorks/inference
+          git -C "$terminal_root" fetch -q --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+          git -C "$terminal_root" checkout -q --detach FETCH_HEAD
+          test "$(git -C "$terminal_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+          {
+            echo "INFERENCE_REPO=$inference_root"
+            echo "SCENEWORKS_INFERENCE_REPO=$inference_root"
+            echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$terminal_root"
+          } >> "$GITHUB_ENV"
+      - name: Run exact remote verification
+        run: node "$GITHUB_WORKSPACE/control/scripts/remote-macos-verification.mjs" run "$VERIFICATION_CANDIDATE_PATH" "$VERIFICATION_OUTPUT"
+      - name: Upload remote verification artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-verification-${{ inputs.verification_profile }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.VERIFICATION_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 14
