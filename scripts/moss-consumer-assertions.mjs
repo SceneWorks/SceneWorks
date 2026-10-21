@@ -115,21 +115,104 @@ function git(root, ...args) {
 function snapshot(root) { return { head: git(root, "rev-parse", "HEAD"), clean: git(root, "status", "--porcelain") === "" }; }
 function store(file, value) { mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.tmp`; writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`); renameSync(tmp, file); }
 
-export async function executeCpuCommand(root, args, log, limitMs, state) {
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function cpuProcesses() {
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,pgid=,uid=,stat=,lstart=,comm="], { encoding: "utf8", env: { ...process.env, LC_ALL: "C" }, timeout: 3000, maxBuffer: 8 * 1024 * 1024 });
+  requireFact(!result.error && result.status === 0, "owned CPU process audit unavailable");
+  const rows = new Map();
+  for (const line of result.stdout.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 11) continue;
+    const [pid, ppid, pgid, uid] = parts.slice(0, 4).map(Number);
+    if (![pid, ppid, pgid, uid].every(Number.isSafeInteger)) continue;
+    rows.set(pid, { pid, ppid, pgid, uid, status: parts[4], birth: parts.slice(5, 10).join(" "), command: parts.slice(10).join(" ") });
+  }
+  return rows;
+}
+
+// Only the command we spawned and observed descendants belong to this supervisor. Never signal
+// a numeric process group: root exit/PID reuse must not turn cleanup into a signal to a stranger.
+export function ownedCpuTree(rootPid, { sample = cpuProcesses, send = (pid, signal) => process.kill(pid, signal), graceMs = 2000 } = {}) {
+  const known = new Map(), uid = process.getuid?.();
+  requireFact(Number.isSafeInteger(uid), "owned CPU supervision requires POSIX process identities");
+  // exec (rustup -> cargo, or a build-script launcher) changes comm without changing birth/UID.
+  const matches = (row, identity) => row && row.uid === identity.uid && row.birth === identity.birth;
+  const observe = () => {
+    const rows = sample(), root = rows.get(rootPid);
+    if (!known.has(rootPid) && root?.ppid === process.pid && root.uid === uid && root.pgid === rootPid) known.set(rootPid, root);
+    const live = new Set([...known].filter(([pid, identity]) => matches(rows.get(pid), identity) && !rows.get(pid).status.startsWith("Z")).map(([pid]) => pid));
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const groupProven = [...live].some(pid => rows.get(pid).pgid === rootPid);
+      for (const row of rows.values()) {
+        if (live.has(row.pid) || row.uid !== uid || row.status.startsWith("Z")) continue;
+        if (live.has(row.ppid) || (groupProven && row.pgid === rootPid)) {
+          if (!known.has(row.pid)) known.set(row.pid, row);
+          if (matches(row, known.get(row.pid))) { live.add(row.pid); changed = true; }
+        }
+      }
+    }
+    return { live: [...live].map(pid => rows.get(pid)), unknown: [...rows.values()].filter(row => row.pgid === rootPid && !row.status.startsWith("Z") && !live.has(row.pid)) };
+  };
+  const cleanup = async () => {
+    const errors = [];
+    for (const signal of ["SIGTERM", "SIGKILL"]) {
+      const current = observe();
+      // Descendants first; every individual PID is reauthenticated immediately before signaling.
+      for (const row of current.live.sort((a, b) => (a.pid === rootPid) - (b.pid === rootPid))) {
+        const fresh = sample().get(row.pid);
+        if (!matches(fresh, known.get(row.pid)) || fresh.status.startsWith("Z")) continue;
+        try { send(row.pid, signal); } catch (error) { if (error.code !== "ESRCH") errors.push(`${signal} pid ${row.pid}: ${error.code ?? error.message}`); }
+      }
+      const until = performance.now() + graceMs;
+      while (observe().live.length && performance.now() < until) await delay(25);
+      if (!observe().live.length) break;
+    }
+    const after = observe();
+    return { errors, remaining: after.live.map(row => row.pid), unproven: after.unknown.map(row => row.pid) };
+  };
+  return { observe, cleanup };
+}
+
+export async function executeCpuCommand(root, args, log, limitMs, state, supervision = {}) {
   const { openSync, closeSync, writeSync } = await import("node:fs");
-  const fd = openSync(log, "w");
+  const fd = openSync(log, "w"), deadline = performance.now() + limitMs;
   console.log(JSON.stringify({ command: args, log: path.basename(log), bound_ms: limitMs }));
   const child = spawn(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
-  for (const stream of [child.stdout, child.stderr]) stream.on("data", bytes => { writeSync(fd, bytes); process.stdout.write(bytes); });
+  let closed = false, logOpen = true, exit = null, failure = null;
+  const completion = new Promise(resolve => {
+    child.on("error", error => { failure ??= error.message; });
+    child.on("close", (code, signal) => { closed = true; exit = code ?? (signal ? 1 : 0); resolve(); });
+  });
+  for (const stream of [child.stdout, child.stderr]) stream.on("data", bytes => { if (logOpen) { writeSync(fd, bytes); process.stdout.write(bytes); } });
   state.child = Number.isInteger(child.pid) ? child : null;
-  const stop = signal => { try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; } };
-  let exceeded = false, escalation;
-  const timer = setTimeout(() => { exceeded = true; stop("SIGTERM"); escalation = setTimeout(() => stop("SIGKILL"), 2000); }, limitMs);
+  const tree = ownedCpuTree(child.pid, supervision);
   try {
-    const exit = await new Promise((resolve, reject) => { child.on("error", reject); child.on("close", (code, signal) => resolve(code ?? (signal ? 1 : 0))); });
-    requireFact(!exceeded && !state.cancelled, "managed deadline/cancellation");
-    return { exit, output: readFileSync(log, "utf8") };
-  } finally { clearTimeout(timer); if (escalation) clearTimeout(escalation); if (state.cancelEscalation) { clearTimeout(state.cancelEscalation); state.cancelEscalation = null; } if ((exceeded || state.cancelled) && Number.isInteger(child.pid)) stop("SIGKILL"); state.child = null; closeSync(fd); }
+    while (!closed) {
+      tree.observe();
+      if (state.cancelled || performance.now() >= deadline) { failure ??= "managed deadline/cancellation"; break; }
+      await Promise.race([completion, delay(100)]);
+    }
+  } catch (error) { failure ??= error.message; }
+  finally {
+    // Root close is not proof that its children exited. Reap observed owned descendants too;
+    // conversely, an already-empty tree receives no post-close SIGKILL at all.
+    try {
+      const before = tree.observe();
+      if (before.live.length || before.unknown.length) failure ??= "owned CPU descendants outlived command";
+      const cleanup = await tree.cleanup();
+      state.cleanup = cleanup;
+      state.unsafeToRestore = cleanup.remaining.length > 0 || cleanup.unproven.length > 0;
+      if (cleanup.errors.length || state.unsafeToRestore) failure = `${failure ?? "owned CPU cleanup failed"}; cleanup: ${JSON.stringify(cleanup)}`;
+      if (!closed && !state.unsafeToRestore) await completion;
+    } catch (error) { state.unsafeToRestore = true; failure = `${failure ?? "owned CPU cleanup failed"}; cleanup: ${error.message}`; }
+    if (closed) state.child = null;
+    logOpen = false;
+    closeSync(fd);
+  }
+  requireFact(!failure, failure);
+  return { exit, output: readFileSync(log, "utf8") };
 }
 
 export async function runAssertions(root, output, { execute = executeCpuCommand, inspect = snapshot, now = () => performance.now(), budgetMs = 80 * 60 * 1000, spec = loadRegistry(), signals = true } = {}) {
@@ -138,7 +221,18 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
   const initial = inspect(root); requireFact(SHA.test(initial.head) && initial.clean, "exact clean source required before assertion driver");
   const originals = Object.fromEntries(MUTABLE_FILES.map(file => [file, readFileSync(path.join(root, file))]));
   const hashes = values => Object.fromEntries(MUTABLE_FILES.map(file => [file, digest(values[file])]));
-  const restore = () => { for (const file of MUTABLE_FILES) { writeFileSync(path.join(root, file), originals[file]); utimesSync(path.join(root, file), new Date(), new Date()); } };
+  const restore = () => {
+    for (const file of MUTABLE_FILES) {
+      let current;
+      try { current = readFileSync(path.join(root, file)); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      // Audit every mutable file, including unexpected changes, but do not invalidate Cargo's
+      // dependency graph by rewriting already-identical core sources after a worker-only case.
+      if (!current?.equals(originals[file])) {
+        writeFileSync(path.join(root, file), originals[file]);
+        utimesSync(path.join(root, file), new Date(), new Date());
+      }
+    }
+  };
   const verifyRestored = () => MUTABLE_FILES.every(file => readFileSync(path.join(root, file)).equals(originals[file]));
   // Validate every planned patch against baseline BEFORE spending a compile or changing a byte.
   for (const item of spec.cases) {
@@ -148,17 +242,10 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
   mkdirSync(output, { recursive: false });
   const resultPath = path.join(output, "assertions.json");
   const result = { schema_version: 2, status: "running", source_sha: initial.head, registry_sha256: spec.registry_sha256, driver_sha256: digest(readFileSync(fileURLToPath(import.meta.url))), test_ids: Object.keys(TESTS), baseline: [], cases: [], final_green: [], source_before: hashes(originals), source_after: {}, restored: false };
-  const state = { child: null, cancelled: false, cancelEscalation: null };
-  const cancel = () => {
-    state.cancelled = true;
-    if (state.child) {
-      const pid = state.child.pid;
-      const stop = signal => { try { process.kill(-pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; } };
-      stop("SIGTERM");
-      if (!state.cancelEscalation) state.cancelEscalation = setTimeout(() => stop("SIGKILL"), 2000);
-    } else restore();
-    // An active compiler is reaped before finally restores source; it cannot race a restore write.
-  };
+  const state = { child: null, cancelled: false, unsafeToRestore: false };
+  // The command supervisor observes cancellation, authenticates and reaps its owned CPU tree
+  // before source restoration. The signal handler itself never guesses a numeric process group.
+  const cancel = () => { state.cancelled = true; };
   if (signals) { process.on("SIGTERM", cancel); process.on("SIGINT", cancel); }
   const invoke = async (args, label, maxMs) => {
     requireFact(!state.cancelled && deadline > now(), "original driver deadline exhausted");
@@ -184,7 +271,7 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
         for (const patch of item.patches) { const file = path.join(root, patch.file); writeFileSync(file, patchText(readFileSync(file, "utf8"), patch)); utimesSync(file, new Date(), new Date()); }
         for (const key of item.tests) record.red.push(await selected(key, `${item.id}-red-${key}`, "red"));
         record.killed = true;
-      } finally { restore(); record.restored = verifyRestored(); store(resultPath, result); }
+      } finally { if (!state.unsafeToRestore) restore(); record.restored = verifyRestored(); store(resultPath, result); }
       requireFact(record.restored, "mutation source did not restore");
       for (const key of item.tests) record.green.push(await selected(key, `${item.id}-green-${key}`, "green"));
       store(resultPath, result);
@@ -193,12 +280,13 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
     result.status = "passed";
   } catch (error) { result.status = "failed"; result.failure = error.message; }
   finally {
-    restore(); result.restored = verifyRestored();
+    if (!state.unsafeToRestore) restore(); result.restored = verifyRestored();
+    if (state.cleanup) result.cleanup = state.cleanup;
     result.source_after = hashes(Object.fromEntries(MUTABLE_FILES.map(file => [file, readFileSync(path.join(root, file))])));
     const after = inspect(root); result.clean_after = after.clean; result.head_after = after.head;
     result.elapsed_seconds = (now() - start) / 1000;
     if (signals) { process.off("SIGTERM", cancel); process.off("SIGINT", cancel); }
-    if (!result.restored || !after.clean || after.head !== initial.head || now() > deadline) result.status = "failed";
+    if (state.unsafeToRestore || !result.restored || !after.clean || after.head !== initial.head || now() > deadline) result.status = "failed";
     if (result.status === "passed") {
       try { validateAssertionReceipt(result, spec, initial.head, digest(readFileSync(fileURLToPath(import.meta.url)))); }
       catch (error) { result.status = "failed"; result.failure = error.message; }

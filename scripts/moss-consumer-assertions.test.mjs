@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const modulePath = process.env.MOSS_ASSERTIONS_UNDER_TEST ?? fileURLToPath(new URL("./moss-consumer-assertions.mjs", import.meta.url));
-const { bodySpan, digest, loadRegistry, MUTABLE_FILES, parseTestResult, patchText, REGISTRY_PATH, runAssertions, TESTS, validateAssertionReceipt } = await import(pathToFileURL(modulePath));
+const { bodySpan, digest, executeCpuCommand, loadRegistry, MUTABLE_FILES, ownedCpuTree, parseTestResult, patchText, REGISTRY_PATH, runAssertions, TESTS, validateAssertionReceipt } = await import(pathToFileURL(modulePath));
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHA = "a".repeat(40);
@@ -106,9 +106,162 @@ test("receipt validates case IDs, exact selected test counts, implementation has
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("restore rewrites and touches only changed files while auditing every mutable source", async () => {
+  const f = fixture();
+  try {
+    for (const file of MUTABLE_FILES) utimesSync(path.join(f.root, file), new Date(1000), new Date(1000));
+    const before = Object.fromEntries(MUTABLE_FILES.map(file => [file, statSync(path.join(f.root, file), { bigint: true })]));
+    const execute = f.options.execute;
+    let corrupted = false;
+    f.options.execute = async (...args) => {
+      const red = !readFileSync(path.join(f.root, MUTABLE_FILES[0])).equals(f.original[MUTABLE_FILES[0]]);
+      if (red && !corrupted) { writeFileSync(path.join(f.root, MUTABLE_FILES[1]), "unexpected mutable-file change"); corrupted = true; }
+      return execute(...args);
+    };
+    const result = await runAssertions(f.root, f.output, f.options);
+    assert.equal(result.status, "passed"); assert.equal(restored(f), true);
+    for (const [index, file] of MUTABLE_FILES.entries()) {
+      const after = statSync(path.join(f.root, file), { bigint: true });
+      assert.equal(after.ino, before[file].ino, file);
+      if (index < 2) assert.ok(after.mtimeNs > before[file].mtimeNs, `changed source must get a fresh restore timestamp: ${file}`);
+      else assert.equal(after.mtimeNs, before[file].mtimeNs, `untouched dependency was rewritten: ${file}`);
+    }
+    assert.deepEqual(result.source_before, result.source_after);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+for (const fault of ["partial write", "failed apply", "cancel", "timeout"]) test(`selective restore repairs all changed files after ${fault}`, async () => {
+  const f = fixture();
+  try {
+    const execute = f.options.execute;
+    if (fault === "failed apply") f.spec.cases[0].patches.push({ file: MUTABLE_FILES[1], op: "replace", old: "value = 1", new: "value = 3" });
+    f.options.execute = async (...args) => {
+      const command = args[1], control = args[4];
+      if (fault === "failed apply" && command.includes(TESTS.protocol[1])) {
+        const result = await execute(...args);
+        writeFileSync(path.join(f.root, MUTABLE_FILES[1]), "anchor changed after validation");
+        return result;
+      }
+      if (!readFileSync(path.join(f.root, MUTABLE_FILES[0])).equals(f.original[MUTABLE_FILES[0]])) {
+        writeFileSync(path.join(f.root, MUTABLE_FILES[2]), "unexpected partial write");
+        if (fault === "cancel") control.cancelled = true;
+        throw new Error(fault);
+      }
+      return execute(...args);
+    };
+    const result = await runAssertions(f.root, f.output, f.options);
+    assert.equal(result.status, "failed"); assert.equal(restored(f), true);
+    assert.deepEqual(result.source_before, result.source_after);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("unreaped compiler fails closed without racing source restoration", async () => {
+  const f = fixture();
+  try {
+    const execute = f.options.execute;
+    f.options.execute = async (...args) => {
+      if (!readFileSync(path.join(f.root, MUTABLE_FILES[0])).equals(f.original[MUTABLE_FILES[0]])) {
+        args[4].unsafeToRestore = true;
+        throw new Error("managed deadline; cleanup: EPERM, owned compiler still live");
+      }
+      return execute(...args);
+    };
+    const result = await runAssertions(f.root, f.output, f.options);
+    assert.equal(result.status, "failed"); assert.equal(result.restored, false);
+    assert.equal(restored(f), false); assert.notDeepEqual(result.source_before, result.source_after);
+    assert.match(result.failure, /deadline.*EPERM/);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+test("selective restore handles successful multiple-file mutations", async () => {
+  const f = fixture();
+  try {
+    f.spec.cases[0].patches.push({ file: MUTABLE_FILES[1], op: "replace", old: "value = 1", new: "value = 3" });
+    const result = await runAssertions(f.root, f.output, f.options);
+    assert.equal(result.status, "passed"); assert.equal(restored(f), true);
+    assert.deepEqual(result.source_before, result.source_after);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+const posixOnly = { skip: process.platform === "win32", timeout: 8000 };
+const tinyNode = code => [process.execPath, "--max-old-space-size=24", "-e", `setInterval(()=>{if(process.memoryUsage().rss>128*1024**2)process.exit(91)},25).unref();${code}`];
+function gone(pid) { const r = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }); return r.status === 1 || /^\s*Z/.test(r.stdout); }
+test("CPU command normal close never sends a post-close signal", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-normal-")), state = { cancelled: false }, signals = [];
+  try {
+    const result = await executeCpuCommand(root, tinyNode("setTimeout(()=>{},200)"), path.join(root, "log"), 2000, state, { send: (pid, signal) => { signals.push([pid, signal]); process.kill(pid, signal); }, graceMs: 100 });
+    assert.equal(result.exit, 0); assert.deepEqual(signals, []); assert.equal(state.child, null);
+    assert.deepEqual(state.cleanup, { errors: [], remaining: [], unproven: [] });
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("CPU cancellation terminates and reaps before returning", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-cancel-")), state = { cancelled: false };
+  const timer = setTimeout(() => { state.cancelled = true; }, 350);
+  try {
+    await assert.rejects(() => executeCpuCommand(root, tinyNode("setInterval(()=>{},1000)"), path.join(root, "log"), 2000, state, { graceMs: 100 }), /managed deadline\/cancellation/);
+    assert.equal(state.child, null); assert.equal(state.unsafeToRestore, false);
+  } finally { clearTimeout(timer); rmSync(root, { recursive: true, force: true }); }
+});
+test("CPU spawn errors are failures and receive no speculative process signal", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-spawn-")), state = { cancelled: false }, sent = [];
+  try {
+    await assert.rejects(() => executeCpuCommand(root, [path.join(root, "missing-executable")], path.join(root, "log"), 1000, state, { send: (...args) => sent.push(args), graceMs: 100 }), /ENOENT/);
+    assert.equal(state.child, null); assert.deepEqual(sent, []);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("CPU deadline reaps TERM-resistant descendants even after the root exits", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-tree-")), state = { cancelled: false };
+  try {
+    const grandchild = "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)";
+    const child = `const c=require('node:child_process').spawn(process.execPath,${JSON.stringify(tinyNode(grandchild).slice(1))},{stdio:'inherit'});require('node:fs').writeFileSync(${JSON.stringify(path.join(root, "pids"))},JSON.stringify([process.pid,c.pid]));process.on('SIGTERM',()=>{});setInterval(()=>{},1000)`;
+    const code = `require('node:child_process').spawn(process.execPath,${JSON.stringify(tinyNode(child).slice(1))},{stdio:'inherit'});process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000)`;
+    await assert.rejects(() => executeCpuCommand(root, tinyNode(code), path.join(root, "log"), 700, state, { graceMs: 100 }), /managed deadline\/cancellation/);
+    for (const pid of JSON.parse(readFileSync(path.join(root, "pids")))) assert.ok(gone(pid), `owned descendant ${pid} survived`);
+    assert.equal(state.child, null); assert.equal(state.unsafeToRestore, false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("CPU root close still cleans an observed live grandchild", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-orphan-")), state = { cancelled: false };
+  try {
+    const child = "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)";
+    const code = `const c=require('node:child_process').spawn(process.execPath,${JSON.stringify(tinyNode(child).slice(1))},{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(path.join(root, "pid"))},String(c.pid));setTimeout(()=>process.exit(0),500)`;
+    await assert.rejects(() => executeCpuCommand(root, tinyNode(code), path.join(root, "log"), 2000, state, { graceMs: 100 }), /descendants outlived command/);
+    assert.ok(gone(Number(readFileSync(path.join(root, "pid"), "utf8")))); assert.equal(state.child, null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("CPU signal EPERM stays explicit and fail-closed without replacing the deadline", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-eperm-")), state = { cancelled: false };
+  try {
+    await assert.rejects(() => executeCpuCommand(root, tinyNode("process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"), path.join(root, "log"), 300, state, {
+      graceMs: 100, send: (pid, signal) => { if (signal === "SIGTERM") throw Object.assign(new Error("injected permission failure"), { code: "EPERM" }); process.kill(pid, signal); },
+    }), /managed deadline\/cancellation.*cleanup:.*EPERM/);
+    assert.equal(state.child, null); assert.equal(state.unsafeToRestore, false); assert.ok(state.cleanup.errors.some(error => error.includes("EPERM")));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+test("owned CPU identity rejects reused and foreign processes and tolerates known ESRCH races", posixOnly, async () => {
+  const uid = process.getuid(), pid = 910001;
+  const row = (id, ppid, birth = "first") => ({ pid: id, ppid, pgid: pid, uid, birth, command: `fixture-${id}`, status: "S" });
+  const rows = new Map([[pid, row(pid, process.pid)], [pid + 1, row(pid + 1, pid)]]), sent = [];
+  const tree = ownedCpuTree(pid, { sample: () => new Map(rows), graceMs: 1, send: (id, signal) => { sent.push([id, signal]); rows.delete(id); } });
+  assert.equal(tree.observe().live.length, 2);
+  rows.set(pid, { ...rows.get(pid), command: "exec changed the executable, not process identity" });
+  assert.equal(tree.observe().live.length, 2);
+  rows.set(pid + 1, row(pid + 1, 1, "reused"));
+  rows.set(pid + 2, { ...row(pid + 2, 1), uid: uid + 1 });
+  const cleanup = await tree.cleanup();
+  assert.ok(sent.every(([id]) => id === pid)); assert.deepEqual(cleanup.unproven, [pid + 1, pid + 2]);
+  const raceRows = new Map([[pid, row(pid, process.pid)]]);
+  const race = ownedCpuTree(pid, { sample: () => new Map(raceRows), graceMs: 1, send: id => { raceRows.delete(id); throw Object.assign(new Error("already gone"), { code: "ESRCH" }); } });
+  assert.deepEqual(await race.cleanup(), { errors: [], remaining: [], unproven: [] });
+});
+
 if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypasses are killed by original tests without Cargo", async t => {
   const source = readFileSync(path.join(ROOT, "scripts/moss-consumer-assertions.mjs"), "utf8");
   for (const [id, target, old, replacement] of [
+    ["DRV-restore-before-reap", "unreaped compiler fails closed without racing source restoration", "} finally { if (!state.unsafeToRestore) restore();", "} finally { restore();"],
+    ["DRV-restore-unchanged", "restore rewrites and touches only changed files while auditing every mutable source", "if (!current?.equals(originals[file]))", "if (true)"],
+    ["DRV-restore-touch", "restore rewrites and touches only changed files while auditing every mutable source", "utimesSync(path.join(root, file), new Date(), new Date());", "utimesSync(path.join(root, file), new Date(1000), new Date(1000));"],
+    ["DRV-source-hash", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", "JSON.stringify(result.source_before) === JSON.stringify(result.source_after)", "true"],
+    ["DRV-owned-identity", "owned CPU identity rejects reused and foreign processes and tolerates known ESRCH races", "row && row.uid === identity.uid && row.birth === identity.birth", "row"],
+    ["DRV-signal-EPERM", "CPU signal EPERM stays explicit and fail-closed without replacing the deadline", 'if (error.code !== "ESRCH") errors.push', 'if (false) errors.push'],
     ["DRV-positive-count", "positive and assertion-red parser rejects compilation, crash, no selection and wrong named test", "record.passed === 1", "record.passed >= 0"],
     ["DRV-restore", "synthetic executor proves compile-once, exact positive counts, mutation red, touch restore and final green", "writeFileSync(path.join(root, file), originals[file]);", "void originals[file];"],
     ["DRV-no-stale-carry", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", 'requireFact(!Object.hasOwn(result, "carried"), "stale carried evidence is not accepted; every registry case must execute");', ""],
