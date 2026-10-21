@@ -358,6 +358,14 @@ function fixtureNode(root, name) {
   catch (error) { if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error; copyFileSync(process.execPath, executable); }
   return executable;
 }
+test("self-hosted manual job uses provisioned Python 3.12, not the hosted toolcache installer", () => {
+  const body = jobBody(JOB);
+  assert.doesNotMatch(body, /actions\/setup-python@/);
+  assert.match(body, /command -v python3\.12/);
+  assert.match(body, /--version \| grep -E '\^Python 3\\\.12\\\.'/);
+  assert.match(body, /echo "\$shim" >> "\$GITHUB_PATH"/);
+  assert.ok(body.indexOf("Require exact host Python 3.12") < body.indexOf("Run exact remote verification"));
+});
 test("native runner classifies all selected adapter and NAX units without running a device", () => {
   assert.equal(unitKind(path.join(os.tmpdir(), "deps", "memory_mlx_adapter-abc")), "adapter-bin");
   assert.equal(unitKind(path.join(os.tmpdir(), "deps", "sceneworks_memory_adapter-abc")), "adapter-library");
@@ -425,6 +433,19 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
       assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/); assert.doesNotMatch(result.stderr, /SyntaxError|ERR_MODULE_NOT_FOUND/);
       writeFileSync(mutated, controller); utimesSync(mutated, new Date(), new Date());
+    } finally { rmSync(scratch, { recursive: true, force: true }); }
+  });
+  await t.test("RV-hosted-python-installer", () => {
+    const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-workflow-mutation-"));
+    try {
+      const old = "      - name: Require exact host Python 3.12\n";
+      assert.equal(workflow.split(old).length - 1, 1);
+      const mutated = path.join(scratch, "macos-mlx.yml");
+      writeFileSync(mutated, workflow.replace(old, '      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n        with:\n          python-version: "3.12"\n' + old)); utimesSync(mutated, new Date(), new Date());
+      const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: mutated }; delete childEnv.NODE_TEST_CONTEXT;
+      const target = "self-hosted manual job uses provisioned Python 3.12, not the hosted toolcache installer";
+      const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
+      assert.notEqual(result.status, 0, result.stdout); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/);
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
   for (const name of ["changes", "macos-checks", "nax-worker", JOB]) await t.test(name === JOB ? "RV-manual-origin" : `RV-legacy-${name}`, () => {

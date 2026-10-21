@@ -1054,9 +1054,18 @@ jobs:
             echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)"
           } >> "$GITHUB_ENV"
           diskutil info / | grep -E 'Container Free Space|Volume Free Space|Available Space'
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
+      # setup-python installs into the HOSTED toolcache path (/Users/runner), which a self-hosted
+      # Mac does not own (run 39551550926: "mkdir: /Users/runner: Permission denied"). Use the
+      # box's provisioned Python 3.12, as this workflow's other self-hosted steps already do.
+      - name: Require exact host Python 3.12
+        run: |
+          py="$(command -v python3.12)"
+          "$py" --version | grep -E '^Python 3\.12\.'
+          shim="$RUNNER_TEMP/macos-verification-python-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir "$shim"
+          ln -s "$py" "$shim/python3"
+          ln -s "$py" "$shim/python"
+          echo "$shim" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
