@@ -258,7 +258,7 @@ jobs:
           node-version: "20"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -467,7 +467,7 @@ jobs:
             apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       # Save only on `main` — see the note on the `parity-rust` cache step in check.yml. This lane
       # runs on `refs/tags/v*`, and a tag-scoped cache is readable from no other ref at all, so
       # saving here only ever consumed budget that the PR lanes needed.
