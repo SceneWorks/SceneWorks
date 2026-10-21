@@ -73,6 +73,7 @@ on:
           - catalog
           - qwen-image-2-1-app-lifecycle
           - iris-mlx-real-weights
+          - supra2-mlx-real-weights
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -259,6 +260,16 @@ jobs:
     with:
       source_sha: ${{ inputs.ref }}
       filter: ${{ inputs.iris_smoke_filter }}
+  supra2-mlx-real-weights:
+    if: ${{ inputs.profile == 'supra2-mlx-real-weights' }}
+    permissions:
+      contents: read
+    # sc-24216 (epic 24212): the Supra2-IMG worker real-weight convert, render and offline lifecycle
+    # tests on nax-macos-2, at the dispatch's exact commit (`ref` must be that 40-hex SHA). Like the
+    # Iris profile above it skips BOTH catalog jobs: no walk, no commit, no push, no PR.
+    uses: ./.github/workflows/supra2-mlx-real-weights.yml
+    with:
+      source_sha: ${{ inputs.ref }}
   mlx:
     if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
