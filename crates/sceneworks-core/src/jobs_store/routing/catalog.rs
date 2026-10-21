@@ -2232,6 +2232,7 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
 /// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
 pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2260,6 +2261,34 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// submit path refuses it up front instead of leaving it queued forever (sc-24159).
 pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
     CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+}
+
+/// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
+pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
+    let base = plan
+        .get("target")
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str);
+    if !matches!(base, Some("moss_image_base" | "moss_image_sft")) {
+        return false;
+    }
+    let advanced = match plan.get("config") {
+        None => None,
+        Some(Value::Object(config)) => match config.get("advanced") {
+            None => None,
+            Some(Value::Object(advanced)) => Some(advanced),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let method = match advanced.and_then(|advanced| advanced.get("networkType")) {
+        None => "lora",
+        Some(Value::String(value)) if value.trim().is_empty() => "lora",
+        Some(Value::String(value)) => value.trim(),
+        _ => return false,
+    };
+    method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
 }
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
@@ -2655,6 +2684,7 @@ mod tests {
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -4237,5 +4267,63 @@ mod tests {
              queues FOREVER with no error and an idle worker (sc-15328). Either make a lane claim \
              it, or stop advertising `loraCompatibility` on the model: {stranded:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod moss_native_training_routing_tests {
+    use super::*;
+    use crate::contracts::{JobSnapshot, JobType};
+    use crate::jobs_store::routing::{candle, mlx};
+
+    fn job(plan: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id":"moss-routing", "type":"lora_train", "status":"queued",
+            "payload":{"plan":plan}, "result":{}, "requestedGpu":"auto",
+            "progress":0, "stage":"queued", "message":"", "attempts":0,
+            "cancelRequested":false, "createdAt":"", "updatedAt":""
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic() {
+        let targets: Vec<_> = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| target.kernel == "moss_image_lora")
+            .collect();
+        assert!(["moss_image_base", "moss_image_sft"]
+            .iter()
+            .all(|base| targets.iter().any(|target| target.base_model == *base)));
+        for target in targets {
+            let plan = json!({"target":{"kernel":target.kernel,"baseModel":target.base_model},
+                "config":target.defaults});
+            for method in ["lora", "lokr", " LoKR ", ""] {
+                let mut selected = plan.clone();
+                selected["config"]["advanced"]["networkType"] = json!(method);
+                let selected = job(selected);
+                assert!(mlx::training_job_is_mlx_eligible(&selected));
+                assert!(candle::training_job_is_candle_eligible(&selected));
+                assert!(mlx::training_kernel_is_mlx_only(&selected));
+            }
+            for method in [json!("full"), json!("control"), json!("unknown"), json!(42)] {
+                let mut invalid = plan.clone();
+                invalid["config"]["advanced"]["networkType"] = method;
+                let invalid = job(invalid);
+                assert!(!mlx::training_job_is_mlx_eligible(&invalid));
+                assert!(!candle::training_job_is_candle_eligible(&invalid));
+                assert!(mlx::training_kernel_is_mlx_only(&invalid));
+            }
+            let mut foreign = plan.clone();
+            foreign["target"]["baseModel"] = json!("qwen_image_2_1");
+            let foreign = job(foreign);
+            assert!(!mlx::training_job_is_mlx_eligible(&foreign));
+            assert!(!candle::training_job_is_candle_eligible(&foreign));
+            let mut control = job(plan);
+            control.job_type = JobType::ControlTraining;
+            assert!(!mlx::training_job_is_mlx_eligible(&control));
+            assert!(!candle::training_job_is_candle_eligible(&control));
+        }
     }
 }

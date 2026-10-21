@@ -7100,35 +7100,42 @@ mod moss_training_adapter_tests {
     use super::*;
     #[test]
     fn native_moss_import_keeps_exact_base_and_refuses_cross_checkpoint_use() {
-        let header = json!({"__metadata__":{"family":"moss-image","baseModel":"moss_image_base","sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":"lokr","rank":"8","alpha":"12"}});
-        assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
-        let metadata = read_adapter_metadata(&header);
-        assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_base"));
-        let mut entry = serde_json::Map::new();
-        entry.insert("family".into(), json!("moss-image"));
-        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
-        assert_eq!(entry["baseModel"], json!("moss_image_base"));
-        let adapter = Value::Object(entry);
-        assert!(validate_lora_compatibility(
-            std::slice::from_ref(&adapter),
-            Some("moss_image"),
-            "moss_image_base",
-            Some("moss_image_base")
-        )
-        .is_ok());
-        assert!(validate_lora_compatibility(
-            std::slice::from_ref(&adapter),
-            Some("moss_image"),
-            "moss_image_sft",
-            Some("moss_image_sft")
-        )
-        .is_err());
-        assert!(validate_lora_compatibility(
-            &[json!({"family":"moss-image"})],
-            Some("moss_image"),
-            "moss_image_base",
-            Some("moss_image_base")
-        )
-        .is_err());
+        for (base, other) in [
+            ("moss_image_base", "moss_image_sft"),
+            ("moss_image_sft", "moss_image_base"),
+        ] {
+            for method in ["lora", "lokr"] {
+                let header = json!({"__metadata__":{"family":"moss-image","baseModel":base,"sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":method,"rank":"8","alpha":"12"}});
+                assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
+                let metadata = read_adapter_metadata(&header);
+                assert_eq!(metadata.moss_base_model.as_deref(), Some(base));
+                let mut entry = serde_json::Map::new();
+                entry.insert("family".into(), json!("moss-image"));
+                apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+                assert_eq!(entry["baseModel"], json!(base));
+                let adapter = Value::Object(entry);
+                assert!(validate_lora_compatibility(
+                    std::slice::from_ref(&adapter),
+                    Some("moss_image"),
+                    base,
+                    Some(base)
+                )
+                .is_ok());
+                assert!(validate_lora_compatibility(
+                    std::slice::from_ref(&adapter),
+                    Some("moss_image"),
+                    other,
+                    Some(other)
+                )
+                .is_err());
+                assert!(validate_lora_compatibility(
+                    &[json!({"family":"moss-image"})],
+                    Some("moss_image"),
+                    base,
+                    Some(base)
+                )
+                .is_err());
+            }
+        }
     }
 }

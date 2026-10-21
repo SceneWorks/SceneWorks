@@ -2670,10 +2670,30 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// macOS MLX path (bf16 alone fits) yet a guaranteed OOM on candle for these families — and a thin /
 /// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
 /// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B run impossible to configure
-/// into a dense-backward OOM. On macOS this is the identity (the MLX path tolerates a dense bf16
-/// backward), so the mapped config passes through unchanged.
-#[cfg(target_os = "macos")]
+/// into a dense-backward OOM. Those safety overrides are Candle-only. Both backends receive the
+/// same strict MOSS options bag and adapter-training sampler default.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
+            tracing::info!(
+                event = "candle_training_force_gradient_checkpointing",
+                kernel = %plan.target.kernel,
+                base_model = %plan.target.base_model,
+                "candle big-DiT training family requires gradient checkpointing; overriding the plan's \
+                 gradientCheckpointing=false to avoid a dense-backward CUDA OOM"
+            );
+            config.gradient_checkpointing = true;
+        }
+        // The Candle LTX trainer intentionally uses f32; the shared MLX default stays bf16.
+        if plan.target.kernel == "ltx_mlx_lora" {
+            config.train_dtype = "f32".to_owned();
+        }
+    }
     if plan.target.kernel == "moss_image_lora" {
         if !plan.config.advanced.contains_key("timestepType") {
             config.timestep_type = "moss_stage3_v1".to_owned();
@@ -2689,27 +2709,6 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
             .model_options
             .entry("vae_posterior".to_owned())
             .or_insert_with(|| json!("posterior_mean_v1"));
-    }
-    config
-}
-
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
-    if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
-        tracing::info!(
-            event = "candle_training_force_gradient_checkpointing",
-            kernel = %plan.target.kernel,
-            base_model = %plan.target.base_model,
-            "candle big-DiT training family requires gradient checkpointing; overriding the plan's \
-             gradientCheckpointing=false to avoid a dense-backward CUDA OOM"
-        );
-        config.gradient_checkpointing = true;
-    }
-    // The candle LTX trainer intentionally runs f32: bf16 was measured to decorrelate gradients
-    // through the deep distilled DiT. Keep the shared target's bf16 default for MLX, but normalize
-    // the off-Mac config before validation.
-    if plan.target.kernel == "ltx_mlx_lora" {
-        config.train_dtype = "f32".to_owned();
     }
     config
 }
@@ -7796,7 +7795,49 @@ mod tests {
         assert_eq!(summary.get("baseModelInstalled").unwrap(), false);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_shared_finalization_defaults_strict_options_and_preserves_explicit_sampler() {
+        let dir = tempfile::tempdir().unwrap();
+        let targets = sceneworks_core::training::builtin_training_targets();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.base_model == base)
+                .unwrap();
+            let mut value = plan_json(dir.path(), &target.kernel, base, "lora", &["item.png"]);
+            value["target"]["targetId"] = json!(target.id);
+            value["target"]["family"] = json!(target.family);
+            value["config"] = serde_json::to_value(&target.defaults).unwrap();
+            let advanced = value["config"]["advanced"].as_object_mut().unwrap();
+            advanced.remove("timestepType");
+            advanced.remove("modelOptions");
+            let config = engine_training_config(&parse(value.clone()));
+            assert_eq!(config.timestep_type, "moss_stage3_v1");
+            assert_eq!(
+                json!(config.model_options),
+                json!({"vae_posterior":"posterior_mean_v1"})
+            );
+            value["config"]["advanced"]["timestepType"] = json!("uniform");
+            value["config"]["advanced"]["modelOptions"] =
+                json!({"vae_posterior":"posterior_mean_v1"});
+            let config = engine_training_config(&parse(value));
+            assert_eq!(config.timestep_type, "uniform");
+            assert_eq!(
+                json!(config.model_options),
+                json!({"vae_posterior":"posterior_mean_v1"})
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn moss_native_requests_keep_official_bf16_source_and_requested_compute_for_both_methods() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -7907,7 +7948,11 @@ mod tests {
                         steps: 3,
                         final_loss: 0.25,
                     };
-                    let result = training_result(&plan, &output, &[], &[], &[], 0, 0., "mlx");
+                    let backend = crate::inference_runtime::trainer_descriptor(engine)
+                        .expect("actual selected native trainer")
+                        .backend;
+                    let result = training_result(&plan, &output, &[], &[], &[], 0, 0., backend);
+                    assert_eq!(result["backend"], json!(backend));
                     assert_eq!(result["baseModel"], json!(base));
                     assert_eq!(result["networkType"], json!(network));
                     assert_eq!(result["triggerWords"], json!(["sksmoss"]));

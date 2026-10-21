@@ -5216,12 +5216,11 @@ fn moss_image_lora_target(sft: bool) -> TrainingTarget {
             "mixedPrecisions":["bf16","f32"],"timestepTypes":["moss_stage3_v1","sigmoid","linear","uniform","weighted"],
             "timestepBiases":["balanced","high_noise","low_noise"],"lossTypes":["mse","mae"],
             "lrSchedulers":["constant","linear","cosine"],"outputScopes":["project","global"],
-            "supportsWeightNoise":true,"supportsGradientNoise":true,"supportsSubjectMaskLoss":true,
-            "appleSiliconOnly":true,"requiresBackend":"mlx"})),
+            "supportsWeightNoise":true,"supportsGradientNoise":true,"supportsSubjectMaskLoss":true})),
         ui: object(
             json!({"label":format!("{name} LoRA / LoKr"),"datasetModality":"image",
-            "description":"Native MLX transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
-            "recommendedFor":["character","style"],"appleSiliconOnly":true,"requiresBackend":"mlx"}),
+            "description":"Native MLX and CUDA transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
+            "recommendedFor":["character","style"]}),
         ),
         extra: ExtraFields::new(),
     }
@@ -5252,6 +5251,12 @@ mod moss_training_s1_tests {
                 json!("posterior_mean_v1")
             );
             assert_eq!(target.limits["networkTypes"], json!(["lora", "lokr"]));
+            assert_eq!(target.limits["mixedPrecisions"], json!(["bf16", "f32"]));
+            assert_eq!(target.defaults.advanced["mixedPrecision"], json!("bf16"));
+            for metadata in [&target.limits, &target.ui] {
+                assert!(!metadata.contains_key("appleSiliconOnly"));
+                assert!(!metadata.contains_key("requiresBackend"));
+            }
         }
     }
 }
