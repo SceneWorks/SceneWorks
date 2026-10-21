@@ -14,7 +14,7 @@ fn extend_capabilities_unique(
 
 pub(crate) async fn discover_gpu(settings: &Settings, health: &GpuHealth) -> DiscoveredGpu {
     let requested_gpu_id = settings.gpu_id.as_str();
-    if requested_gpu_id == "cpu" {
+    if is_cpu_worker(requested_gpu_id) {
         return cpu_gpu();
     }
     // Apple-Silicon native MLX GPU worker (epic 3018): an explicit `mlx` gpu id
@@ -683,7 +683,7 @@ type GpuUtilizationCache =
     tokio::sync::Mutex<HashMap<String, (Instant, Option<WorkerUtilizationSnapshot>)>>;
 
 pub(crate) async fn gpu_utilization(gpu_id: &str) -> Option<WorkerUtilizationSnapshot> {
-    if gpu_id == "cpu" {
+    if is_cpu_worker(gpu_id) {
         return None;
     }
     static CACHE: std::sync::OnceLock<GpuUtilizationCache> = std::sync::OnceLock::new();
@@ -1200,10 +1200,48 @@ pub(crate) fn fallback_gpu(gpu_id: &str) -> DiscoveredGpu {
     }
 }
 
+// Preserve the existing trim/"0" parser and all legacy truthy values. The one
+// explicit preparation scope is narrower, never a way to enable GPU work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UtilityJobScope {
+    Disabled,
+    All,
+    ModelDownload,
+}
+
+pub(crate) fn utility_job_scope(value: Option<&str>) -> UtilityJobScope {
+    match value.map(str::trim) {
+        Some("0") => UtilityJobScope::Disabled,
+        Some("model_download") => UtilityJobScope::ModelDownload,
+        _ => UtilityJobScope::All,
+    }
+}
+
+// Settings and the API's in-process override already trim/default the id. Keep
+// the exact CPU identity used by discovery and utilization (not case-folding).
+pub(crate) fn is_cpu_worker(gpu_id: &str) -> bool {
+    gpu_id == "cpu"
+}
+
+pub(crate) fn worker_capabilities_for_scope(
+    gpu: &DiscoveredGpu,
+    scope: UtilityJobScope,
+) -> Vec<WorkerCapability> {
+    if scope == UtilityJobScope::ModelDownload {
+        return if is_cpu_worker(&gpu.id) && gpu.capabilities.contains(&WorkerCapability::Cpu) {
+            vec![WorkerCapability::Cpu, WorkerCapability::ModelDownload]
+        } else {
+            Vec::new()
+        };
+    }
+    worker_capabilities_with_utility(gpu, scope == UtilityJobScope::All)
+}
+
 pub(crate) fn worker_capabilities(gpu: &DiscoveredGpu) -> Vec<WorkerCapability> {
-    let utility_jobs_enabled =
-        std::env::var("SCENEWORKS_UTILITY_JOBS").map_or(true, |value| value.trim() != "0");
-    worker_capabilities_with_utility(gpu, utility_jobs_enabled)
+    worker_capabilities_for_scope(
+        gpu,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+    )
 }
 
 pub(crate) fn worker_capabilities_with_utility(
@@ -1401,5 +1439,48 @@ Pages occupied by compressor:                2483449.
         assert!(used <= total, "used {used} must not exceed total {total}");
         assert_eq!(snapshot.memory_free_mb, Some(total - used));
         eprintln!("live mlx utilization snapshot: {snapshot:?}");
+    }
+}
+
+#[cfg(test)]
+mod preparation_scope_tests {
+    use super::*;
+    #[test]
+    fn cpu_preparation_scope_preserves_legacy_parser_and_capabilities() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("true"),
+            Some("false"),
+            Some("anything"),
+        ] {
+            assert_eq!(utility_job_scope(value), UtilityJobScope::All);
+            assert_eq!(
+                worker_capabilities_for_scope(&cpu_gpu(), utility_job_scope(value)),
+                worker_capabilities_with_utility(&cpu_gpu(), true)
+            );
+        }
+        assert_eq!(utility_job_scope(Some(" 0 ")), UtilityJobScope::Disabled);
+        assert_eq!(
+            worker_capabilities_for_scope(&cpu_gpu(), UtilityJobScope::Disabled),
+            worker_capabilities_with_utility(&cpu_gpu(), false)
+        );
+        assert_eq!(
+            worker_capabilities_for_scope(&cpu_gpu(), utility_job_scope(Some("model_download"))),
+            vec![WorkerCapability::Cpu, WorkerCapability::ModelDownload]
+        );
+        for id in ["0", "1", "mlx", "auto", "CPU", " cpu "] {
+            assert!(!is_cpu_worker(id));
+            assert!(worker_capabilities_for_scope(
+                &fallback_gpu(id),
+                UtilityJobScope::ModelDownload
+            )
+            .is_empty());
+            assert_eq!(
+                worker_capabilities_for_scope(&fallback_gpu(id), UtilityJobScope::All),
+                worker_capabilities_with_utility(&fallback_gpu(id), true)
+            );
+        }
     }
 }

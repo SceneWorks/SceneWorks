@@ -429,6 +429,16 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
   return { output, report: campaign };
 }
 export async function main(args = process.argv.slice(2)) {
+  if (args[0] === 'prepare') {
+    assert((args[1] === 'plan' && args.length === 3) || (args[1] === 'run' && args.length === 4), 'prepare plan REQUEST.json | prepare run PREP_ADMISSION.json PREP_PLAN.json');
+    const { preparationPlan, runPreparation } = await import('./flux3-image-klein-preparation.mjs');
+    const sources = await loadProductTargets();
+    try {
+      const input = JSON.parse(await readFile(args[2], 'utf8'));
+      const result = args[1] === 'plan' ? preparationPlan(input, sources) : await runPreparation(input, JSON.parse(await readFile(args[3], 'utf8')), sources);
+      console.log(JSON.stringify(result, null, 2)); return;
+    } catch { throw new Error('CPU preparation plan/admission refused or incomplete; no GPU authorization produced'); }
+  }
   const sources = await loadProductTargets();
   if (!args.length || args[0] === 'plan' || args[0] === 'catalog') { assert(args.length <= 1); console.log(JSON.stringify(args[0] === 'catalog' ? terminalCatalog(sources) : terminalPlan(sources), null, 2)); return; }
   if (args[0] === 'produce-build') { assert(args.length === 2, 'produce-build requires one separately user-admitted build JSON'); const { produceTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); console.log(JSON.stringify(await produceTerminalBuild(JSON.parse(await readFile(args[1], 'utf8'))))); return; }

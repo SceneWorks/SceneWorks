@@ -1442,6 +1442,11 @@ pub async fn run() -> WorkerResult<()> {
         );
     }
     let settings = Settings::from_env();
+    // Refuse the preparation scope before an auto supervisor can enumerate devices.
+    validate_utility_worker_selection(
+        &settings,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+    )?;
     // Only the top-level worker process performs conversion recovery. It runs before any utility
     // children are spawned, and the lifecycle lock excludes independently running finalizers.
     // Child restarts must never sweep while sibling utility workers may be converting.
@@ -1842,6 +1847,30 @@ fn reclaim_import_staging(
     sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
 }
 
+fn validate_utility_worker_selection(
+    settings: &Settings,
+    scope: UtilityJobScope,
+) -> WorkerResult<()> {
+    if scope == UtilityJobScope::ModelDownload && !is_cpu_worker(&settings.gpu_id) {
+        return Err(WorkerError::InvalidPayload(
+            "model_download utility scope requires the cpu worker".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn initialize_worker_gpu_with(
+    settings: &Settings,
+    scope: UtilityJobScope,
+    apply_limit: impl FnOnce(u64),
+) -> WorkerResult<()> {
+    validate_utility_worker_selection(settings, scope)?;
+    if !is_cpu_worker(&settings.gpu_id) {
+        apply_limit(settings.gpu_memory_limit_bytes);
+    }
+    Ok(())
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -1857,7 +1886,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // upscales, AND LoRA training. When the user configured no ceiling (0) a default derived from
     // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
     // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
-    generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
+    initialize_worker_gpu_with(
+        &settings,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+        generator_cache::apply_gpu_memory_limit,
+    )?;
     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
     // do no MLX work) don't clobber the file with zeros.
@@ -2957,3 +2990,41 @@ mod snapshot_install;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cpu_preparation_startup_tests {
+    use super::*;
+    #[test]
+    fn cpu_preparation_startup_never_initializes_gpu_and_wrong_selection_refuses_first() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temporary.path().to_path_buf());
+        settings.gpu_id = "cpu".to_owned();
+        for scope in [
+            UtilityJobScope::All,
+            UtilityJobScope::Disabled,
+            UtilityJobScope::ModelDownload,
+        ] {
+            initialize_worker_gpu_with(&settings, scope, |_| {
+                panic!("CPU touched GPU memory initialization")
+            })
+            .unwrap();
+            assert!(!should_run_cuda_preflight(&settings));
+        }
+        for id in ["mlx", "0", "1", "auto", "CPU"] {
+            settings.gpu_id = id.to_owned();
+            assert!(initialize_worker_gpu_with(
+                &settings,
+                UtilityJobScope::ModelDownload,
+                |_| panic!("wrong selection touched GPU before refusal")
+            )
+            .is_err());
+            let calls = std::cell::Cell::new(0);
+            initialize_worker_gpu_with(&settings, UtilityJobScope::All, |bytes| {
+                assert_eq!(bytes, settings.gpu_memory_limit_bytes);
+                calls.set(calls.get() + 1);
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+        }
+    }
+}
