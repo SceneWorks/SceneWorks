@@ -8427,9 +8427,11 @@ async fn qwen_image_2_1_tier_at_the_superseded_rehost_revision_reads_as_the_work
 async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
+    // The H3 Veda predictor by repo, not "the first" managed pin (sc-24213 adds Supra2-IMG's).
     let pin = sceneworks_core::managed_file::builtin_identities()
         .unwrap()
-        .first()
+        .iter()
+        .find(|identity| identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview")
         .unwrap();
     let payload = json!({"repo":pin.repo,"revision":pin.revision,"files":[pin.file],"licenseAcknowledged":true});
     let (status, job) = request(
