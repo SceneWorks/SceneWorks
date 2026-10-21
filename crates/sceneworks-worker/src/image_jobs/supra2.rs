@@ -957,5 +957,258 @@ mod tests {
             }
             assert_eq!(lane::max_requested_steps(50), 80);
         }
+
+        // -----------------------------------------------------------------------------------
+        // Through the PRODUCTION arm with admission satisfied: a weightless but priceable
+        // install (every pinned file at its exact pinned size, safetensors headers the memory
+        // contract can read, configs the provider checks), so `generate_*_stream_using` runs its
+        // real pre-load provider contract + admission and only the engine is a probe.
+        // -----------------------------------------------------------------------------------
+
+        /// Write exactly `bytes`: `json` padded with spaces, else a one-tensor (`tensor`, U8)
+        /// safetensors whose single tensor fills the file, else zeros. `set_len` keeps the pinned
+        /// multi-hundred-MB sizes sparse.
+        fn write_sized(path: &Path, bytes: u64, json: Option<&Value>, tensor: &str) {
+            use std::io::Write;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut file = std::fs::File::create(path).unwrap();
+            if let Some(json) = json {
+                let mut text = json.to_string();
+                assert!(
+                    text.len() as u64 <= bytes,
+                    "{} does not fit",
+                    path.display()
+                );
+                text.push_str(&" ".repeat((bytes - text.len() as u64) as usize));
+                file.write_all(text.as_bytes()).unwrap();
+                return;
+            }
+            if path.extension().is_some_and(|ext| ext == "safetensors") {
+                const HEADER: u64 = 256;
+                let data = bytes - 8 - HEADER;
+                let mut entry = serde_json::Map::new();
+                entry.insert(
+                    tensor.to_owned(),
+                    json!({ "dtype": "U8", "shape": [data], "data_offsets": [0, data] }),
+                );
+                let mut header = Value::Object(entry).to_string();
+                header.push_str(&" ".repeat(HEADER as usize - header.len()));
+                file.write_all(&HEADER.to_le_bytes()).unwrap();
+                file.write_all(header.as_bytes()).unwrap();
+            }
+            file.set_len(bytes).unwrap();
+        }
+
+        /// Stage one pinned component's snapshot (cache-only, at its exact revision) with every
+        /// pinned file at its pinned size.
+        fn stage_component(
+            data: &Path,
+            pin: gen_core::supra2::ComponentPin,
+            config: &Value,
+            tensor: &str,
+        ) {
+            let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data, pin.repo)
+                .unwrap()
+                .join("snapshots")
+                .join(pin.revision);
+            for file in pin.files {
+                let json = (file.path == "config.json").then_some(config);
+                write_sized(&snapshot.join(file.path), file.bytes, json, tensor);
+            }
+        }
+
+        /// The converted bundle the pin contract accepts at `BundleCheck::SizesOnly` (the
+        /// admission depth): the manifest `convert_pinned_checkpoint` writes for the pinned
+        /// checkpoint, and both converted files at their pinned sizes.
+        fn stage_priceable_install(data: &Path) -> PathBuf {
+            use gen_core::supra2::{
+                BundleComponent, BundleFile, BundleManifest, BundleSource, Supra2Config,
+                FLAN_T5_BASE, PINNED_CONDITIONING, PINNED_DENOISER, SD_VAE, SUPRA2_SOURCE,
+            };
+            let cfg = Supra2Config::published();
+            stage_component(
+                data,
+                FLAN_T5_BASE,
+                &json!({
+                    "d_model": cfg.ctx_dim,
+                    "num_layers": gen_core::supra2::T5_LAYERS,
+                    "num_heads": gen_core::supra2::T5_HEADS,
+                    "d_kv": gen_core::supra2::T5_D_KV,
+                    "relative_attention_num_buckets": 32,
+                    "relative_attention_max_distance": 128,
+                    "feed_forward_proj": "gated-gelu"
+                }),
+                "encoder.embed",
+            );
+            stage_component(
+                data,
+                SD_VAE,
+                &json!({
+                    "latent_channels": cfg.latent_channels,
+                    "layers_per_block": gen_core::supra2::VAE_LAYERS_PER_BLOCK,
+                    "norm_num_groups": gen_core::supra2::VAE_NORM_GROUPS,
+                    "block_out_channels": gen_core::supra2::VAE_BLOCK_OUT_CHANNELS
+                }),
+                "decoder.weights",
+            );
+            let bundle = data.join("models/mlx/supra2_img");
+            let file = |pin: gen_core::supra2::PinnedFile| BundleFile {
+                file: pin.path.to_owned(),
+                bytes: pin.bytes,
+                sha256: pin.sha256.to_owned(),
+            };
+            let source = SUPRA2_SOURCE.files[0];
+            let component = |id: &str, pin: gen_core::supra2::ComponentPin| BundleComponent {
+                component: id.to_owned(),
+                repo: pin.repo.to_owned(),
+                revision: pin.revision.to_owned(),
+                license: pin.license.to_owned(),
+                download_bytes: pin.download_bytes(),
+            };
+            let manifest = BundleManifest {
+                schema: gen_core::supra2::BUNDLE_SCHEMA.to_owned(),
+                provider_id: gen_core::supra2::PROVIDER_ID.to_owned(),
+                source: BundleSource {
+                    repo: Some(SUPRA2_SOURCE.repo.to_owned()),
+                    revision: Some(SUPRA2_SOURCE.revision.to_owned()),
+                    file: source.path.to_owned(),
+                    bytes: source.bytes,
+                    sha256: source.sha256.to_owned(),
+                    weights_key: "ema".to_owned(),
+                },
+                config: cfg,
+                vae_scale: gen_core::supra2::VAE_SCALE,
+                denoiser: file(PINNED_DENOISER),
+                denoiser_tensors: cfg.expected_tensors().len(),
+                conditioning: Some(file(PINNED_CONDITIONING)),
+                components: vec![
+                    component(gen_core::supra2::TEXT_ENCODER_COMPONENT, FLAN_T5_BASE),
+                    component(gen_core::supra2::VAE_COMPONENT, SD_VAE),
+                ],
+            };
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(
+                bundle.join(gen_core::supra2::BUNDLE_MANIFEST),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            write_sized(
+                &bundle.join(PINNED_DENOISER.path),
+                PINNED_DENOISER.bytes,
+                None,
+                "dit",
+            );
+            write_sized(
+                &bundle.join(PINNED_CONDITIONING.path),
+                PINNED_CONDITIONING.bytes,
+                None,
+                "uncond_text",
+            );
+            bundle
+        }
+
+        /// The full production arm (`generate_stream_using` on macOS,
+        /// `generate_candle_stream_using` off-Mac) on the priceable install: the real provider
+        /// memory contract prices it, admission passes, the probe engine is called ONCE with
+        /// `count: 3`, and three assets are published on seeds 40, 41, 42.
+        ///
+        /// *Mutation that reds this:* drop the native-count branch in `resolve_native_prompt_batch`
+        /// (three engine calls of count 1).
+        #[test]
+        fn the_production_arm_renders_a_count_n_job_in_one_native_call() {
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", ""),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+                #[cfg(target_os = "macos")]
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                (crate::vram_gate::CUDA_VRAM_CAP_ENV, "64"),
+            ]);
+            let data = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let bundle = stage_priceable_install(data.path());
+            let mut entry = shipped_supra2_entry();
+            entry.insert("modelPath".to_owned(), json!(bundle));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (outcome, posts, asset_writes) = runtime.block_on(async {
+                let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+                let mut settings = settings_at(data.path());
+                settings.api_url = base_url;
+                settings.heartbeat_seconds = 5;
+                let api = ApiClient::new(&settings);
+                let job: JobSnapshot =
+                    serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
+                        .unwrap();
+                let payload = json!({
+                    "projectId": "project-supra2",
+                    "model": "supra2_img",
+                    "mode": "text_to_image",
+                    "prompt": "a red fox sitting in fresh snow",
+                    "width": 256,
+                    "height": 256,
+                    "count": 3,
+                    "seed": 40,
+                    "advanced": { "steps": 12, "guidanceScale": 4.5 },
+                    "modelManifestEntry": Value::Object(entry),
+                });
+                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
+                let loader_seen = Arc::clone(&seen);
+                let loader = move |_engine: &str, _spec: &gen_core::LoadSpec| {
+                    Ok(Box::new(Supra2Probe {
+                        descriptor: model().descriptor,
+                        canceled: false,
+                        seen: loader_seen,
+                    }) as Box<dyn Generator>)
+                };
+                let mut asset_writes = Vec::new();
+                #[cfg(target_os = "macos")]
+                let arm = lane::generate_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "mlx",
+                    &mut asset_writes,
+                    loader,
+                );
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let arm = lane::generate_candle_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "cuda",
+                    &mut asset_writes,
+                    loader,
+                );
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(120), arm)
+                    .await
+                    .expect("the supra2 arm finished");
+                let posts = posts.lock().unwrap().clone();
+                (outcome, posts, asset_writes)
+            });
+            assert!(outcome.is_ok(), "{outcome:?}\n{posts:#?}");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "one engine call: {seen:#?}");
+            assert_eq!(
+                (seen[0].count, seen[0].seed, seen[0].steps, seen[0].guidance),
+                (3, Some(40), Some(12), Some(4.5))
+            );
+            assert!(seen[0].prompt_batch.is_empty());
+            let seeds: Vec<Value> = asset_writes
+                .iter()
+                .map(|asset| asset["seed"].clone())
+                .collect();
+            assert_eq!(seeds, vec![json!(40), json!(41), json!(42)]);
+        }
     }
 }
