@@ -556,6 +556,22 @@ mod tests {
                 &bundle,
             )
             .expect("install-time conversion");
+            // The real conversion satisfies the integrity check the catalog (sizes) and the worker
+            // preflight (digests) apply, so a genuine install reads `converted` and loads.
+            for check in [
+                sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+                sceneworks_core::converted_artifacts::ArtifactCheck::Digests,
+            ] {
+                assert_eq!(
+                    sceneworks_core::converted_artifacts::converted_artifact_problem(
+                        "supra2_img",
+                        &bundle,
+                        check
+                    ),
+                    None,
+                    "{check:?}"
+                );
+            }
             let mut entry = shipped_supra2_entry();
             entry.insert("modelPath".to_owned(), json!(bundle));
             let mut settings = settings_at(data.path());
