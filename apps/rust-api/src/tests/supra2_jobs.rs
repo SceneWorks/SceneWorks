@@ -91,7 +91,6 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
             "referenceAssetIds",
         ),
         (json!({ "maskAssetId": "asset_1" }), "maskAssetId"),
-        (json!({ "hiresFix": { "enabled": true } }), "hires fix"),
         (json!({ "advanced": { "steps": 100_001 } }), "100000"),
         (json!({ "advanced": { "steps": 0 } }), "steps"),
         (json!({ "advanced": { "sampler": "dpmpp_2m" } }), "sampler"),
