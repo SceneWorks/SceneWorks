@@ -3596,7 +3596,7 @@ mod tests {
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds, and
     /// the exact bytes the web LoRA picker reads `loraCompatibility` out of.
-    fn builtin_image_models() -> Vec<serde_json::Value> {
+    pub(super) fn builtin_image_models() -> Vec<serde_json::Value> {
         let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -4297,7 +4297,7 @@ mod moss_native_training_routing_tests {
         }))
         .unwrap();
         for base in ["moss_image_base", "moss_image_sft"] {
-            let entry = builtin_image_models()
+            let entry = super::tests::builtin_image_models()
                 .iter()
                 .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base))
                 .unwrap()
