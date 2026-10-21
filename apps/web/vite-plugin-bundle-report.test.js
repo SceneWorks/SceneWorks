@@ -180,4 +180,33 @@ describe("bundle report", () => {
 
     expect(report.violations).toEqual(["bundle-budgets.json is missing the lazyChunk budget"]);
   });
+
+  it.each(["initial", "largestRoute"])("fails closed when the %s budget is missing", (name) => {
+    const { [name]: _omitted, ...without } = roomyBudgets;
+    const report = buildBundleReport(entryWith(), without);
+
+    expect(report.violations).toEqual([`bundle-budgets.json is missing the ${name} budget`]);
+  });
+
+  it.each(["/src/modelCatalog.js", "/src/data/previewSupport.json"])(
+    "fails when the offline model catalog (%s) lands in the initial graph",
+    (moduleSuffix) => {
+      const report = buildBundleReport(
+        entryWith({
+          "assets/index.js": chunk("assets/index.js", {
+            isEntry: true,
+            modules: {
+              "C:/repo/apps/web/src/main.jsx": {},
+              [`C:/repo/apps/web${moduleSuffix}`]: {},
+            },
+          }),
+        }),
+        roomyBudgets,
+      );
+
+      expect(report.violations).toEqual([
+        `Offline model catalog leaked into the initial Assets graph via C:/repo/apps/web${moduleSuffix}`,
+      ]);
+    },
+  );
 });
