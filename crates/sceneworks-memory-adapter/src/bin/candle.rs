@@ -38,6 +38,15 @@ const IRIS_ID: &str = "iris_3b";
 const IRIS_DEPTH_ID: &str = "iris_3b_depth";
 const IRIS_RESTORE_ID: &str = "iris_3b_restore";
 
+#[path = "candle_supra2.rs"]
+mod candle_supra2;
+
+/// Supra2-IMG (sc-24217, epic 24212), served by `candle_supra2`: `candle-gen-supra2`'s registry id
+/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// for the reason the Iris ids above are: `adapterCapturableProviders` reads the pre-gate off this
+/// file.
+const SUPRA2_ID: &str = "supra2_img";
+
 /// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
 /// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
 const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
@@ -7703,6 +7712,13 @@ fn run(request: &Value) -> Result<Value, String> {
     if matches!(provider, IRIS_ID | IRIS_DEPTH_ID | IRIS_RESTORE_ID) {
         return candle_iris::run(request);
     }
+    // sc-24217: Supra2-IMG dispatches above the shared gates too. Its arm validates the native
+    // single still, the plain overlay and its resident override itself
+    // (`protocol::validate_supra2_plan`) before any env var or weight is read, and converts the
+    // bundle in a child process before the measured process loads anything.
+    if provider == SUPRA2_ID {
+        return candle_supra2::run(request);
+    }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
     // exist to measure. The four ids are spelled HERE, as consts, rather than asked of the module:
@@ -8340,6 +8356,8 @@ fn main() {
         "probe" => probe(),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
+        // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
+        protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
