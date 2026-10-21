@@ -1373,6 +1373,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "iris_3b_depth",
         // sc-25683: the Iris restoration task's candle floor is declared from existing evidence, not measured.
         "iris_3b_restore",
+        // sc-24214: Supra2-IMG's candle floor is declared from its resident set, not measured.
+        "supra2_img",
         // The six YuE entries left this set in sc-19387: their candle floors are CUDA-measured.
       ].sort(),
     );

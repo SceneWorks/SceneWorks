@@ -270,6 +270,7 @@
       "candle": false
     },
     "supra2_img": {
+      "candle": false,
       "mlx": false
     },
     "yue2": {
