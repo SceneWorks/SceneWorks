@@ -67,31 +67,16 @@ export function patchText(text, patch) {
   return text.slice(0, left) + section.replace(patch.old, patch.new) + text.slice(right);
 }
 
-export function sourceFingerprints(source) {
-  const [a, b] = bodySpan(source, "fn training_load_precision(");
-  let offset = 0, moss = null;
-  while (source.indexOf("fn finalize_training_config(", offset) >= 0) {
-    const span = bodySpan(source, "fn finalize_training_config(", offset, false);
-    const body = source.slice(...span);
-    const marker = 'if plan.target.kernel == "moss_image_lora"';
-    if (body.includes(marker)) { const inner = bodySpan(body, marker); requireFact(moss === null, "multiple MOSS finalizers"); moss = body.slice(...inner); }
-    offset = span[1] + 1;
-  }
-  requireFact(moss !== null, "MOSS finalizer missing");
-  return { official_source_load: normalizedDigest(source.slice(a, b)), moss_finalizer: normalizedDigest(moss) };
-}
-
 export function loadRegistry(root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
   const bytes = readFileSync(path.join(root, REGISTRY_PATH));
   const spec = JSON.parse(bytes);
-  requireFact(spec.schema_version === 1 && Array.isArray(spec.cases) && spec.cases.length === 59, "closed 59-case registry required");
+  requireFact(spec.schema_version === 2 && Array.isArray(spec.cases) && spec.cases.length === 69 && !Object.hasOwn(spec, "carried"), "closed 69-case executed registry required");
   const ids = new Set();
   for (const item of spec.cases) {
     requireFact(/^SW-[A-Za-z0-9-]+$/.test(item.id) && !ids.has(item.id), "duplicate/invalid case id"); ids.add(item.id);
     requireFact(Array.isArray(item.tests) && item.tests.length > 0 && item.tests.every(key => Object.hasOwn(TESTS, key)), "unknown exact test selector");
     requireFact(Array.isArray(item.patches) && item.patches.length > 0 && item.patches.every(patch => MUTABLE_FILES.includes(patch.file) && ["replace", "body"].includes(patch.op)), "patch outside closed source scope");
   }
-  requireFact(spec.carried?.source_revision === "e1206ef7a5b556402b5fa5e4f3d4f6a800c8a026" && JSON.stringify(spec.carried.case_ids) === JSON.stringify(["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted"]), "prior precision proof identities mismatch");
   return { ...spec, registry_sha256: digest(bytes) };
 }
 
@@ -111,7 +96,7 @@ export function parseTestResult(output, exit, exact, expected) {
 }
 
 export function validateAssertionReceipt(result, spec, expectedSha, expectedDriverHash) {
-  requireFact(result.schema_version === 1 && result.status === "passed" && result.source_sha === expectedSha, "assertion result source/status mismatch");
+  requireFact(result.schema_version === 2 && result.status === "passed" && result.source_sha === expectedSha, "assertion result source/status mismatch");
   requireFact(Number.isFinite(result.elapsed_seconds) && result.elapsed_seconds >= 0 && result.elapsed_seconds <= 80 * 60, "assertion driver exceeded its original bound");
   requireFact(result.registry_sha256 === spec.registry_sha256 && /^[0-9a-f]{64}$/.test(expectedDriverHash ?? "") && result.driver_sha256 === expectedDriverHash, "assertion implementation/registry mismatch");
   requireFact(JSON.stringify(result.test_ids) === JSON.stringify(Object.keys(TESTS)), "incomplete focused test scope");
@@ -120,7 +105,7 @@ export function validateAssertionReceipt(result, spec, expectedSha, expectedDriv
   requireFact(positive(result.baseline) && positive(result.final_green) && JSON.stringify(result.baseline.map(row => row.test_id)) === JSON.stringify(Object.keys(TESTS)) && JSON.stringify(result.final_green.map(row => row.test_id)) === JSON.stringify(Object.keys(TESTS)), "baseline/final test not positive or exact");
   requireFact(result.cases.length === spec.cases.length && result.cases.every((row, index) => row.id === spec.cases[index].id && row.killed === true && row.restored === true && row.red.length === spec.cases[index].tests.length && row.green.length === row.red.length && JSON.stringify(row.red.map(test => test.test_id)) === JSON.stringify(spec.cases[index].tests) && JSON.stringify(row.green.map(test => test.test_id)) === JSON.stringify(spec.cases[index].tests) && row.red.every(test => test.passed === 0 && test.failed === 1 && test.ignored === 0 && Number.isInteger(test.exit_code) && test.exit_code > 0) && positive(row.green)), "incomplete, surviving or unrestored mutation proof");
   requireFact(result.restored === true && result.clean_after === true && result.head_after === expectedSha && Object.values(result.source_before).every(value => /^[0-9a-f]{64}$/.test(value)) && JSON.stringify(Object.keys(result.source_before).sort()) === JSON.stringify([...MUTABLE_FILES].sort()) && JSON.stringify(result.source_before) === JSON.stringify(result.source_after), "source restoration mismatch");
-  requireFact(result.carried?.status === "carried-prior-proof-not-executed" && result.carried.source_revision === spec.carried.source_revision && JSON.stringify(result.carried.case_ids) === JSON.stringify(spec.carried.case_ids) && JSON.stringify(result.carried.fingerprints) === JSON.stringify(spec.carried.fingerprints), "carried precision evidence relabeled or changed");
+  requireFact(!Object.hasOwn(result, "carried"), "stale carried evidence is not accepted; every registry case must execute");
 }
 
 function git(root, ...args) {
@@ -155,8 +140,6 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
   const hashes = values => Object.fromEntries(MUTABLE_FILES.map(file => [file, digest(values[file])]));
   const restore = () => { for (const file of MUTABLE_FILES) { writeFileSync(path.join(root, file), originals[file]); utimesSync(path.join(root, file), new Date(), new Date()); } };
   const verifyRestored = () => MUTABLE_FILES.every(file => readFileSync(path.join(root, file)).equals(originals[file]));
-  const prior = sourceFingerprints(originals[MUTABLE_FILES[6]].toString());
-  requireFact(JSON.stringify(prior) === JSON.stringify(spec.carried.fingerprints), "prior precision fingerprints changed; cannot carry old proof");
   // Validate every planned patch against baseline BEFORE spending a compile or changing a byte.
   for (const item of spec.cases) {
     const changed = {};
@@ -164,7 +147,7 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
   }
   mkdirSync(output, { recursive: false });
   const resultPath = path.join(output, "assertions.json");
-  const result = { schema_version: 1, status: "running", source_sha: initial.head, registry_sha256: spec.registry_sha256, driver_sha256: digest(readFileSync(fileURLToPath(import.meta.url))), test_ids: Object.keys(TESTS), baseline: [], cases: [], final_green: [], source_before: hashes(originals), source_after: {}, restored: false, carried: { status: "carried-prior-proof-not-executed", source_revision: spec.carried.source_revision, case_ids: spec.carried.case_ids, fingerprints: prior } };
+  const result = { schema_version: 2, status: "running", source_sha: initial.head, registry_sha256: spec.registry_sha256, driver_sha256: digest(readFileSync(fileURLToPath(import.meta.url))), test_ids: Object.keys(TESTS), baseline: [], cases: [], final_green: [], source_before: hashes(originals), source_after: {}, restored: false };
   const state = { child: null, cancelled: false, cancelEscalation: null };
   const cancel = () => {
     state.cancelled = true;

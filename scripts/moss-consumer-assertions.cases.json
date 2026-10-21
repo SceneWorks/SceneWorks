@@ -1,17 +1,5 @@
 {
-  "schema_version": 1,
-  "carried": {
-    "source_revision": "e1206ef7a5b556402b5fa5e4f3d4f6a800c8a026",
-    "case_ids": [
-      "SW-Base-official-source",
-      "SW-SFT-official-source",
-      "SW-compute-demoted"
-    ],
-    "fingerprints": {
-      "official_source_load": "9e47b9d6ead24bbc598aeb37a5cbe8255ce20a5a1ba77e95067903b7ca757565",
-      "moss_finalizer": "483e1303bf813cc12e0c6f3ddeba0de92c252e0c29b1bb02c2efed62053d17cd"
-    }
-  },
+  "schema_version": 2,
   "cases": [
     {
       "id": "SW-target-count",
@@ -818,6 +806,49 @@
       ]
     },
     {
+      "id": "SW-Base-official-source",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "body",
+          "anchor": "fn training_load_precision(",
+          "new": "if !matches!(engine_id,\"qwen_image_2_1\"|\"moss_image_sft\") && train_dtype.trim().eq_ignore_ascii_case(\"f32\"){Precision::Fp32}else{Precision::Bf16}"
+        }
+      ]
+    },
+    {
+      "id": "SW-SFT-official-source",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "body",
+          "anchor": "fn training_load_precision(",
+          "new": "if !matches!(engine_id,\"qwen_image_2_1\"|\"moss_image_base\") && train_dtype.trim().eq_ignore_ascii_case(\"f32\"){Precision::Fp32}else{Precision::Bf16}"
+        }
+      ]
+    },
+    {
+      "id": "SW-compute-demoted",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "anchor": "fn finalize_training_config(",
+          "old": "if plan.target.kernel == \"moss_image_lora\" {",
+          "new": "if plan.target.kernel == \"moss_image_lora\" {config.train_dtype=\"bf16\".into();"
+        }
+      ]
+    },
+    {
       "id": "SW-thin-sampler-default",
       "tests": [
         "thin"
@@ -856,9 +887,114 @@
         {
           "file": "crates/sceneworks-worker/src/training_jobs.rs",
           "op": "replace",
-          "old": "if !plan.config.advanced.contains_key(\"timestepType\")",
-          "new": "if plan.target.kernel == \"moss_image_lora\"",
+          "old": ".is_none_or(|value| value.trim().is_empty())",
+          "new": ".is_none_or(|_value| true)",
           "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-thin-blank-sampler",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": ".and_then(Value::as_str)\n            .is_none_or(|value| value.trim().is_empty())",
+          "new": ".is_none()",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-modules-array",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "let modules = modules.as_array().ok_or_else(|| {\n                WorkerError::InvalidPayload(\"MOSS loraTargetModules must be an array\".into())\n            })?;",
+          "new": "let empty = Vec::new();\n            let modules = modules.as_array().unwrap_or(&empty);",
+          "anchor": "fn validate_training_target_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-modules-members",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "modules.iter().any(|module| !module.is_string())",
+          "new": "false",
+          "anchor": "fn validate_training_target_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-decomp-integer",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "let factor = factor.as_i64().ok_or_else(|| {\n                WorkerError::InvalidPayload(\"MOSS decomposeFactor must be an integer\".into())\n            })?;",
+          "new": "let factor = factor.as_i64().unwrap_or(-1);",
+          "anchor": "fn validate_training_target_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-decomp-positive",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "factor <= 0 || i32::try_from(factor).is_err()",
+          "new": "i32::try_from(factor).is_err()",
+          "anchor": "fn validate_training_target_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-decomp-overflow",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "factor <= 0 || i32::try_from(factor).is_err()",
+          "new": "factor <= 0",
+          "anchor": "fn validate_training_target_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-validate-valid-decomp",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "factor <= 0 || i32::try_from(factor).is_err()",
+          "new": "factor <= 4 || i32::try_from(factor).is_err()",
+          "anchor": "fn validate_training_target_config("
         }
       ]
     },

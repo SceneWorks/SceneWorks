@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 const modulePath = process.env.MOSS_ASSERTIONS_UNDER_TEST ?? fileURLToPath(new URL("./moss-consumer-assertions.mjs", import.meta.url));
-const { bodySpan, digest, loadRegistry, MUTABLE_FILES, parseTestResult, patchText, REGISTRY_PATH, runAssertions, sourceFingerprints, TESTS, validateAssertionReceipt } = await import(pathToFileURL(modulePath));
+const { bodySpan, digest, loadRegistry, MUTABLE_FILES, parseTestResult, patchText, REGISTRY_PATH, runAssertions, TESTS, validateAssertionReceipt } = await import(pathToFileURL(modulePath));
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHA = "a".repeat(40);
@@ -16,10 +16,9 @@ function output(exact, red = false, count = 1) {
 }
 function fixture() {
   const root = mkdtempSync(path.join(os.tmpdir(), "moss-assertions-synthetic-"));
-  const worker = `fn training_load_precision() { official_bf16() }\nfn finalize_training_config() { if plan.target.kernel == "moss_image_lora" { policy_mean() } config }\n`;
-  for (const file of MUTABLE_FILES) { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), file === MUTABLE_FILES[6] ? worker : "fn fixture() { let value = 1; }\n"); }
+  for (const file of MUTABLE_FILES) { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), "fn fixture() { let value = 1; }\n"); }
   const original = Object.fromEntries(MUTABLE_FILES.map(file => [file, readFileSync(path.join(root, file))]));
-  const spec = { schema_version: 1, registry_sha256: "1".repeat(64), carried: { source_revision: "e1206ef7a5b556402b5fa5e4f3d4f6a800c8a026", case_ids: ["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted"], fingerprints: sourceFingerprints(worker) }, cases: [{ id: "SW-synthetic", tests: ["target"], patches: [{ file: MUTABLE_FILES[0], op: "replace", old: "value = 1", new: "value = 2" }] }] };
+  const spec = { schema_version: 2, registry_sha256: "1".repeat(64), cases: [{ id: "SW-synthetic", tests: ["target"], patches: [{ file: MUTABLE_FILES[0], op: "replace", old: "value = 1", new: "value = 2" }] }] };
   const state = { calls: [], fault: null, clock: 0 };
   const execute = async (_root, args, _log, _limit, control) => {
     state.calls.push(args); state.clock += 1;
@@ -39,17 +38,17 @@ function fixture() {
 }
 function restored(f) { return MUTABLE_FILES.every(file => readFileSync(path.join(f.root, file)).equals(f.original[file])); }
 
-test("closed committed inventory has all 59 cases, seven exact tests, and separately carried precision proof", () => {
+test("closed committed inventory executes all 69 cases across seven exact tests", () => {
   const spec = loadRegistry(ROOT);
-  assert.equal(spec.cases.length, 59); assert.equal(Object.keys(TESTS).length, 7);
+  assert.equal(spec.cases.length, 69); assert.equal(Object.keys(TESTS).length, 7);
   let workerSeen = false;
   for (const item of spec.cases) {
     const worker = item.tests.some(key => TESTS[key][0] === "sceneworks-worker");
     if (worker) workerSeen = true;
     assert.ok(worker || !workerSeen, "core cases must precede worker cases");
   }
-  assert.deepEqual(spec.carried.case_ids, ["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted"]);
-  assert.ok(spec.carried.case_ids.every(id => !spec.cases.some(item => item.id === id)));
+  for (const id of ["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted", "SW-thin-blank-sampler", "SW-validate-modules-array", "SW-validate-modules-members", "SW-validate-decomp-integer", "SW-validate-decomp-positive", "SW-validate-decomp-overflow", "SW-validate-valid-decomp"]) assert.ok(spec.cases.some(item => item.id === id), id);
+  assert.equal(Object.hasOwn(spec, "carried"), false);
   assert.equal(spec.registry_sha256, digest(readFileSync(path.join(ROOT, REGISTRY_PATH))));
 });
 test("byte patching handles Rust strings, raw strings, characters, nested comments and lifetimes", () => {
@@ -73,7 +72,7 @@ test("synthetic executor proves compile-once, exact positive counts, mutation re
     assert.equal(result.status, "passed"); assert.equal(result.baseline.length, 7); assert.equal(result.final_green.length, 7);
     assert.deepEqual(result.cases[0].red.map(row => row.failed), [1]); assert.deepEqual(result.cases[0].green.map(row => row.passed), [1]);
     assert.equal(f.state.calls.filter(args => args.includes("--no-run")).length, 1);
-    assert.equal(restored(f), true); assert.equal(result.carried.status, "carried-prior-proof-not-executed");
+    assert.equal(restored(f), true); assert.equal(Object.hasOwn(result, "carried"), false);
     validateAssertionReceipt(result, f.spec, SHA, driverHash);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
@@ -82,16 +81,11 @@ for (const fault of ["compile", "timeout", "cancel", "survive", "zero"]) test(`s
   try { const result = await runAssertions(f.root, f.output, f.options); assert.equal(result.status, "failed"); assert.equal(restored(f), true); assert.equal(result.cases.every(row => !row.killed), true); }
   finally { rmSync(f.root, { recursive: true, force: true }); }
 });
-test("carried precision fingerprint drift refuses execution rather than silently replaying or relabeling proof", async () => {
-  const f = fixture(); f.spec.carried.fingerprints.official_source_load = "0".repeat(64);
-  try { await assert.rejects(() => runAssertions(f.root, f.output, f.options), /precision fingerprints/); assert.equal(f.state.calls.length, 0); assert.equal(restored(f), true); }
-  finally { rmSync(f.root, { recursive: true, force: true }); }
-});
 test("receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", async () => {
   const f = fixture();
   try {
     const valid = await runAssertions(f.root, f.output, f.options);
-    for (const change of [value => { value.registry_sha256 = "0".repeat(64); }, value => { value.driver_sha256 = "0".repeat(64); }, value => { value.cases[0].id = "foreign"; }, value => { value.cases[0].killed = false; }, value => { value.cases[0].red[0].failed = 0; }, value => { value.cases[0].green[0].test_id = "protocol"; }, value => { value.baseline[0].passed = 0; }, value => { value.final_green[0].test_id = "protocol"; }, value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, value => { value.clean_after = false; }, value => { value.head_after = "b".repeat(40); }, value => { value.carried.status = "executed-remotely"; }]) {
+    for (const change of [value => { value.registry_sha256 = "0".repeat(64); }, value => { value.driver_sha256 = "0".repeat(64); }, value => { value.cases[0].id = "foreign"; }, value => { value.cases[0].killed = false; }, value => { value.cases[0].red[0].failed = 0; }, value => { value.cases[0].green[0].test_id = "protocol"; }, value => { value.baseline[0].passed = 0; }, value => { value.final_green[0].test_id = "protocol"; }, value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, value => { value.clean_after = false; }, value => { value.head_after = "b".repeat(40); }, value => { value.carried = { status: "carried-prior-proof-not-executed" }; }]) {
       const bad = structuredClone(valid); change(bad); assert.throws(() => validateAssertionReceipt(bad, f.spec, SHA, driverHash));
     }
   } finally { rmSync(f.root, { recursive: true, force: true }); }
@@ -102,7 +96,7 @@ if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypas
   for (const [id, target, old, replacement] of [
     ["DRV-positive-count", "positive and assertion-red parser rejects compilation, crash, no selection and wrong named test", "record.passed === 1", "record.passed >= 0"],
     ["DRV-restore", "synthetic executor proves compile-once, exact positive counts, mutation red, touch restore and final green", "writeFileSync(path.join(root, file), originals[file]);", "void originals[file];"],
-    ["DRV-carried-fingerprint", "carried precision fingerprint drift refuses execution rather than silently replaying or relabeling proof", "JSON.stringify(prior) === JSON.stringify(spec.carried.fingerprints)", "true"],
+    ["DRV-no-stale-carry", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", 'requireFact(!Object.hasOwn(result, "carried"), "stale carried evidence is not accepted; every registry case must execute");', ""],
     ["DRV-case-binding", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", "row.id === spec.cases[index].id", "true"],
   ]) await t.test(id, () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "moss-driver-policy-mutation-"));

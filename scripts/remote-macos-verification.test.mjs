@@ -25,7 +25,7 @@ function syntheticAssertionResult() {
   const spec = loadRegistry(ROOT);
   const green = key => ({ test_id: key, passed: 1, failed: 0, ignored: 0, exit_code: 0 });
   const hashes = Object.fromEntries(MUTABLE_FILES.map(file => [file, "1".repeat(64)]));
-  return { schema_version: 1, status: "passed", elapsed_seconds: 1, source_sha: SOURCE, registry_sha256: spec.registry_sha256, driver_sha256: sha256(readFileSync(path.join(ROOT, ASSERTION_DRIVER))), test_ids: Object.keys(ASSERTION_TESTS), baseline: Object.keys(ASSERTION_TESTS).map(green), final_green: Object.keys(ASSERTION_TESTS).map(green), cases: spec.cases.map(item => ({ id: item.id, killed: true, restored: true, red: item.tests.map(test_id => ({ test_id, passed: 0, failed: 1, ignored: 0, exit_code: 101 })), green: item.tests.map(green) })), source_before: hashes, source_after: { ...hashes }, restored: true, clean_after: true, head_after: SOURCE, carried: { status: "carried-prior-proof-not-executed", source_revision: spec.carried.source_revision, case_ids: spec.carried.case_ids, fingerprints: spec.carried.fingerprints } };
+  return { schema_version: 2, status: "passed", elapsed_seconds: 1, source_sha: SOURCE, registry_sha256: spec.registry_sha256, driver_sha256: sha256(readFileSync(path.join(ROOT, ASSERTION_DRIVER))), test_ids: Object.keys(ASSERTION_TESTS), baseline: Object.keys(ASSERTION_TESTS).map(green), final_green: Object.keys(ASSERTION_TESTS).map(green), cases: spec.cases.map(item => ({ id: item.id, killed: true, restored: true, red: item.tests.map(test_id => ({ test_id, passed: 0, failed: 1, ignored: 0, exit_code: 101 })), green: item.tests.map(green) })), source_before: hashes, source_after: { ...hashes }, restored: true, clean_after: true, head_after: SOURCE };
 }
 function capability(backend, kind) {
   const generatedFrom = { inferenceRevision: PIN };
@@ -237,7 +237,7 @@ test("consumer assertion evidence is authenticated but can never create a canoni
     assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false);
   } finally { rmSync(local.root, { recursive: true, force: true }); }
 });
-for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { value.cases[0].green[0].test_id = "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried.status = "executed-remotely"; } })) test(`consumer evidence rejects ${name}`, async () => {
+for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { value.cases[0].green[0].test_id = "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried = { status: "carried-prior-proof-not-executed" }; } })) test(`consumer evidence rejects ${name}`, async () => {
   const f = fixture("consumer-assertions"), value = syntheticAssertionResult(); change(value);
   replaceMember(f, "assertions.json", JSON.stringify(value)); await assert.rejects(f.verify);
 });

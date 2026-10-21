@@ -878,6 +878,26 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                 ));
             }
         }
+        if let Some(modules) = advanced.get("loraTargetModules") {
+            let modules = modules.as_array().ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS loraTargetModules must be an array".into())
+            })?;
+            if modules.iter().any(|module| !module.is_string()) {
+                return Err(WorkerError::InvalidPayload(
+                    "MOSS loraTargetModules must contain only strings".into(),
+                ));
+            }
+        }
+        if let Some(factor) = advanced.get("decomposeFactor") {
+            let factor = factor.as_i64().ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS decomposeFactor must be an integer".into())
+            })?;
+            if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
+                return Err(WorkerError::InvalidPayload(
+                    "MOSS decomposeFactor must be -1 or a positive i32".into(),
+                ));
+            }
+        }
         for key in ["cacheLatents", "cacheTextEmbeddings"] {
             if advanced.get(key).is_some_and(|v| v != &Value::Bool(true)) {
                 return Err(WorkerError::InvalidPayload(format!("MOSS {key} must be true; native training freezes and caches the VAE/text encoder")));
@@ -2695,7 +2715,13 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
         }
     }
     if plan.target.kernel == "moss_image_lora" {
-        if !plan.config.advanced.contains_key("timestepType") {
+        if plan
+            .config
+            .advanced
+            .get("timestepType")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
             config.timestep_type = "moss_stage3_v1".to_owned();
         }
         config.model_options = plan
@@ -7822,6 +7848,14 @@ mod tests {
                 json!(config.model_options),
                 json!({"vae_posterior":"posterior_mean_v1"})
             );
+            assert!(config.lora_target_modules.is_empty());
+            assert_eq!(config.decompose_factor, -1);
+            for blank in ["", "   "] {
+                let mut unspecified = value.clone();
+                unspecified["config"]["advanced"]["timestepType"] = json!(blank);
+                let config = engine_training_config(&parse(unspecified));
+                assert_eq!(config.timestep_type, "moss_stage3_v1", "{base}: {blank:?}");
+            }
             value["config"]["advanced"]["timestepType"] = json!("uniform");
             value["config"]["advanced"]["modelOptions"] =
                 json!({"vae_posterior":"posterior_mean_v1"});
@@ -7873,9 +7907,26 @@ mod tests {
                     value["config"]["advanced"]["networkType"] = json!(network);
                     value["config"]["advanced"]["mixedPrecision"] = json!(dtype);
                     value["config"]["advanced"]["loraTargetModules"] = json!(["q", "ffn_up_gate"]);
+                    value["config"]["advanced"]["decomposeFactor"] = json!(4);
                     value["dataset"]["items"][0]["caption"] =
                         json!("日本語 caption {\"layout\":\"left\"}");
                     value["output"]["triggerWords"] = json!(["sksmoss"]);
+                    for (field, invalid, expected) in [
+                        ("loraTargetModules", json!("q"), "must be an array"),
+                        ("loraTargetModules", json!(["q", 7]), "only strings"),
+                        ("decomposeFactor", json!(4_294_967_295_i64), "positive i32"),
+                        ("decomposeFactor", json!(0), "positive i32"),
+                        ("decomposeFactor", json!("4"), "must be an integer"),
+                    ] {
+                        let mut refused = value.clone();
+                        refused["config"]["advanced"][field] = invalid;
+                        let error = validate_training_target_config(&parse(refused))
+                            .expect_err("invalid MOSS mapping input must fail before loading");
+                        assert!(
+                            matches!(&error, WorkerError::InvalidPayload(message) if message.contains(field) && message.contains(expected)),
+                            "{base}/{network}/{dtype}/{field}: {error:?}"
+                        );
+                    }
                     let plan = parse(value);
                     let engine = validate_training_target_config(&plan)
                         .expect("actual registered MOSS trainer accepts offered method");
@@ -7903,6 +7954,7 @@ mod tests {
                     );
                     assert_eq!((request.config.rank, request.config.alpha), (2, 3.));
                     assert_eq!(request.config.lora_target_modules, vec!["q", "ffn_up_gate"]);
+                    assert_eq!(request.config.decompose_factor, 4);
                     assert_eq!(
                         request.config.model_options.get("vae_posterior"),
                         Some(&json!("posterior_mean_v1"))
