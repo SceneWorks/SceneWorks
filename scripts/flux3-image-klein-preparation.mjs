@@ -189,15 +189,43 @@ async function insideDirectory(directory, root) {
   const value = await realpath(directory), relative = path.relative(await realpath(root), value);
   assert(relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative), 'directory escaped approved root'); assert((await stat(value)).isDirectory()); return value;
 }
+// Byte-identical ports of sceneworks-core `safe_download_dir` (the managed
+// `data/models/<X>` receipt directory, keyed by REPOSITORY, never model ID) and
+// `safe_repo_dir_name` (the HF hub `models--<X>` directory). Both are pinned by
+// tests/fixtures/rust_migration_contracts/repo_slugs.json, which the Rust core,
+// API and worker tests assert too, so drift fails on both sides.
+export function safeDownloadDir(value) {
+  let output = '', replacing = false;
+  for (const character of value) {
+    if (/^[A-Za-z0-9_.-]$/.test(character)) { output += character; replacing = false; } else if (!replacing) { output += '__'; replacing = true; }
+  }
+  output = output.replace(/^_+|_+$/g, ''); return output || 'download';
+}
+export function safeRepoDirName(repo) {
+  const output = [...repo].map(character => (/^[A-Za-z0-9._-]$/.test(character) ? character : '--')).join('').replace(/^-+|-+$/g, '');
+  return output || null;
+}
+// Top-level `license:` of a README model-card front matter, else null.
+export function readmeCardLicense(text) {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text); if (!match) return null;
+  const line = /^license:[ \t]*(.*?)[ \t]*$/m.exec(match[1]); if (!line) return null;
+  const value = line[1].replace(/^(['"])(.*)\1$/, '$2').trim(); return value || null;
+}
 export async function discoverPreparationInventory({ state, hfHome, row, job, authorization, installed }) {
   assert.equal(job.status, 'completed'); assert.equal(job.type, 'model_download');
   assert.equal(job.payload?.modelId, row.modelId); assert.equal(job.payload?.repo, row.repository); assert.equal(job.payload?.revision, row.resolvedRevision); assert.deepEqual(job.payload?.files, []);
-  const marker = await contained(path.join(state, 'data/models', row.modelId, '.sceneworks-download-complete.json'), state), markerBytes = await readFile(marker), envelope = JSON.parse(markerBytes);
+  const marker = await contained(path.join(state, 'data/models', safeDownloadDir(row.repository), '.sceneworks-download-complete.json'), state), markerBytes = await readFile(marker), envelope = JSON.parse(markerBytes);
   const matches = (envelope.receipts ?? [envelope]).filter(r => r.jobId === job.id && r.modelId === row.modelId && r.repo === row.repository && r.snapshotRevision === row.resolvedRevision); assert.equal(matches.length, 1);
   const receipt = matches[0]; assert.equal(receipt.schemaVersion, 2); assert(/^\d{4}-\d{2}-\d{2}T[0-9:.+-]+Z?$/.test(receipt.completedAt) && Number.isFinite(Date.parse(receipt.completedAt))); assert.deepEqual(receipt.manifestFiles, []); assert(Array.isArray(receipt.resolvedFiles) && receipt.resolvedFiles.length);
   assert.equal(installed?.id, row.modelId); assert.equal(installed.installState, 'installed');
-  const snapshot = await insideDirectory(installed.installedPath, hfHome);
-  assert.equal(path.basename(snapshot), row.resolvedRevision); assert.equal(path.basename(path.dirname(snapshot)), 'snapshots'); assert.equal(path.basename(path.dirname(path.dirname(snapshot))), `models--${row.repository.replaceAll('/', '--')}`);
+  // The exact pinned snapshot is derived from the approved coordinates and must
+  // equal the completed job's own reported HF-cache path. The catalog reports
+  // either that snapshot (FLUX 3 runtimes) or its repository cache root (other
+  // models, e.g. PUP); nothing else is accepted.
+  const repoDir = safeRepoDirName(row.repository); assert(repoDir, 'approved repository has no HF cache directory');
+  const snapshot = await insideDirectory(path.join(hfHome, 'hub', `models--${repoDir}`, 'snapshots', row.resolvedRevision), hfHome);
+  assert.equal(job.result?.storage, 'huggingface_cache'); assert.equal(await realpath(job.result.path), snapshot, 'completed job must report the exact pinned snapshot');
+  const listed = await realpath(installed.installedPath); assert(listed === snapshot || listed === path.dirname(path.dirname(snapshot)), 'catalog installed path is neither the pinned snapshot nor its repository cache root');
   const files = [];
   async function walk(directory, prefix = '') {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -210,8 +238,17 @@ export async function discoverPreparationInventory({ state, hfHome, row, job, au
   assert.deepEqual([...receipt.resolvedFiles].sort(), files.map(f => f.path).sort(), 'actual receipt must cover complete observed snapshot, not a supplied inventory');
   const totalBytes = files.reduce((n, f) => n + f.bytes, 0); assert.equal(totalBytes, row.downloadBytes, 'actual pinned repository size differs from approved whole-repository bytes');
   assert.equal(await fileHash(await contained(path.join(snapshot, 'config.json'), hfHome)), authorization.configSha256);
-  const licenseFile = files.find(f => /^LICENSE(?:\.md|\.txt)?$/i.test(f.path)); assert(licenseFile, 'actual upstream license file required');
-  return { authority: 'OBSERVED_NOT_GPU_APPROVED', gpuExecutionApproved: false, modelId: row.modelId, repository: row.repository, resolvedRevision: row.resolvedRevision, root: snapshot, containmentRoot: await realpath(hfHome), totalBytes, files, jobId: job.id, workerId: job.workerId, receiptSha256: hash(markerBytes), receipt: { schemaVersion: receipt.schemaVersion, jobId: receipt.jobId, modelId: receipt.modelId, repo: receipt.repo, snapshotRevision: receipt.snapshotRevision, completedAt: receipt.completedAt, manifestFiles: receipt.manifestFiles, resolvedFiles: receipt.resolvedFiles }, authorization: { httpStatus: authorization.httpStatus, configSha256: authorization.configSha256 }, license: { path: licenseFile.path, sha256: licenseFile.sha256 } };
+  // Prefer a shipped LICENSE file. Only when none exists may the README card's
+  // own `license:` stand in, and only if it equals the source catalog license.
+  const licenseFile = files.find(f => /^LICENSE(?:\.md|\.txt)?$/i.test(f.path)); let license;
+  if (licenseFile) license = { source: 'file', path: licenseFile.path, sha256: licenseFile.sha256 };
+  else {
+    const readme = files.find(f => f.path === 'README.md'); assert(readme && typeof row.license === 'string' && row.license, 'actual upstream license file or catalog-matching README card license required');
+    const declared = readmeCardLicense(await readFile(await contained(path.join(snapshot, 'README.md'), hfHome), 'utf8'));
+    assert(declared && declared.toLowerCase() === row.license.toLowerCase(), 'README card license must equal the source catalog license');
+    license = { source: 'readme-card', path: readme.path, sha256: readme.sha256, license: declared };
+  }
+  return { authority: 'OBSERVED_NOT_GPU_APPROVED', gpuExecutionApproved: false, modelId: row.modelId, repository: row.repository, resolvedRevision: row.resolvedRevision, root: snapshot, containmentRoot: await realpath(hfHome), totalBytes, files, jobId: job.id, workerId: job.workerId, receiptSha256: hash(markerBytes), receipt: { schemaVersion: receipt.schemaVersion, jobId: receipt.jobId, modelId: receipt.modelId, repo: receipt.repo, snapshotRevision: receipt.snapshotRevision, completedAt: receipt.completedAt, manifestFiles: receipt.manifestFiles, resolvedFiles: receipt.resolvedFiles }, authorization: { httpStatus: authorization.httpStatus, configSha256: authorization.configSha256 }, license };
 }
 // Keep complete SANITIZED lines: first 64 KiB plus a rolling tail, <=2 MiB
 // total. Each pipe's incomplete raw line is separately bounded to 64 KiB;
