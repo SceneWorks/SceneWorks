@@ -82,11 +82,18 @@ export function inferencePin(root) {
   return revisions[0];
 }
 
+// Transport spelling is not repository identity. Accept only these exact same-repo forms;
+// do not use a permissive URL parser (credentials, escaping, queries and suffixes stay invalid).
+export function canonicalRepositoryOrigin(origin) {
+  requireFact(["https://github.com/SceneWorks/SceneWorks", "https://github.com/SceneWorks/SceneWorks.git", "git@github.com:SceneWorks/SceneWorks.git", "ssh://git@github.com/SceneWorks/SceneWorks.git"].includes(origin), "same-origin checkout required");
+  return `https://github.com/${REPOSITORY}.git`;
+}
+
 export function checkoutContext(root, request, { executeGit = git, readPin = inferencePin, platform = process.platform } = {}) {
   validateRequest(request);
   const g = (...args) => executeGit(root, ...args);
   requireFact(g("rev-parse", "HEAD") === request.source_sha && g("status", "--porcelain") === "", "exact clean committed source required");
-  requireFact(/^https:\/\/github\.com\/SceneWorks\/SceneWorks(?:\.git)?$/.test(g("remote", "get-url", "origin")), "same-origin checkout required");
+  canonicalRepositoryOrigin(g("remote", "get-url", "origin"));
   g("fetch", "--no-tags", "origin", `+refs/heads/${request.source_ref}:refs/remotes/origin/${request.source_ref}`, `+refs/heads/${request.base_ref}:refs/remotes/origin/${request.base_ref}`);
   g("merge-base", "--is-ancestor", "HEAD", `origin/${request.source_ref}`);
   requireFact(readPin(root) === request.inference_sha, "requested inference pin differs from checkout");

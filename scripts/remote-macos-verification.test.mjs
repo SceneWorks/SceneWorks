@@ -298,6 +298,24 @@ test("checkout identity uses exact clean owned source, ancestry and recomputed M
     assert.throws(() => checkoutContext(ROOT, request(), { executeGit: changed, readPin: () => fault === "pin" ? BASE : PIN, platform: "darwin" }), fault);
   }
 });
+test("same-repository origin accepts exact HTTPS and SSH transports and rejects confusable identities", () => {
+  const good = ["https://github.com/SceneWorks/SceneWorks", "https://github.com/SceneWorks/SceneWorks.git", "git@github.com:SceneWorks/SceneWorks.git", "ssh://git@github.com/SceneWorks/SceneWorks.git"];
+  for (const origin of good) {
+    assert.equal(policy.canonicalRepositoryOrigin(origin), `https://github.com/${REPOSITORY}.git`);
+    const executeGit = (_root, ...args) => {
+      if (args[0] === "status") return "";
+      if (args[0] === "remote") return origin;
+      if (args[0] === "fetch" || args.includes("--is-ancestor")) return "";
+      if (args[0] === "diff") return "Cargo.toml";
+      return args[0] === "rev-parse" && args[1] === "HEAD" ? SOURCE : BASE;
+    };
+    assert.equal(checkoutContext(ROOT, request("facts-and-projections"), { executeGit, readPin: () => PIN }).source_sha, SOURCE);
+  }
+  const bad = [undefined, null, "", "https://github.com/fork/SceneWorks.git", "git@github.com:SceneWorks/inference.git", "ssh://git@github.com/SceneWorks/SceneWorks.git.evil", "https://github.com.evil/SceneWorks/SceneWorks.git", "git@github.com.evil:SceneWorks/SceneWorks.git", "ssh://root@github.com/SceneWorks/SceneWorks.git", "https://git@github.com/SceneWorks/SceneWorks.git", "https://token:secret@github.com/SceneWorks/SceneWorks.git", "ssh://git:secret@github.com/SceneWorks/SceneWorks.git", "ssh://git@github.com:22/SceneWorks/SceneWorks.git", "https://github.com/SceneWorks/%53ceneWorks.git", "https://github.com/SceneWorks/SceneWorks.git/../inference", "https://github.com/SceneWorks/SceneWorks.git/", "git@github.com:SceneWorks/SceneWorks.git?x", "https://github.com/SceneWorks/SceneWorks.git#x", "ssh://git@github.com/SceneWorks/SceneWorks.git?x", "git@github.com:SceneWorks/SceneWorks.git\n", " https://github.com/SceneWorks/SceneWorks.git", "https://github.com/sceneworks/SceneWorks.git"];
+  for (const origin of bad) assert.throws(() => policy.canonicalRepositoryOrigin(origin), /same-origin checkout required/, String(origin));
+  // The checkout path must call the strict canonicalizer, not merely export a dead helper.
+  assert.match(readFileSync(modulePath, "utf8"), /canonicalRepositoryOrigin\(g\("remote", "get-url", "origin"\)\);/);
+});
 test("Cargo pin reader rejects multiple or differently resolved inference sources", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-pin-"));
   try {
@@ -473,6 +491,8 @@ test("synthetic NAX-class CPU fixture drains safely on a budget violation and ca
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   const cases = [
+    ["RV-origin-identity", "same-repository origin accepts exact HTTPS and SSH transports and rejects confusable identities", '].includes(origin), "same-origin checkout required"', '].length > 0, "same-origin checkout required"'],
+    ["RV-origin-call", "same-repository origin accepts exact HTTPS and SSH transports and rejects confusable identities", 'canonicalRepositoryOrigin(g("remote", "get-url", "origin"));', 'g("remote", "get-url", "origin");'],
     ["RV-host-strip-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", ', ''],
     ["RV-host-strip-test", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", ', ''],
     ["RV-host-strip-cache-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", ' build_override_strip: "none", ', ''],
