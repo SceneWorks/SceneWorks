@@ -244,6 +244,11 @@ on:
           - "1"
           - "0,1"
         default: "1"
+      run_supra2_worker_smoke:
+        description: "Run the sc-24214 Supra2-IMG Candle worker job once on real weights (install-time convert, then one default 256², 50-step, CFG 3.0, seed-0 image_generate job; the three pinned snapshots must already be in E:\\huggingface\\hub)"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -412,6 +417,7 @@ jobs:
         env:
           CAPABILITY_FACTS_ONLY: ${{ inputs.capability_facts_only }}
           RUN_IRIS_WORKER_SMOKE: ${{ inputs.run_iris_worker_smoke }}
+          RUN_SUPRA2_WORKER_SMOKE: ${{ inputs.run_supra2_worker_smoke }}
           RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
@@ -420,7 +426,7 @@ jobs:
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
           YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
-          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE) -contains 'true')) {
+          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE, $env:RUN_SUPRA2_WORKER_SMOKE) -contains 'true')) {
             throw 'capability_facts_only cannot share a dispatch with provisioning or a GPU/runtime profile'
           }
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
@@ -1798,3 +1804,54 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1
+
+  # SC-24214 (epic 24212): one real-weight Supra2-IMG `image_generate` job through the production
+  # Candle worker dispatch, on the real-weights card. Dispatch only — never on PR/push — and bounded
+  # (the install-time `.pt` -> bundle convert, then ONE default 256², 50-step image). Offline: the
+  # pinned SupraLabs/Supra2-IMG, google/flan-t5-base and stabilityai/sd-vae-ft-mse snapshots must
+  # already be in E:\huggingface\hub (inference's `candle-supra2` real-weight job materializes them
+  # there); a missing snapshot fails the job rather than downloading.
+  #   gh workflow run windows-candle.yml --ref <branch> -f run_supra2_worker_smoke=true
+  supra2-worker-smoke:
+    needs: candle-worker
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the Supra2 worker smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the Supra2 worker smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned inference revision for the Supra2 worker smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the Supra2-IMG Candle worker smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release supra2_worker_gpu_smoke -- --ignored --nocapture --test-threads=1

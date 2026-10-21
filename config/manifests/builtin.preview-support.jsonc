@@ -7,8 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
-      "audioInferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc"
+      "inferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc"
     },
     "mlx": {
       "inferenceRevision": "46c22c01e717f3595ac77a598142ad16a799e2cc"
@@ -280,6 +279,7 @@
       "candle": false
     },
     "supra2_img": {
+      "candle": false,
       "mlx": false
     },
     "yue2": {
