@@ -5469,11 +5469,25 @@ fn mlx_raw_settings(
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
     // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
+    // So are the unconditional context CFG steered against and the rendering backend (epic-review
+    // follow-up): the reproducibility record, never a replayed copy.
     raw.remove(sceneworks_core::supra2::MODEL_REVISIONS_KEY);
     if sceneworks_core::supra2::is_supra2(&request.model) {
         raw.insert(
             sceneworks_core::supra2::MODEL_REVISIONS_KEY.to_owned(),
             sceneworks_core::supra2::pinned_revisions(&request.model_manifest_entry),
+        );
+        raw.insert(
+            sceneworks_core::supra2::UNCONDITIONAL_KEY.to_owned(),
+            sceneworks_core::supra2::unconditional_source(&request.model_manifest_entry, guidance),
+        );
+        raw.insert(
+            sceneworks_core::supra2::BACKEND_KEY.to_owned(),
+            Value::from(if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            }),
         );
     }
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
