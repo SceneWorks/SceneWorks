@@ -177,8 +177,9 @@ export function ownedCpuTree(rootPid, { sample = cpuProcesses, send = (pid, sign
 
 export async function executeCpuCommand(root, args, log, limitMs, state, supervision = {}) {
   const { openSync, closeSync, writeSync } = await import("node:fs");
-  const fd = openSync(log, "w"), deadline = performance.now() + limitMs;
-  console.log(JSON.stringify({ command: args, log: path.basename(log), bound_ms: limitMs }));
+  const fd = openSync(log, "w"), started = performance.now(), deadline = started + limitMs;
+  const childRecipe = Object.fromEntries(["CARGO_INCREMENTAL", "CARGO_BUILD_JOBS", "CARGO_PROFILE_TEST_DEBUG", "CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP", "RUSTUP_TOOLCHAIN"].map(key => [key, process.env[key] ?? "unset"]));
+  console.log(JSON.stringify({ command: args, log: path.basename(log), bound_ms: limitMs, child_recipe: childRecipe }));
   const child = spawn(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], detached: true });
   let closed = false, logOpen = true, exit = null, failure = null;
   const completion = new Promise(resolve => {
@@ -211,6 +212,7 @@ export async function executeCpuCommand(root, args, log, limitMs, state, supervi
     logOpen = false;
     closeSync(fd);
   }
+  console.log(JSON.stringify({ completed: path.basename(log), elapsed_ms: performance.now() - started, exit_code: exit, failure, cleanup: state.cleanup }));
   requireFact(!failure, failure);
   return { exit, output: readFileSync(log, "utf8") };
 }
@@ -258,12 +260,12 @@ export async function runAssertions(root, output, { execute = executeCpuCommand,
     return { test_id: key, ...parseTestResult(run.output, run.exit, exact, expected) };
   };
   try {
-    const build = await invoke(["cargo", "test", "--locked", "-p", "sceneworks-core", "-p", "sceneworks-worker", "--lib", "--no-run"], "initial-compile", 35 * 60 * 1000);
+    const build = await invoke(["cargo", "test", "--locked", "--verbose", "-p", "sceneworks-core", "-p", "sceneworks-worker", "--lib", "--no-run"], "initial-compile", 35 * 60 * 1000);
     requireFact(build.exit === 0, "initial focused-library compilation failed");
     for (const key of Object.keys(TESTS)) result.baseline.push(await selected(key, `baseline-${key}`, "green"));
     store(resultPath, result);
-    // Registry order is mechanism-grouped: core mutations finish before worker mutations, so a
-    // core patch never asks Cargo to rebuild a dependent worker test binary.
+    // Three independent fail-fast sentinels precede the remaining mechanism-grouped cases.
+    // Core cases still finish before the rest of the worker cases; no case is carried or skipped.
     for (const item of spec.cases) {
       const record = { id: item.id, red: [], green: [], killed: false, restored: false };
       result.cases.push(record);

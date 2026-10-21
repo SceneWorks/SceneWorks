@@ -17,8 +17,8 @@ const sourceRef = "story/sc-26585-epic-26584-moss-image-training", base = "featu
 const machine = () => ({ runner_name: "nax-macos-2", platform: "darwin", arch: "arm64", runtime: "26.5.2", sdk: "26.5", deployment_target: "26.2", chip: "Apple M5 Max", developer_dir: "/Applications/Xcode.app/Contents/Developer", metal_compiler: "/Applications/Xcode.app/Contents/Developer/usr/bin/metal" });
 const request = (profile = "canonical-preflight") => ({ repository: REPOSITORY, profile, source_sha: SOURCE, source_ref: sourceRef, inference_sha: PIN, base_ref: base, allow_nax_unit: profile === "canonical-preflight", legacy_device_inputs: false });
 const unitLedger = () => ({ limit_seconds: 300, rss_limit_bytes: 8 * 1024 ** 3, used_seconds: 3, runs: ["adapter-library", "adapter-bin", "nax-gpu"].map((kind, index) => ({ kind, pid: 100 + index, exit_code: 0, peak_rss_bytes: 1024, rss_samples: 1, seconds: 1, violation: null })) });
-function cacheContext() {
-  const value = { serialized: true, released: true, runner_name: "nax-macos-2", toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: "26.5", target_directory_sha256: "1".repeat(64), rustc_sha256: "2".repeat(64), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), build_flags: { ...CACHE_FLAGS } };
+function cacheContext(profile = "canonical-preflight") {
+  const value = { serialized: true, released: true, runner_name: "nax-macos-2", toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: "26.5", target_directory_sha256: "1".repeat(64), rustc_sha256: "2".repeat(64), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), build_flags: policy.cacheFlags(profile) };
   return { ...value, context_sha256: sha256(JSON.stringify(value)) };
 }
 function syntheticAssertionResult() {
@@ -47,7 +47,7 @@ function fixture(profile = "canonical-preflight") {
     OUTPUTS.forEach((file, index) => { files[`payload/${file}`] = Buffer.from(index < 3 ? JSON.stringify(capability(index === 1 ? "candle" : "mlx", ["media", "audio", "runtime"][index])) : file.endsWith(".md") ? "# Static generated fixture\n" : file.endsWith(".jsonc") ? "// generated fixture\n{}\n" : "{}\n"); });
   }
   if (profile === "facts-and-projections") files["facts.log"] = Buffer.from("actual static producer output\n");
-  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
+  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(profile), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
   const controls = Object.fromEntries([WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH].map(file => [file, sha256(readFileSync(path.join(ROOT, file)))]));
   const run = { id: 41, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", repository: { id: 9, full_name: REPOSITORY }, head_repository: { id: 9, full_name: REPOSITORY }, head_branch: sourceRef, head_sha: DISPATCHER, path: WORKFLOW };
   const ownedJob = { name: JOB, run_id: 41, run_attempt: 2, head_sha: DISPATCHER, conclusion: "success", runner_name: "nax-macos-2", labels: ["self-hosted", "macOS", "ARM64", "rw-llm"], steps: ["Run exact remote verification", "Upload remote verification artifact"].map(name => ({ name, conclusion: "success" })) };
@@ -386,7 +386,8 @@ test("manual verifier overrides only host build strip and binds both profiles in
   };
   for (const [key, value] of Object.entries(expected)) assert.equal(env[key], value, key);
   assert.deepEqual(Object.keys(env).filter(key => key.endsWith("_STRIP")).sort(), ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP", "CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP"]);
-  for (const key of ["SDKROOT", "TMPDIR", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL"]) assert.equal(env[key], original[key]);
+  for (const key of ["SDKROOT", "TMPDIR", "CARGO_TARGET_DIR"]) assert.equal(env[key], original[key]);
+  assert.equal(env.CARGO_INCREMENTAL, "0");
   assert.equal(original.CARGO_BUILD_TARGET, "foreign"); assert.equal(env.CARGO_BUILD_TARGET, undefined); assert.equal(env.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER, undefined);
   assert.equal(CACHE_FLAGS.build_override_strip, "none"); assert.equal(CACHE_FLAGS.test_build_override_strip, "none");
   for (const key of ["build_override_strip", "test_build_override_strip"]) {
@@ -395,11 +396,41 @@ test("manual verifier overrides only host build strip and binds both profiles in
     assert.throws(() => validateCacheContext(stale), /build flags/);
   }
   const controller = readFileSync(modulePath, "utf8");
-  assert.match(controller, /const runEnv = remoteBuildEnv\(env\);/);
-  assert.ok(controller.indexOf("const runEnv = remoteBuildEnv(env);") < controller.indexOf('if (request.profile === "facts-and-projections")'));
-  assert.equal(controller.split("remoteBuildEnv(env)").length - 1, 2); // definition + single common profile entry
+  assert.match(controller, /const runEnv = remoteBuildEnv\(env, request.profile\);/);
+  assert.ok(controller.indexOf("const runEnv = remoteBuildEnv(env, request.profile);") < controller.indexOf('if (request.profile === "facts-and-projections")'));
+  assert.equal([...controller.matchAll(/\bremoteBuildEnv\(/g)].length, 2); // definition + single common profile entry
   // No global Cargo/toolchain/workflow profile edits: only the controller constructs this override.
   assert.doesNotMatch(workflow, /BUILD_OVERRIDE_STRIP|CARGO_PROFILE_(?:DEV|TEST)_STRIP/);
+});
+test("incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", async () => {
+  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) {
+    const expected = profile === "consumer-assertions" ? "1" : "0";
+    for (const ambient of [undefined, "0", "1", "foreign-value"]) {
+      const env = policy.remoteBuildEnv({ CARGO_INCREMENTAL: ambient, VERIFICATION_PROFILE: "consumer-assertions", TMPDIR: "/tmp/unchanged", SDKROOT: "/sdk/unchanged", CARGO_TARGET_DIR: "/leased/target" }, profile);
+      assert.equal(env.CARGO_INCREMENTAL, expected, `${profile}/${ambient}`);
+      assert.equal(env.TMPDIR, "/tmp/unchanged"); assert.equal(env.SDKROOT, "/sdk/unchanged"); assert.equal(env.CARGO_TARGET_DIR, "/leased/target");
+      assert.equal(env.CARGO_BUILD_JOBS, "2"); assert.equal(env.CARGO_PROFILE_TEST_DEBUG, "0"); assert.equal(env.CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP, "none");
+    }
+    assert.equal(policy.cacheFlags(profile).incremental, expected);
+    const valid = cacheContext(profile); validateCacheContext(valid, profile);
+    for (const incorrect of [undefined, expected === "1" ? "0" : "1"]) {
+      const stale = structuredClone(valid);
+      if (incorrect === undefined) delete stale.build_flags.incremental; else stale.build_flags.incremental = incorrect;
+      const { context_sha256, ...body } = stale; stale.context_sha256 = sha256(JSON.stringify(body));
+      assert.throws(() => validateCacheContext(stale, profile), /cache build flags/);
+    }
+  }
+  assert.notEqual(cacheContext("consumer-assertions").context_sha256, cacheContext("canonical-preflight").context_sha256);
+  assert.throws(() => policy.remoteBuildEnv({}, "foreign-profile"), /unknown cache recipe profile/);
+  const controller = readFileSync(modulePath, "utf8");
+  assert.match(controller, /build_flags: cacheFlags\(request.profile\)/);
+  assert.match(controller, /validateCacheContext\(receipt.cache_context, request.profile\)/);
+  assert.match(controller, /validateCacheContext\(receipt.cache_context, context.profile\)/);
+  assert.match(controller, /remoteBuildEnv\(env, request.profile\)/);
+  const valid = fixture("consumer-assertions"); await valid.verify();
+  const stale = fixture("consumer-assertions");
+  stale.receipt.cache_context = cacheContext("canonical-preflight");
+  await assert.rejects(stale.verify, /cache build flags/);
 });
 test("original proc macro invocation distinguishes rebuilt no-strip from stale or stripped evidence", () => {
   const command = "   Running `rustc --crate-name bytemuck_derive src/lib.rs --crate-type proc-macro -C prefer-dynamic";
@@ -491,13 +522,17 @@ test("synthetic NAX-class CPU fixture drains safely on a budget violation and ca
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   const cases = [
+    ["RV-incremental-runtime", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'runEnv.CARGO_INCREMENTAL = cacheFlags(profile).incremental;', 'void profile;'],
+    ["RV-incremental-scope", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'incremental: profile === "consumer-assertions" ? "1" : "0"', 'incremental: "1"'],
+    ["RV-incremental-recipe", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'equal(context.build_flags, cacheFlags(profile))', 'true'],
+    ["RV-incremental-auth-profile", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'validateCacheContext(receipt.cache_context, context.profile);', 'validateCacheContext(receipt.cache_context);'],
     ["RV-origin-identity", "same-repository origin accepts exact HTTPS and SSH transports and rejects confusable identities", '].includes(origin), "same-origin checkout required"', '].length > 0, "same-origin checkout required"'],
     ["RV-origin-call", "same-repository origin accepts exact HTTPS and SSH transports and rejects confusable identities", 'canonicalRepositoryOrigin(g("remote", "get-url", "origin"));', 'g("remote", "get-url", "origin");'],
     ["RV-host-strip-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", ', ''],
     ["RV-host-strip-test", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", ', ''],
     ["RV-host-strip-cache-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", ' build_override_strip: "none", ', ''],
     ["RV-host-strip-cache-test", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'test_build_override_strip: "none", ', ''],
-    ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, CACHE_FLAGS)', 'true'],
+    ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, cacheFlags(profile))', 'true'],
     ["RV-cache-exclusion", "dedicated target cache lease prevents overlap and never steals or releases another owner", 'mkdirSync(lease);', 'mkdirSync(lease, { recursive: true });'],
     ["RV-consumer-proof", "consumer evidence rejects survivor", 'validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);', 'void spec;'],
     ["RV-no-currency-gate", "provenance-only drift is not a canonical currency gate", 'pin === undefined || revision === pin', 'revision === pin'],

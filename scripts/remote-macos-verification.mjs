@@ -18,7 +18,7 @@ export const WORKFLOW = ".github/workflows/macos-mlx.yml";
 export const CONTROLLER = "scripts/remote-macos-verification.mjs";
 export const JOB = "manual-verification";
 export const PROFILES = ["facts-and-projections", "consumer-assertions", "canonical-preflight"];
-export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", build_override_strip: "none", test_build_override_strip: "none", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
+export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", build_override_strip: "none", test_build_override_strip: "none", incremental: "0", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
 export const OUTPUTS = [
   "config/engine-capabilities/capabilities.mlx.json",
   "config/engine-capabilities/audio/capabilities.candle.json",
@@ -168,7 +168,7 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
   requireFact(receipt.clean_before === true && typeof receipt.clean_after === "boolean" && (context.profile === "facts-and-projections" || receipt.clean_after === true), "dirty canonical source cannot pass");
   requireFact(receipt.run_id === runId && receipt.run_attempt === attempt && receipt.job === JOB && receipt.runner_name === "nax-macos-2", "receipt execution identity mismatch");
   validateMachine(receipt.machine, context.profile);
-  validateCacheContext(receipt.cache_context);
+  validateCacheContext(receipt.cache_context, context.profile);
   requireFact(receipt.cache_context.sdk === receipt.machine.sdk && receipt.cache_context.cargo_config_sha256 === context.cargo_config_sha256, "cache SDK/config differs from observed source");
   const run = await api.json(`repos/${REPOSITORY}/actions/runs/${runId}/attempts/${attempt}`);
   requireFact(run.id === runId && run.run_attempt === attempt && run.event === "workflow_dispatch" && run.status === "completed" && run.conclusion === "success", "actual run did not complete successfully");
@@ -417,10 +417,17 @@ export function acquireTargetLease(directory, owner) {
   } };
 }
 
-export function validateCacheContext(context) {
+// Cargo 1.97.1 (c980f486) gives CARGO_INCREMENTAL=1 precedence over every profile/config.
+// Incremental is part of Cargo's Profile fingerprint and unit metadata; the lease is unchanged.
+export function cacheFlags(profile = "canonical-preflight") {
+  requireFact(PROFILES.includes(profile), "unknown cache recipe profile");
+  return { ...CACHE_FLAGS, incremental: profile === "consumer-assertions" ? "1" : "0" };
+}
+
+export function validateCacheContext(context, profile = "canonical-preflight") {
   requireFact(context?.serialized === true && context.released === true && context.runner_name === "nax-macos-2", "target cache was not exclusively owned and released");
   requireFact(context.toolchain === "1.97.1" && context.host === "aarch64-apple-darwin" && HASH.test(context.rustc_sha256 ?? "") && HASH.test(context.cargo_config_sha256 ?? "") && HASH.test(context.target_directory_sha256 ?? "") && /^\d+\.\d+(?:\.\d+)?$/.test(context.sdk ?? ""), "compiler/cache context mismatch");
-  requireFact(equal(context.build_flags, CACHE_FLAGS), "inconsistent cache build flags");
+  requireFact(equal(context.build_flags, cacheFlags(profile)), "inconsistent cache build flags");
   const { context_sha256, ...body } = context;
   requireFact(HASH.test(context_sha256 ?? "") && sha256(JSON.stringify(body)) === context_sha256, "cache context fingerprint mismatch");
 }
@@ -434,13 +441,13 @@ export async function executeRemote(root, output, env = process.env) {
   requireFact(!env.RUSTFLAGS && !env.CARGO_ENCODED_RUSTFLAGS, "nonstandard compiler flags require a separate validated cache context");
   const rustc = command(root, [path.join(os.homedir(), ".cargo/bin/rustup"), "run", "1.97.1", "rustc", "-vV"]);
   requireFact(/^release: 1\.97\.1$/m.test(rustc) && /^host: aarch64-apple-darwin$/m.test(rustc), "native pinned compiler required");
-  const cache = { serialized: true, released: true, runner_name: env.RUNNER_NAME, toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: machine.sdk, target_directory_sha256: sha256(target), rustc_sha256: sha256(rustc), cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))), build_flags: { ...CACHE_FLAGS } };
+  const cache = { serialized: true, released: true, runner_name: env.RUNNER_NAME, toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: machine.sdk, target_directory_sha256: sha256(target), rustc_sha256: sha256(rustc), cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))), build_flags: cacheFlags(request.profile) };
   const lease = acquireTargetLease(target, { ...identity, runner_name: env.RUNNER_NAME, source_sha: request.source_sha });
   let receipt;
   try { receipt = await executeRemoteWithinLease(root, output, env); }
   finally { lease.release(); }
   receipt.cache_context = { ...cache, context_sha256: sha256(JSON.stringify(cache)) };
-  validateCacheContext(receipt.cache_context);
+  validateCacheContext(receipt.cache_context, request.profile);
   writeFileSync(path.join(output, "receipt.json"), `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;
 }
@@ -451,8 +458,9 @@ export async function executeRemote(root, output, env = process.env) {
 // hashes Profile.strip into both fingerprints and unit metadata; old stripped units cannot be reused.
 // Disable strip ONLY for build-override units (build scripts, proc macros and their dependencies); the
 // regular dev/test units keep Cargo's defaults. Recorded in CACHE_FLAGS so the receipt binds it.
-export function remoteBuildEnv(env) {
+export function remoteBuildEnv(env, profile = "canonical-preflight") {
   const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
+  runEnv.CARGO_INCREMENTAL = cacheFlags(profile).incremental;
   delete runEnv.CARGO_BUILD_TARGET;
   delete runEnv.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER;
   return runEnv;
@@ -471,7 +479,7 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
   const identity = dispatchIdentity(env);
   requireFact(!existsSync(output), "output directory must be new"); mkdirSync(output, { recursive: true });
   const receipt = { schema_version: 1, status: "running", ...context, ...identity, repository: REPOSITORY, job: JOB, runner_name: env.RUNNER_NAME, machine, clean_before: true, files: {} };
-  const runEnv = remoteBuildEnv(env);
+  const runEnv = remoteBuildEnv(env, request.profile);
   if (request.profile === "facts-and-projections") {
     // Keep committed Windows provenance as declared; never restamp it or add a pin-currency gate.
     // Changed Candle semantics still require genuine producer facts before the final matrix can pass.

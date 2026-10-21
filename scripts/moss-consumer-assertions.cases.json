@@ -17,6 +17,36 @@
       ]
     },
     {
+      "id": "SW-thin-explicit-options",
+      "tests": [
+        "thin"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "\n    config\n",
+          "new": "\n    if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n    config\n",
+          "anchor": "fn finalize_training_config("
+        }
+      ]
+    },
+    {
+      "id": "SW-result-backend",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "json!(backend)",
+          "new": "json!(\"wrong\")",
+          "anchor": "fn training_result("
+        }
+      ]
+    },
+    {
       "id": "SW-target-count",
       "tests": [
         "target",
@@ -1067,36 +1097,6 @@
           "old": "factor <= 0 || i32::try_from(factor).is_err()",
           "new": "factor <= 4 || i32::try_from(factor).is_err()",
           "anchor": "fn validate_training_target_config("
-        }
-      ]
-    },
-    {
-      "id": "SW-thin-explicit-options",
-      "tests": [
-        "thin"
-      ],
-      "patches": [
-        {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
-          "op": "replace",
-          "old": "\n    config\n",
-          "new": "\n    if plan.target.kernel == \"moss_image_lora\" && plan.config.advanced.contains_key(\"modelOptions\") { config.model_options.extend(plan.config.advanced.clone()); }\n    config\n",
-          "anchor": "fn finalize_training_config("
-        }
-      ]
-    },
-    {
-      "id": "SW-result-backend",
-      "tests": [
-        "protocol"
-      ],
-      "patches": [
-        {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
-          "op": "replace",
-          "old": "json!(backend)",
-          "new": "json!(\"wrong\")",
-          "anchor": "fn training_result("
         }
       ]
     }

@@ -41,11 +41,10 @@ function restored(f) { return MUTABLE_FILES.every(file => readFileSync(path.join
 test("closed committed inventory executes all 74 cases across seven exact tests", () => {
   const spec = loadRegistry(ROOT);
   assert.equal(spec.cases.length, 74); assert.equal(Object.keys(TESTS).length, 7);
-  assert.equal(spec.cases[0].id, "SW-load-text-encoder");
-  // Check the repaired typed-source fixture immediately after baseline; the remaining cases
-  // retain the core-then-worker order so each core mutation avoids rebuilding worker tests.
+  assert.deepEqual(spec.cases.slice(0, 3).map(item => item.id), ["SW-load-text-encoder", "SW-thin-explicit-options", "SW-result-backend"]);
+  // Three independent fail-fast cases follow baseline; the remaining 71 retain their order.
   let workerSeen = false;
-  for (const item of spec.cases.slice(1)) {
+  for (const item of spec.cases.slice(3)) {
     const worker = item.tests.some(key => TESTS[key][0] === "sceneworks-worker");
     if (worker) workerSeen = true;
     assert.ok(worker || !workerSeen, "core cases must precede worker cases");
@@ -87,6 +86,8 @@ test("synthetic executor proves compile-once, exact positive counts, mutation re
     assert.equal(result.status, "passed"); assert.equal(result.baseline.length, 7); assert.equal(result.final_green.length, 7);
     assert.deepEqual(result.cases[0].red.map(row => row.failed), [1]); assert.deepEqual(result.cases[0].green.map(row => row.passed), [1]);
     assert.equal(f.state.calls.filter(args => args.includes("--no-run")).length, 1);
+    assert.equal(f.state.calls.find(args => args.includes("--no-run")).filter(arg => arg === "--verbose").length, 1);
+    assert.ok(f.state.calls.filter(args => !args.includes("--no-run")).every(args => !args.includes("--verbose") && !args.includes("-vv")));
     assert.equal(restored(f), true); assert.equal(Object.hasOwn(result, "carried"), false);
     validateAssertionReceipt(result, f.spec, SHA, driverHash);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
@@ -192,6 +193,26 @@ test("CPU command normal close never sends a post-close signal", posixOnly, asyn
     assert.deepEqual(state.cleanup, { errors: [], remaining: [], unproven: [] });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+test("CPU child inherits the selected incremental recipe and logs only its whitelist", posixOnly, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-recipe-")), state = { cancelled: false };
+  const oldIncremental = process.env.CARGO_INCREMENTAL, oldSecret = process.env.MOSS_FIXTURE_SECRET, originalLog = console.log, messages = [];
+  process.env.CARGO_INCREMENTAL = "1"; process.env.MOSS_FIXTURE_SECRET = "not-a-recipe-field";
+  console.log = text => messages.push(text);
+  try {
+    const result = await executeCpuCommand(root, tinyNode("console.log('incremental='+process.env.CARGO_INCREMENTAL);setTimeout(()=>{},200)"), path.join(root, "log"), 2000, state, { graceMs: 100 });
+    assert.equal(result.exit, 0); assert.match(result.output, /incremental=1/);
+    const records = messages.map(text => JSON.parse(text));
+    assert.equal(records[0].child_recipe.CARGO_INCREMENTAL, "1");
+    assert.deepEqual(Object.keys(records[0].child_recipe), ["CARGO_INCREMENTAL", "CARGO_BUILD_JOBS", "CARGO_PROFILE_TEST_DEBUG", "CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP", "RUSTUP_TOOLCHAIN"]);
+    assert.ok(Number.isFinite(records[1].elapsed_ms)); assert.equal(records[1].exit_code, 0);
+    assert.ok(messages.every(text => !text.includes("not-a-recipe-field")));
+  } finally {
+    console.log = originalLog;
+    if (oldIncremental === undefined) delete process.env.CARGO_INCREMENTAL; else process.env.CARGO_INCREMENTAL = oldIncremental;
+    if (oldSecret === undefined) delete process.env.MOSS_FIXTURE_SECRET; else process.env.MOSS_FIXTURE_SECRET = oldSecret;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 test("CPU cancellation terminates and reaps before returning", posixOnly, async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "moss-cpu-cancel-")), state = { cancelled: false };
   const timer = setTimeout(() => { state.cancelled = true; }, 350);
@@ -256,6 +277,8 @@ test("owned CPU identity rejects reused and foreign processes and tolerates know
 if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypasses are killed by original tests without Cargo", async t => {
   const source = readFileSync(path.join(ROOT, "scripts/moss-consumer-assertions.mjs"), "utf8");
   for (const [id, target, old, replacement] of [
+    ["DRV-child-recipe", "CPU child inherits the selected incremental recipe and logs only its whitelist", '["CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"', '["CARGO_BUILD_JOBS"'],
+    ["DRV-initial-verbose", "synthetic executor proves compile-once, exact positive counts, mutation red, touch restore and final green", '["cargo", "test", "--locked", "--verbose", "-p", "sceneworks-core"', '["cargo", "test", "--locked", "-p", "sceneworks-core"'],
     ["DRV-restore-before-reap", "unreaped compiler fails closed without racing source restoration", "} finally { if (!state.unsafeToRestore) restore();", "} finally { restore();"],
     ["DRV-restore-unchanged", "restore rewrites and touches only changed files while auditing every mutable source", "if (!current?.equals(originals[file]))", "if (true)"],
     ["DRV-restore-touch", "restore rewrites and touches only changed files while auditing every mutable source", "utimesSync(path.join(root, file), new Date(), new Date());", "utimesSync(path.join(root, file), new Date(1000), new Date(1000));"],
