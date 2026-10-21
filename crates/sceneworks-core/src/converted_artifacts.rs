@@ -136,7 +136,7 @@ mod tests {
             let problem = converted_artifact_problem("supra2_img", tmp.path(), check)
                 .expect("no bundle manifest");
             assert!(
-                problem.contains(gen_core::supra2::BUNDLE_MANIFEST),
+                problem.contains("is not a converted Supra2 bundle"),
                 "{problem}"
             );
         }

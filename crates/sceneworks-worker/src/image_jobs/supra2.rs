@@ -187,7 +187,7 @@ mod tests {
         assert!(
             message.contains("Supra2-IMG's converted model files are damaged or incomplete")
                 && message.contains("run Convert again")
-                && message.contains(gen_core::supra2::BUNDLE_MANIFEST),
+                && message.contains("is not a converted Supra2 bundle"),
             "{message}"
         );
         assert_eq!(

@@ -12170,7 +12170,10 @@ mod variant_install_tests {
         let problem = status
             .conversion_problem
             .expect("the engine's refusal reason");
-        assert!(problem.contains("supra2_bundle.json"), "{problem}");
+        assert!(
+            problem.contains("is not a converted Supra2 bundle"),
+            "{problem}"
+        );
 
         // Same marker-only shape for a converter WITHOUT a contract: unchanged, installed.
         let mut other = model.clone();
