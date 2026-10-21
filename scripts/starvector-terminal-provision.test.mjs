@@ -918,9 +918,9 @@ test("Windows overlong checkout directories refuse before any write or Git comma
   const revision = (await execFile("git", ["-C", source, "rev-parse", "HEAD"])).stdout.trim();
   const expected = terminalPinPaths(hostRoot, revision).inferenceRoot;
   const objectPath = path.join(expected, ".git", "objects", "ab", "c".repeat(38));
-  assert.ok(objectPath.length > 300);
   assert.ok(objectPath.split(path.sep).every(component => component.length < 255));
   if (process.platform === "win32") {
+    assert.ok(objectPath.length > 300);
     await mkdir(expected, { recursive: true });
     await writeFile(path.join(expected, "existing-target"), "preserve target bytes");
     const foreign = `${expected}.staging-foreign-owner`;
@@ -973,8 +973,13 @@ test("Windows overlong checkout directories refuse before any write or Git comma
     await assert.rejects(lstat(path.join(hostRoot, ".locks")), { code: "ENOENT" });
     t.diagnostic(`Unchanged ${objectPath.length}-character fixture refused early with no Git/mkdir/lock/staging/publication or changed bytes`);
   } else {
-    // No Windows limit or argv change is imposed on other platforms.
+    // Short /tmp prefixes need not reproduce a Windows path length. The real positive
+    // publication still runs, without a Windows limit, flag, namespace or skipped contract.
     assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    assert.equal(await installPinnedCheckout(source, hostRoot, revision), revision);
+    assert.equal((await execFile("git", ["-C", expected, "rev-parse", "HEAD"])).stdout.trim(), revision);
+    assert.equal((await execFile("git", ["-C", expected, "status", "--porcelain"])).stdout, "");
+    for (const relative of closure) assert.equal(await readFile(path.join(expected, relative), "utf8"), `DECLARED SYNTHETIC fixture: ${relative}`);
   }
 });
 
