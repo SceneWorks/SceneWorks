@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1082,
+    "cellCount": 1083,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -15,12 +15,12 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "e677b5caa4fc1e1d3e5d39e5203fd4bb69bc6b6ac980bd45866a44b5ca21a9b5",
-    "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
-    "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
-    "descriptorMlxFacts": "1ae25631931a6dbfa8da77b5f2f694983ca17f54d08e44218a01bc7b5235c2be",
-    "descriptorMlxRuntime": "ca5b0f3da96af240c9810633b19a9586e0edeb082ad47d6527c7b628791db64f",
-    "descriptorPreviewFacts": "c24bf449402a7d7a1d43e0a063fe6828d0304cf793bbee89ac152eac4a3561a7",
+    "descriptorAudioFacts": "52ce1c2fdef390f05fb29d946f149fb536d7e676c2e1b5c3dcfbfaef264b2484",
+    "descriptorCandleFacts": "f7ee4c251284a7274fa58bf6c1810329b08f05d8b3c9c89d0299b60969ef987c",
+    "descriptorCandleRuntime": "d3d0c8972c26a8dc7811d4053bddc645690b23a7086abf60c8be7f1a3bb2f616",
+    "descriptorMlxFacts": "c812061ed49c1009c04adccdb64b79934c9894560b95588926028f7109e5c668",
+    "descriptorMlxRuntime": "d8aa1c62b4395fcb72d4c17bf7d2694e19cb5bff98b39431b74ae7333585e44e",
+    "descriptorPreviewFacts": "0ff333a69065d1ae63a6dfbed74930f774d4d3a86579dfbcad4e2c2e79aca3e4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "5a2291261850a46e6f2685c60e71f1669beefc53c3957804c916a4420aee3187",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
@@ -6436,8 +6436,8 @@
       "operationAndMode": [
         {
           "capability": "text_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "conditioningShape": [],
@@ -6453,12 +6453,18 @@
           "candle": false
         }
       ],
-      "precisionTier": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
-        "candle": null
+        "mlx": false,
+        "candle": false
       }
     },
     {
