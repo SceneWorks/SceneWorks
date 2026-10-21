@@ -8,9 +8,17 @@ import test from "node:test";
 import { selectSteps } from "./preflight.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const nestedTestArgs = target => ["--test", "--test-reporter=spec", `--test-name-pattern=^${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, fileURLToPath(import.meta.url)];
+test("nested Node probes require spec reporter and exact test scope", () => {
+  const target = "fixture (+) exact", args = nestedTestArgs(target);
+  assert.equal(args[0], "--test"); assert.equal(args.filter(arg => arg === "--test-reporter=spec").length, 1);
+  assert.equal(args.length, 4); assert.equal(args[3], fileURLToPath(import.meta.url));
+  const pattern = new RegExp(args[2].slice("--test-name-pattern=".length));
+  assert.ok(pattern.test(target)); assert.ok(!pattern.test(target + " extra")); assert.ok(!pattern.test("unrelated"));
+});
 const modulePath = process.env.REMOTE_MACOS_CONTROLLER_UNDER_TEST ?? path.join(ROOT, "scripts/remote-macos-verification.mjs");
 const policy = await import(pathToFileURL(modulePath));
-const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, CACHE_FLAGS, ASSERTION_DRIVER, CONTROL_FILES, CROSS_TOOLCHAIN_HELPER, acquireTargetLease, validateCacheContext, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, requireFreshStamp, sha256, unitKind, unitRunner, validateCapabilityFile, validateFacts, validateMachine, validateRequest, validateStamp, validateUnits } = policy;
+const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, CACHE_FLAGS, ASSERTION_DRIVER, CONTROL_FILES, CROSS_TOOLCHAIN_HELPER, TARGET_REGISTRY, TARGET_REGISTRY_WRITER, acquireTargetLease, validateCacheContext, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, requireFreshStamp, sha256, unitKind, unitRunner, validateCapabilityFile, validateFacts, validateMachine, validateRequest, validateStamp, validateUnits } = policy;
 const { loadRegistry, TESTS: ASSERTION_TESTS, MUTABLE_FILES, REGISTRY_PATH } = await import("./moss-consumer-assertions.mjs");
 const SOURCE = "a".repeat(40), PIN = "b".repeat(40), BASE = "c".repeat(40), DISPATCHER = "d".repeat(40);
 const { TOOL_KEYS, identityDigest } = await import("./canonical-cross-toolchain.mjs");
@@ -31,6 +39,15 @@ function syntheticAssertionResult() {
   const hashes = Object.fromEntries(MUTABLE_FILES.map(file => [file, "1".repeat(64)]));
   return { schema_version: 2, status: "passed", elapsed_seconds: 1, source_sha: SOURCE, registry_sha256: spec.registry_sha256, driver_sha256: sha256(readFileSync(path.join(ROOT, ASSERTION_DRIVER))), test_ids: Object.keys(ASSERTION_TESTS), baseline: Object.keys(ASSERTION_TESTS).map(green), final_green: Object.keys(ASSERTION_TESTS).map(green), cases: spec.cases.map(item => ({ id: item.id, killed: true, restored: true, red: item.tests.map(test_id => ({ test_id, passed: 0, failed: 1, ignored: 0, exit_code: 101 })), green: item.tests.map(green) })), source_before: hashes, source_after: { ...hashes }, restored: true, clean_after: true, head_after: SOURCE };
 }
+function targetRegistry() {
+  return { schemaVersion: 1, targets: ["moss_image_base", "moss_image_sft"].map(base => ({
+    id: `${base}_lora`, name: base, modality: "image", outputKind: "lora", family: "moss-image", baseModel: base,
+    baseModelRepo: `OpenMOSS-Team/MOSS-Image-${base === "moss_image_base" ? "Base" : "SFT"}`, kernel: "moss_image_lora",
+    defaults: { rank: 16, alpha: 16, learningRate: 0.0001, steps: 1000, batchSize: 1, gradientAccumulation: 1, resolution: 1024, saveEvery: 250, seed: 42, optimizer: "adamw", advanced: { mixedPrecision: "bf16", timestepType: "moss_stage3_v1", modelOptions: { vae_posterior: "posterior_mean_v1" } } },
+    limits: { networkTypes: ["lora", "lokr"], mixedPrecisions: ["bf16", "f32"] }, ui: {},
+  })) };
+}
+const generationRecord = () => ({ purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, passed: 1, failed: 0, ignored: 0, exit_code: 0 });
 function capability(backend, kind) {
   const generatedFrom = { inferenceRevision: PIN };
   return kind === "runtime"
@@ -50,8 +67,11 @@ function fixture(profile = "canonical-preflight") {
   } else {
     OUTPUTS.forEach((file, index) => { files[`payload/${file}`] = Buffer.from(index < 3 ? JSON.stringify(capability(index === 1 ? "candle" : "mlx", ["media", "audio", "runtime"][index])) : file.endsWith(".md") ? "# Static generated fixture\n" : file.endsWith(".jsonc") ? "// generated fixture\n{}\n" : "{}\n"); });
   }
-  if (profile === "facts-and-projections") files["facts.log"] = Buffer.from("actual static producer output\n");
-  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(profile), ...(profile === "canonical-preflight" ? { cross_toolchain: crossIdentity() } : {}), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
+  if (profile === "facts-and-projections") {
+    files["facts.log"] = Buffer.from("actual static producer output\n");
+    files[`payload/${TARGET_REGISTRY}`] = Buffer.from(JSON.stringify(targetRegistry()));
+  }
+  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(profile), ...(profile === "canonical-preflight" ? { cross_toolchain: crossIdentity() } : {}), ...(profile === "facts-and-projections" ? { target_registry_generation: generationRecord() } : {}), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
   const controls = Object.fromEntries(CONTROL_FILES.map(file => [file, sha256(readFileSync(path.join(ROOT, file)))]));
   const run = { id: 41, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", repository: { id: 9, full_name: REPOSITORY }, head_repository: { id: 9, full_name: REPOSITORY }, head_branch: sourceRef, head_sha: DISPATCHER, path: WORKFLOW };
   const ownedJob = { name: JOB, run_id: 41, run_attempt: 2, head_sha: DISPATCHER, conclusion: "success", runner_name: "nax-macos-2", labels: ["self-hosted", "macOS", "ARM64", "rw-llm"], steps: ["Run exact remote verification", "Upload remote verification artifact", ...(profile === "canonical-preflight" ? ["Prepare real canonical cross toolchain", "Require real canonical cross checks"] : [])].map(name => ({ name, conclusion: "success" })) };
@@ -439,6 +459,32 @@ test("incremental compilation is scoped to the declared consumer profile and aut
   stale.receipt.cache_context = cacheContext("canonical-preflight");
   await assert.rejects(stale.verify, /cache build flags/);
 });
+test("facts transport binds the exact authoritative target writer as generation only", async () => {
+  assert.equal(OUTPUTS.length, 9); assert.equal(OUTPUTS.at(-1), TARGET_REGISTRY);
+  assert.deepEqual(OUTPUTS.slice(0, 8), ["config/engine-capabilities/capabilities.mlx.json", "config/engine-capabilities/audio/capabilities.candle.json", "config/engine-capabilities/runtime/capabilities.mlx.json", "config/backend-capabilities/matrix.json", "config/manifests/builtin.preview-support.jsonc", "apps/web/src/data/previewSupport.json", "docs/generated/memory-matrix.json", "docs/generated/memory-matrix.md"]);
+  assert.equal(TARGET_REGISTRY, "tests/fixtures/rust_migration_contracts/training/target-registry.json");
+  const writer = `running 1 test\ntest ${TARGET_REGISTRY_WRITER} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n`;
+  assert.deepEqual(policy.registryGenerationRecord(writer), generationRecord());
+  for (const bad of [writer.replace("1 passed", "0 passed"), writer.replace("0 ignored", "1 ignored"), writer.replaceAll(TARGET_REGISTRY_WRITER, "other_writer"), "error[E0308]: cannot compile"]) assert.throws(() => policy.registryGenerationRecord(bad));
+  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) assert.equal(policy.remoteBuildEnv({ REGEN_FIXTURE: "ambient" }, profile).REGEN_FIXTURE, undefined);
+  const registry = targetRegistry(); policy.validateTargetRegistry(registry);
+  const expanded = structuredClone(registry); expanded.targets.push({ ...expanded.targets[0], id: "extra_target" }); policy.validateTargetRegistry(expanded); // no pinned total population
+  for (const change of [
+    value => { value.targets = []; }, value => { value.targets.pop(); }, value => { value.targets.push(value.targets[0]); },
+    value => { value.targets[0].baseModel = "moss_image_sft"; }, value => { value.targets[0].baseModelRepo = "foreign/checkpoint"; },
+    value => { value.targets[0].limits.networkTypes = ["lora"]; }, value => { value.targets[0].defaults.rank = 1.5; },
+    value => { value.targets[0].defaults.advanced.modelOptions.vae_posterior = "sample"; }, value => { value.machine = "host-dependent"; },
+  ]) { const bad = structuredClone(registry); change(bad); assert.throws(() => policy.validateTargetRegistry(bad)); }
+  const controller = readFileSync(modulePath, "utf8");
+  assert.ok(controller.includes('["cargo", "test", "--locked", "-p", "sceneworks-core", "--test", "training_contracts", TARGET_REGISTRY_WRITER, "--", "--exact", "--ignored"]'));
+  assert.ok(controller.includes('log, { ...runEnv, REGEN_FIXTURE: "1" }, true)'));
+  assert.doesNotMatch(controller, /runEnv\.REGEN_FIXTURE\s*=|process\.env\.REGEN_FIXTURE\s*=/);
+  const valid = fixture("facts-and-projections"); await valid.verify();
+  for (const change of [f => { delete f.receipt.target_registry_generation; }, f => { f.receipt.target_registry_generation.passed = 0; }, f => { f.receipt.target_registry_generation.purpose = "validation-proof"; }]) {
+    const f = fixture("facts-and-projections"); change(f); await assert.rejects(f.verify);
+  }
+  const badWire = fixture("facts-and-projections"); replaceMember(badWire, `payload/${TARGET_REGISTRY}`, JSON.stringify({ schemaVersion: 1, targets: [] })); await assert.rejects(badWire.verify);
+});
 test("canonical compiler proof binds helper source, real setup steps, identity and profile cache", async () => {
   assert.ok(CONTROL_FILES.includes("scripts/canonical-cross-toolchain.mjs"));
   const body = jobBody(JOB), start = body.indexOf("      - name: Prepare real canonical cross toolchain");
@@ -551,6 +597,10 @@ test("synthetic NAX-class CPU fixture drains safely on a budget violation and ca
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   const cases = [
+    ["RV-registry-writer-env", "facts transport binds the exact authoritative target writer as generation only", '{ ...runEnv, REGEN_FIXTURE: "1" }', 'runEnv'],
+    ["RV-registry-env-leak", "facts transport binds the exact authoritative target writer as generation only", 'delete runEnv.REGEN_FIXTURE;', 'void runEnv.REGEN_FIXTURE;'],
+    ["RV-registry-generation-proof", "facts transport binds the exact authoritative target writer as generation only", 'equal(record, { purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, passed: 1, failed: 0, ignored: 0, exit_code: 0 })', 'true'],
+    ["RV-registry-wire", "facts transport binds the exact authoritative target writer as generation only", 'export function validateTargetRegistry(value) {', 'export function validateTargetRegistry(value) { return;'],
     ["RV-cross-helper-control", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", '[WORKFLOW, CONTROLLER, CROSS_TOOLCHAIN_HELPER,', '[WORKFLOW, CONTROLLER,'],
     ["RV-cross-identity-binding", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", 'receipt.cache_context.cross_toolchain_sha256 === identityDigest(receipt.cross_toolchain)', 'true'],
     ["RV-cross-steps", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", 'requiredSteps.push("Prepare real canonical cross toolchain", "Require real canonical cross checks")', 'void context.profile'],
@@ -590,11 +640,11 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_CONTROLLER_UNDER_TEST: mutated };
       // A new test-runner process must not inherit the outer worker's private IPC protocol.
       delete childEnv.NODE_TEST_CONTEXT;
-      const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
+      const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
       assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/); assert.doesNotMatch(result.stderr, /SyntaxError|ERR_MODULE_NOT_FOUND/);
       writeFileSync(mutated, controller); utimesSync(mutated, new Date(), new Date());
       if (name.startsWith("RV-cross-")) {
-        const green = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
+        const green = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
         assert.equal(green.status, 0, green.stdout + green.stderr);
       }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
@@ -607,7 +657,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       const modified = path.join(scratch, "workflow.yml");
       writeFileSync(modified, workflow.replace(old, "      - name: Prepare real canonical cross toolchain\n"));
       const env = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: modified }; delete env.NODE_TEST_CONTEXT;
-      const args = ["--test", "--test-name-pattern=^canonical compiler proof binds helper source, real setup steps, identity and profile cache$", fileURLToPath(import.meta.url)];
+      const args = nestedTestArgs("canonical compiler proof binds helper source, real setup steps, identity and profile cache");
       const red = spawnSync(process.execPath, args, { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });
       assert.notEqual(red.status, 0, red.stdout + red.stderr); assert.match(red.stdout, /(?:ℹ|#) fail 1/);
       writeFileSync(modified, workflow);
@@ -624,7 +674,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       writeFileSync(mutated, workflow.replace(old, '      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0\n        with:\n          python-version: "3.12"\n' + old)); utimesSync(mutated, new Date(), new Date());
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: mutated }; delete childEnv.NODE_TEST_CONTEXT;
       const target = "self-hosted manual job uses provisioned Python 3.12, not the hosted toolcache installer";
-      const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
+      const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
       assert.notEqual(result.status, 0, result.stdout); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/);
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
@@ -638,7 +688,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       writeFileSync(mutated, workflow.replace(body, body.replace(line, changed))); utimesSync(mutated, new Date(), new Date());
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: mutated }; delete childEnv.NODE_TEST_CONTEXT;
       const target = name === JOB ? "fork manual verification never queues a self-hosted runner" : "manual profiles never run legacy jobs";
-      const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
+      const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env: childEnv, encoding: "utf8", timeout: 10000 });
       assert.notEqual(result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`); assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/);
       writeFileSync(mutated, workflow); utimesSync(mutated, new Date(), new Date());
     } finally { rmSync(scratch, { recursive: true, force: true }); }

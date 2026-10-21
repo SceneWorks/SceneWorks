@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { selectSteps } from "./preflight.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { loadRegistry, validateAssertionReceipt, REGISTRY_PATH } from "./moss-consumer-assertions.mjs";
+import { loadRegistry, parseTestResult, validateAssertionReceipt, REGISTRY_PATH } from "./moss-consumer-assertions.mjs";
 import { identityDigest, readToolchainIdentity, validateToolchainIdentity, verifyToolchainFiles } from "./canonical-cross-toolchain.mjs";
 export const ASSERTION_DRIVER = "scripts/moss-consumer-assertions.mjs";
 
@@ -20,6 +20,8 @@ export const CONTROLLER = "scripts/remote-macos-verification.mjs";
 export const JOB = "manual-verification";
 export const PROFILES = ["facts-and-projections", "consumer-assertions", "canonical-preflight"];
 export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", build_override_strip: "none", test_build_override_strip: "none", incremental: "0", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
+export const TARGET_REGISTRY = "tests/fixtures/rust_migration_contracts/training/target-registry.json";
+export const TARGET_REGISTRY_WRITER = "regen_target_registry_fixture";
 export const OUTPUTS = [
   "config/engine-capabilities/capabilities.mlx.json",
   "config/engine-capabilities/audio/capabilities.candle.json",
@@ -29,6 +31,7 @@ export const OUTPUTS = [
   "apps/web/src/data/previewSupport.json",
   "docs/generated/memory-matrix.json",
   "docs/generated/memory-matrix.md",
+  TARGET_REGISTRY,
 ];
 export const CROSS_TOOLCHAIN_HELPER = "scripts/canonical-cross-toolchain.mjs";
 export const CONTROL_FILES = Object.freeze([WORKFLOW, CONTROLLER, CROSS_TOOLCHAIN_HELPER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]);
@@ -107,6 +110,33 @@ export function checkoutContext(root, request, { executeGit = git, readPin = inf
   const selected_steps = request.profile === "canonical-preflight" ? selectSteps(changed_files, false, root, platform).map(step => step.name) : [];
   requireFact(request.profile !== "canonical-preflight" || (platform === "darwin" && selected_steps.length > 0), "non-Mac or empty canonical verification scope refused");
   return { ...request, base_sha, merge_base, changed_files, selected_steps, selection_platform, cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))) };
+}
+
+export function registryGenerationRecord(output) {
+  const plain = output.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  return { purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, ...parseTestResult(plain, 0, TARGET_REGISTRY_WRITER, "green") };
+}
+function validateRegistryGeneration(record) {
+  requireFact(equal(record, { purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, passed: 1, failed: 0, ignored: 0, exit_code: 0 }), "target registry writer did not execute exactly once; generation is not validation proof");
+}
+export function validateTargetRegistry(value) {
+  const object = row => row !== null && typeof row === "object" && !Array.isArray(row);
+  requireFact(object(value) && value.schemaVersion === 1 && equal(Object.keys(value).sort(), ["schemaVersion", "targets"]) && Array.isArray(value.targets) && value.targets.length > 0, "invalid training registry wire root");
+  const ids = new Set();
+  for (const row of value.targets) {
+    requireFact(object(row) && ["id", "name", "modality", "outputKind", "family", "baseModel", "kernel"].every(key => typeof row[key] === "string" && row[key].length > 0), "invalid training target identity");
+    requireFact(!ids.has(row.id), "duplicate training target id"); ids.add(row.id);
+    requireFact(["defaults", "limits", "ui"].every(key => object(row[key])) && object(row.defaults.advanced), "invalid training target objects");
+    for (const key of ["rank", "alpha", "steps", "batchSize", "gradientAccumulation", "resolution", "saveEvery"]) requireFact(Number.isInteger(row.defaults[key]) && row.defaults[key] >= 0 && row.defaults[key] <= 0xffffffff, `invalid training config ${key}`);
+    requireFact(Number.isSafeInteger(row.defaults.seed) && Number.isFinite(row.defaults.learningRate) && row.defaults.learningRate >= 0 && typeof row.defaults.optimizer === "string", "invalid training config scalar");
+  }
+  for (const base of ["moss_image_base", "moss_image_sft"]) {
+    const row = value.targets.find(target => target.id === `${base}_lora`);
+    requireFact(row?.baseModel === base && row.family === "moss-image" && row.kernel === "moss_image_lora" && row.modality === "image" && row.outputKind === "lora", "MOSS target missing or checkpoint identity changed");
+    requireFact(row.baseModelRepo === `OpenMOSS-Team/MOSS-Image-${base === "moss_image_base" ? "Base" : "SFT"}`, "MOSS target checkpoint repository changed");
+    requireFact(equal(row.limits.networkTypes, ["lora", "lokr"]) && equal(row.limits.mixedPrecisions, ["bf16", "f32"]), "MOSS target methods or precision contract changed");
+    requireFact(row.defaults.advanced.mixedPrecision === "bf16" && row.defaults.advanced.timestepType === "moss_stage3_v1" && equal(row.defaults.advanced.modelOptions, { vae_posterior: "posterior_mean_v1" }), "MOSS target source/sampler policy changed");
+  }
 }
 
 export function validateCapabilityFile(value, backend, kind, pin) {
@@ -220,6 +250,8 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
   } else {
     for (const file of OUTPUTS.filter(file => /\.jsonc?$/.test(file))) JSON.parse(stripJsoncComments(files[`payload/${file}`].toString()));
     for (const [index, kind] of ["media", "audio", "runtime"].entries()) validateCapabilityFile(JSON.parse(files[`payload/${OUTPUTS[index]}`]), kind === "audio" ? "candle" : "mlx", kind, context.inference_sha);
+    validateRegistryGeneration(receipt.target_registry_generation);
+    validateTargetRegistry(JSON.parse(files[`payload/${TARGET_REGISTRY}`]));
   }
   return artifact;
 }
@@ -472,6 +504,7 @@ export async function executeRemote(root, output, env = process.env) {
 export function remoteBuildEnv(env, profile = "canonical-preflight") {
   const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
   runEnv.CARGO_INCREMENTAL = cacheFlags(profile).incremental;
+  delete runEnv.REGEN_FIXTURE;
   delete runEnv.CARGO_BUILD_TARGET;
   delete runEnv.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER;
   return runEnv;
@@ -511,6 +544,13 @@ async function executeRemoteWithinLease(root, output, env = process.env, crossTo
       writeFileSync(path.join(root, OUTPUTS[3]), readFileSync(matrix));
       await runLogged(root, ["npm", "--prefix", "apps/web", "run", "gen:preview-support"], log, runEnv, true);
       await runLogged(root, ["npm", "run", "generate:memory-matrix"], log, runEnv, true);
+      // GENERATION ONLY: the existing ignored writer is not a validation test or mutation proof.
+      // Its flag is confined to this one child; all later commands keep the declared profile env.
+      const writerLogStart = readFileSync(log).length;
+      await runLogged(root, ["cargo", "test", "--locked", "-p", "sceneworks-core", "--test", "training_contracts", TARGET_REGISTRY_WRITER, "--", "--exact", "--ignored"], log, { ...runEnv, REGEN_FIXTURE: "1" }, true);
+      receipt.target_registry_generation = registryGenerationRecord(readFileSync(log).subarray(writerLogStart).toString("utf8"));
+      validateRegistryGeneration(receipt.target_registry_generation);
+      validateTargetRegistry(JSON.parse(readFileSync(path.join(root, TARGET_REGISTRY), "utf8")));
       requireFact(git(root, "diff", "--name-only").split("\n").filter(Boolean).every(file => OUTPUTS.includes(file)), "producer modified non-derived source");
       for (const file of OUTPUTS) atomicWrite(path.join(output, "payload", file), readFileSync(path.join(root, file)));
       receipt.command = ["facts-and-projections"];

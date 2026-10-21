@@ -9,6 +9,14 @@ const modulePath = process.env.MOSS_ASSERTIONS_UNDER_TEST ?? fileURLToPath(new U
 const { bodySpan, digest, executeCpuCommand, loadRegistry, MUTABLE_FILES, ownedCpuTree, parseTestResult, patchText, REGISTRY_PATH, runAssertions, TESTS, validateAssertionReceipt } = await import(pathToFileURL(modulePath));
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const nestedTestArgs = target => ["--test", "--test-reporter=spec", `--test-name-pattern=^${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, fileURLToPath(import.meta.url)];
+test("nested Node probes require spec reporter and exact test scope", () => {
+  const target = "fixture (+) exact", args = nestedTestArgs(target);
+  assert.equal(args[0], "--test"); assert.equal(args.filter(arg => arg === "--test-reporter=spec").length, 1);
+  assert.equal(args.length, 4); assert.equal(args[3], fileURLToPath(import.meta.url));
+  const pattern = new RegExp(args[2].slice("--test-name-pattern=".length));
+  assert.ok(pattern.test(target)); assert.ok(!pattern.test(target + " extra")); assert.ok(!pattern.test("unrelated"));
+});
 const SHA = "a".repeat(40);
 const driverHash = digest(readFileSync(modulePath));
 function output(exact, red = false, count = 1) {
@@ -295,7 +303,7 @@ if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypas
       assert.equal(source.split(old).length - 1, 1, id);
       const mutated = path.join(scratch, "driver.mjs"); writeFileSync(mutated, source.replace(old, replacement)); utimesSync(mutated, new Date(), new Date());
       const env = { ...process.env, MOSS_ASSERTIONS_MUTATION_CHILD: "1", MOSS_ASSERTIONS_UNDER_TEST: mutated }; delete env.NODE_TEST_CONTEXT;
-      const result = spawnSync(process.execPath, ["--test", `--test-name-pattern=^${target}$`, fileURLToPath(import.meta.url)], { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });
+      const result = spawnSync(process.execPath, nestedTestArgs(target), { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });
       assert.notEqual(result.status, 0, `${id}\n${result.stdout}\n${result.stderr}`);
       assert.ok(result.stdout.includes(`✖ ${target}`), result.stdout); assert.match(result.stdout, /(?:ℹ|#) fail 1/); assert.doesNotMatch(result.stderr, /SyntaxError|ERR_MODULE_NOT_FOUND/);
       writeFileSync(mutated, source); utimesSync(mutated, new Date(), new Date());
