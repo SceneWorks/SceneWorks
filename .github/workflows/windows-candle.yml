@@ -1854,15 +1854,18 @@ jobs:
       - name: Run the Supra2-IMG Candle worker smoke, lifecycle and acceptance matrix
         shell: cmd
         env:
-          SUPRA2_BUNDLE_OUT: ${{ runner.temp }}\supra2-bundle
-          SUPRA2_BUNDLE_DIR: ${{ runner.temp }}\supra2-bundle
+          # The installed layout: the worker admits a modelPath only inside its own data dir,
+          # which the acceptance matrix takes from this path.
+          SUPRA2_DATA_ROOT: ${{ runner.temp }}\supra2-data
+          SUPRA2_BUNDLE_OUT: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
+          SUPRA2_BUNDLE_DIR: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
           SUPRA2_RENDER_OUT: ${{ runner.temp }}\supra2-worker-evidence
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release --lib --no-run
           if errorlevel 1 exit /b 1
-          if exist "%SUPRA2_BUNDLE_OUT%" rmdir /s /q "%SUPRA2_BUNDLE_OUT%"
+          if exist "%SUPRA2_DATA_ROOT%" rmdir /s /q "%SUPRA2_DATA_ROOT%"
           if not exist "%SUPRA2_RENDER_OUT%" mkdir "%SUPRA2_RENDER_OUT%"
           rem Each invocation runs EXACTLY one passing test (run-one.cmd). The convert test writes the
           rem bundle to SUPRA2_BUNDLE_OUT in its own process; the acceptance matrix loads it later.

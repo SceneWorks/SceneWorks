@@ -118,8 +118,10 @@ run_guarded() { # $1 test path, $2 cap GiB, $3 wall s
 
 # The convert test writes the bundle here (SUPRA2_BUNDLE_OUT); the acceptance matrix, a separate
 # process, loads it (SUPRA2_BUNDLE_DIR) and writes its PNGs + supra2_matrix_mlx.json into $out.
-bundle="$RUNNER_TEMP/supra2-bundle"
-rm -rf "$bundle"
+# The installed layout (<data dir>/models/mlx/supra2_img): the worker admits a modelPath only
+# inside its own data dir, which the matrix takes from this path.
+rm -rf "$RUNNER_TEMP/supra2-data"
+bundle="$RUNNER_TEMP/supra2-data/models/mlx/supra2_img"
 run_guarded "model_jobs::supra2_convert_tests::supra2_real_weight_convert_writes_a_loadable_bundle" 16 600
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_render_through_the_worker_arm" 16 900
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload" 16 1200

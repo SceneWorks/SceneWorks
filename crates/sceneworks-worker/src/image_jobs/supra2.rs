@@ -1440,7 +1440,8 @@ mod tests {
 
         /// The acceptance matrix. Env: `SUPRA2_BUNDLE_DIR` — the converted bundle a SEPARATE step
         /// produced (`supra2_real_weight_convert_writes_a_loadable_bundle` with
-        /// `SUPRA2_BUNDLE_OUT`); `SUPRA2_HF_HUB_CACHE` (else `HF_HUB_CACHE`) — the hub holding the
+        /// `SUPRA2_BUNDLE_OUT`), at the installed layout `<data dir>/models/mlx/supra2_img`;
+        /// `SUPRA2_HF_HUB_CACHE` (else `HF_HUB_CACHE`) — the hub holding the
         /// pinned Flan-T5-Base and SD VAE snapshots; optional `SUPRA2_RENDER_OUT` — the artifact dir
         /// the PNGs and `supra2_matrix_<backend>.json` are written to.
         ///
@@ -1482,8 +1483,22 @@ mod tests {
                 out,
                 cells: Vec::new(),
             };
+            // The production path admits a `modelPath` only inside an app-managed root, so the
+            // shared bundle sits where an install puts it — `<data dir>/models/mlx/supra2_img` —
+            // and that data dir is this worker's.
+            let data_dir = bundle
+                .ends_with("models/mlx/supra2_img")
+                .then(|| bundle.ancestors().nth(3).map(Path::to_path_buf))
+                .flatten()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "SUPRA2_BUNDLE_DIR must be <data dir>/models/mlx/supra2_img (the installed \
+                         layout): {}",
+                        bundle.display()
+                    )
+                });
             let temp = tempfile::tempdir().unwrap();
-            let mut settings = Settings::for_test(temp.path().join("data"));
+            let mut settings = Settings::for_test(data_dir);
             settings.config_dir = temp.path().join("config");
             settings.worker_id = format!("supra2-matrix-{BACKEND}");
             settings.heartbeat_seconds = 30;
