@@ -237,7 +237,7 @@ test("consumer assertion evidence is authenticated but can never create a canoni
     assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false);
   } finally { rmSync(local.root, { recursive: true, force: true }); }
 });
-for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { value.cases[0].green[0].test_id = "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried = { status: "carried-prior-proof-not-executed" }; } })) test(`consumer evidence rejects ${name}`, async () => {
+for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { const row = value.cases[0].green[0]; row.test_id = row.test_id === "protocol" ? "target" : "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried = { status: "carried-prior-proof-not-executed" }; } })) test(`consumer evidence rejects ${name}`, async () => {
   const f = fixture("consumer-assertions"), value = syntheticAssertionResult(); change(value);
   replaceMember(f, "assertions.json", JSON.stringify(value)); await assert.rejects(f.verify);
 });

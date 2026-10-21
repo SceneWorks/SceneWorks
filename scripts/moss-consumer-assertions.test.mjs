@@ -41,8 +41,11 @@ function restored(f) { return MUTABLE_FILES.every(file => readFileSync(path.join
 test("closed committed inventory executes all 74 cases across seven exact tests", () => {
   const spec = loadRegistry(ROOT);
   assert.equal(spec.cases.length, 74); assert.equal(Object.keys(TESTS).length, 7);
+  assert.equal(spec.cases[0].id, "SW-load-text-encoder");
+  // Check the repaired typed-source fixture immediately after baseline; the remaining cases
+  // retain the core-then-worker order so each core mutation avoids rebuilding worker tests.
   let workerSeen = false;
-  for (const item of spec.cases) {
+  for (const item of spec.cases.slice(1)) {
     const worker = item.tests.some(key => TESTS[key][0] === "sceneworks-worker");
     if (worker) workerSeen = true;
     assert.ok(worker || !workerSeen, "core cases must precede worker cases");

@@ -2,6 +2,21 @@
   "schema_version": 2,
   "cases": [
     {
+      "id": "SW-load-text-encoder",
+      "tests": [
+        "protocol"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "op": "replace",
+          "old": "spec.text_encoder = self.text_encoder;",
+          "new": "spec.text_encoder = Some(gen_core::WeightsSource::Dir(std::path::PathBuf::from(\"wrong\")));",
+          "anchor": "pub(crate) fn load_spec("
+        }
+      ]
+    },
+    {
       "id": "SW-target-count",
       "tests": [
         "target",
@@ -768,21 +783,6 @@
           "op": "replace",
           "old": ".fold(spec, |spec, (id, source)| spec.with_component(id, source))",
           "new": ".fold(spec, |spec, (_id, _source)| spec)",
-          "anchor": "pub(crate) fn load_spec("
-        }
-      ]
-    },
-    {
-      "id": "SW-load-text-encoder",
-      "tests": [
-        "protocol"
-      ],
-      "patches": [
-        {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
-          "op": "replace",
-          "old": "spec.text_encoder = self.text_encoder;",
-          "new": "spec.text_encoder = Some(gen_core::WeightsSource::Dir(std::path::PathBuf::from(\"wrong\")));",
           "anchor": "pub(crate) fn load_spec("
         }
       ]
