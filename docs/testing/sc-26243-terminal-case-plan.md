@@ -21,6 +21,74 @@ Candle smoke entrypoints keep their existing default request and behavior. The
 terminal driver shares their nonce/env/health/owned-API/accepted-job/saved-asset/PNG
 assertions; it does not impersonate a worker or publish provider images itself.
 
+### Independent CPU source preparation (separate future approval)
+
+The separate preparation mechanism adds **zero** generation attempts and does not
+create, reset, or consume a generation ledger. It does not approve or change the
+38-generation default / 40-attempt integration proposal. These are operator
+interfaces, **not authorization to run them**:
+
+```sh
+node scripts/flux3-image-klein-terminal-driver.mjs prepare plan REQUEST.json
+node scripts/flux3-image-klein-terminal-driver.mjs prepare run PREP_ADMISSION.json PREP_PLAN.json
+```
+
+`REQUEST.json` has exactly `backend` (`candle` or `mlx`, selecting the sealed API
+build), `sourceSha`, `inferenceMainSha`, and a nonempty unique `modelIds` array from
+`flux3_klein`, `flux3_klein_base`, `flux3_image_klein_pup`. Planning reads only
+provided JSON and shipped source catalogs. It never inspects environment,
+credentials, installed inventories, or caches; never launches or accesses network.
+It emits frozen whole-repository coordinates/bytes/license metadata and a plan
+hash, not expected or approved artifact hashes.
+
+Execution needs a **new explicit user provisioning approval**, `actualProvision:
+true`, `userProvisionApprovalId`, `admissionId`, `approvedBy`, the immutable
+`preparationPlanSha256`, exact clean source/MAIN-reachable inference identities,
+actual `runner`/`runnerAccount`, bounded `timeoutSeconds`, absolute external
+`outputRoot` and `hfHome`, and `diskBudgetBytes` covering all repository bytes plus
+at least 30 GiB. Every selected repository requires its exact revision/byte count,
+`userDownloadApprovalId`, `wholeRepository`, `licenseAcknowledged`,
+`accountGateAcknowledged`, `diskAcknowledged`, matching `runnerAccount` and
+`hfHome`. All of these are checked before credentials, launch, or network.
+
+A separately approved sealed **api-worker** build is mandatory: `binary`,
+`binarySha256`, `binarySourceSha`, `binaryBuildReceipt`, and
+`preparationBuildReceiptBinding` bind the actual producer receipt, transcript,
+source/lock/inference edges, compiler/toolchain hashes and command. Resource
+adapter receipts are rejected. Preparation never invokes the build producer.
+The existing generation run still requires its original nonzero approved plan,
+physical GPU admission, and durable ledger; preparation cannot weaken that path.
+
+The dedicated nonce-owned factory launches only the API with one in-process CPU
+utility worker: `CUDA_VISIBLE_DEVICES=-1`, CPU IDs, both backends disabled,
+`SCENEWORKS_UTILITY_JOBS=model_download`, no GPU check or separate GPU worker.
+It waits for canonical ready API identity AND exactly the owned CPU/download-only
+worker. Only approved model-download POSTs and owned-job reads/cancellation are
+allowed; generation/training/raw queue/conversion routes are refused. Mac
+execution remains secondary `nax-macos-2` only. CPU boot skips GPU memory-limit
+initialization, and CPU job metrics skip GPU reset/read/total-memory hooks; CPU
+wall time remains available, GPU measurements are absent rather than fabricated.
+
+After a completed owned download, discovery requires the actual matching v2
+job/repo/revision receipt and the complete observed snapshot. It hashes all files,
+checks exact approved total bytes and authenticated config, and exclusively
+exports `OBSERVED_NOT_GPU_APPROVED` inventories. No preinstalled derived package
+is required. These candidate observations are **not** the generation driver's
+`parent-approved-pinned-inventory`, do not publish base q4/q8 pins, and do not
+permit conversion or future GPU execution. Receipts are never seeded or invented.
+Only bounded redacted process logs and selected inventory evidence are exported;
+no complete state/DB upload. Credentials, Authorization values, URL credentials,
+and signed storage URL query strings are redacted.
+
+Source and CPU-fixture tests are not empirical model/host proof. Actual source
+provisioning, auth/downloads, sealed builds and CPU conversions require separate
+user approval after this code is verified. Other inputs still needed are licensed
+ordered reference PNGs/instance IDs/boxes/semantic expectations, compatible LoRA
+hashes/ranks/factor shapes and zero/on pair, captioned/edit datasets and rights,
+real TE/AE/PUP inventories, actual base access/weights and four real base q4/q8
+conversion pin records, then later hardware/final-plan and visual-proof approval.
+Never invent any of these artifacts.
+
 `plan` is a SMALL REPRESENTATIVE code default: **26 product generations + 12
 resource generations = 38 total across both backends**, including the two training
 reloads. The hard global ceiling is **48**, not 48 per machine. The remaining ten

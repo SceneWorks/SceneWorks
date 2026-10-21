@@ -70,8 +70,17 @@ export async function produceTerminalBuild(a, dependencies = {}) {
   const receiptPath = path.join(directory, 'producer-receipt.json'); await io.writeFile(receiptPath, JSON.stringify(receipt) + '\n', { flag: 'wx' }); return { receiptPath, receiptSha256: hash(JSON.stringify(receipt) + '\n'), receipt };
 }
 export async function verifyTerminalBuild(a, { sourceRoot = rootDefault, role = 'api-worker' } = {}) {
+  const binding = (role === 'api-worker' ? a.approvedPlan?.buildReceipts : a.approvedPlan?.resourceBuildReceipts)?.[a.backend];
+  return verifyBoundBuild(a, sourceRoot, role, binding);
+}
+// Separate preparation authority, never a no-plan option on generation execution.
+export async function verifyPreparationBuild(a, { sourceRoot = rootDefault } = {}) {
+  assert(a.actualProvision === true && a.userProvisionApprovalId && a.preparationBuildReceiptBinding);
+  return verifyBoundBuild(a, sourceRoot, 'api-worker', a.preparationBuildReceiptBinding);
+}
+async function verifyBoundBuild(a, sourceRoot, role, binding) {
   const recipe = buildRecipe(a.backend, a.backend === 'candle' ? 'win32' : 'darwin', role);
-  const binding = (role === 'api-worker' ? a.approvedPlan?.buildReceipts : a.approvedPlan?.resourceBuildReceipts)?.[a.backend]; assert(binding, 'parent-approved concrete producer receipt required; binarySourceSha labels are not build proof');
+  assert(binding, 'parent-approved concrete producer receipt required; binarySourceSha labels are not build proof');
   const file = await contained(a.binaryBuildReceipt.path, a.binaryBuildReceipt.root), bytes = await readFile(file); assert.equal(hash(bytes), binding.receiptSha256); assert.equal(hash(bytes), a.binaryBuildReceipt.sha256);
   const receipt = JSON.parse(bytes); assert.equal(receipt.kind, 'flux3-owned-build-producer-receipt'); assert.equal(receipt.schemaVersion, 1); assert.equal(receipt.sourceSha, a.sourceSha); assert.equal(receipt.inferenceMainSha, a.inferenceMainSha); assert.equal(receipt.backend, a.backend); assert(receipt.userBuildApprovalId && receipt.resourceAdmissionId);
   assert.equal(receipt.producerScriptSha256, await fileHash(fileURLToPath(import.meta.url)), 'producer source changed since this observed build'); assert.equal(receipt.cargoLockSha256, binding.cargoLockSha256); assert.equal(hash(await readFile(path.join(sourceRoot, 'Cargo.lock'))), receipt.cargoLockSha256, 'current lock differs from actually built lock');
