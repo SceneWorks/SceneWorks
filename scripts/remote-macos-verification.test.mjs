@@ -367,6 +367,22 @@ test("failed native build records fixed read-only toolchain diagnostics without 
   for (const expected of ["otool -hv", "LC_BUILD_VERSION", "otool -L", "-gt 12", "file \"$f\""]) assert.ok(dylibProbe.includes(expected), expected);
   // The library path is only ever an ARGUMENT to inspection tools, never a command to execute.
   assert.doesNotMatch(dylibProbe, /(?:^|\n|;|&&|\||\bthen|\bdo)\s*"\$f"|\bexec\b|(?:^|\s)\.\s+"\$f"|dlopen/);
+  assert.ok(dylibProbe.includes("sectname \\.rustc") && dylibProbe.includes("rustc-metadata-sections"));
+  for (const expected of ["xcrun --find ld-classic", "rustup toolchain list"]) assert.ok(calls.includes(expected), expected);
+  assert.ok(calls.some(call => call.includes("ls -d /Applications/Xcode*.app") && call.includes("head -n 10")));
+  // Diagnostics NEVER compile: no cargo build/run/test and no rustc beyond version/sysroot queries.
+  const original = "   Running `rustc --crate-name syn x`\n   Running `rustc --crate-name bytemuck --edition=2018 --extern bytemuck_derive=/t/libbytemuck_derive-1.dylib -L dependency=/t`\nnoise";
+  const evidence = []; const replayed = policy.buildDiagnostics(ROOT, {}, (cmd, args) => { evidence.push([cmd, ...args]); return { status: 0, stdout: "", stderr: "" }; }, original);
+  assert.ok(evidence.every(([cmd, ...args]) => cmd !== "cargo" ? cmd !== "rustc" || ["-vV", "--print"].includes(args[0]) : args[0] === "-V"), JSON.stringify(evidence));
+  assert.match(replayed, /2 rustc invocation line\(s\); showing last 2/);
+  assert.match(replayed, /--extern bytemuck_derive=\/t\/libbytemuck_derive-1\.dylib \(exists: false\)/);
+  assert.doesNotMatch(replayed, /noise/);
+  assert.match(policy.invocationEvidence("   Running `rustc --crate-name bytemuck -L x`").join("\n"), /NO --extern bytemuck_derive argument/);
+  assert.match(policy.invocationEvidence("   Running `rustc --crate-name bytemuck " + "a".repeat(4000) + "`").join("\n"), /truncated/);
+  assert.match(policy.invocationEvidence("nothing").join("\n"), /not found in original log/);
+  // Exactly the original facts dump is verbose (not -vv, no second cargo execution).
+  const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
+  assert.equal(controller.split('"--verbose"').length - 1, 1); assert.doesNotMatch(controller, /"-vv"|"build", "-v"/);
   // A probe failure is evidence, not a new verdict.
   const failing = policy.buildDiagnostics(ROOT, {}, () => ({ status: 1, stdout: "", stderr: "unavailable" }));
   assert.match(failing, /exit 1/);

@@ -320,7 +320,7 @@ async function runLogged(root, args, log, env, append = false) {
     const child = spawn(args[0], args.slice(1), { cwd: root, env, stdio: ["ignore", output, output] });
     const code = await new Promise((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
     // Evidence is best-effort: a diagnostics problem must never replace or mask the build's own failure.
-    if (code !== 0 && args[0] === "cargo") { try { writeSync(output, buildDiagnostics(root, env)); } catch (error) { writeSync(output, `\n(build diagnostics unavailable: ${error.message})\n`); } }
+    if (code !== 0 && args[0] === "cargo") { try { writeSync(output, buildDiagnostics(root, env, undefined, readFileSync(log, "utf8").slice(-8 * 1024 * 1024))); } catch (error) { writeSync(output, `\n(build diagnostics unavailable: ${error.message})\n`); } }
     requireFact(code === 0, `${args[0]} ${args[1] ?? ""} exited ${code}; retained log: ${path.basename(log)}`);
   } finally { closeSync(output); }
 }
@@ -328,7 +328,7 @@ async function runLogged(root, args, log, env, append = false) {
 // Read-only, bounded evidence for a failed native build. Fixed commands only; never changes the
 // verdict. Records the compiler/SDK/linker identity and the target's proc-macro dylibs so a
 // toolchain/cache defect can be told apart from a source error.
-export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, args, { cwd: root, env, encoding: "utf8", timeout: 20000 })) {
+export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, args, { cwd: root, env, encoding: "utf8", timeout: 20000, maxBuffer: 4 * 1024 * 1024 }), originalLog = null) {
   const lines = ["", "=== remote verification build diagnostics (read-only) ==="];
   const probe = (cmd, args) => { const r = run(cmd, args); lines.push(`$ ${[cmd, ...args].join(" ")}`, `${(r.stdout ?? "").trim()}${r.stderr ? `\n${r.stderr.trim()}` : ""}`.slice(0, 2000), `exit ${r.status}`); };
   probe("rustc", ["-vV"]);
@@ -349,9 +349,30 @@ export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, 
     '  otool -hv "$f" 2>&1 | sed -n "3,4p"',
     '  otool -l "$f" 2>&1 | grep -A4 -E "LC_BUILD_VERSION" | grep -E "platform|minos|sdk" | head -n 3',
     '  otool -L "$f" 2>&1 | sed -n "2,6p"',
+    // Where (if anywhere) rustc metadata landed: segment/section of the .rustc payload.
+    '  otool -l "$f" 2>&1 | grep -B1 -A2 -E "sectname \\.rustc" | grep -E "sectname|segname|size" | head -n 4 || true',
+    '  echo "rustc-metadata-sections: $(otool -l "$f" 2>/dev/null | grep -c "sectname .rustc")"',
     'done',
   ].join("\n"), "sh", deps]);
+  probe("xcrun", ["--find", "ld-classic"]);
+  probe("/bin/sh", ["-c", "ls -d /Applications/Xcode*.app 2>&1 | head -n 10"]);
+  probe("rustup", ["toolchain", "list"]);
+  // Evidence from the ORIGINAL verbose cargo execution only; nothing is re-run or recompiled.
+  if (typeof originalLog === "string") lines.push(...invocationEvidence(originalLog));
   return `${lines.join("\n")}\n`;
+}
+
+/** The last rustc invocations of the original verbose cargo run, plus the proc-macro extern. */
+export function invocationEvidence(log, exists = existsSync) {
+  const invocations = log.split("\n").filter(line => line.includes("Running `") && line.includes("--crate-name"));
+  const lines = [`original verbose cargo log: ${invocations.length} rustc invocation line(s); showing last ${Math.min(3, invocations.length)}`];
+  for (const line of invocations.slice(-3)) lines.push(line.length > 3000 ? `${line.slice(0, 3000)} …[truncated ${line.length - 3000} chars]` : line);
+  const failing = [...invocations].reverse().find(line => /--crate-name bytemuck(\s|$)/.test(line));
+  const extern = failing && /--extern bytemuck_derive=(\S+?)`?(\s|$)/.exec(failing);
+  lines.push(!failing ? "bytemuck invocation: not found in original log"
+    : !extern ? "bytemuck invocation: NO --extern bytemuck_derive argument"
+    : `bytemuck invocation: --extern bytemuck_derive=${extern[1]} (exists: ${exists(extern[1])})`);
+  return lines;
 }
 
 // This protects ONLY this workflow's dedicated target directory, not the physical host/GPU.
@@ -423,7 +444,7 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-facts-"));
     const log = path.join(output, "facts.log");
     try {
-      await runLogged(root, ["cargo", "run", "--locked", "-p", "sceneworks-worker", "--bin", "dump-engine-capabilities", "--", scratch], log, runEnv);
+      await runLogged(root, ["cargo", "run", "--locked", "--verbose", "-p", "sceneworks-worker", "--bin", "dump-engine-capabilities", "--", scratch], log, runEnv);
       for (const file of OUTPUTS.slice(0, 3)) {
         const from = path.join(scratch, file.slice("config/engine-capabilities/".length));
         const bytes = readFileSync(from); requireFact(JSON.parse(bytes).generatedFrom?.inferenceRevision === request.inference_sha, "dump pin differs");
