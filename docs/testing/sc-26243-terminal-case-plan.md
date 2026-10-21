@@ -180,6 +180,18 @@ Windows actual MSVC 19.44 `/Bv` output bind the transcript. The admitted warm ta
 and exclusive sealed-copy output stay outside the checkout. Nothing here grants
 permission to build or use the resource owner's target.
 
+Windows source-checkout provisioning has distinct **directory** and **file**
+constraints. The shared `starvector-terminal-provision.mjs` checkout helper admits
+only published and actual UUID-staging **directory** paths shorter than 260 UTF-16
+characters on Windows. It refuses a longer root actionably **before** mkdir, lock,
+clone or publication; choose a shorter checkout root. Its four owned Git calls
+use per-invocation `core.longpaths=true` for deep **file** paths, including files
+longer than 300 characters under admitted directory roots. That flag does not
+remove Git for Windows' directory/chdir limit. No global Git setting, namespace,
+short-path alias, drive mapping or trust exception is applied. Non-Windows argv
+and path admission are unchanged. This is an input/platform constraint, **not** a
+model/tier exception or a waiver of any required artifact or observation.
+
 The parent-approved `buildReceipts[backend]` includes `receiptSha256`,
 `transcriptSha256`, `binarySha256`, `cargoLockSha256`, `rustflagsSha256`,
 `cargoExecutableSha256`, `rustcExecutableSha256`, plus Windows
