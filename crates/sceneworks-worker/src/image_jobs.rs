@@ -585,6 +585,15 @@ pub(crate) async fn run_image_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let request = ImageRequest::from_payload(&job.payload);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -3013,6 +3022,20 @@ pub(crate) fn write_image_asset(
         if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
+            {
+                // Preserve requested steps separately from the provider's deduplicated actual grid.
+                if let Some(steps) = report.pointer("/resolved/steps") {
+                    share.advanced.insert("steps".to_owned(), steps.clone());
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
+        }
         share.model_hash = plan.model_hash.clone();
         // Replace request-derived hints with the exact adapter stack the worker resolved. This is
         // the only seam that can attach hashes, so client-supplied attribution fields never win.
@@ -3071,7 +3094,9 @@ pub(crate) fn write_image_asset(
         // Authored nullable sides live separately in the resolver-owned reference fact.
         "normalizedWidth": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { width } else { request.width },
         "normalizedHeight": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { height } else { request.height },
-        "count": plan.image_count,
+        // MOSS records the whole native prompt batch in the recipe. Its replay count is
+        // images per prompt; the generation set and expectedCount retain the total.
+        "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
         "family": plan.family,
         "seed": seed,
         "index": index,

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "50ff063612f79cd411f4e5b9748f7fff024ebf65",
+    "inferenceRevision": "c8f6e5efbdf4c55466d9f4ad5cf3085940795c6c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -39,6 +39,8 @@
     "mage_flow_edit_base": "mage_flow_edit_base",
     "mage_flow_edit_turbo": "mage_flow_edit_turbo",
     "mage_flow_turbo": "mage_flow_turbo",
+    "moss_image_base": "moss_image_base",
+    "moss_image_sft": "moss_image_sft",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
     "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
@@ -449,6 +451,8 @@
       "mage_flow_edit_turbo",
       "minimax_h3",
       "mochi_1",
+      "moss_image_base",
+      "moss_image_sft",
       "qwen_image",
       "qwen_image_2_1",
       "qwen_image_2_1_turbo",
@@ -1642,6 +1646,48 @@
         "samplers": [],
         "schedulers": [],
         "supported_guidance_methods": []
+      },
+      {
+        "id": "moss_image_base",
+        "family": "moss_image",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
+      },
+      {
+        "id": "moss_image_sft",
+        "family": "moss_image",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
       },
       {
         "id": "qwen_image",

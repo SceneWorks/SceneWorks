@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "9bcc1fc81fdb07c3cbfb2bce87e633194b3b2e6e",
+    "inferenceRevision": "c8f6e5efbdf4c55466d9f4ad5cf3085940795c6c",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -913,6 +913,50 @@
         "normalization": {
           "kind": "learnedPerChannel",
           "identity": "mochi-1-config-per-channel-statistics"
+        }
+      }
+    },
+    {
+      "id": "moss_image_base",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
         }
       }
     },
@@ -8622,6 +8666,44 @@
           "structurallyNotApplicableRungs": [
             "bounded_attention"
           ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "moss_image_base",
+      "composed": false,
+      "selectorDigest": "sha256:17829e176653ac18d8743c94ae37b4e3ca8fcb4dd462484bfe20af2cd326d1ee",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "moss_image_sft",
+      "composed": false,
+      "selectorDigest": "sha256:17829e176653ac18d8743c94ae37b4e3ca8fcb4dd462484bfe20af2cd326d1ee",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
         }
       ]

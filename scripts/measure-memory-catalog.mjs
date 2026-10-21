@@ -81,6 +81,7 @@ import { spawn } from "node:child_process";
 import { readFile, writeFile, mkdir, cp, rm, realpath, stat, readdir, open } from "node:fs/promises";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { FLUX3_CHECKPOINTS, flux3Conversion as nativeFlux3Conversion, bindResourceCaseInputs } from "./lib/flux3-resource-contract.mjs";
 import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
 import { createHash } from "node:crypto";
 // ONE spelling of the refusal signature, shared with the arm that records it (sc-22738). The runner
@@ -975,15 +976,31 @@ export const MAGE_COMPONENT_IDS = Object.freeze(["text_encoder", "vae"]);
  */
 // FLUX3 native tiers are separate packages, not snapshot/<tier> folders. The two
 // packed backends deliberately have different conversion IDs (the install contract).
-export const FLUX3_REPOSITORY = "black-forest-labs/flux-3-image-klein";
-export const FLUX3_REVISION = "8454017f9ebaada30c998fccd9f67a80c7580f68";
-export const FLUX3_BASE_REPOSITORY = "black-forest-labs/flux-3-image-klein-base";
-export const FLUX3_BASE_REVISION = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+export const FLUX3_REPOSITORY = FLUX3_CHECKPOINTS.flux3_klein.repository;
+export const FLUX3_REVISION = FLUX3_CHECKPOINTS.flux3_klein.revision;
+export const FLUX3_BASE_REPOSITORY = FLUX3_CHECKPOINTS.flux3_klein_base.repository;
+export const FLUX3_BASE_REVISION = FLUX3_CHECKPOINTS.flux3_klein_base.revision;
 export function flux3Conversion(backend, tier) {
-  if (!["q4", "q8"].includes(tier)) return null;
-  if (backend === "candle") return `flux3-candle-ggml-${tier === "q4" ? "q4_1" : "q8_0"}-v1`;
-  if (backend === "mlx") return `flux3-mlx-affine-${tier}-g64-v1`;
-  return null;
+  if (!["q4", "q8"].includes(tier) || !["candle", "mlx"].includes(backend)) return null;
+  return nativeFlux3Conversion(backend, tier);
+}
+
+/** Prepare only explicitly declared supplemental cases. Never expands a grid, launches an
+ * adapter, writes evidence, or ingests a variant as the cell's plain canonical anchor. */
+export async function prepareFlux3ResourceCases(cases, { root }) {
+  if (!Array.isArray(cases)) throw new Error("FLUX3 resourceCases must be an explicit array");
+  const seen = new Set();
+  const prepared = [];
+  for (const resourceCase of cases) {
+    if (seen.has(resourceCase?.caseId)) throw new Error("duplicate FLUX3 resource case identity");
+    seen.add(resourceCase?.caseId);
+    try {
+      prepared.push({ status: "INPUTS_BOUND", anchorEligible: false, resourceAdmission: "NOT_GRANTED", ...await bindResourceCaseInputs(resourceCase, { root }) });
+    } catch (error) {
+      prepared.push({ status: "BLOCKED", anchorEligible: false, caseId: resourceCase?.caseId, reason: String(error.message ?? error) });
+    }
+  }
+  return prepared;
 }
 
 export const PROVIDER_FAMILIES = Object.freeze({
@@ -2220,7 +2237,10 @@ async function classifyFlux3Anchor(row, parts, models, hubs) {
       && entry.localDerivation?.conversion === conversion
       && Number.isSafeInteger(entry.localDerivation?.weightsBytes) && entry.localDerivation.weightsBytes > 0
       && /^[0-9a-f]{64}$/.test(entry.localDerivation?.weightsSha256 ?? ""));
-    if (!pinned) return { ...row, status: "weights_missing", reason: `base ${backend}:${tier} requires verified conversion output size and SHA-256 pins; base file access is HTTP 403. Distilled pins, self-reported receipts and dense fallback are not substitutes` };
+    if (!pinned) {
+      row.roots.push({ label: "FLUX3 base required pinned original (unverified/unavailable)", path: snapshotPath(hubs[0], repository, revision) });
+      return { ...row, status: "weights_missing", reason: `base ${backend}:${tier} requires verified conversion output size and SHA-256 pins; base file access is HTTP 403. Distilled pins, self-reported receipts and dense fallback are not substitutes` };
+    }
   }
   const expected = snapshotPath(hubs[0], repository, revision);
   const original = await firstExistingDirectory(hubs.map(hub => snapshotPath(hub, repository, revision)));

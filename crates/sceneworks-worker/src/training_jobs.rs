@@ -65,6 +65,146 @@ use gen_core::{
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
 
+/// Model-less terminal witness. Uses the exact production config mapper and pure contracts;
+/// reads ONLY the frozen config JSON, never weights, tensors, registries or devices.
+pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, String> {
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    {
+        let _ = plan;
+        Err("unsupported: native training contracts are not enabled".to_owned())
+    }
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION, KERNELS};
+        if plan.schema_version != 1
+            || plan.plan_version != TRAINING_PLAN_VERSION
+            || plan.target.family != "flux3"
+            || !KERNELS.contains(&plan.target.kernel.as_str())
+            || plan.target.base_model != BASE_ID
+            || plan.target.base_model_repo.as_deref() != Some(BASE_REPO)
+        {
+            return Err("witness requires the frozen dense base target".to_owned());
+        }
+        let base = Path::new(&plan.target.base_model_path);
+        if base.file_name().and_then(|v| v.to_str()) != Some(BASE_REVISION) {
+            return Err("witness requires the exact pinned base snapshot".to_owned());
+        }
+        let target =
+            sceneworks_core::training::flux3::target(plan.target.kernel == "flux3_klein_edit_lora");
+        sceneworks_core::training::flux3::validate(&target, &plan.config)
+            .map_err(|_| "witness config refused".to_owned())?;
+        crate::flux3_snapshot_member(base, &base.join("config.json"), false)?;
+        if std::fs::metadata(base.join("config.json"))
+            .map_err(|_| "witness config is unavailable".to_owned())?
+            .len()
+            > 1024 * 1024
+        {
+            return Err("witness config exceeds bound".to_owned());
+        }
+        let cfg = gen_core::flux3::Flux3Config::from_dir(base)
+            .map_err(|_| "witness config JSON refused".to_owned())?;
+        cfg.validate_supported()
+            .map_err(|_| "witness release format refused".to_owned())?;
+        gen_core::flux3::training::identity::validate_release_config(&cfg)
+            .map_err(|_| "witness requires canonical undistilled graph".to_owned())?;
+        let mut normalized = engine_training_config(plan);
+        normalized.resume = false;
+        // Byte-identical to gen_core::flux3::training::identity::build; not a JS approximation.
+        let config_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{normalized:?}|trigger_words={:?}",
+                    plan.output.trigger_words
+                )
+                .as_bytes()
+            )
+        );
+        let targets =
+            gen_core::flux3::training::lora_targets(&cfg.dit, &normalized.lora_target_modules)
+                .map_err(|_| "witness factor selection refused".to_owned())?;
+        let mut factors = BTreeMap::new();
+        for target in targets {
+            factors.insert(
+                format!("{}.lora_A.weight", target.native),
+                vec![normalized.rank as usize, target.input],
+            );
+            factors.insert(
+                format!("{}.lora_B.weight", target.native),
+                vec![target.output, normalized.rank as usize],
+            );
+        }
+        let request = TrainingRequest {
+            items: plan
+                .dataset
+                .items
+                .iter()
+                .map(|item| TrainingItem {
+                    image_path: PathBuf::from(&item.image_path),
+                    caption: item.caption.clone(),
+                    control_image_path: item.control_image_path.as_ref().map(PathBuf::from),
+                    reference_image_paths: item
+                        .reference_image_paths
+                        .iter()
+                        .map(PathBuf::from)
+                        .collect(),
+                    subject_mask_path: None,
+                    model_options: Default::default(),
+                })
+                .collect(),
+            config: normalized.clone(),
+            output_dir: PathBuf::from(&plan.output.output_dir),
+            file_name: plan.output.file_name.clone(),
+            trigger_words: plan.output.trigger_words.clone(),
+            cancel: CancelFlag::new(),
+        };
+        let options = gen_core::flux3::training::options::TrainingOptions::parse(&request)
+            .map_err(|_| "witness source options refused".to_owned())?;
+        let backend = if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle-cuda"
+        };
+        let active_factor_keys: Vec<_> = factors
+            .keys()
+            .filter(|name| options.workflow.trains(name.as_str()))
+            .cloned()
+            .collect();
+        let configuration = json!({
+            "optimizer": "adamw",
+            "learning_rate": format!("{:?}", normalized.learning_rate),
+            "rank": normalized.rank.to_string(),
+            "alpha": format!("{:?}", normalized.alpha as f64),
+            "scaling": "alpha/rank",
+            "precision": options.precision.name(),
+            "backend": format!("{backend};os={};arch={}", std::env::consts::OS, std::env::consts::ARCH),
+            "scheduler": format!("{:?};warmup={};cycles={};power={}", options.scheduler, normalized.lr_warmup_steps, options.cycles, options.power),
+            "accumulation": normalized.gradient_accumulation.to_string(),
+            "accumulation_scaling": "loss/configured_N_before_backward; epoch-tail flush",
+            "rng": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "config_sha256": config_sha256
+        });
+        Ok(json!({
+            "formatVersion": 1,
+            "configSha256": config_sha256,
+            "configuration": configuration,
+            "factors": factors,
+            "activeFactorKeys": active_factor_keys,
+            "trainingReference": gen_core::flux3::training::TRAINING_REFERENCE_REVISION,
+            "rngAlgorithm": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "baseRepository": BASE_REPO,
+            "baseRevision": BASE_REVISION,
+            "rank": normalized.rank,
+            "alpha": normalized.alpha,
+            "learningRate": normalized.learning_rate,
+            "seed": normalized.seed,
+            "accumulation": normalized.gradient_accumulation,
+            "resolution": normalized.resolution,
+            "steps": normalized.steps
+        }))
+    }
+}
+
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
 /// (dry run, the default) or execute real training. The dry-run/execute split was
 /// ported from the retired Python worker's `run_lora_train_job`.
@@ -4957,6 +5097,144 @@ mod tests {
 
     fn parse(value: Value) -> TrainingPlan {
         serde_json::from_value(value).expect("plan deserializes")
+    }
+
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn flux3_pure_config_witness_needs_no_weights_and_binds_mapper_options() {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join(BASE_REVISION);
+        std::fs::create_dir(&base).unwrap();
+        let config = json!({
+            "format_version":1,"model":"flux-3-image-klein-base","quantization":null,
+            "torch_dtype":"bfloat16",
+            "dit":{"hidden":3072,"heads":24,"depth":5,"depth_single":28,
+                "mlp_ratio":3.0,"axes_dim":[32,32,32,32],"theta":10000,
+                "in_channels":{"image":128,"image_cond":128,"text":20480},
+                "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5,
+                "flow_map":false},
+            "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder",
+                "layers":[4,8,12,16,20,24,28,32],"pad_multiple":80,
+                "max_tokens":8192,"dtype":"bfloat16"},
+            "vae":{"path":"ae.safetensors","dtype":"float32"},
+            "sampler":{"steps":50,"guidance":3.5,"alpha":6.93,"size":[1024,1024]}
+        });
+        std::fs::write(base.join("config.json"), config.to_string()).unwrap();
+        let mut value = plan_json(
+            temp.path(),
+            "flux3_klein_lora",
+            BASE_ID,
+            "lora",
+            &["absent.png"],
+        );
+        value["target"]["family"] = json!("flux3");
+        value["target"]["baseModelRepo"] = json!(BASE_REPO);
+        value["target"]["baseModelPath"] = json!(base);
+        value["config"] =
+            serde_json::to_value(sceneworks_core::training::flux3::target(false).defaults).unwrap();
+        let mut plan = parse(value);
+        let before = flux3_training_config_witness(&plan).unwrap();
+        assert!(before["factors"].as_object().is_some_and(|f| !f.is_empty()));
+        let active = before["activeFactorKeys"].as_array().unwrap();
+        assert!(!active.is_empty());
+        assert!(active.iter().all(|key| {
+            !key.as_str()
+                .unwrap()
+                .starts_with("content_mode_blocks.image_cond.")
+                && before["factors"].get(key.as_str().unwrap()).is_some()
+        }));
+        plan.config.advanced.get_mut("flux3").unwrap()["caption_dropout"] = json!(0.25);
+        let changed = flux3_training_config_witness(&plan).unwrap();
+        assert_ne!(before["configSha256"], changed["configSha256"]);
+        plan.config.advanced.insert("resume".into(), json!(true));
+        assert_eq!(
+            changed["configSha256"],
+            flux3_training_config_witness(&plan).unwrap()["configSha256"]
+        );
+        assert_eq!(
+            std::fs::read_dir(&base).unwrap().count(),
+            1,
+            "only config exists: no weight, tokenizer or dataset reads"
+        );
+        // Compare the witness with the actual native identity builder, not another
+        // independently restated Debug/shape formula. Only a declared tiny byte fixture
+        // is read by request_fingerprint; no weights, preprocessing, tensors or device.
+        let bytes_file = temp.path().join("declared-fingerprint-fixture.bin");
+        std::fs::write(&bytes_file, b"DECLARED_SYNTHETIC_DATASET_BYTES").unwrap();
+        let cfg = gen_core::flux3::Flux3Config::from_dir(&base).unwrap();
+        for rank in [4, 8] {
+            plan.config.rank = rank;
+            let witness = flux3_training_config_witness(&plan).unwrap();
+            let request = TrainingRequest {
+                items: vec![TrainingItem {
+                    image_path: bytes_file.clone(),
+                    caption: "declared private fixture caption".into(),
+                    control_image_path: None,
+                    reference_image_paths: Vec::new(),
+                    subject_mask_path: None,
+                    model_options: Default::default(),
+                }],
+                config: engine_training_config(&plan),
+                output_dir: temp.path().join("never-written"),
+                file_name: "never-written.safetensors".into(),
+                trigger_words: plan.output.trigger_words.clone(),
+                cancel: CancelFlag::new(),
+            };
+            let options =
+                gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            let targets = gen_core::flux3::training::lora_targets(
+                &cfg.dit,
+                &request.config.lora_target_modules,
+            )
+            .unwrap();
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle-cuda"
+            };
+            let mut native = gen_core::flux3::training::identity::build(
+                &request,
+                &cfg,
+                &options,
+                BTreeMap::from([("DECLARED_FIXTURE_ONLY".into(), "d".repeat(64))]),
+                &targets,
+                &[],
+                backend,
+            )
+            .unwrap();
+            assert_eq!(
+                witness["configSha256"],
+                json!(native.configuration["config_sha256"])
+            );
+            assert_eq!(
+                witness["factors"],
+                serde_json::to_value(&native.factors).unwrap()
+            );
+            native.configuration.remove("recipe_sha256");
+            assert_eq!(
+                witness["configuration"],
+                serde_json::to_value(&native.configuration).unwrap()
+            );
+            assert!(!temp.path().join("never-written").exists());
+        }
+        plan.target.base_model = "flux3_klein".into();
+        assert!(flux3_training_config_witness(&plan).is_err());
+    }
+
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[test]
+    fn flux3_witness_neither_backend_is_typed_unsupported_without_io() {
+        let plan = parse(plan_json(
+            Path::new("absent"),
+            "flux3_klein_lora",
+            "flux3_klein_base",
+            "lora",
+            &[],
+        ));
+        assert!(flux3_training_config_witness(&plan)
+            .unwrap_err()
+            .starts_with("unsupported:"));
     }
 
     /// A dataset of `count` distinct images `img00.png…` under `<data>/datasets/ds-1/images`, with

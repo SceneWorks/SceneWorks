@@ -457,7 +457,7 @@ pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
-pub use training_jobs::installed_aux_training_model_dir;
+pub use training_jobs::{flux3_training_config_witness, installed_aux_training_model_dir};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.

@@ -1771,6 +1771,95 @@
           "key": "ai-toolkit-perceptual-source-notice"
         }
       ]
+    },
+    {
+      "id": "moss-image-base",
+      "models": [
+        "moss_image_base"
+      ],
+      "name": "MOSS-Image Base",
+      "version": "1ceede80badddd6a7812069619edaa5633587192",
+      "publisher": "OpenMOSS-Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Text-to-image weights downloaded from the official frozen upstream snapshot and executed by native MLX or Candle. Uses the SFT snapshot’s shared text encoder, tokenizer, scheduler and small VAE.",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (official frozen LICENSE)",
+          "key": "moss-image-base-apache"
+        },
+        {
+          "label": "Model and native source provenance",
+          "key": "moss-image-provenance"
+        }
+      ]
+    },
+    {
+      "id": "moss-image-sft",
+      "models": [
+        "moss_image_sft"
+      ],
+      "name": "MOSS-Image SFT",
+      "version": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+      "publisher": "OpenMOSS-Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Text-to-image weights downloaded from the official frozen upstream snapshot and executed by native MLX or Candle. Also supplies the shared text encoder, tokenizer, scheduler and small VAE used by Base. Optional 8-step DMD has its own license declaration below.",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (official frozen LICENSE)",
+          "key": "moss-image-sft-apache"
+        },
+        {
+          "label": "Model and native source provenance",
+          "key": "moss-image-provenance"
+        }
+      ],
+      "appliesToModels": [
+        "moss_image_base"
+      ]
+    },
+    {
+      "id": "moss-image-sft-8-steps-dmd",
+      "models": [],
+      "appliesToModels": [
+        "moss_image_sft"
+      ],
+      "name": "MOSS-Image SFT optional 8-step DMD",
+      "version": "5ff314b4c1470876b114b810146085db8a181a6e",
+      "publisher": "lodestones / OpenMOSS-Team (base model)",
+      "license": "Apache-2.0 (model-card declaration)",
+      "homepage": "https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Optional SFT acceleration package: unmerged LoRA and FP32 replacement/dataspace tensors, or the published full-FP32 distilled transformer. Downloaded only when selected for installation; acceleration remains explicitly selected and defaults off. Its frozen README declares Apache-2.0; no standalone DMD LICENSE is published.",
+      "documents": [
+        {
+          "label": "Published license declaration and source",
+          "key": "moss-image-dmd-declaration"
+        },
+        {
+          "label": "Apache License 2.0 (declared standard)",
+          "key": "moss-image-sft-apache"
+        },
+        {
+          "label": "Model and native source provenance",
+          "key": "moss-image-provenance"
+        }
+      ]
     }
   ]
 }

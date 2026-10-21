@@ -521,11 +521,18 @@ connection and free space, then retry from the setup screen. The download resume
 into `%APPDATA%\SceneWorks\gpu-runtime`. On a machine with no internet access, pre-stage
 the runtime instead — see [Offline / air-gapped install](docs/offline-install.md).
 
-**Linux: "GPU runtime setup failed" / "unresolved shared-library dependencies."**
+**Linux: "GPU runtime setup failed" / "missing shared libraries."**
 The first-run runtime download or ELF dependency check did not complete. Retry
-after checking network and disk space. If the message names `libgomp`, install
-the GNU OpenMP runtime (`sudo apt install libgomp1` on Debian/Ubuntu or
-`sudo dnf install libgomp` on Fedora/RHEL), then relaunch. Offline machines can
+after checking network and disk space. The message names each library `ldd` could
+not resolve; install whichever package provides them and relaunch — if that is
+`libgomp`, the GNU OpenMP runtime is `sudo apt install libgomp1` on Debian/Ubuntu
+or `sudo dnf install libgomp` on Fedora/RHEL. On an immutable/atomic distribution
+(Bazzite, Silverblue, Bluefin, …) there is no `dnf`/`apt` writing into the running
+system: layer the package with `rpm-ostree install <package>` and reboot — a
+layered package only arrives on the next boot — or start SceneWorks from a
+toolbox/distrobox container that already has it. A name beginning `libcuda` or
+`libnvidia-ml` is installed by the NVIDIA driver rather than by a distribution
+package, so install or update the driver and reboot instead. Offline machines can
 copy a provisioned Linux runtime as described in
 [Offline / air-gapped install](docs/offline-install.md).
 

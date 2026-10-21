@@ -123,6 +123,8 @@ const GENERATION_CAPABILITIES = new Set([
 // Candle cells to a story scoped to Metal — which is precisely the false green this epic exists to
 // prevent, and which shipped in the generated matrix until this change.
 export const MODEL_STORIES = {
+  moss_image_base: { mlx: 26323, candle: 26324 },
+  moss_image_sft: { mlx: 26323, candle: 26324 },
   mage_flow_edit_base: { mlx: 15450, candle: 15841 },
   mage_flow_edit: { mlx: 15451, candle: 15844 },
   mage_flow_edit_turbo: { mlx: 15452, candle: 15847 },
@@ -197,6 +199,7 @@ export const MODEL_STORIES = {
 // `candle` key owns no dual-backend model; adding one to the catalog fails generation until its
 // Candle family twin is filed.
 export const FAMILY_STORIES = {
+  26323: { mlx: 26323, candle: 26324 },
   15509: { mlx: 15509, candle: 15813 },
   15510: { mlx: 15510, candle: 15815 },
   15511: { mlx: 15511, candle: 15817 },
@@ -378,6 +381,7 @@ export function familyGroup(modelId) {
   if (modelId === "bernini_image") return 15528;
   if (modelId.startsWith("iris")) return 25678;
   if (modelId.startsWith("flux3")) return 26233;
+  if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
   throw new Error(`no family story for ${modelId}`);
 }
 
@@ -418,11 +422,20 @@ export function modelStory(modelId, backend) {
  * so a repeated id is last-write-wins: the guard would then check every cell naming that id against
  * whichever claimant happened to be indexed last, quietly passing that one's cells and rejecting the
  * other's. Not vacuous, but no longer proof of anything. One id means one owner/role and one backend
- * unless a checked PAIRED_MODEL_STORIES declaration names that exact model on exactly both lanes.
+ * unless a checked PAIRED_MODEL_STORIES declaration names that exact model on exactly both lanes,
+ * or COMPOSITE_STORY_OWNERSHIP names the exact model/family claims on one native backend.
  */
 // Explicit story-local dual-backend scope, never inferred from repeated ids. S6's two native
 // implementations are one SAME-model story; both backend receipts are still required separately.
 export const PAIRED_MODEL_STORIES = { flux3_klein_base: 26239 };
+
+// The approved MOSS backend stories each implement both exact variants and their family.
+// This declaration permits only these three claims per story, on its single native backend.
+// It does not relax the legacy one-owner rule for any other story, model or family.
+export const COMPOSITE_STORY_OWNERSHIP = Object.freeze([
+  { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+  { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+]);
 
 export function buildStoryBackendScope(
   modelStories = MODEL_STORIES,
@@ -442,10 +455,22 @@ export function buildStoryBackendScope(
     if (!Number.isInteger(storyId)) {
       throw new Error(`${role} for ${owner}: story id ${JSON.stringify(storyId)} is not an integer`);
     }
-    // The ONLY repeat allowed is a checked declared pair for this exact model/role. Cross-model,
-    // cross-role, reused and unmarked ids remain defects, not last-write-wins aliases.
+    // Only exact declared same-model pairs or exact single-backend composite claims may repeat.
+    // Cross-model/role reuse outside those declarations remains a defect, never last-write-wins.
     const paired = role === "model story" && pairedModelStories[owner] === storyId;
     const existing = scope.get(storyId);
+    const composite = COMPOSITE_STORY_OWNERSHIP.find((entry) => entry.story === storyId);
+    if (composite) {
+      const allowed = composite.backend === backend && (
+        (role === "family story" && owner === `family SC-${composite.family}`) ||
+        (role === "model story" && composite.model_ids.includes(owner))
+      );
+      if (!allowed) throw new Error(`SC-${storyId}: claim ${backend} ${role} of ${owner} is outside its declared composite scope`);
+      const claims = existing?.claims ?? [];
+      if (claims.some((claim) => claim.role === role && claim.owner === owner)) throw new Error(`SC-${storyId}: duplicate composite claim`);
+      scope.set(storyId, { backend, role: "composite story", owner: `family SC-${composite.family}`, claims: [...claims, { role, owner }] });
+      return;
+    }
     if (existing) {
       if (paired && existing.backend === "paired" && existing.role === role && existing.owner === owner) return;
       throw new Error(
@@ -462,6 +487,15 @@ export function buildStoryBackendScope(
   for (const [group, byBackend] of Object.entries(familyStories)) {
     for (const [backend, storyId] of Object.entries(byBackend)) {
       claim(storyId, backend, "family story", `family SC-${group}`);
+    }
+  }
+  for (const composite of COMPOSITE_STORY_OWNERSHIP) {
+    const owner = scope.get(composite.story);
+    if (!owner) continue;
+    const required = [ { role: "family story", owner: `family SC-${composite.family}` },
+      ...composite.model_ids.map((model) => ({ role: "model story", owner: model })) ];
+    if (owner.claims.length !== required.length || required.some((claim) => !owner.claims.some((actual) => actual.role === claim.role && actual.owner === claim.owner))) {
+      throw new Error(`SC-${composite.story}: incomplete declared composite scope`);
     }
   }
   return scope;
@@ -523,7 +557,8 @@ export function assertCellOwnershipIsBackendScoped(
         );
       }
       const expectedOwner = expected.owner(cell);
-      if (owner.role !== expected.role || owner.owner !== expectedOwner) {
+      const claims = owner.claims ?? [owner];
+      if (!claims.some((claim) => claim.role === expected.role && claim.owner === expectedOwner)) {
         throw new Error(
           `${cell.id}: ${field} SC-${storyId} is the ${owner.backend} ${owner.role} of ${owner.owner}, but this cell needs the ${cell.backend} ${expected.role} of ${expectedOwner} — a cell credited to another entry's story names a story that cannot close it`,
         );
@@ -609,7 +644,15 @@ export function assertTwinCoverage(
       throw new Error(`family SC-${group}: owns no dual model but carries Candle twin SC-${stories.candle}`);
     }
   }
-  const candleModelTwins = new Set(dual.map((model) => modelStories[model.id].candle));
+  const candleModelTwins = new Set(dual.map((model) => {
+    const story = modelStories[model.id].candle;
+    const composite = COMPOSITE_STORY_OWNERSHIP.find((entry) => entry.story === story);
+    if (!composite) return story;
+    if (composite.backend !== "candle" || !composite.model_ids.includes(model.id)) {
+      throw new Error(`SC-${story}: Candle model twin ${model.id} is outside its declared composite scope`);
+    }
+    return `${story}:${model.id}`;
+  }));
   if (candleModelTwins.size !== dual.length) {
     throw new Error(`${dual.length} dual models map onto only ${candleModelTwins.size} distinct Candle model twins`);
   }

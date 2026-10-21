@@ -22,6 +22,7 @@ mod mcp;
 mod media;
 mod model_cache;
 mod model_library;
+mod moss_image;
 mod projects;
 mod prompt_batches;
 mod recipe_presets;

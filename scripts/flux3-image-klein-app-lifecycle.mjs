@@ -90,8 +90,8 @@ export function assertAccepted(job, body) {
 }
 // Backend-neutral seam: Candle can reuse the request + saved-asset checks with its
 // own admitted runner/launcher and expected adapter, not impersonate a Mac receipt.
-export function assertSavedAsset(job, library, sidecar, { projectId, workerId, backend, adapter }) {
-  const body = imageBody(projectId); assertAccepted(job, body);
+export function assertSavedAsset(job, library, sidecar, { projectId, workerId, backend, adapter, body = imageBody(projectId) }) {
+  assertAccepted(job, body);
   fact(job.status === "completed" && job.stage === "completed" && job.backend === backend && job.workerId === workerId && job.error == null, "owned native worker must complete the ordinary job");
   const result = job.result;
   fact(result?.model === body.model && result.adapter === adapter && !Object.hasOwn(result, "assetWrites") && result.assetIds?.length === 1 && result.assets?.length === 1, "API must publish worker facts into final assets/assetIds, not provider-only PNG or unregistered assetWrites");
@@ -104,7 +104,7 @@ export function assertSavedAsset(job, library, sidecar, { projectId, workerId, b
   fact(library.generationSetId && library.generationSetId === result.generationSetId && library.lineage?.jobId === job.id, "saved asset provenance must bind generation set and actual job");
   const recipe = library.recipe;
   fact(recipe?.model === body.model && recipe.adapter === adapter && recipe.mode === body.mode && recipe.prompt === body.prompt && recipe.seed === body.seed, "saved recipe must preserve native model/adapter/mode/prompt/seed");
-  fact(recipe.rawAdapterSettings?.realModelInference === true && recipe.rawAdapterSettings?.numInferenceSteps === 16 && recipe.rawAdapterSettings?.repo === MODEL_REPO, "real flow-map inference settings required; no procedural stub");
+  fact(recipe.rawAdapterSettings?.realModelInference === true && recipe.rawAdapterSettings?.numInferenceSteps === body.advanced.steps && recipe.rawAdapterSettings?.repo === (body.model === "flux3_klein_base" ? "black-forest-labs/flux-3-image-klein-base" : MODEL_REPO), "real flow-map inference settings required; no procedural stub");
   const settings = recipe.normalizedSettings;
   fact(settings?.family === "flux3" && settings.width === body.width && settings.height === body.height && settings.count === 1, "saved FLUX3 settings required");
   const file = library.file;
@@ -122,6 +122,23 @@ export function assertServedPng(served, saved, width, height) {
   fact(sha256(served) === sha256(saved), "API-served PNG must exactly match the saved library file");
 }
 
+// Shared runner-account credential boundary. Call ONLY from an explicitly admitted
+// provisioning execution path, never from planning or installed-only acceptance.
+export async function runnerHfCredential(env, read = readFile) {
+  let token;
+  try { token = (await read(env.HF_TOKEN_PATH || path.join(env.HF_HOME || path.join(env.HOME, ".cache", "huggingface"), "token"), "utf8")).trim(); } catch { /* actionable refusal below; never disclose credential path/content */ }
+  fact(token, "Selected runner has no stored HF credential. Log that runner account into Hugging Face and authorize the FLUX Kommunity gate; never transfer another machine's token.");
+  return token;
+}
+export async function authorizeFlux3Repository(repo, revision, token, { signal, fetchImpl = fetch } = {}) {
+  const allowed = new Map([[MODEL_REPO, MODEL_REVISION], ["black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"], ["black-forest-labs/flux-3-image-klein-pup", "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed"]]);
+  fact(allowed.get(repo) === revision, "credential boundary refuses non-frozen repository/revision");
+  fact(repo === "black-forest-labs/flux-3-image-klein-pup" || token, "gated source requires this runner account's own stored credential");
+  const response = await fetchImpl(`https://huggingface.co/${repo}/resolve/${revision}/config.json`, { headers: token ? { Authorization: `Bearer ${token}` } : undefined, signal });
+  fact(response.ok, `Selected runner cannot fetch the pinned config (HTTP ${response.status}). ${repo === "black-forest-labs/flux-3-image-klein-pup" ? "Verify this frozen public component's availability." : `Authorize this runner account for ${repo} and refresh its stored HF login.`} No fallback or skip-as-pass.`);
+  const bytes = Buffer.from(await response.arrayBuffer()); fact(bytes.length > 0, "pinned config is empty");
+  return { repository: repo, resolvedRevision: revision, mechanism: token ? "runner_stored_hf_credential" : "public_pinned_repository", httpStatus: response.status, configSha256: sha256(bytes) };
+}
 export function redactSensitiveText(text, secrets) {
   for (const secret of secrets) if (secret) for (const value of new Set([secret, encodeURIComponent(secret)])) text = text.split(value).join("[REDACTED]");
   return text;
@@ -233,6 +250,16 @@ export function ownedApiController({ url, state, api, controller, fetchImpl = fe
   const requireOwned = async () => { fact(await verify(), "owned API not ready"); alive(); };
   return {
     verify,
+    // Terminal acceptance needs rejected status/body and ordinary multipart asset uploads.
+    // Keep exactly the same per-request nonce-path/readiness/exit ownership gate.
+    async exchange(method, route, body, { multipart = false } = {}) {
+      await requireOwned();
+      try {
+        const response = await fetchImpl(url + route, { method, redirect: "error", headers: multipart ? undefined : { "content-type": "application/json" }, body: body === undefined ? undefined : multipart ? body : JSON.stringify(body), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
+        const value = await response.json(); alive();
+        return { status: response.status, body: value };
+      } catch { alive(); throw new Error("owned API exchange unavailable"); }
+    },
     async startWorker(launch) { await requireOwned(); alive(); return launch(); },
     async call(method, route, body) { await requireOwned(); return request(method, route, body); },
     async served(route) {
@@ -298,14 +325,10 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     receipt.identity.hardware = hardware.map(({ chip_type, physical_memory, machine_model }) => ({ chip_type, physical_memory, machine_model }));
     // Prefer the selected runner account's OWN HF login, not a dispatcher secret.
     // Read once in memory; no credential paths/content enter the receipt or artifact.
-    let token;
-    try { token = (await readFile(env.HF_TOKEN_PATH || path.join(env.HF_HOME || path.join(env.HOME, ".cache", "huggingface"), "token"), "utf8")).trim(); } catch { /* actionable refusal below */ }
-    fact(token, "Selected Mac has no stored HF credential. Log that runner account into Hugging Face and authorize the FLUX Kommunity gate; do not transfer a Windows token or rehost weights.");
+    let token = await runnerHfCredential(env);
     secrets.add(token);
-    const auth = await fetch(`https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_REVISION}/config.json`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
-    fact(auth.ok, `Selected Mac cannot fetch the pinned gated config (HTTP ${auth.status}). Authorize this runner account for black-forest-labs/flux-3-image-klein and refresh its stored HF login.`);
-    const config = Buffer.from(await auth.arrayBuffer()); fact(config.length > 0, "pinned gated config empty");
-    receipt.auth = { status: "passed", mechanism: "runner_stored_hf_credential", pinned_file: "config.json", http_status: auth.status, sha256: sha256(config) };
+    const auth = await authorizeFlux3Repository(MODEL_REPO, MODEL_REVISION, token, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
+    receipt.auth = { status: "passed", mechanism: auth.mechanism, pinned_file: "config.json", http_status: auth.httpStatus, sha256: auth.configSha256 };
     if (preflightOnly) { receipt.status = "passed"; return receipt; }
     const identity = attemptIdentity(output), { state, workerId } = identity; receipt.identity.attempt_nonce = identity.nonce; await mkdir(state); await mkdir(path.join(state, "data", "projects"), { recursive: true }); await mkdir(path.join(state, "credentials")); await cp(path.join(root, "config"), path.join(state, "config"), { recursive: true });
     const weights = path.join(env.HOME, "sceneworks-flux3-app-weights"), hub = path.join(weights, "hub"), xet = path.join(weights, "xet");

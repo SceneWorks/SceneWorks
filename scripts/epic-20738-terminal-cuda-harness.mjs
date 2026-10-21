@@ -192,11 +192,13 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // predictor (Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview): 144 keys. Epic 25899's
 // terminal story (sc-25909) re-records base Qwen Image 2.1's re-host at its NOTICE revision
 // (ef03535e…) and adds the published Turbo re-host (SceneWorks/qwen-image-2-1-turbo-mlx
-// @9095dfbb…): 145 keys. sc-26234's whole-repository FLUX 3 download (files: []) adds no
-// selective census row; preserve main's honest Qwen re-record and its pinned digest.
+// @9095dfbb…): 145 keys.
+// sc-26325 adds the two exact official MOSS Base/SFT listings: 147 keys; every prior row is unchanged.
+// sc-26234's whole-repository FLUX 3 download (files: []) adds no selective census row;
+// preserve main's honest evidence re-record and its pinned digest.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "58aae9b38ad00e1bb1411e222cd5fe8d3e053b428c301f03d206679936e889d5";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "0bce144d4d816b3fda122c2460177c3ea6192f531bd496f3949a81dfb54b320c";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

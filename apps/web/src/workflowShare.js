@@ -243,6 +243,9 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // as not restored, and left out of the recipe. The safe default is "the user is told", never "it
 // quietly disappears".
 export const ADVANCED_PREFILL = {
+  mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
+  mossImageExecutionReport: { label: "MOSS execution receipt", prefill: PREFILL_NONE,
+    detail: "Recorded provenance belongs to the exported image. A new generation computes its own receipt." },
   resolution: { label: "Resolution", prefill: PREFILL_CONTROL },
   // sc-15952 reclassified this. It was `PREFILL_PROMPT` on the reading that the panel shows its
   // content in the prompt block above the grid — true of `stylePrompt`, which the studio really

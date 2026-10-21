@@ -57,7 +57,7 @@ test("exact source, dispatch identity and clean checkout refuse mismatch", () =>
 test("controller retains failed exact-source receipt before build, auth or process launch", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "flux3-app-refusal-")), output = path.join(directory, "attempt");
   try {
-    await assert.rejects(runLifecycle({ ...process.env, RUNNER_TEMP: directory, FLUX3_APP_OUTPUT: output, FLUX3_APP_SOURCE_SHA: sha, FLUX3_APP_INFERENCE_SHA: inference, GITHUB_SHA: inference, FLUX3_APP_RUNNER_TARGET: "secondary" }, { preflightOnly: true }), /dispatch SHA/);
+    await assert.rejects(runLifecycle({ RUNNER_TEMP: directory, FLUX3_APP_OUTPUT: output, FLUX3_APP_SOURCE_SHA: sha, FLUX3_APP_INFERENCE_SHA: inference, GITHUB_SHA: inference, FLUX3_APP_RUNNER_TARGET: "secondary" }, { preflightOnly: true }), /dispatch SHA/);
     const receipt = JSON.parse(await readFile(path.join(output, "evidence", "receipt.json"), "utf8"));
     assert.equal(receipt.status, "failed"); assert.equal(receipt.phase, "preflight");
     assert.deepEqual(receipt.cleanup, []); assert.equal(receipt.auth, undefined); assert.equal(receipt.saved_asset, undefined);

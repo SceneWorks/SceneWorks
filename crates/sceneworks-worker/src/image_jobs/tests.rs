@@ -28072,12 +28072,30 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
         .split_once(");")
         .expect("shared mode mapper call must terminate")
         .0;
-    assert!(mode_call.contains("engine_id,"));
-    assert!(mode_call.contains("if flux3_references.is_some() { \"edit_image\" }"));
+    // rustfmt may wrap this call without changing its executed family/reference identity.
+    // Keep the complete argument/branch contract, not independent tokens from unrelated code.
+    let reference_mode_contract = |call: &str| {
+        call.split_whitespace().collect::<Vec<_>>().join(" ")
+            == "engine_id, if flux3_references.is_some() { \"edit_image\" } else { &request.mode },"
+    };
     assert!(
-        mode_call.contains("else { &request.mode }"),
-        "all other families must preserve their authored mode"
+        reference_mode_contract(mode_call),
+        "actual FLUX3 references select edit_image; every other family preserves authored mode"
     );
+    for (required, mutation) in [
+        ("engine_id,", "\"sdxl\","),
+        ("flux3_references.is_some()", "false"),
+        ("\"edit_image\"", "\"text_to_image\""),
+        ("&request.mode", "\"edit_image\""),
+    ] {
+        let mutated = mode_call.replacen(required, mutation, 1);
+        assert_ne!(mutated, mode_call, "mutation must change the actual call");
+        assert!(
+            !reference_mode_contract(&mutated),
+            "the actual normalized guard must reject changing {required}"
+        );
+    }
+    assert!(reference_mode_contract(mode_call));
     assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
     assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
     assert!(base.contains("| \"sdxl\""));
@@ -28470,13 +28488,33 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
     );
 
     // Deference arm: gated on sequential capability AND a staging-engaging selection.
-    let deference = stream
-        .split_once("} else if sequential_capable\n                && memory_strategy_selection")
+    let deference = normalized_stream
+        .split_once("} else if sequential_capable")
         .expect("the legacy gate's deference arm is gated on sequential_capable")
         .1
         .split_once("match (needed, budget) {")
         .expect("deference arm body")
         .0;
+    let deference = format!("sequential_capable{deference}");
+    let deference_contract = |arm: &str| {
+        arm.split_whitespace().collect::<Vec<_>>().join(" ").starts_with(
+            "sequential_capable && memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized()) && generation_memory.is_some_and(|memory| memory.stage_residency) {",
+        )
+    };
+    assert!(deference_contract(&deference));
+    for required in [
+        "sequential_capable",
+        "memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized())",
+        "generation_memory.is_some_and(|memory| memory.stage_residency)",
+    ] {
+        let mutated = deference.replacen(required, "true", 1);
+        assert_ne!(mutated, deference, "mutation must change the actual arm");
+        assert!(
+            !deference_contract(&mutated),
+            "the actual normalized guard must reject removing {required}"
+        );
+    }
+    assert!(deference_contract(&deference));
     assert!(
         deference.contains(".is_some_and(|selection| selection.strategy.is_optimized())"),
         "the deference arm requires an optimized selection"

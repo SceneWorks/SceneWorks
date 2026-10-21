@@ -6,10 +6,10 @@
     "brotliBytes": 126500
   },
   "total": {
-    "_comment": "2026-10-19: approved total gzip/Brotli headroom for epic 26233 layout authoring and general controls; all other budgets unchanged.",
+    "_comment": "2026-10-20: approved total gzip/Brotli headroom for integrated FLUX3 and main's MOSS UI; initial, raw, and route budgets unchanged.",
     "rawBytes": 3200000,
-    "gzipBytes": 866000,
-    "brotliBytes": 739000
+    "gzipBytes": 870000,
+    "brotliBytes": 743000
   },
   "largestRoute": {
     "rawBytes": 1100000,

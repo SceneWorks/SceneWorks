@@ -1,35 +1,35 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:646e84cb1ac7308cc178254c24d3cd0d432496dfbeafcfa9c5361cdf55cfa20a",
+    "sceneWorksRevision": "source-tree:640b82d3cce1e2832377573ce9bd26a2a16d8c4dd28ab4ada6bfceb39c3ff571",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "a6da4d1d86876d73a74a1bd5cc6d377c0947d593cffe7e7824be1057081cdb81"
+        "sha256": "18a28cc21c0ba35d008afd4f6f6f553e7a56e88a446d0a89b7c584c032393536"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "3aedc9530474d0701be4f4e5ea12717b13263d44415dbf66f76e51fc8c69436c"
+        "sha256": "717b72dc8cfd39532becb3f94402ce3d6d011bb819686acce5b5cf545d6e030c"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "ff7a5e1da4871b411d11ffddb5034039acfaa17a5e2447967cf6abf4307057de"
+        "sha256": "25e196a2fe5a1cb52a81afabbec870da6c93ba9df155d3724d9601a85ffee3fa"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "2c4086080344f14412f681bbe6b4e2c2e7d097f4fbaf7889e7e82a6c8aee8adb"
+        "sha256": "e4a868ec39cc502d79d20224469019dc8fef04e3ae17fffd2606556c30bfe000"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "957cc0f444686cebce379d193010a56eefd7ddceb4eae8606d62366f0db3a81a"
+        "sha256": "f8f10d783be740ad018ef1f9cfb888d7bf9085890bef0a8adb238afda0957f2e"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "022d98325af8790596737b10b624277c68ffab68c6e14b279e2920c6f6535f99"
+        "sha256": "a339e482b1732b51fa86d6ea4ee3e72e4222a5e02164fb1ba430f1044508f724"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "dedbf888be74390f04bf122be26ecbb78105e12e8f3dbd54dc950410c8bb80e3"
+        "sha256": "ad3e33cadbff432f7d21df61c97bfd73953d96de4983ec51fcd5a8ebf81b39fc"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "d1f4af52060c96be62834730fb132b9fe4f56a60397ad52c2500b8ee31fe45be"
+        "sha256": "107ed975a7a4e13cf5737dfa75207ce484db7387a938060b89f5f69b9e112015"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "02346d4adeb5bc267d9cb726b57b5320b536216b3cda522defbb3b8e0e8be143"
+        "sha256": "81cc8c7a5f10bda8698e37b21f03fb0b75d77dfdbebf1e84dae51882f4076d74"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "220b15278f3889f1276e9aef7f9de126f2c77ea613957e11d01f03221ba28d11"
+        "sha256": "9055184ec68663d357022be257e49094f7d426f83afc0567da1037c42f53bbd3"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 69,
+    "catalogEntries": 71,
     "catalogEntriesByModality": {
-      "image": 58,
+      "image": 60,
       "video": 11
     },
-    "cells": 10730,
+    "cells": 10750,
     "publishedCells": 3986,
-    "elidedCells": 6744,
+    "elidedCells": 6764,
     "elidedByState": {
-      "Implemented": 1520,
-      "Missing": 5224
+      "Implemented": 1524,
+      "Missing": 5240
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 52,
-    "mlxStagedStaticCoverageDenominator": 58,
+    "mlxStagedStaticCoverageDenominator": 60,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -175,7 +175,7 @@
       }
     ],
     "anchors": 258,
-    "analyticOnlyCells": 115,
+    "analyticOnlyCells": 119,
     "anchoredCells": 3986,
     "staleAnchors": 258,
     "attestedAnchors": 0,
@@ -2987,6 +2987,132 @@
           ],
           "overlays": [
             "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_base",
+      "name": "MOSS-Image Base",
+      "modality": "image",
+      "familyGroup": 26323,
+      "family": "moss_image",
+      "resolvedRoute": "moss_image_base",
+      "resolvedRoutes": {
+        "mlx": "moss_image_base",
+        "candle": "moss_image_base"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "owningModelStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "name": "MOSS-Image SFT",
+      "modality": "image",
+      "familyGroup": 26323,
+      "family": "moss_image",
+      "resolvedRoute": "moss_image_sft",
+      "resolvedRoutes": {
+        "mlx": "moss_image_sft",
+        "candle": "moss_image_sft"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "owningModelStories": {
+        "mlx": 26323,
+        "candle": 26324
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
             "none"
           ],
           "rungs": [
@@ -16259,6 +16385,246 @@
       "implemented": 6,
       "states": {
         "Anchored/underived": 6
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 1,
+      "states": {
+        "Implemented": 1
+      }
+    },
+    {
+      "modelId": "moss_image_sft",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 1,
+      "published": 0,
+      "elided": 1,
+      "implemented": 0,
+      "states": {
+        "Missing": 1
       }
     },
     {
@@ -252068,6 +252434,8 @@
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:resident",
       "mage_flow_turbo:mage_flow_turbo:mlx:q8:text_to_image:none:staged_residency"
     ],
+    "moss_image_base": [],
+    "moss_image_sft": [],
     "pulid_flux_dev": [],
     "qwen_image": [
       "qwen_image:qwen_image:candle:bf16:text_to_image:control:resident",
