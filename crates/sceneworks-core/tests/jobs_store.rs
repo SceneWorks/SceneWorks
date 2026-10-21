@@ -674,6 +674,88 @@ fn generation_metrics_upsert_get_list_and_merge() {
 /// *materialized* it as. The failure this pins is a stats row that says `nvfp4` and leaves a reader
 /// to assume the run executed NVFP4 natively when it took the dense BF16 fallback.
 #[test]
+fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
+    let db = temp_db("veda-metrics");
+    let path = db.path();
+    let store = JobsStore::new(path.clone());
+    store.initialize().unwrap();
+    let connection = Connection::open(&path).unwrap();
+    for id in ["sparse-run", "dense-run", "later-run"] {
+        connection.execute("insert into jobs (id,type,status,payload_json,created_at,updated_at,completed_at)
+            values (?1,'video_generate','completed','{}','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')", [id]).unwrap();
+    }
+    let sparse = json!({"effective":"sparse","kernel":"actual-native-kernel","plan":"trained",
+        "planMatch":"nearest","totalAttentionFraction":0.4375});
+    let dense = json!({"effective":"dense","totalAttentionFraction":1.0,"fallbackReason":"missing predictor"});
+    for (id, outcome) in [("sparse-run", sparse.clone()), ("dense-run", dense.clone())] {
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    veda_execution: Some(outcome.clone()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .upsert_generation_metrics(
+                id,
+                &GenerationMetrics {
+                    total_ms: Some(1234),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .get_generation_metrics(id)
+                .unwrap()
+                .unwrap()
+                .veda_execution,
+            Some(outcome)
+        );
+    }
+    store
+        .upsert_generation_metrics("later-run", &GenerationMetrics::default())
+        .unwrap();
+    assert!(store
+        .get_generation_metrics("later-run")
+        .unwrap()
+        .unwrap()
+        .veda_execution
+        .is_none());
+    store
+        .purge_terminal_jobs_completed_before("2021-01-01T00:00:00Z")
+        .unwrap();
+    let rows = store
+        .list_generation_metrics(None, None, None, 100)
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "sparse-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(sparse)
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "dense-run")
+            .unwrap()
+            .metrics
+            .veda_execution,
+        Some(dense)
+    );
+    assert!(rows
+        .iter()
+        .find(|r| r.job_id == "later-run")
+        .unwrap()
+        .metrics
+        .veda_execution
+        .is_none());
+}
+
+#[test]
 fn generation_metrics_separate_source_codec_from_execution_representation() {
     let db = temp_db("gen-metrics-facts");
     let path = db.path();
@@ -698,6 +780,9 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
     let dense = GenerationMetrics {
         model: Some("kreamania-v7".to_owned()),
         quant_label: Some("nvfp4".to_owned()),
+        veda_execution: Some(
+            json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0}),
+        ),
         source_codec: Some("nvfp4-v1".to_owned()),
         execution_representation: Some("dense-fallback".to_owned()),
         backend: Some("cuda".to_owned()),
@@ -771,6 +856,10 @@ fn generation_metrics_separate_source_codec_from_execution_representation() {
     );
     assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
     assert_eq!(row.metrics.total_ms, Some(1234));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
 }
 
 /// The same separation, on a database that EXISTED before the two columns did — the only shape in
@@ -915,6 +1004,7 @@ fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) 
             &GenerationMetrics {
                 model: Some("kreamania-v7".to_owned()),
                 quant_label: Some("nvfp4".to_owned()),
+                veda_execution: Some(json!({"effective":"dense","fallbackReason":"forced self-test failure","totalAttentionFraction":1.0})),
                 source_codec: Some("nvfp4-v1".to_owned()),
                 execution_representation: Some("dense-fallback".to_owned()),
                 image_count: Some(3),
@@ -951,6 +1041,14 @@ fn generation_metrics_history_upgrade_case(label: &str, with_image_count: bool) 
     assert_eq!(row.metrics.model.as_deref(), Some("kreamania-v7"));
     assert_eq!(row.metrics.quant_label.as_deref(), Some("nvfp4"));
     assert_eq!(row.metrics.total_ms, Some(4321));
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["effective"],
+        "dense"
+    );
+    assert_eq!(
+        row.metrics.veda_execution.as_ref().unwrap()["fallbackReason"],
+        "forced self-test failure"
+    );
     assert_eq!(
         row.metrics.image_count,
         Some(3),
@@ -5938,6 +6036,9 @@ fn mac_capabilities_master_switch_and_infra_features() {
     // Smart-select segmentation is native SAM3 on MLX and Candle (sc-6105 / sc-18480).
     assert_eq!(epic("imageSegment"), None);
     assert!(mac.features["imageSegment"].supported);
+    // Iris-3B depth runs on native MLX on Mac and Candle off-Mac (sc-25682).
+    assert_eq!(epic("imageDepth"), None);
+    assert!(mac.features["imageDepth"].supported);
     assert_eq!(epic("datasetCaptioning"), None);
     // LyCORIS is ported to MLX (epic 3641) → no longer a capability gap entry at all.
     assert!(!mac.features.contains_key("lycoris"));
@@ -5960,9 +6061,11 @@ fn mac_capabilities_master_switch_and_infra_features() {
             !matches!(
                 key.as_str(),
                 "datasetCaptioning"
+                    | "imageDepth"
                     | "imageSegment"
                     | "imageUpscale"
                     | "imageUpscaleSeedvr2"
+                    | "imageUpscaleIris"
                     | "personDetect"
                     | "poseFromPhoto"
                     | "videoUpscale"
@@ -5979,10 +6082,26 @@ fn mac_capabilities_master_switch_and_infra_features() {
     let windows = mac_capabilities("windows", false);
     assert!(windows.features["imageUpscaleSeedvr2"].supported);
     assert!(windows.features["imageUpscaleSeedvr2"].reason.is_none());
+    // Iris restoration (sc-25683) has a backend on the same three platforms (MLX + Candle).
+    assert!(mac.features["imageUpscaleIris"].supported);
+    assert!(windows.features["imageUpscaleIris"].supported);
+    assert!(inert.features["imageUpscaleIris"].supported);
+    assert!(!mac_capabilities("freebsd", false).features["imageUpscaleIris"].supported);
     assert!(windows.features["imageSegment"].supported);
     assert!(windows.features["imageSegment"].reason.is_none());
     assert!(inert.features["imageSegment"].supported);
     assert!(inert.features["imageSegment"].reason.is_none());
+    assert!(windows.features["imageDepth"].supported);
+    assert!(inert.features["imageDepth"].supported);
+    let other = mac_capabilities("freebsd", false);
+    assert!(!other.features["imageDepth"].supported);
+    assert_eq!(
+        other.features["imageDepth"]
+            .reason
+            .as_ref()
+            .and_then(|r| r.suggested_epic.clone()),
+        Some("sc-25682".to_owned())
+    );
     // AuraSR is dropped as an offered engine off-Mac too (sc-5499): unsupported on Windows (and Linux),
     // not just under active Mac gating — so the web picker hides it on every platform.
     assert!(!windows.features["imageUpscaleAuraSr"].supported);
@@ -8140,6 +8259,7 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             WorkerCapability::Gpu,
             WorkerCapability::ImageDetail,
             WorkerCapability::ImageSegment,
+            WorkerCapability::ImageDepth,
             WorkerCapability::DatasetAnalysis,
             WorkerCapability::Unknown("candle".to_owned()),
         ],
@@ -8167,6 +8287,11 @@ fn native_candle_utility_capabilities_dispatch_supported_shapes_only() {
             "SAM3 box segment",
             JobType::ImageSegment,
             json!({ "sourceAssetId": "asset_src", "box": [8, 12, 64, 80] }),
+        ),
+        (
+            "Iris depth",
+            JobType::ImageDepth,
+            json!({ "sourceAssetId": "asset_src", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         ),
         (
             "CLIP dataset analysis",
@@ -9289,4 +9414,96 @@ fn registering_retires_a_previous_unhealthy_reason() {
         worker.status_reason, None,
         "re-registering re-advertises what the worker can serve, so the old remedy must be retired"
     );
+}
+
+/// sc-25785: a worker reports `resumeCheckpointStep` only when it changes, so the latest value
+/// must survive later results that omit it and a store-side interrupt (backend restart) that never
+/// goes through a progress report — the Queue's Resume offer reads it from the interrupted row.
+#[test]
+fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
+    let store = store("resume-checkpoint-carry-forward");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 50 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 100 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "other": true })))
+        .expect("progress");
+    // The worker died with the job: its row no longer names the job, so startup recovery
+    // interrupts it (an exactly-owned job would be preserved for the live worker instead).
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'offline', current_job_id = null",
+            [],
+        )
+        .expect("worker fixture updates");
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
+    assert_eq!(job.result.get("other"), Some(&json!(true)));
+}
+
+/// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered
+/// reference edit — is claimed by an MLX worker and by a Candle worker, through the store's real
+/// claim path, exactly as a base 2.1 job is.
+///
+/// *Mutation that reds this:* dropping `qwen_image_2_1_turbo` from `IMAGE_MODEL_CAPS` (both lanes
+/// stop claiming), from the MLX match arm (the MLX claim fails), or from the Candle
+/// `QwenImage21Edit` route (the conditioned Candle claim fails).
+#[test]
+fn qwen_image_2_1_turbo_image_jobs_are_claimed_by_the_mlx_and_the_candle_worker() {
+    let payloads = [
+        json!({ "model": "qwen_image_2_1_turbo", "prompt": "a lighthouse at dusk" }),
+        json!({
+            "model": "qwen_image_2_1_turbo",
+            "mode": "edit_image",
+            "prompt": "make the sky violet",
+            "sourceAssetId": "asset_source",
+            "referenceAssetIds": ["asset_source", "asset_style"]
+        }),
+    ];
+    for (index, payload) in payloads.iter().enumerate() {
+        for native in ["mlx", "candle"] {
+            let store = store(&format!("qwen-2-1-turbo-claim-{native}-{index}"));
+            let job = store
+                .create_job(image_job_with(payload.clone(), "auto"))
+                .expect("job creates");
+            let worker = format!("worker-{native}");
+            if native == "mlx" {
+                register_gpu_worker(&store, &worker, "mlx", image_caps());
+            } else {
+                register_candle_worker(&store, &worker);
+            }
+            let claimed = store
+                .claim_next_job(&worker)
+                .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| panic!("{worker} must claim Turbo job {index}"));
+            assert_eq!(claimed.id, job.id, "{worker}/{index}");
+        }
+    }
 }

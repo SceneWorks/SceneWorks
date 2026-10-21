@@ -4,6 +4,7 @@
 // editor is deliberately lazy-loaded to keep konva off the main/test path). ImageEditor.jsx
 // re-exports these so its public surface (and its tests) are unchanged.
 
+import { irisRestoreControls } from "./irisRestore.js";
 import { serializeLora } from "./presetUtils.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 
@@ -142,9 +143,16 @@ export function buildEditJobBody({
 // detail/softness control (`softness: true`). `aura-sr` is kept here only so a stale saved selection
 // gracefully falls back — it is hidden on every platform (dropped, sc-3668 / sc-5499) via
 // `macUpscaleEngineBlocked`.
+//
+// `iris` (sc-25683) is the Iris-3B restoration transform. It is NOT sized by `factors`: it takes any
+// positive `scale` (default 4×; 1× restores without resizing) plus input sizing and colour fix, and
+// its preview comes from the engine planner (see irisRestore.js). `factors: [4]` only keeps the
+// shared factor state defined while it is selected; no surface renders factors for a `restoration`
+// engine. It is offered only where a native lane exists AND its own task entry is installed.
 export const UPSCALE_ENGINES = [
   { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
   { key: "seedvr2", label: "SeedVR2", factors: [2, 4], softness: true },
+  { key: "iris", label: "Iris restore", factors: [4], restoration: true },
   { key: "aura-sr", label: "AuraSR", factors: [4] },
 ];
 
@@ -157,12 +165,23 @@ export function upscaleEngineHasSoftness(engineKey) {
   return Boolean(UPSCALE_ENGINES.find((entry) => entry.key === engineKey)?.softness);
 }
 
+// Whether an engine is a scale-sized restoration engine (Iris, sc-25683) rather than a 2×/4× factor
+// upscaler.
+export function upscaleEngineIsRestoration(engineKey) {
+  return Boolean(UPSCALE_ENGINES.find((entry) => entry.key === engineKey)?.restoration);
+}
+
 // The `POST /api/v1/jobs` body for a standalone image_upscale job (sc-2431). The
 // worker reads sourceAssetId/factor/engine from the payload; displayName names the
 // result. `softness` (0..1) is a SeedVR2-only detail knob (sc-4815) — omitted for engines
 // that ignore it. Pure for unit testing.
-export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, factor, engine, displayName, softness }) {
-  const payload = { projectId: project.id, sourceAssetId, factor, engine, displayName };
+//
+// The Iris restoration engine (sc-25683) carries `scale` / `inputSizing` / `colorFix` instead of
+// `factor` (the API and worker refuse a factor for it by name), from `restore`.
+export function buildUpscaleJobBody({ project, requestedGpu, sourceAssetId, factor, engine, displayName, softness, restore }) {
+  const payload = upscaleEngineIsRestoration(engine)
+    ? { projectId: project.id, sourceAssetId, engine, displayName, ...irisRestoreControls(restore) }
+    : { projectId: project.id, sourceAssetId, factor, engine, displayName };
   if (upscaleEngineHasSoftness(engine) && typeof softness === "number") {
     payload.softness = softness;
   }

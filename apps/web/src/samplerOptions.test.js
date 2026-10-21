@@ -6,6 +6,8 @@ import {
   guidanceDefaultFromModel,
   guidanceMethodDefaultFromModel,
   guidanceMethodOptionsFromModel,
+  maxStepsForModel,
+  negativePromptInertAtGuidance,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -13,6 +15,8 @@ import {
   schedulerShiftDefaultFromModel,
   stepsDefaultFromModel,
   stepsMenuFromModel,
+  guidanceIsOff,
+  patchGridHint,
 } from "./samplerOptions.js";
 import { fallbackModels } from "./constants.js";
 
@@ -215,5 +219,55 @@ describe("samplerOptions", () => {
         "ddim_uniform", "beta57",
       ]);
     }
+  });
+
+  // sc-25679 — Iris-3B ships a 100-step default above the historical 80 ceiling.
+  it("raises the Steps ceiling to the model's own default", () => {
+    expect(maxStepsForModel({ defaults: { steps: 100 } })).toBe(100);
+    expect(maxStepsForModel({ defaults: { steps: 40 } })).toBe(80);
+    expect(maxStepsForModel(null)).toBe(80);
+  });
+
+  // sc-25679 — the negative prompt is the CFG unconditional for a declaring model.
+  it("marks the negative prompt inert only at guidance 1.0 for a declaring model", () => {
+    const iris = { image: { negativePromptRequiresGuidance: true }, defaults: { guidanceScale: 3.0 } };
+    expect(negativePromptInertAtGuidance(iris, "")).toBe(false);
+    expect(negativePromptInertAtGuidance(iris, "1")).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, 1)).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, "2.5")).toBe(false);
+    expect(
+      negativePromptInertAtGuidance({ ...iris, defaults: { guidanceScale: 1.0 } }, ""),
+    ).toBe(true);
+    const undeclared = { defaults: { guidanceScale: 1.0 } };
+    expect(negativePromptInertAtGuidance(undeclared, "")).toBe(false);
+  });
+});
+
+describe("sc-25681 image sampling-control declarations", () => {
+  const iris = {
+    id: "iris_3b",
+    name: "Iris 3B",
+    defaults: { guidanceScale: 3.0, schedulerShift: 4.0, sampler: "dpmpp_2m" },
+    limits: { samplers: ["dpmpp_2m", "euler"], requiresDimensionsMultipleOf: 16 },
+    image: { patchGridVisibleBelow: 1024 },
+  };
+  const plain = { id: "plain", defaults: { guidanceScale: 3.0 } };
+
+  it("reads the sampler menu and shift default", () => {
+    expect(samplerOptionsFromModel(iris)).toEqual(["euler", "dpmpp_2m"]);
+    expect(samplerDefaultFromModel(iris)).toBe("dpmpp_2m");
+    expect(schedulerShiftDefaultFromModel(iris)).toBe(4.0);
+  });
+
+  it("guidance is off exactly at 1.0, override or default", () => {
+    expect(guidanceIsOff(iris, "1")).toBe(true);
+    expect(guidanceIsOff(iris, "")).toBe(false);
+    expect(guidanceIsOff({ defaults: { guidanceScale: 1 } }, "")).toBe(true);
+  });
+
+  it("hints at the patch grid below the declared side and never otherwise", () => {
+    expect(patchGridHint(iris, 1024, 1024)).toBeNull();
+    expect(patchGridHint(iris, 1216, 832)).toBe("Below 1024px a side, Iris 3B shows a visible patch grid.");
+    expect(patchGridHint(plain, 512, 512)).toBeNull();
   });
 });

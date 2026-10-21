@@ -228,6 +228,15 @@ pub struct WorkflowUpscale {
     pub engine: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub softness: Option<f64>,
+    /// Iris restoration (sc-25683): the applied output scale (any positive factor; 1 = restore only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Iris restoration: `budgeted` or `original` input sizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_sizing: Option<String>,
+    /// Iris restoration: whether the wavelet colour correction ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_fix: Option<bool>,
 }
 
 /// The portable, sanitized workflow of one generated image.
@@ -1049,6 +1058,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         }]),
     },
     WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs.rs",
+        function: "standalone_restore_workflow_share",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — the standalone Iris restoration's \
+               own envelope (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs/detail.rs",
         function: "run_image_detail_job",
         lane: "POST /api/v1/image/detail/jobs — writes the refined PNG (macOS-gated; the scan is \
@@ -1056,6 +1075,16 @@ pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
         disposition: SeamDisposition::Embeds(&[WebBuilderRef {
             path: "apps/web/src/imageJobs.js",
             function: "buildDetailJobBody",
+        }]),
+    },
+    WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/upscale_jobs.rs",
+        function: "run_iris_restore_job_using",
+        lane: "POST /api/v1/jobs type=image_upscale engine=iris — hands the standalone Iris \
+               restoration's envelope to the shared single-child writer (sc-25683)",
+        disposition: SeamDisposition::Embeds(&[WebBuilderRef {
+            path: "apps/web/src/imageJobs.js",
+            function: "buildUpscaleJobBody",
         }]),
     },
     WorkflowWriteSeam {
@@ -1229,8 +1258,18 @@ pub enum AdvancedShape {
     /// `keypoints`, `hands`, `face` — all three drive the rendered skeleton). Pose-library ids,
     /// and anything else the picker attached, do not travel.
     Poses,
+    /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
+    /// H3 validator refuses malformed values or unknown fields.
+    H3VedaSettings,
+    /// Canonical MOSS request options, validated by gen-core.
+    MossImageOptions,
+    /// Provider receipt with local adapter paths reduced to their frozen relative filename.
+    MossImageReport,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
+    /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
+    /// another length, a string, a nested value — is dropped, like an object under a scalar key.
+    NumberPair,
 }
 
 /// One classified `advanced` key.
@@ -1314,6 +1353,9 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
+    deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
+    allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
     allow(
         "resolution",
         AdvancedShape::Scalar,
@@ -1334,6 +1376,18 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         "schedulerShift",
         AdvancedShape::Scalar,
         "Authored time-shift (mu) for the curated schedule.",
+    ),
+    allow(
+        "cfgInterval",
+        AdvancedShape::NumberPair,
+        "Authored classifier-free-guidance interval [start, end] in model time (sc-25681, \
+         Iris-3B): which denoise steps guidance runs on — changes the picture, names nothing local.",
+    ),
+    allow(
+        "captionOverflow",
+        AdvancedShape::Scalar,
+        "Authored caption-overflow policy (warn / error / silent, sc-25681): whether an over-long \
+         prompt is truncated or refused — authored intent about the prompt, not a hardware budget.",
     ),
     allow(
         "steps",
@@ -1646,6 +1700,14 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedKeySource::VideoStudioBuilder,
         "Authored right-clip conditioning strength for a bridge — the sibling of \
          `videoConditioningStrength`, and dropping it would make a shared bridge replay lopsided.",
+    ),
+    allow_from(
+        "veda",
+        AdvancedShape::H3VedaSettings,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored MiniMax-H3 Veda sparsity and full-attention controls. The complete closed wire \
+         object changes the denoising recipe and must travel together; malformed or unknown \
+         members are refused rather than silently producing a different recipe.",
     ),
     allow_from(
         "timelineAction",
@@ -2414,6 +2476,16 @@ fn sanitize_upscale(value: Option<&Value>) -> Option<WorkflowUpscale> {
             .and_then(Value::as_str)
             .and_then(shareable_label),
         softness: upscale.get("softness").and_then(Value::as_f64),
+        scale: upscale
+            .get("scale")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value > 0.0),
+        input_sizing: upscale
+            .get("inputSizing")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "budgeted" | "original"))
+            .map(str::to_owned),
+        color_fix: upscale.get("colorFix").and_then(Value::as_bool),
     })
 }
 
@@ -2734,6 +2806,13 @@ fn reduce_workflow_share(share: WorkflowShare) -> WorkflowShare {
             factor: upscale.factor,
             engine: upscale.engine.as_deref().and_then(shareable_label),
             softness: upscale.softness.filter(|value| value.is_finite()),
+            scale: upscale
+                .scale
+                .filter(|value| value.is_finite() && *value > 0.0),
+            input_sizing: upscale
+                .input_sizing
+                .filter(|value| matches!(value.as_str(), "budgeted" | "original")),
+            color_fix: upscale.color_fix,
         }),
         loras,
         inputs,
@@ -2903,12 +2982,62 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
+            AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
+            AdvancedShape::MossImageOptions => sanitize_moss_options(value),
+            AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
+            AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
         }
     }
     out
+}
+
+fn sanitize_moss_options(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::{MossImageOptions, MossImageResolved, MossImageVariant};
+    let options: MossImageOptions = serde_json::from_value(value.clone()).ok()?;
+    MossImageResolved::resolve(
+        MossImageVariant::Sft,
+        &gen_core::GenerationRequest {
+            moss_image: Some(options.clone()),
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    serde_json::to_value(options).ok()
+}
+/// Keep the native validated receipt while excluding this machine's optional adapter location.
+/// The source receipt still identifies the exact upstream adapter bytes by repository/revision/hash.
+pub fn sanitize_moss_execution_report(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::MossImageExecutionReport;
+    let report: MossImageExecutionReport = serde_json::from_value(value.clone()).ok()?;
+    let mut data = report.into_data();
+    for adapter in &mut data.adapter_reports {
+        adapter.adapter_path = std::path::PathBuf::from("lora.safetensors");
+    }
+    serde_json::to_value(MossImageExecutionReport::new(data).ok()?).ok()
+}
+
+/// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire
+/// grammar and `deny_unknown_fields`; this boundary adds a small byte ceiling before parsing, then
+/// keeps the original strings intact so ranges and separators replay exactly as authored.
+fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
+    const MAX_CONTROL_TEXT_BYTES: usize = PROSE_MAX_BYTES;
+    const MAX_H3_STEPS: u32 = 200;
+
+    let object = value.as_object()?;
+    if object.values().any(|member| {
+        member
+            .as_str()
+            .is_some_and(|text| text.len() > MAX_CONTROL_TEXT_BYTES)
+    }) {
+        return None;
+    }
+    let mut advanced = JsonObject::new();
+    advanced.insert("veda".to_owned(), value.clone());
+    crate::h3_veda::requested_h3_veda("minimax_h3", &advanced, MAX_H3_STEPS).ok()?;
+    Some(Value::Object(object.clone()))
 }
 
 /// The prose keys inside a sanitized value that are what the user typed, and so are exempt
@@ -2942,6 +3071,13 @@ fn sanitize_scalar(key: &str, value: &Value) -> Option<Value> {
         // close: it is how a path reaches the file through a key that is otherwise allowed.
         _ => None,
     }
+}
+
+fn sanitize_number_pair(value: &Value) -> Option<Value> {
+    let pair = value.as_array().filter(|pair| pair.len() == 2)?;
+    pair.iter()
+        .all(|number| number.as_f64().is_some_and(f64::is_finite))
+        .then(|| value.clone())
 }
 
 fn sanitize_structured_prompt(value: &Value) -> Option<Value> {
@@ -3353,6 +3489,59 @@ mod tests {
         assert!(!recipe.contains_key("caption"));
         // `magicPromptBackend: null` is not a scalar we carry.
         assert!(!recipe.contains_key("magicPromptBackend"));
+    }
+
+    #[test]
+    fn veda_keeps_every_valid_wire_control_and_refuses_unknown_or_malformed_members() {
+        let all_layers = (0..50)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let all_steps = (0..200)
+            .map(|step| step.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": all_layers,
+            "fullAttentionSteps": all_steps
+        });
+        let advanced = json!({"veda": complete})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], complete);
+
+        let controls = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": "49, 2–0",
+            "fullAttentionSteps": "0; 3"
+        });
+        let advanced = json!({"veda": controls})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], controls);
+
+        for controls in [
+            json!({"enabled": true, "unknown": "must not be smuggled"}),
+            json!({"enabled": true, "generated": "C:\\weights\\veda"}),
+            json!({"enabled": true, "fullAttentionSteps": "200"}),
+            json!({"enabled": true, "fullAttentionLayers": "50"}),
+        ] {
+            let advanced = json!({"veda": controls})
+                .as_object()
+                .cloned()
+                .expect("object");
+            assert!(
+                !sanitize_advanced(&advanced).contains_key("veda"),
+                "malformed or unknown Veda data must not become a partial recipe"
+            );
+        }
     }
 
     #[test]

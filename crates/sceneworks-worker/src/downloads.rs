@@ -738,6 +738,32 @@ pub(crate) struct HuggingFaceSnapshot {
 }
 
 impl HuggingFaceSnapshot {
+    /// Catalog identity wins; an upstream metadata disagreement is an error, never a new pin.
+    pub(crate) fn enforce_managed_identity(
+        &mut self,
+        identity: &sceneworks_core::managed_file::ManagedFileIdentity,
+    ) -> WorkerResult<()> {
+        if self.files.len() != 1 || self.files[0].path != identity.file {
+            return Err(WorkerError::InvalidPayload(
+                "Managed component resolved a different file set".into(),
+            ));
+        }
+        let file = &mut self.files[0];
+        if file.size.is_some_and(|bytes| bytes != identity.bytes)
+            || file
+                .sha256
+                .as_ref()
+                .is_some_and(|sha| sha != &identity.sha256)
+        {
+            return Err(WorkerError::InvalidPayload(
+                "Managed component HF metadata conflicts with the catalog identity".into(),
+            ));
+        }
+        file.size = Some(identity.bytes);
+        file.sha256 = Some(identity.sha256.clone());
+        Ok(())
+    }
+
     pub(crate) async fn resolve(
         client: &reqwest::Client,
         settings: &Settings,
@@ -1323,8 +1349,19 @@ pub(crate) async fn download_snapshot_into_cache(
             .await
             .send()
             .await?;
+        let reported_commit = header_value(&head, "x-repo-commit");
+        if revision.len() == 40
+            && revision.bytes().all(|b| b.is_ascii_hexdigit())
+            && reported_commit
+                .as_deref()
+                .is_some_and(|sha| sha != revision)
+        {
+            return Err(WorkerError::InvalidPayload(
+                "Hugging Face resolved a different immutable revision".into(),
+            ));
+        }
         if commit.is_none() {
-            commit = header_value(&head, "x-repo-commit");
+            commit = reported_commit;
         }
         let etag = header_value(&head, "x-linked-etag")
             .or_else(|| header_value(&head, "etag"))
@@ -3004,6 +3041,34 @@ mod atomic_cache_publication_tests {
         .await
     }
 
+    #[tokio::test]
+    async fn managed_digest_transfer_and_cache_reuse_reject_equal_length_wrong_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("predictor.safetensors");
+        let good = b"correct learned predictor";
+        let wrong = vec![b'x'; good.len()];
+        let (url, server) = fixture_server(wrong.clone()).await;
+        assert!(publish_fixture(&target, &url, good).await.is_err());
+        assert!(
+            !target.exists(),
+            "wrong download must never become installed"
+        );
+        server.abort();
+        let (url, server) = fixture_server(good.to_vec()).await;
+        publish_fixture(&target, &url, good).await.unwrap();
+        server.abort();
+        // Correct cache reuse must work without a live transfer server.
+        publish_fixture(&target, "http://127.0.0.1:1/no-network", good)
+            .await
+            .unwrap();
+        std::fs::write(&target, wrong).unwrap();
+        assert!(
+            publish_fixture(&target, "http://127.0.0.1:1/no-network", good)
+                .await
+                .is_err()
+        );
+    }
+
     /// Required fixture: an interrupted transfer resumes from the durable partial
     /// sibling, and never turns the target path into its transfer scratch space.
     #[tokio::test]
@@ -3326,5 +3391,38 @@ mod snapshot_progress_tests {
             "only the selected blob belongs in snapshot progress: {}",
             payload.message
         );
+    }
+}
+
+#[cfg(test)]
+mod managed_predictor_metadata_tests {
+    use super::*;
+    #[test]
+    fn catalog_digest_is_injected_and_metadata_conflicts_are_refused() {
+        let pin = sceneworks_core::managed_file::builtin_identities()
+            .unwrap()
+            .first()
+            .unwrap();
+        let file = SnapshotFile {
+            path: pin.file.clone(),
+            size: None,
+            download_url: "http://invalid.invalid".into(),
+            sha256: None,
+        };
+        let mut snapshot = HuggingFaceSnapshot { files: vec![file] };
+        snapshot.enforce_managed_identity(pin).unwrap();
+        assert_eq!(
+            snapshot.files[0].sha256.as_deref(),
+            Some(pin.sha256.as_str())
+        );
+        assert_eq!(snapshot.files[0].size, Some(pin.bytes));
+        let mut bad = snapshot.clone();
+        bad.files[0].sha256 = Some("0".repeat(64));
+        assert!(bad.enforce_managed_identity(pin).is_err());
+        let mut bad = snapshot.clone();
+        bad.files[0].size = Some(pin.bytes + 1);
+        assert!(bad.enforce_managed_identity(pin).is_err());
+        snapshot.files[0].path = "other.safetensors".into();
+        assert!(snapshot.enforce_managed_identity(pin).is_err());
     }
 }

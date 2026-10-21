@@ -424,3 +424,26 @@ describe("buildImageJobAdvanced", () => {
     });
   });
 });
+
+// sc-25681: Iris-3B's controls. A shift-axis model sends its shift with no scheduler picked; the
+// resolved CFG interval and a non-default caption-overflow policy ride verbatim; and every one of
+// them is absent when not set, so other models' payloads stay byte-identical.
+describe("buildImageJobAdvanced — sc-25681 sampling controls", () => {
+  it("sends the shift on its own for a shift-axis model, never otherwise", () => {
+    expect(buildImageJobAdvanced(offState({ schedulerShift: 4, supportsSchedulerShift: true })).schedulerShift).toBe(4);
+    expect(buildImageJobAdvanced(offState({ schedulerShift: 4 })).schedulerShift).toBeUndefined();
+    expect(
+      buildImageJobAdvanced(offState({ schedulerShift: 2, scheduler: "karras" })).schedulerShift,
+    ).toBe(2);
+  });
+
+  it("carries the interval and policy only when set", () => {
+    const set = buildImageJobAdvanced(offState({ cfgInterval: [0.1, 0.9], captionOverflow: "error" }));
+    expect(set.cfgInterval).toEqual([0.1, 0.9]);
+    expect(set.captionOverflow).toBe("error");
+    const unset = buildImageJobAdvanced(offState({ cfgInterval: null, captionOverflow: "default" }));
+    expect(unset).not.toHaveProperty("cfgInterval");
+    expect(unset).not.toHaveProperty("captionOverflow");
+    expect(buildImageJobAdvanced(offState())).not.toHaveProperty("cfgInterval");
+  });
+});

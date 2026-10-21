@@ -791,7 +791,8 @@ SCENEWORKS_IDEOGRAM_BF16_ROOT=/abs/path/.../snapshots/<rev>/bf16
 # halves swapped: q8/q4 are the `<tier>/` subdirs of the SceneWorks re-host, and bf16 IS the upstream
 # `Qwen/Qwen-Image-2.1` snapshot at its ROOT (the converter refuses to emit a `bf16/` copy), exactly
 # the directories the worker's `qwen_image_2_1_declared_tier_dir` resolves. The re-host rows are
-# PUBLISHED (sc-24114) at `SceneWorks/qwen-image-2-1-mlx@1691de01c24a070131e0a28bf4c065fd027f4fe9`, each
+# PUBLISHED (sc-24114; republished with each tier's NOTICE by sc-25909) at
+# `SceneWorks/qwen-image-2-1-mlx@ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, each
 # tier a packed `transformer/model.safetensors` + `text_encoder/model.safetensors` with a
 # `quantization` marker in each `config.json`. Both lanes load all three roots, eager materialization, `LoadSpec::quantize` = the tier.
 # SCOPE (sc-24114): the six qwen_image_2_1 anchors are TEXT-TO-IMAGE at the 2048x2048 DEFAULT preset with
@@ -806,6 +807,49 @@ SCENEWORKS_QWEN_IMAGE_2_1_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY=Qwen/Qwen-Image-2.1       # fixed; validated against QWEN_IMAGE_2_1_BF16_REPOSITORY
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
+
+# BOTH adapters — qwen_image_2_1_turbo (sc-25907, epic 25899). The distilled checkpoint is base's
+# split-repo shape over its OWN two repositories and its OWN env families, split from base's the way
+# Lens-Turbo is split from Lens, so a Turbo plan can never be satisfied by base weights (adapter
+# `QWEN_IMAGE_2_1_TURBO_FAMILY` / `QWEN_IMAGE_2_1_TURBO_BF16_FAMILY` in `bin/mlx.rs`,
+# `qwen_image_2_1_turbo_five_rung_family` in `bin/candle.rs`). q8/q4 are the `<tier>/` subdirs of the
+# SceneWorks re-host, PUBLISHED (sc-25909) at
+# `SceneWorks/qwen-image-2-1-turbo-mlx@9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`; bf16 IS the upstream
+# `Qwen/Qwen-Image-2.1-Turbo` snapshot at its ROOT.
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY=SceneWorks/qwen-image-2-1-turbo-mlx  # fixed; validated against QWEN_IMAGE_2_1_TURBO_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8 ONLY — bf16 is the family below
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY=Qwen/Qwen-Image-2.1-Turbo       # fixed; validated against QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
+
+# BOTH adapters — the three Iris-3B TASK routes (sc-25690): generation (iris_3b), monocular depth
+# (iris_3b_depth) and restoration (iris_3b_restore). Three fine-tunes in ONE upstream repository at
+# one revision, never re-hosted, bf16 only (no route quantizes, so there is exactly one cell per
+# route per lane and no tier sub-directory anywhere): the generation backbone at the snapshot ROOT,
+# the depth export in `depth/`, the restoration export in `upscaler/` — the directories the worker's
+# generation arm, `depth_jobs::resolve_depth_export` and `iris_restore::resolve_restore_export_dir`
+# hand the engine. One env family per task; a root that is another task's folder is refused.
+SCENEWORKS_IRIS_3B_REPOSITORY=speridlabs/iris-3b                 # fixed; validated against IRIS_3B_REPOSITORY
+SCENEWORKS_IRIS_3B_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_ROOT=/abs/path/.../snapshots/<rev>            # the snapshot ROOT (config.yaml, model.safetensors)
+SCENEWORKS_IRIS_3B_COMPONENT_TEXT_ENCODER=/abs/path/.../models--Qwen--Qwen3-VL-4B-Instruct/snapshots/<rev>
+                                                                 # generation ONLY: the staged text encoder
+SCENEWORKS_IRIS_3B_DEPTH_REPOSITORY=speridlabs/iris-3b
+SCENEWORKS_IRIS_3B_DEPTH_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_DEPTH_ROOT=/abs/path/.../snapshots/<rev>/depth       # config.yaml, model.safetensors, empty_prompt.safetensors
+SCENEWORKS_IRIS_3B_RESTORE_REPOSITORY=speridlabs/iris-3b
+SCENEWORKS_IRIS_3B_RESTORE_REVISION=<exact artifact revision>
+SCENEWORKS_IRIS_3B_RESTORE_ROOT=/abs/path/.../snapshots/<rev>/upscaler  # same three files
+# Depth and restoration are NOT generators (a provider-specific estimator and a `Transform`), so the
+# Iris arm drives each itself: depth runs ONE estimate whose model-input grid is the plan geometry,
+# restoration ONE tiled pass whose processing size is the plan geometry (a 4x upscale of a source a
+# quarter that size; a geometry that fits one tile is refused, because the anchor measures the tiled
+# path). Both load resident with no text encoder — their contracts declare staged residency
+# structurally not applicable, which is why their candle plan rows override the lane's staged default
+# — and their "conditioning" phase is the resident model with its shipped empty-prompt states.
+# `measure-memory-catalog.mjs` exports all of the above itself; it inventories only the generation
+# root's own two files, because that root is the snapshot root the two task folders also live in.
 
 # BOTH adapters — the SenseNova-U1 family (sc-22734). SIX catalog ids on TWO engine ids, and SIX
 # env families: each id ships its OWN independently pinned tiered rehost, so the arm resolves the
@@ -897,7 +941,11 @@ SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier 
 # across the probes, `footprint` on a 38 GB process received 0.31 s of budget and `bernini:q4:mlx`
 # was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside 1.2 s; with the
 # census still on 1 s, `bernini:q8:mlx` was SIGKILLed 85 minutes in at a steady 52 GB by a single
-# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`).
+# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`). Every catalog capture
+# also runs under `--require-completion-handshake` (sc-26246): the harness asks the guard for a
+# final sample and exits only once it is committed, on failure too. Without it, a capture whose
+# root exited between the census and the footprint sample was a `RootTelemetryLost` hard stop
+# that discarded a finished render as `capture_failed`.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target

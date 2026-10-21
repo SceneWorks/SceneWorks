@@ -14,6 +14,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "image_upscale",
   "image_detail",
   "image_segment",
+  "image_depth",
   "video_generate",
   "video_extend",
   "video_bridge",

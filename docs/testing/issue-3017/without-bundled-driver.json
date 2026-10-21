@@ -1,0 +1,25 @@
+{
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "appdir": "/home/sceneworks/sc3017/without-driver",
+  "api_sha256": "84e35de20f0b2bf6f54c94ec385e65a88ea9a479edc236213deba744d1f70da7",
+  "bundled_host_driver_libraries": [],
+  "packaging_passed": true,
+  "scope": "AppImage packaging and one-shot CUDA probe; not a Bazzite desktop or model-generation test",
+  "nvidia_smi": {
+    "exit_code": 0,
+    "stdout": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\nNVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\n",
+    "stderr": ""
+  },
+  "bundled_driver": {
+    "ldd": {
+      "exit_code": 0,
+      "stdout": "\tlinux-vdso.so.1 (0x00007fffbf9db000)\n\tlibcuda.so.1 => /usr/lib/wsl/lib/libcuda.so.1 (0x000073a801f4a000)\n\tlibnvrtc.so.12 => /home/sceneworks/sc3017/without-driver/usr/lib/libnvrtc.so.12 (0x000073a7dda00000)\n\tlibcurand.so.10 => /home/sceneworks/sc3017/without-driver/usr/lib/libcurand.so.10 (0x000073a7d3200000)\n\tlibcublas.so.12 => /home/sceneworks/sc3017/without-driver/usr/lib/libcublas.so.12 (0x000073a7cca00000)\n\tlibcublasLt.so.12 => /home/sceneworks/sc3017/without-driver/usr/lib/libcublasLt.so.12 (0x000073a79a600000)\n\tlibcudart.so.12 => /home/sceneworks/sc3017/without-driver/usr/lib/libcudart.so.12 (0x000073a79a000000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000073a799c00000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000073a801f1a000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000073a7e4317000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000073a799800000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000073a801f88000)\n\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x000073a801f15000)\n\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x000073a801f0e000)\n\tlibrt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x000073a801f09000)\n",
+      "stderr": ""
+    },
+    "gpu_check": {
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  }
+}

@@ -77,6 +77,7 @@ fn synthetic_plan(route: &'static str, assets_gib: f64, headroom_gib: f64) -> Ml
 
 fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
     MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count,
@@ -88,6 +89,8 @@ fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 
@@ -115,6 +118,8 @@ fn select_with_loaded_parity(
         MlxAdmissionPhase::TierProbe,
         generator.descriptor.capabilities.component_precision_floors,
         generator.contract.as_ref(),
+        None,
+        &|_| None,
         |base| {
             generator.contract.as_ref().map_or(
                 gen_core::MemoryPeakBreakdown::from_unattributed(base),
@@ -385,6 +390,8 @@ fn exact_measured_candidate_excluded_by_foreign_reserve_is_a_retryable_tier_refu
             MlxAdmissionPhase::TierProbe,
             &[],
             Some(&contract),
+            None,
+            &|_| None,
             |base| contract.predicted_peak_from_base(base),
             &plan,
             &request,
@@ -616,6 +623,8 @@ fn resident_tier_probe_preserves_actual_loaded_allowance_without_discounting_pip
             phase,
             &[],
             None,
+            None,
+            &|_| None,
             gen_core::MemoryPeakBreakdown::from_unattributed,
             &plan,
             &request,
@@ -663,6 +672,8 @@ fn resident_tier_probe_preserves_actual_loaded_allowance_without_discounting_pip
         MlxAdmissionPhase::TierProbe,
         &[],
         None,
+        None,
+        &|_| None,
         gen_core::MemoryPeakBreakdown::from_unattributed,
         &plan,
         &request,

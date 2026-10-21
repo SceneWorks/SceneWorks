@@ -1,11 +1,10 @@
-// Reading a dropped image's embedded workflow, and turning it into something the Image Studio
-// can be prefilled with (sc-15951, epic 15945).
+// Reading a dropped/imported asset's embedded workflow, and turning it into the recipe shape its
+// destination studio can be prefilled with (sc-15951, epic 15945).
 //
 // The envelope contract is `docs/workflow-share-envelope.md`; the resolution report is
 // `crates/sceneworks-core/src/workflow_resolution.rs`. Nothing here re-derives either — this
-// module only bridges the two onto the shape the studio's existing replay seam already accepts
-// (`recipe.normalizedSettings` / `recipe.rawAdapterSettings`, read by the injection effect in
-// `screens/ImageStudio.jsx`).
+// module only bridges the two onto the shape the destination studio's existing replay seam accepts
+// (`recipe.normalizedSettings` / `recipe.rawAdapterSettings`, read by Image Studio and Video Studio).
 //
 // # The one rule
 //
@@ -18,8 +17,8 @@
 // model.
 //
 // The same rule has a second half, and it is the one this module got wrong first: a knob that
-// travels in the envelope but reaches no Image Studio control is ALSO a silent substitution — the
-// studio keeps whatever it was already on while the panel says "PiD decoder — On". So
+// travels in the envelope but reaches no destination-studio control is ALSO a silent substitution —
+// the studio keeps whatever it was already on while the panel says "PiD decoder — On". So
 // [`ADVANCED_PREFILL`] below is the single table both halves read: the recipe carries exactly the
 // keys the studio applies, and the panel marks exactly the rest as not restored.
 
@@ -242,6 +241,9 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // as not restored, and left out of the recipe. The safe default is "the user is told", never "it
 // quietly disappears".
 export const ADVANCED_PREFILL = {
+  mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
+  mossImageExecutionReport: { label: "MOSS execution receipt", prefill: PREFILL_NONE,
+    detail: "Recorded provenance belongs to the exported image. A new generation computes its own receipt." },
   resolution: { label: "Resolution", prefill: PREFILL_CONTROL },
   // sc-15952 reclassified this. It was `PREFILL_PROMPT` on the reading that the panel shows its
   // content in the prompt block above the grid — true of `stylePrompt`, which the studio really
@@ -265,6 +267,9 @@ export const ADVANCED_PREFILL = {
   sampler: { label: "Sampler", prefill: PREFILL_CONTROL },
   scheduler: { label: "Scheduler", prefill: PREFILL_CONTROL },
   schedulerShift: { label: "Schedule shift", prefill: PREFILL_CONTROL },
+  // sc-25681 — Iris-3B's CFG interval and caption-overflow policy; both restore their controls.
+  cfgInterval: { label: "Guidance interval", prefill: PREFILL_CONTROL },
+  captionOverflow: { label: "Long prompts", prefill: PREFILL_CONTROL },
   steps: { label: "Steps", prefill: PREFILL_CONTROL },
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
@@ -293,6 +298,13 @@ export const ADVANCED_PREFILL = {
   // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
   // that unavailable choice visible and the API then fails closed until it is restored or changed.
   textEncoderModel: { label: "Text encoder", prefill: PREFILL_CONTROL },
+  // The sparse-attention request belongs to Video Studio. Preserve the complete authored object,
+  // including its range/list strings, only when a video envelope is routed there. An image envelope
+  // cannot claim this control was restored in Image Studio.
+  veda: {
+    label: "Veda",
+    prefill: PREFILL_CONTROL,
+  },
   // The settings that travel and land nowhere. Each names why, because "not restored" without a
   // reason reads like a bug.
   poses: {
@@ -412,8 +424,10 @@ export const ADVANCED_PREFILL = {
   },
 };
 
-function prefillDisposition(key) {
-  return ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE;
+function prefillDisposition(key, share) {
+  return key === "veda" && share.sceneworksWorkflow !== "video"
+    ? PREFILL_NONE
+    : (ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE);
 }
 
 // Shared workflows cross a trust boundary before they reach the number-backed controls in a
@@ -484,7 +498,7 @@ export function recipeFromWorkflowShare(
   // studio-facing edits below.)
   const rawSettings = {};
   for (const [key, value] of Object.entries(share.advanced ?? {})) {
-    if (value !== null && value !== undefined && prefillDisposition(key) !== PREFILL_NONE) {
+    if (value !== null && value !== undefined && prefillDisposition(key, share) !== PREFILL_NONE) {
       if (NUMERIC_ADVANCED_PREFILL_KEYS.has(key)) {
         const number = sharedRecipeNumber(value);
         if (number === null) {
@@ -676,7 +690,7 @@ export function workflowSettingRows(share, report = null) {
   }
   const styleResolvedHere = styleIdResolved(report);
   return Object.keys(settings)
-    .filter((key) => prefillDisposition(key) !== PREFILL_PROMPT)
+    .filter((key) => prefillDisposition(key, share) !== PREFILL_PROMPT)
     .map((key) => ({ key, value: settings[key] }))
     .filter(
       (row) =>
@@ -691,10 +705,12 @@ export function workflowSettingRows(share, report = null) {
         key: row.key,
         label: ADVANCED_PREFILL[row.key]?.label ?? row.key,
         value: settingValueLabel(row.key, row.value),
-        restored: prefillDisposition(row.key) === PREFILL_CONTROL && !styleUnavailable,
+        restored: prefillDisposition(row.key, share) === PREFILL_CONTROL && !styleUnavailable,
         detail: styleUnavailable
           ? "This install does not have that style, so the prompt is used exactly as it was already composed."
-          : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
+          : row.key === "veda" && share.sceneworksWorkflow !== "video"
+            ? "Video Studio only."
+            : (ADVANCED_PREFILL[row.key]?.detail ?? "This build has no control for this setting."),
       };
     });
 }

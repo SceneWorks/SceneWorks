@@ -350,6 +350,9 @@ fn fully_populated_envelope() -> WorkflowShare {
             factor: Some(2),
             engine: Some("seedvr2".to_owned()),
             softness: Some(0.25),
+            scale: Some(1.5),
+            input_sizing: Some("budgeted".to_owned()),
+            color_fix: Some(true),
         }),
         loras: vec![WorkflowLora {
             name: Some("coast".to_owned()),
@@ -1211,7 +1214,7 @@ fn the_settings_copy_names_the_save_without_workflow_control_once() {
     // that tells you to use it — and they said three different things ("Save without workflow",
     // "Save a copy without the workflow…", and a third in the document). A user told to look for a
     // control that is not spelled that way anywhere is a user who concludes it does not exist.
-    let source = read_repo_file(SETTINGS_COPY_PATH);
+    let source = read_repo_file("apps/web/src/workflowEmbedPreferences.js");
     let anchor = "SAVE_WITHOUT_WORKFLOW_LABEL = \"";
     let start = source
         .find(anchor)

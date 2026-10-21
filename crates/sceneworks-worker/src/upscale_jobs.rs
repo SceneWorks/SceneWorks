@@ -967,6 +967,26 @@ pub(crate) async fn run_image_upscale_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // Iris restoration (sc-25683) is its own sized-by-scale engine with its own job body; every
+    // other engine keeps the path below unchanged.
+    let requested_engine = job
+        .payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or("real-esrgan");
+    if sceneworks_core::image_restoration::is_iris_engine(requested_engine) {
+        return run_iris_restore_job_using(
+            api,
+            settings,
+            job,
+            crate::iris_restore::registry_transform_loader,
+        )
+        .await;
+    }
+    // `scale` / `inputSizing` / `colorFix` are Iris controls; another engine refuses them by name
+    // rather than ignoring them.
+    sceneworks_core::image_restoration::reject_iris_only_keys(&job.payload, requested_engine)
+        .map_err(WorkerError::InvalidPayload)?;
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -1270,6 +1290,361 @@ pub(crate) async fn run_image_upscale_job(
             ProgressStage::Completed,
             1.0,
             "Image upscale complete.",
+            None,
+            Some(result),
+            None,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Iris-3B restoration (sc-25683): the `iris` engine of the standalone image_upscale job and of the
+// Image Studio inline post-processing pass. See `crate::iris_restore` for the plan / install /
+// admission halves; this is the job wiring both surfaces share.
+// ---------------------------------------------------------------------------
+
+const IRIS_CANCEL_MESSAGE: &str = "Iris restoration canceled by user.";
+
+/// Resolve the install, plan the request against the INSTALLED export's geometry, admit it, then run
+/// it through the cached transform while forwarding per-tile progress (built by `progress_for`) and
+/// keeping the heartbeat + cancel poll alive. Shared by the standalone job and the inline pass, so
+/// both refuse, plan and progress identically. Returns no image on cancel or refusal.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn restore_with_progress(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    loader: crate::iris_restore::TransformLoader,
+    source: RgbImage,
+    params: sceneworks_core::image_restoration::IrisRestoreParams,
+    trained_model: Option<String>,
+    progress_for: impl Fn(u32, u32) -> sceneworks_core::contracts::ProgressRequest + Send + 'static,
+) -> WorkerResult<crate::iris_restore::RestoreOutcome> {
+    use crate::iris_restore::{
+        admission_error, live_total_gb, plan_restore, resolve_restore_export_dir,
+        restore_image_using, RestoreLane,
+    };
+    // A trained restoration model (sc-25688) replaces the release export; its task is checked and
+    // it plans with its own export geometry.
+    let (export_dir, resources) = match trained_model.as_deref() {
+        Some(model) => {
+            let dir = crate::iris_task_training::trained_task_export_dir(
+                &settings.data_dir,
+                model,
+                gen_core::iris::IrisTask::Restoration,
+            )
+            .map_err(|detail| WorkerError::InvalidPayload(format!("Iris restoration: {detail}")))?;
+            let resources = gen_core::iris::restoration::RestorationResources::from_dir(
+                &dir,
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+            )
+            .map_err(|error| WorkerError::InvalidPayload(format!("Iris restoration: {error}")))?;
+            (dir, resources)
+        }
+        None => resolve_restore_export_dir(settings)?,
+    };
+    let geometry = resources.settings.geometry(resources.config());
+    let plan = plan_restore(source.width(), source.height(), &params, geometry)
+        .map_err(WorkerError::InvalidPayload)?;
+    if let Some(refusal) = admission_error(
+        RestoreLane::this_build(),
+        &plan,
+        live_total_gb(settings).await,
+    ) {
+        return Err(refusal);
+    }
+
+    // Per-tile progress crosses from the transform cache thread to this task through a channel; the
+    // forwarder posts it and is drained BEFORE this returns, so no tile update can land after the
+    // caller's terminal post.
+    let (tile_tx, mut tile_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, u32)>();
+    let forward_api = api.clone();
+    let forward_job = job_id.to_owned();
+    let cancel = CancelFlag::new();
+    let task_cancel = cancel.clone();
+    // Each per-tile post answers with the job snapshot; a user cancel recorded there trips the
+    // engine's flag at once, so the restore stops before the NEXT tile instead of waiting for the
+    // heartbeat's cancel poll (5-15 s — longer than a whole warm restore, which would otherwise
+    // publish an asset the user had canceled).
+    let forward_cancel = cancel.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some((current, total)) = tile_rx.recv().await {
+            // A failed progress post must not abort the restore; the heartbeat path owns liveness.
+            if let Ok(snapshot) =
+                update_job(&forward_api, &forward_job, progress_for(current, total)).await
+            {
+                if snapshot.cancel_requested {
+                    forward_cancel.cancel();
+                }
+            }
+        }
+    });
+    let observed_cancel = cancel.clone();
+    let outcome = crate::run_blocking_with_heartbeat(
+        api,
+        settings,
+        job_id,
+        Some(cancel),
+        IRIS_CANCEL_MESSAGE,
+        "Iris restoration task",
+        Some(|| async move {
+            update_job(
+                api,
+                job_id,
+                progress_payload(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.45,
+                    "Canceling Iris restoration after the current tile.",
+                    None,
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .map(|_| ())
+        }),
+        tokio::spawn(async move {
+            restore_image_using(
+                loader,
+                export_dir,
+                plan,
+                source,
+                params,
+                task_cancel,
+                move |current, total| {
+                    let _ = tile_tx.send((current, total));
+                },
+            )
+            .await
+        }),
+    )
+    .await;
+    // The tile sender lives in the finished (or abandoned) transform job; once it is dropped the
+    // forwarder drains and exits. Bound the wait so an abandoned job can never hang the worker.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), forwarder).await;
+    // A cancel the engine's flag recorded after its last checkpoint still means the user canceled:
+    // return no image. A cancel recorded on the job AFTER the last per-tile reply never reaches this
+    // flag (the heartbeat poll has ended too) — each caller re-checks the job right before it writes
+    // its asset, which closes that window.
+    if outcome.is_ok() && observed_cancel.is_cancelled() {
+        crate::progress::mark_job_canceled(api, job_id, IRIS_CANCEL_MESSAGE).await?;
+        return Err(WorkerError::Canceled(IRIS_CANCEL_MESSAGE.to_owned()));
+    }
+    outcome
+}
+
+/// The payload keys of OTHER engines that the Iris engine does not honour. A standalone Iris job
+/// that names one is refused by name (E3) — `factor` in particular, because Iris sizes its output by
+/// `scale` and silently ignoring a factor would return a different size than the caller asked for.
+const IRIS_REFUSED_KEYS: [&str; 3] = ["factor", "softness", "seed"];
+
+/// The standalone `image_upscale` job with `engine: "iris"` (sc-25683): restore one source asset into
+/// a NEW lineage-preserving asset (the source is never touched), from the task's own installed
+/// `upscaler/` export. `loader` is the transform loader seam (production:
+/// [`crate::iris_restore::registry_transform_loader`]; tests inject a stub).
+pub(crate) async fn run_iris_restore_job_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    loader: crate::iris_restore::TransformLoader,
+) -> WorkerResult<()> {
+    use sceneworks_core::image_restoration::{parse_iris_restore_params, IRIS_RESTORE_ENGINE};
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    let payload = &job.payload;
+    if let Some(key) = IRIS_REFUSED_KEYS
+        .iter()
+        .find(|key| payload.get(**key).is_some_and(|value| !value.is_null()))
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "`{key}` is not a control of the Iris restoration engine (it sizes its output with \
+             `scale`, and is deterministic with no softness)."
+        )));
+    }
+    let params = parse_iris_restore_params(payload).map_err(WorkerError::InvalidPayload)?;
+    let trained_model = sceneworks_core::image_restoration::parse_iris_restore_model(payload)
+        .map_err(WorkerError::InvalidPayload)?;
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.12,
+            "Loading source image.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+
+    let source_asset_id = payload
+        .get("sourceAssetId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Restoration jobs require a source image asset.".to_owned())
+        })?
+        .to_owned();
+    let project_id = payload
+        .get("projectId")
+        .and_then(Value::as_str)
+        .or(job.project_id.as_deref())
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload("Restoration jobs require a projectId.".to_owned())
+        })?
+        .to_owned();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| WorkerError::InvalidPayload(format!("project not found: {e}")))?;
+    let project_path = PathBuf::from(project.path);
+    let source = resolve_asset_media(&store, &project_id, &source_asset_id, &project_path)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Source image asset not found or missing: {source_asset_id}."
+            ))
+        })?;
+    let source_path = source.path;
+    let source_display = source.display_name;
+    // Upright pixels first (upstream `exif_transpose`s before restoring), then split any alpha plane
+    // off: the transform takes RGB and the plane is re-attached at the output geometry.
+    let (source_image, source_alpha) = tokio::task::spawn_blocking(move || {
+        crate::iris_restore::decode_oriented(&source_path)
+            .map_err(|e| {
+                WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
+            })
+            .map(|decoded| crate::image_jobs::split_alpha(&decoded))
+    })
+    .await
+    .map_err(|e| task_join_error("restoration source decode task", e))??;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.3,
+            "Restoring with Iris.",
+            None,
+            None,
+            None,
+        ),
+    )
+    .await?;
+    let outcome = restore_with_progress(
+        api,
+        settings,
+        &job.id,
+        loader,
+        source_image,
+        params,
+        trained_model.clone(),
+        |current, total| {
+            progress_payload(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.3 + 0.6 * f64::from(current) / f64::from(total.max(1)),
+                &format!("Restoring tile {current}/{total} with Iris."),
+                None,
+                None,
+                None,
+            )
+        },
+    )
+    .await?;
+    let plan = outcome.plan;
+    let (out_w, out_h) = (outcome.image.width(), outcome.image.height());
+    let record = crate::iris_restore::applied_settings_record(&plan, trained_model.as_deref());
+
+    let source_name = payload
+        .get("displayName")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or(source_display)
+        .unwrap_or_else(|| "Image".to_owned());
+    let workflow = crate::image_jobs::workflow_source(settings, &job.payload).and_then(|payload| {
+        crate::image_jobs::standalone_restore_workflow_share(
+            &payload,
+            &plan,
+            trained_model.as_deref(),
+        )
+    });
+    let written = match crate::image_jobs::reattach_alpha(outcome.image, source_alpha.as_ref()) {
+        crate::image_jobs::GeneratedPixels::Rgb(rgb) => image::DynamicImage::ImageRgb8(rgb),
+        crate::image_jobs::GeneratedPixels::Rgba(rgba) => image::DynamicImage::ImageRgba8(rgba),
+    };
+    // A trained restoration model (sc-25688) is the asset's model, like a trained depth model.
+    let model = trained_model
+        .as_deref()
+        .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID);
+    let display_name = format!(
+        "{source_name} ({})",
+        crate::iris_restore::display_suffix(&plan)
+    );
+    let plan_view = crate::iris_restore::RestorePlanView::from_plan(&plan);
+    // A cancel requested after the last per-tile reply is seen by no flag; re-check the job before
+    // publishing so a canceled restore never writes (and then completes with) an asset.
+    crate::progress::check_cancel(api, &job.id, IRIS_CANCEL_MESSAGE).await?;
+    let result = write_single_child_asset(
+        &project_path,
+        written,
+        SingleChildAssetSpec {
+            filename_stem: "restored_iris",
+            mode: "image_upscale",
+            model,
+            adapter: IRIS_RESTORE_ENGINE,
+            encode_label: "restoration encode task",
+            workflow,
+        },
+        |write| {
+            json!({
+                "assetId": write.asset_id,
+                "mediaPath": write.media_path,
+                "mimeType": "image/png",
+                "type": "image",
+                "width": out_w,
+                "height": out_h,
+                "normalizedWidth": out_w,
+                "normalizedHeight": out_h,
+                "count": 1,
+                "seed": 0,
+                "displayName": display_name,
+                "createdAt": write.created_at,
+                "mode": "image_upscale",
+                "model": model,
+                "adapter": IRIS_RESTORE_ENGINE,
+                "prompt": "",
+                "negativePrompt": "",
+                "loras": [],
+                "stylePreset": "",
+                "sourceAssetId": source_asset_id,
+                "rawAdapterSettings": { "upscale": record },
+                "parents": [source_asset_id],
+                "extra": {
+                    "isUpscaled": true,
+                    "upscaledFromAssetId": source_asset_id,
+                    "engine": IRIS_RESTORE_ENGINE,
+                    "scale": plan.scale,
+                    "restoration": plan_view,
+                },
+            })
+        },
+    )
+    .await?;
+
+    update_job(
+        api,
+        &job.id,
+        progress_payload(
+            JobStatus::Completed,
+            ProgressStage::Completed,
+            1.0,
+            "Iris restoration complete.",
             None,
             Some(result),
             None,

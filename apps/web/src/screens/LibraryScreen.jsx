@@ -192,6 +192,7 @@ export function LibraryScreen() {
             <option value="all">All media</option>
             <option value="image">Images</option>
             <option value="vector">Vectors</option>
+            <option value="depth">Depth maps</option>
             <option value="video">Videos</option>
             <option value="audio">Audio</option>
             <option value="upload">Uploads</option>
@@ -286,6 +287,9 @@ export function LibraryScreen() {
             vqaPending={vqaPending}
             audioModels={audioModels}
             createVqaJob={createVqaJob}
+            onEstimateDepth={
+              batch.depthAvailability?.available ? (asset) => batch.openBatchWith([asset.id], "depth") : null
+            }
           />
         </div>
       )}

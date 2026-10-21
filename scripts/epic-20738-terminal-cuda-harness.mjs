@@ -184,10 +184,19 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, the sc-24833 FLUX.2 VAE / E-LatentLPIPS
 // weights, ViTPose+ base and the HybrIK / Sapiens re-hosts; the epic's final main sync (sc-2124) adds
 // main's YuE1 re-hosts, YuE2's three upstream m-a-p repos and the Wan-VACE base/transformer entries
-// (135 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
+// (137 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
+// The Iris-3B epic (sc-25678) merges with main's record: its two generation keys (speridlabs/iris-3b,
+// Qwen/Qwen3-VL-4B-Instruct), the three restoration TRAINING resources (timm/vgg16.tv_in1k,
+// vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup) and the REPA teacher (facebook/dinov2-base) join
+// main's 137 keys: 143 keys. The MiniMax-H3 Veda epic (sc-25140) adds the optional Veda sparse
+// predictor (Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview): 144 keys. Epic 25899's
+// terminal story (sc-25909) re-records base Qwen Image 2.1's re-host at its NOTICE revision
+// (ef03535e…) and adds the published Turbo re-host (SceneWorks/qwen-image-2-1-turbo-mlx
+// @9095dfbb…): 145 keys.
+// sc-26325 adds the two exact official MOSS Base/SFT listings: 147 keys; every prior row is unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "cc86ec216ff857331e6472015e8a3da10ecac5983bc7f8974d11b6804e44991e";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "0bce144d4d816b3fda122c2460177c3ea6192f531bd496f3949a81dfb54b320c";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

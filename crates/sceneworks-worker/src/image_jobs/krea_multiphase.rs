@@ -664,6 +664,7 @@ async fn generate_krea_multiphase_stream(
     .with_resolved_artifact_tier(resolved_mlx_artifact_tier(&weights_dir, quant_bits))?;
     #[cfg(target_os = "macos")]
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         conditioning_windows: None,
         width,
         height,
@@ -675,6 +676,8 @@ async fn generate_krea_multiphase_stream(
         reference_count: 0,
         use_pid: false,
         has_phases: true,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

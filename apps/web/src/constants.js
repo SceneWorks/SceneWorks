@@ -109,6 +109,19 @@ export const QWEN_IMAGE_2_1_MODEL_ID = "qwen_image_2_1";
 export const QWEN_REWRITE_T2I_MODEL_ID = "qwen_image_2_1_pe_t2i";
 export const QWEN_REWRITE_I2I_MODEL_ID = "qwen_image_2_1_pe_i2i";
 
+// The rewrite TARGETS: base 2.1 and its distilled Turbo sibling (sc-25908, epic 25899) — one prompt
+// format, one template. A mirror of `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`, the
+// exact set the worker serves a rewrite for (`qwen_prompt_rewrite::is_rewrite_target_model`);
+// `qwenImage21Turbo.test.jsx` reads the Rust list and holds this one to it. Keyed on the id, NOT
+// the family: an imported custom checkpoint can carry family `qwen-image-2-1` and the worker
+// refuses a rewrite targeting it.
+export const QWEN_IMAGE_2_1_MODEL_IDS = Object.freeze([QWEN_IMAGE_2_1_MODEL_ID, "qwen_image_2_1_turbo"]);
+
+// Whether the official Qwen rewriters apply to the selected generation model.
+export function qwenRewriterAppliesTo(model) {
+  return QWEN_IMAGE_2_1_MODEL_IDS.includes(model?.id);
+}
+
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
 // 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never
@@ -279,6 +292,52 @@ const seededFallbackModels = [
       promptGuide: {
         title: "Qwen Image 2.1 Prompt Guide",
         path: "/prompt-guides/qwen-image-2-1.md",
+      },
+    },
+  },
+  {
+    // Qwen Image 2.1 Turbo (epic 25899) — the distilled few-step sibling of `qwen_image_2_1`. The
+    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (4, from the sc-25909 step sweep), the
+    // default step count (8) and the prompt guide differ. Kept in step with its manifest entry for
+    // the same reason as the base seed above: every `limits` key drives a pre-catalog control.
+    id: "qwen_image_2_1_turbo",
+    name: "Qwen Image 2.1 Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    supportsAlphaOutput: true,
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 4,
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 8,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 Turbo few-step text-to-image and reference editing (research licence).",
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Turbo Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1-turbo.md",
       },
     },
   },
@@ -1006,7 +1065,7 @@ const seededFallbackModels = [
       // metadata stays in lockstep with the generated manifest. Condensed against the manifest's
       // prose, but it carries the same four load-bearing claims, and
       // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
-      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      description: "MiniMax-H3 video + synchronized stereo audio; first/last-frame conditioning. No guidance scale or negative prompt. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
       durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
@@ -1036,7 +1095,7 @@ const seededFallbackModels = [
       attribution: "Powered by MiniMax H3",
       // sc-17162 — carried in full rather than by reference, same as the manifest entry: this is a
       // separate model card and a user can install it without ever opening the other one's.
-      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. No guidance scale and no negative prompt. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      description: "MiniMax-H3 reference video: up to 9 images, 3 clips and 3 audio references (12 total); synchronized stereo audio. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. No guidance scale or negative prompt. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
       durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, 15s is refused rather than shortened to 14.38s, and the same canvas-driven cost.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },

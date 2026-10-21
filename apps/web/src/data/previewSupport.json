@@ -91,6 +91,10 @@
       "candle": true,
       "mlx": true
     },
+    "iris_3b": {
+      "candle": true,
+      "mlx": true
+    },
     "kokoro_82m": {
       "candle": false
     },
@@ -144,6 +148,14 @@
     "mmaudio_small_16k": {
       "candle": false
     },
+    "moss_image_base": {
+      "candle": false,
+      "mlx": false
+    },
+    "moss_image_sft": {
+      "candle": false,
+      "mlx": false
+    },
     "moss_sfx_v2": {
       "candle": false
     },
@@ -162,6 +174,10 @@
       "mlx": true
     },
     "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
       "candle": false,
       "mlx": false
     },

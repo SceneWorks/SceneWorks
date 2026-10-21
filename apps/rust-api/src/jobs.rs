@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
+    validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -406,6 +406,14 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    guard_iris_training_rerun(&state, &job_id, false).await?;
+    apply_training_retry_resume(
+        &state,
+        &job_id,
+        payload.resume,
+        &mut payload.payload_changes,
+    )
+    .await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -438,6 +446,175 @@ pub(crate) async fn retry_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// The Iris training rerun guard (S9a, [`crate::iris_training::guard_iris_training_rerun`]): a
+/// retry of a run another job still writes, or that already checkpointed / exported, is refused
+/// typed; a duplicate gets its own output id — the returned payload changes. Every other job is
+/// untouched (`None`).
+async fn guard_iris_training_rerun(
+    state: &AppState,
+    job_id: &str,
+    duplicate: bool,
+) -> Result<Option<JsonObject>, ApiError> {
+    let source = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await;
+    match source {
+        Ok(job) => crate::iris_training::guard_iris_training_rerun(state, &job, duplicate).await,
+        // A missing job is the store's own 404 on the retry/duplicate below.
+        Err(_) => Ok(None),
+    }
+}
+
+/// sc-25785: fold a retry's `resume` choice (when given) into the training plan the retry will run, so a caller
+/// resumes (or restarts) a training job in one call without resending the plan. The plan is the
+/// caller's `payloadChanges.plan` when supplied, else the persisted one, with `advanced.resume`
+/// set to `resume`. Resuming is refused, typed, unless the job ended without completing and its
+/// output directory holds a resume checkpoint of that plan's run — the trainer would otherwise
+/// start from step 0 while the caller believed it resumed. Either way the retry is refused while
+/// another run into the same output directory is still in flight: a restart would delete that
+/// run's resume bundles, and a second resume would train two runs into one directory.
+async fn apply_training_retry_resume(
+    state: &AppState,
+    job_id: &str,
+    resume: Option<bool>,
+    payload_changes: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return match resume {
+            None => Ok(()),
+            Some(_) => Err(ApiError::bad_request(
+                "resume applies only to training jobs (lora_train, control_training).",
+            )),
+        };
+    }
+    let mut plan = payload_changes
+        .get("plan")
+        .or_else(|| job.payload.get("plan"))
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("Training job has no plan to retry."))?;
+    // An Iris run (epic 25678) checkpoints into its own `<stem>.checkpoints` tree, never the generic
+    // resume bundles this fold scans for, and resumes only through the Training Studio's Resume / New
+    // phase (`advanced.resumeFromJobId`); the Iris rerun guard has already vetted this retry.
+    if plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
+    {
+        return match resume {
+            Some(true) => Err(ApiError::bad_request(
+                "An Iris training run resumes from the Training Studio (Resume or New phase), not \
+                 from a retry.",
+            )),
+            _ => Ok(()),
+        };
+    }
+    if resume == Some(true)
+        && !matches!(
+            job.status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        )
+    {
+        return Err(ApiError::bad_request(
+            "Only a failed, canceled or interrupted training job can be resumed.",
+        ));
+    }
+    let output_dir = plan
+        .get("output")
+        .and_then(|output| output.get("outputDir"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let Some(output_dir) = output_dir.as_deref() {
+        let active = store_call(state.clone(), move |store, _timeout| {
+            let mut active = Vec::new();
+            for status in [
+                JobStatus::Queued,
+                JobStatus::Preparing,
+                JobStatus::Downloading,
+                JobStatus::LoadingModel,
+                JobStatus::Running,
+                JobStatus::Saving,
+            ] {
+                active.extend(store.list_jobs(None, Some(status.as_str()), 500)?);
+            }
+            Ok(active)
+        })
+        .await?;
+        if active.iter().any(|other| {
+            matches!(
+                other.job_type,
+                JobType::LoraTrain | JobType::ControlTraining
+            ) && other
+                .payload
+                .get("plan")
+                .and_then(|plan| plan.pointer("/output/outputDir"))
+                .and_then(Value::as_str)
+                == Some(output_dir)
+        }) {
+            return Err(ApiError::bad_request(
+                "Another run of this training job is still queued or running; wait for it to finish or cancel it first.",
+            ));
+        }
+    }
+    let Some(resume) = resume else {
+        return Ok(());
+    };
+    if resume {
+        let plan_value = Value::Object(plan.clone());
+        let state_for_scan = state.clone();
+        let step = tokio::task::spawn_blocking(move || {
+            training_plan_resume_checkpoint_step(&state_for_scan, &plan_value)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))?;
+        if step.is_none() {
+            return Err(ApiError::bad_request(
+                "This training job has no saved checkpoint to resume from; restart it from step 0 instead.",
+            ));
+        }
+    }
+    let config = plan
+        .entry("config")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan config must be an object."))?;
+    config
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan advanced must be an object."))?
+        .insert("resume".to_owned(), Value::Bool(resume));
+    payload_changes.insert("plan".to_owned(), Value::Object(plan));
+    Ok(())
+}
+
+/// The latest resume-checkpoint step of a training plan's run in its `output.outputDir`, after
+/// confining that directory exactly as the worker does and matching the engine's checkpoint stem
+/// (`output.fileName`). `None` when the plan names no valid output dir or the dir holds no resume
+/// bundle of that run. Blocking filesystem work (sc-25785).
+fn training_plan_resume_checkpoint_step(state: &AppState, plan: &Value) -> Option<u32> {
+    let output_dir = plan.pointer("/output/outputDir").and_then(Value::as_str)?;
+    let file_name = plan.pointer("/output/fileName").and_then(Value::as_str)?;
+    let output_dir = sceneworks_worker::resolve_training_output_dir_under(
+        &state.settings.data_dir,
+        output_dir,
+        "Training outputDir",
+    )
+    .ok()?;
+    sceneworks_worker::latest_training_resume_step(
+        &output_dir,
+        sceneworks_worker::training_resume_stem(file_name),
+    )
+}
+
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
     let bytes = to_bytes(request.into_body(), 1024 * 1024)
         .await
@@ -456,6 +633,7 @@ pub(crate) async fn duplicate_job(
     Path(job_id): Path<String>,
     ApiJson(mut payload): ApiJson<DuplicateJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let fresh_output = guard_iris_training_rerun(&state, &job_id, true).await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -474,6 +652,10 @@ pub(crate) async fn duplicate_job(
         false,
     )
     .await?;
+    // An Iris training duplicate trains under its own output id (merged last: never overridable).
+    if let Some(fresh_output) = fresh_output {
+        payload.payload_changes.extend(fresh_output);
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.duplicate_job(
             &job_id,
@@ -683,10 +865,45 @@ async fn validate_and_canonicalize_merged_generation_payload(
             .await?;
         }
     } else {
-        validate_raw_job_payload(state, &job_type, &merged).await?;
+        validate_raw_job_payload(state, &job_type, &mut merged).await?;
+    }
+    // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
+    // reach validation, so headless clients cannot silently drop a conflicting authored setting.
+    if merged.get("model") != persisted.get("model")
+        && (persisted
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            || merged
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss))
+        && !payload_changes.contains_key("advanced")
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            for key in [
+                "mossImage",
+                "sampler",
+                "scheduler",
+                "schedulerShift",
+                "guidanceScale",
+                "guidanceMethod",
+                "cfgInterval",
+                "steps",
+            ] {
+                advanced.remove(key);
+            }
+        }
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
+    // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
+    // or the persisted value would survive the merge.
+    let checkpoint_key = crate::iris_training::CHECKPOINT_MODEL_ID_KEY;
+    if persisted.contains_key(checkpoint_key) && !merged.contains_key(checkpoint_key) {
+        merged.insert(checkpoint_key.to_owned(), Value::Null);
+    }
     if matches!(
         job_type,
         JobType::VideoGenerate
@@ -707,6 +924,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
         // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
         validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
+        sceneworks_core::video_request::VideoRequest::from_payload(&merged)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
         crate::generation::ensure_video_model_available_on_platform(
             model_id,
             &model_manifest_entry,
@@ -884,9 +1104,54 @@ pub(crate) async fn canonicalize_image_model_payload(
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry = project_image_manifest_for_worker(
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
-    );
+    // A retried/duplicated request for a trained checkpoint was aliased onto its engine model at
+    // create time; re-resolve from the checkpoint the user picked so the alias is re-derived from
+    // the catalog (never trusted from the stored payload). The recorded checkpoint is honoured ONLY
+    // while `model` is still that checkpoint's engine: a duplicate that picked another model, or a
+    // client-authored key naming something that is not a trained checkpoint of `model`, drops the
+    // key and resolves `model` itself.
+    let requested_checkpoint = payload
+        .get(crate::iris_training::CHECKPOINT_MODEL_ID_KEY)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut honoured_checkpoint = None;
+    if let Some(checkpoint) = requested_checkpoint {
+        validate_model_id(&checkpoint)?;
+        let entry = project_image_manifest_for_worker(
+            crate::models::resolve_model_manifest_entry(state, &checkpoint).await?,
+        );
+        let engine = entry
+            .as_object()
+            .and_then(crate::iris_training::trained_checkpoint_engine_model);
+        if engine == Some(model_id.as_str()) {
+            honoured_checkpoint = Some((checkpoint, entry));
+        } else {
+            payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
+        }
+    }
+    let (model_id, mut model_manifest_entry) = match honoured_checkpoint {
+        Some(resolved) => resolved,
+        None => {
+            let entry = project_image_manifest_for_worker(
+                crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+            );
+            (model_id, entry)
+        }
+    };
+    // A trained Iris full-model export renders through the `iris_3b` generation engine on its own
+    // backbone directory (sc-25685/sc-25686).
+    if let Some(engine_entry) = crate::iris_training::alias_trained_checkpoint(
+        state,
+        &model_id,
+        &model_manifest_entry,
+        payload,
+    )
+    .await?
+    {
+        model_manifest_entry = engine_entry;
+    } else {
+        payload.remove(crate::iris_training::CHECKPOINT_MODEL_ID_KEY);
+    }
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -895,6 +1160,51 @@ pub(crate) async fn canonicalize_image_model_payload(
         return Err(ApiError::bad_request(format!(
             "image_detail model '{model_id}' was not found in the model catalog"
         )));
+    }
+
+    // Every image entry point reaches this post-expansion/post-merge seam.
+    sceneworks_core::moss_image::scrub_reports(payload);
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
+            .map_err(ApiError::bad_request)?
+        {
+            let options = request
+                .moss_image
+                .as_ref()
+                .expect("MOSS request carries options");
+            if matches!(job_type, JobType::ImageDetail) {
+                return Err(ApiError::bad_request(
+                    "MOSS-Image supports text-to-image generation, not image_detail",
+                ));
+            }
+            payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                .insert(
+                    "mossImage".to_owned(),
+                    serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
+                );
+
+            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+                let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
+                    &model_manifest_entry,
+                    purpose,
+                )
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+                for row in rows {
+                    if crate::models::pinned_component_presence(&state.settings.data_dir, &row) != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+                        let component = row.get("componentId").and_then(Value::as_str).unwrap_or("selected component");
+                        return Err(ApiError::bad_request(format!("MOSS-Image {component} missing or incomplete at its frozen revision; install via /api/v1/models/{model_id}/conditional-components/{purpose}/download")));
+                    }
+                }
+            }
+            model_manifest_entry = Value::Object(
+                sceneworks_core::moss_image::selected_components(entry, options)
+                    .map_err(ApiError::bad_request)?,
+            );
+        }
     }
 
     // Overwrite rather than merge. The selected id was path-confined above; imported/custom
@@ -921,7 +1231,7 @@ pub(crate) async fn canonicalize_image_model_payload(
 ///
 /// Keep every other soft component: selected decoders and other request-specific features resolve
 /// their own authored component ids from this worker-private entry.
-fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+pub(crate) fn project_image_manifest_for_worker(mut entry: Value) -> Value {
     if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
         downloads.retain(|download| {
             !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
@@ -1027,19 +1337,80 @@ fn dense_image_detail_error() -> ApiError {
 async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
-    payload: &JsonObject,
+    payload: &mut JsonObject,
 ) -> Result<(), ApiError> {
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        sceneworks_core::video_request::VideoRequest::from_payload(payload)
+            .h3_veda_settings()
+            .map_err(ApiError::bad_request)?;
+    }
     if matches!(
         job_type,
         JobType::ImageUpscale | JobType::ImageDetail | JobType::PromptRefine
     ) {
         validate_payload_model(payload)?;
     }
+    if matches!(job_type, JobType::ImageUpscale) {
+        validate_image_upscale_engine_controls(payload)?;
+    }
     if matches!(
         job_type,
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    if matches!(job_type, JobType::ModelDownload) {
+        if let Some(identity) = sceneworks_core::managed_file::authoritative_job_identity(payload)
+            .map_err(ApiError::bad_request)?
+        {
+            identity.stamp(payload);
+        }
+    }
+    if matches!(job_type, JobType::ImageDepth) {
+        crate::depth_jobs::validate_raw_image_depth_payload(payload)?;
+    }
+    // A trained Iris depth / restoration model named by `irisModel` (sc-25687 / sc-25688) must be a
+    // registered model of that task.
+    let trained = match job_type {
+        JobType::ImageDepth => {
+            sceneworks_core::depth_map::ImageDepthJobPayload::from_job_payload(payload)
+                .ok()
+                .and_then(|request| request.trained_model().map(str::to_owned))
+                .map(|model| (model, sceneworks_core::training::iris::IrisObjective::Depth))
+        }
+        JobType::ImageUpscale => {
+            sceneworks_core::image_restoration::parse_iris_restore_model(payload)
+                .map_err(ApiError::bad_request)?
+                .map(|model| {
+                    (
+                        model,
+                        sceneworks_core::training::iris::IrisObjective::Restoration,
+                    )
+                })
+        }
+        JobType::ImageGenerate | JobType::ImageEdit => payload
+            .get("upscale")
+            .and_then(Value::as_object)
+            .map(sceneworks_core::image_restoration::parse_iris_restore_model)
+            .transpose()
+            .map_err(ApiError::bad_request)?
+            .flatten()
+            .map(|model| {
+                (
+                    model,
+                    sceneworks_core::training::iris::IrisObjective::Restoration,
+                )
+            }),
+        _ => None,
+    };
+    if let Some((model, objective)) = trained {
+        crate::iris_training::validate_trained_task_model(state, &model, objective).await?;
     }
     // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
     // `repo`/`sourceUrl` rather than on a model id.
@@ -1087,6 +1458,11 @@ async fn validate_raw_job_payload(
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        // sc-25907: a base that is deliberately not trainable (the distilled Qwen-Image 2.1 Turbo)
+        // is a 400 that says to train on base, before any licence question is asked about it.
+        if let Some(error) = crate::training::raw_training_payload_base_error(payload) {
+            return Err(error);
+        }
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }
@@ -1106,6 +1482,34 @@ async fn validate_raw_job_payload(
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
     }
     Ok(())
+}
+
+/// The engine-specific controls of a raw `image_upscale` job (sc-25683). The Iris restoration engine
+/// is sized by `scale` (with `inputSizing` / `colorFix`) and refuses the other engines' `factor` /
+/// `softness` / `seed`; every other engine refuses the Iris-only keys. Refusing at submission keeps a
+/// control from being silently ignored by the worker (which applies the same rules).
+fn validate_image_upscale_engine_controls(payload: &JsonObject) -> Result<(), ApiError> {
+    use sceneworks_core::image_restoration::{
+        is_iris_engine, parse_iris_restore_params, reject_iris_only_keys,
+    };
+    let engine = payload
+        .get("engine")
+        .and_then(Value::as_str)
+        .unwrap_or("real-esrgan");
+    if is_iris_engine(engine) {
+        if let Some(key) = ["factor", "softness", "seed"]
+            .into_iter()
+            .find(|key| payload.get(*key).is_some_and(|value| !value.is_null()))
+        {
+            return Err(ApiError::bad_request(format!(
+                "{key} is not a control of the Iris restoration engine; it is sized by scale"
+            )));
+        }
+        parse_iris_restore_params(payload).map_err(ApiError::bad_request)?;
+        Ok(())
+    } else {
+        reject_iris_only_keys(payload, engine).map_err(ApiError::bad_request)
+    }
 }
 
 /// Generation kinds whose `model` selects weights and therefore reaches worker path resolution.
@@ -1440,7 +1844,25 @@ async fn apply_progress_side_effects(
     // On a completing real training run, register the produced adapter as a
     // SceneWorks LoRA after authoritative completion acceptance, then fold the
     // registration outcome into the persisted result (story 1418).
-    if matches!(job.status, JobStatus::Completed) {
+    // A trainer that finishes a cancel durably (Iris after its first optimizer step) has published
+    // a checkpoint AND an export; the worker marks that result `trainedArtifactExported`, and the
+    // export registers exactly as a completed run's would (the registrars still verify the files).
+    // Only the Iris trainer finishes a cancel durably; any other trainer's canceled run registers
+    // nothing even if a result claims an export (E8: existing trainers keep their behaviour).
+    let canceled_with_export = matches!(job.status, JobStatus::Canceled)
+        && matches!(job.job_type, JobType::LoraTrain)
+        && job
+            .payload
+            .get("plan")
+            .and_then(|plan| plan.get("target"))
+            .and_then(|target| target.get("kernel"))
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::training::iris::is_iris_training_kernel)
+        && accepted_result
+            .get("trainedArtifactExported")
+            .and_then(Value::as_bool)
+            == Some(true);
+    if matches!(job.status, JobStatus::Completed) || canceled_with_export {
         if let Some(status) = register_completed_training_lora(state, &job_id).await {
             result.extend(status);
         }
@@ -2039,6 +2461,62 @@ pub(crate) async fn register_trained_base_checkpoint(
         .to_owned();
     validate_lora_id_component(&model_id)?;
     let (output_dir, manifest_path) = resolve_finetune_output_location(state, &model_id);
+
+    // Iris-3B (sc-25685/sc-25686): the full-model export is `<output_dir>/<stem>/{config.yaml,
+    // model.safetensors}` — upstream's export layout, which the generation engine loads as its
+    // backbone resource unchanged — not Mage's diffusers transformer tree.
+    if manifest_entry.get("family").and_then(Value::as_str)
+        == Some(sceneworks_core::training::iris::IRIS_FAMILY)
+    {
+        let entry = crate::iris_training::iris_full_checkpoint_entry(
+            job,
+            manifest_entry,
+            &output_dir,
+            &model_id,
+        )?;
+        let export = entry
+            .get("paths")
+            .and_then(|paths| paths.get("model"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| ApiError::internal("Iris export path missing"))?;
+        tokio::fs::write(
+            export.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec_pretty(&json!({
+                "modelId": model_id,
+                "provider": "training",
+                "jobId": job.id,
+                "completedAt": now_rfc3339(),
+            }))
+            .map_err(|error| ApiError::internal(error.to_string()))?,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::internal(format!(
+                "Could not mark the Iris export at {} as installed: {error}",
+                export.display()
+            ))
+        })?;
+        let upsert_id = model_id.clone();
+        mutate_manifest_entries(state, &manifest_path, "models", move |entries| {
+            let created_at = entries
+                .iter()
+                .find(|item| item.get("id").and_then(Value::as_str) == Some(upsert_id.as_str()))
+                .and_then(|item| item.get("createdAt").cloned());
+            let mut entries = entries
+                .into_iter()
+                .filter(|item| item.get("id").and_then(Value::as_str) != Some(upsert_id.as_str()))
+                .collect::<Vec<_>>();
+            let mut entry = entry;
+            if let Some(created_at) = created_at {
+                entry.insert("createdAt".to_owned(), created_at);
+            }
+            entries.push(Value::Object(entry));
+            Ok((entries, ()))
+        })
+        .await?;
+        return Ok(Some((model_id, manifest_path)));
+    }
 
     let Some(files) = trusted_base_checkpoint_files(&output_dir) else {
         return Err(ApiError::internal(format!(

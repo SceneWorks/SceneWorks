@@ -96,6 +96,27 @@ function clickRow(index = 0) {
 }
 
 describe("StatsScreen", () => {
+  it("exposes persisted Veda telemetry for sparse and forced dense runs", () => {
+    feed.rows = [
+      { ...SINGLE_ROW, metrics: { ...SINGLE_ROW.metrics, vedaExecution: {
+        effective: "sparse", kernel: "native-kernel", plan: "trained", planMatch: "nearest",
+        planGrid: [2,8,9], executionGrid: [2,7,9], totalAttentionFraction: 0.4375,
+      } } },
+      { ...SINGLE_ROW, jobId: "dense-job", metrics: { ...SINGLE_ROW.metrics, vedaExecution: {
+        effective: "dense", totalAttentionFraction: 1, fallbackReason: "actual-device self-test failed",
+      } } },
+    ];
+    render();
+    clickRow(0);
+    expect(container.textContent).toContain("Observed attention: Sparse");
+    expect(container.textContent).toContain("native-kernel");
+    expect(container.textContent).toContain("43.75%");
+    clickRow(1);
+    expect(container.textContent).toContain("Observed attention: Dense");
+    expect(container.textContent).toContain("actual-device self-test failed");
+    expect(container.textContent).not.toContain("native-kernel");
+  });
+
   it("renders a row per metrics record with model, quant, and formatted timing", () => {
     render();
     const text = container.textContent;

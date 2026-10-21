@@ -250,6 +250,23 @@ describe("imageBatchValidation", () => {
     expect(summarize(imageBatchValidation(whole)).surfaced).toEqual([]);
   });
 
+  // S2: the Iris post-processing plan of EVERY batch render size gates the batch Run — a prompt whose
+  // [WxH] directive the restore would refuse never lets the batch start (and render its base image).
+  it("blocks a batch whose Iris restoration plan is refused, and waits while it plans", () => {
+    const refused = summarize(
+      imageBatchValidation({
+        ...whole,
+        restorePlan: { ready: false, blocked: true, error: "output 6144x10752 exceeds 8192" },
+      }),
+    );
+    expect(refused.ready).toBe(false);
+    expect(refused.surfaced[0].message).toBe("Iris restoration cannot run: output 6144x10752 exceeds 8192");
+    const planning = summarize(imageBatchValidation({ ...whole, restorePlan: { ready: false, blocked: false } }));
+    expect(planning.ready).toBe(false);
+    expect(planning.surfaced).toEqual([]);
+    expect(summarize(imageBatchValidation({ ...whole, restorePlan: { ready: true, blocked: false } })).ready).toBe(true);
+  });
+
   it("treats an empty batch as a silent requirement", () => {
     const issues = imageBatchValidation({ ...whole, batchTotal: 0 });
     expect(issues.find((i) => i.field === "prompts").kind).toBe("requirement");

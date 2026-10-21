@@ -375,6 +375,39 @@ describe("WorkerProgressCard layout", () => {
     expect(onFreshRetry).toHaveBeenCalledWith(resumedJob, { payloadChanges: { downloadAction: "fresh" } });
   });
 
+  it("offers Resume only for a stopped training job with a checkpoint, and Restart from step 0 (sc-25785)", () => {
+    const job = {
+      id: "t",
+      type: "lora_train",
+      status: "canceled",
+      attempts: 1,
+      payload: {},
+      result: { resumeCheckpointStep: 150 },
+    };
+    const onRetry = vi.fn();
+    api = render(<WorkerProgressCard job={job} onRetry={onRetry} />, makeContext([]));
+    let buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+    expect(buttons.map((button) => button.textContent)).toEqual(["Resume from step 150", "Restart from step 0"]);
+    act(() => {
+      buttons[0].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetry).toHaveBeenLastCalledWith(job, { resume: true });
+    act(() => {
+      buttons[1].dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    });
+    expect(onRetry).toHaveBeenLastCalledWith(job, { resume: false });
+
+    for (const variant of [
+      { ...job, id: "t2", result: {} },
+      { ...job, id: "t3", status: "completed" },
+    ]) {
+      api.cleanup();
+      api = render(<WorkerProgressCard job={variant} onRetry={onRetry} />, makeContext([]));
+      buttons = Array.from(api.container.querySelectorAll(".worker-progress-card__actions button"));
+      expect(buttons.map((button) => button.textContent)).toEqual(["Restart from step 0"]);
+    }
+  });
+
   it("shows the dismiss × on a terminal job and calls onClear (issue #1556)", () => {
     const job = {
       id: "job-done",
@@ -1384,5 +1417,23 @@ describe("WorkerProgressCard audio track badge (sc-19577)", () => {
     // queue card having quietly stopped rendering the badge at all.
     api = renderCard(clip(true));
     expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
+  });
+});
+
+describe("Veda job result observations", () => {
+  it("reads the actual assetWrites result carrier and ignores requested sparse status alone", () => {
+    const job = { id: "h3-job", type: "video_generate", status: "completed", payload: {
+      model: "minimax_h3", advanced: { veda: { enabled: true } },
+    }, result: { assetWrites: [{ rawAdapterSettings: {
+      veda: { enabled: true }, vedaExecution: { effective: "dense", totalAttentionFraction: 1,
+        fallbackReason: "managed predictor is missing" },
+    } }] } };
+    const rendered = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(rendered.container.textContent).toContain("Observed attention: Dense");
+    expect(rendered.container.textContent).toContain("managed predictor is missing");
+    rendered.cleanup();
+    const later = render(<WorkerProgressCard job={{ ...job, id: "later-job", result: {} }} />, makeContext([]));
+    expect(later.container.textContent).not.toContain("Observed attention");
+    later.cleanup();
   });
 });

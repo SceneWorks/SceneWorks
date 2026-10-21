@@ -12,6 +12,298 @@
   "schemaVersion": 1,
   "models": [
     {
+      "id": "moss_image_base",
+      "name": "MOSS-Image Base",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_base",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "image": {
+        "supportsSchedulerShift": true,
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-Base",
+          "revision": "1ceede80badddd6a7812069619edaa5633587192",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "estimatedSizeBytes": 10164749652,
+          "default": true
+        },
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "estimatedSizeBytes": 17055137947,
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-Base"
+      },
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base/blob/1ceede80badddd6a7812069619edaa5633587192/LICENSE",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3,
+        "schedulerShift": 5,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 16,
+        "maxDimension": 4096,
+        "requiresDimensionsMultipleOf": 16
+      },
+      "mlx": {},
+      "candle": {
+        "measured": false
+      },
+      "ui": {
+        "label": "MOSS-Image Base",
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "recommendedFor": [
+          "text_to_image"
+        ],
+        "promptGuide": {
+          "title": "MOSS-Image Prompt Guide",
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-Base"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "name": "MOSS-Image SFT",
+      "family": "moss_image",
+      "type": "image",
+      "adapter": "moss_image_sft",
+      "capabilities": [
+        "text_to_image"
+      ],
+      "image": {
+        "supportsSchedulerShift": true,
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json",
+            "transformer/pipeline_moss_image.py"
+          ],
+          "estimatedSizeBytes": 10164749875,
+          "default": true
+        },
+        {
+          "provider": "huggingface",
+          "repo": "OpenMOSS-Team/MOSS-Image-SFT",
+          "revision": "fc5de0d56fc910cbca6f6625a70f5f582b26deb1",
+          "files": [
+            "LICENSE",
+            "README.md",
+            "model_index.json",
+            "pipeline_moss_image.py",
+            "scheduler/pipeline_moss_image.py",
+            "scheduler/scheduler_config.json",
+            "text_encoder/config.json",
+            "text_encoder/model-00001-of-00004.safetensors",
+            "text_encoder/model-00002-of-00004.safetensors",
+            "text_encoder/model-00003-of-00004.safetensors",
+            "text_encoder/model-00004-of-00004.safetensors",
+            "text_encoder/model.safetensors.index.json",
+            "tokenizer/chat_template.jinja",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/diffusion_pytorch_model.safetensors"
+          ],
+          "estimatedSizeBytes": 17055137947,
+          "coRequisite": true,
+          "componentId": "moss-shared-snapshot"
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-SFT"
+      },
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/blob/fc5de0d56fc910cbca6f6625a70f5f582b26deb1/LICENSE",
+      "licenseNotice": "Official MOSS-Image weights and bundled license: Apache-2.0. Optional 8-step package declares Apache-2.0 in its README metadata; no separate DMD LICENSE is published.",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3,
+        "schedulerShift": 5,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 16,
+        "maxDimension": 4096,
+        "requiresDimensionsMultipleOf": 16
+      },
+      "mlx": {},
+      "candle": {
+        "measured": false
+      },
+      "ui": {
+        "label": "MOSS-Image SFT",
+        "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
+        "recommendedFor": [
+          "text_to_image"
+        ],
+        "promptGuide": {
+          "title": "MOSS-Image Prompt Guide",
+          "path": "/prompt-guides/moss-image.md",
+          "sources": [
+            {
+              "label": "MOSS-Image model card",
+              "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT"
+            }
+          ]
+        }
+      },
+      "conditionalComponents": [
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "lora.safetensors"
+          ],
+          "estimatedSizeBytes": 1189176800,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-lora",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "time_embedding.safetensors"
+          ],
+          "estimatedSizeBytes": 41017896,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-time",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "dataspace.safetensors"
+          ],
+          "estimatedSizeBytes": 65728,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-dataspace",
+          "requiredFor": [
+            "moss_dmd_unmerged_bf16",
+            "moss_dmd_full_fp32"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
+          "revision": "5ff314b4c1470876b114b810146085db8a181a6e",
+          "files": [
+            "transformer/config.json",
+            "transformer/diffusion_pytorch_model-00001-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00002-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00003-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model-00004-of-00004.safetensors",
+            "transformer/diffusion_pytorch_model.safetensors.index.json"
+          ],
+          "estimatedSizeBytes": 20329321561,
+          "license": "Apache-2.0",
+          "licenseBasis": "Declared in the frozen DMD README metadata; no separate LICENSE file is published.",
+          "componentId": "moss-dmd-transformer",
+          "requiredFor": [
+            "moss_dmd_full_fp32"
+          ]
+        }
+      ]
+    },
+    {
       "id": "mage_flow_edit_base",
       "name": "Mage-Flow Edit-Base",
       "family": "mage-flow",
@@ -3302,25 +3594,34 @@
         // embeds these bytes; re-hosting them on the Hub is not embedding them in a build.
         //
         // PUBLISHED (sc-24114) at revision `1691de01c24a070131e0a28bf4c065fd027f4fe9` (q8 landed in
-        // 2f5ad8bb…, q4 in 1691de01…). The sc-24112 null-SHA placeholder and its `pendingArtifact`
+        // 2f5ad8bb…, q4 in 1691de01…), and REPUBLISHED (sc-25909, epic 25899) at
+        // `ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, which adds ONLY `q8/NOTICE` and `q4/NOTICE`
+        // (148 B each — the verbatim §3 attribution notice as its own file, as the Turbo re-host
+        // ships it); every other blob, `SHA256SUMS` included, is unchanged, and `SHA256SUMS` does
+        // not list NOTICE. An install made at 1691de01… (v0.9.0) is carried to ef03535e… cache-only
+        // at load time — every carried entry relinked to its existing blob, NOTICE written from its
+        // declared bytes — by the exact declaration in `sceneworks_core::hf_revision_supersessions`,
+        // which pins that file list; the Model Manager reads the same declaration. The sc-24112
+        // null-SHA placeholder and its `pendingArtifact`
         // flag are gone together, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
         // keeps rigid (a null SHA without the flag, or the flag with a real SHA, fails the audit),
         // and `default` sits on q4, the lightest installable tier — the catalog convention
         // `qwen_image` / `qwen_image_edit_2511` above follow, and what
         // `test_qwen_image_2_1_defaults_to_its_lightest_installable_tier` demands.
         //
-        // `estimatedSizeBytes` is MEASURED from the published blobs at 1691de01…: the EXACT sum of
+        // `estimatedSizeBytes` is MEASURED from the published blobs at ef03535e…: the EXACT sum of
         // every file under the tier's subdir as the Hub API reports it (`model_info(...,
-        // files_metadata=True)`), the same way the bf16 row's total was obtained:
+        // files_metadata=True)`), the same way the bf16 row's total was obtained (the 1691de01…
+        // totals plus the one 148 B NOTICE):
         //
-        //   q8 = 19_949_564_007 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
+        //   q8 = 19_949_564_155 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
         //                                       + VAE 1_350_989_512 + small files
-        //   q4 = 12_919_123_211 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
+        //   q4 = 12_919_123_359 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
         //                                       + VAE 1_350_989_512 + small files
         //
         // Cross-check against the sc-24112 derivation (bf16 tree total with the DiT's 232 and the
         // tower's 252 group-64 Linears swapped from bf16 to packed width, the arithmetic of the
-        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_325 B and q4 3_311_185 B
+        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_177 B and q4 3_311_037 B
         // BELOW the derived number — ~3.31 MB each, within 860 B of one another, so the packed-weight
         // arithmetic holds and the residue is the non-weight files the re-host carries instead of
         // upstream's.
@@ -3331,21 +3632,21 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19949564007,
-          "footprint": { "diskSizeBytes": 19949564007, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19949564155,
+          "footprint": { "diskSizeBytes": 19949564155, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 12919123211,
-          "footprint": { "diskSizeBytes": 12919123211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 12919123359,
+          "footprint": { "diskSizeBytes": 12919123359, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3732,6 +4033,289 @@
           "title": "Qwen Image 2.1 Prompt Guide",
           "path": "/prompt-guides/qwen-image-2-1.md",
           "sources": [
+            { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
+            { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
+          ]
+        }
+      }
+    },
+    {
+      // Qwen-Image 2.1 Turbo (sc-25907, epic 25899) — the DISTILLED sibling of `qwen_image_2_1`
+      // above, under its OWN catalog id and its own engine id. `Qwen/Qwen-Image-2.1-Turbo` @
+      // fc13ba19 is the same architecture as the base snapshot (same ~7.1B single-stream DiT
+      // config and shard sizes, same ~7.6B Qwen3-VL tower, same seven presets, same Qwen RESEARCH
+      // LICENSE — the LICENSE file is byte-identical, sha256 8dc973f0…), distilled to an 8-step
+      // schedule. It differs from base in exactly what this entry declares differently:
+      //
+      // * THE SCHEDULE. The snapshot's `model_index.json` saves 8 `sample_sigmas`; the engine
+      //   renders over that saved curve at 8 steps, and any OTHER step count is a RESAMPLE of the
+      //   saved curve, not a re-shifted base schedule. A curated non-`default` scheduler name
+      //   REPLACES the distilled sigmas with that scheduler's own unshifted curve — legal (both
+      //   menus are the base menu, verbatim), but it is no longer the distilled schedule.
+      // * THE DEFAULTS. 8 steps and guidance 1.0 (true-CFG off by default: the distilled model is
+      //   meant to run CFG-free; the scale still engages once a negative prompt is supplied).
+      // * THE VAE. Turbo ships its autoencoder in bf16 where the base ships f32. On MLX that halves
+      //   the resident VAE (675,480,808 B vs 1,350,961,616 B) and is the ONLY derived memory
+      //   difference from base there; Candle holds both VAEs at its compute width, so the two ids
+      //   price alike on Candle. Every number below is DERIVED from the engine's
+      //   `memory_strategy::derived` `*_for(Variant::Turbo, …)` functions under Turbo's OWN
+      //   calibration fingerprints — none is copied from base, and nothing is measured (E10).
+      // * NO TRAINER. The engine registers no trainer under the Turbo id, so no training target
+      //   names it as a base and the API refuses one; the LoRA FAMILY is shared with base
+      //   (`qwen-image-2-1`), because the transformer is the same architecture (E9).
+      //
+      // Each engine id refuses the other's snapshot with a typed refusal (the Turbo snapshot is
+      // recognised by its saved `sample_sigmas`), and an error reached through this id names
+      // `qwen_image_2_1_turbo`. Native on BOTH backends exactly as base is: MLX
+      // (`mlx-gen-qwen-image-2-1`) and Candle/CUDA (`candle-gen-qwen-image-2-1`) both register
+      // `qwen_image_2_1_turbo`, and the routing catalog routes it on both.
+      "id": "qwen_image_2_1_turbo",
+      "name": "Qwen Image 2.1 Turbo",
+      "family": "qwen-image-2-1",
+      "type": "image",
+      // Its own recipe stamp (`RecipeAdapter::QwenImage21Turbo`): a replayed asset must say which
+      // checkpoint produced it, and the distilled weights are not the base weights.
+      "adapter": "qwen_image_2_1_turbo",
+      // The base entry's three operations, for the base entry's reasons: one upstream pipeline,
+      // text-to-image with no condition images and editing / multi-reference with 1-10 ORDERED
+      // condition images. No `image_inpaint` (no mask tensor), no `character_image`.
+      "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+      // The same four-channel VAE decode as base (`Capabilities::supports_alpha_output`): the
+      // transparency toggle is backed by the engine, and the prompt decides whether the fourth
+      // channel holds a cut-out.
+      "supportsAlphaOutput": true,
+      "downloads": [
+        // The UPSTREAM diffusers snapshot, pulled directly and whole, as base's bf16 tier is:
+        // `Qwen/Qwen-Image-2.1-Turbo` is public and UNGATED, and SceneWorks redistributes no
+        // weights from it. An empty `files` list is the whole-repo snapshot convention.
+        //
+        // `estimatedSizeBytes` is the EXACT byte total of the pinned revision's tree, summed from
+        // the Hub API's resolved blob sizes for fc13ba19 (`/api/models/…/revision/<sha>?blobs=true`,
+        // 32 files, 32,493,327,348 B = 30.26 GiB): the text encoder (17.53 GB, one file here), the
+        // two transformer shards (14.23 GB), the bf16 VAE (0.68 GB), the tokenizer/processor
+        // corpus, the model card's preview images and the small configs. Smaller than base's
+        // 33,134,949,212 B mostly by the halved VAE.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` are null: nothing has been measured for Turbo,
+        // and base's figures are not Turbo's. NO `platforms` key, for base's reason (both backends
+        // load this tree).
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen-Image-2.1-Turbo",
+          "revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
+          "variant": "bf16",
+          "files": [],
+          "estimatedSizeBytes": 32493327348,
+          "footprint": { "diskSizeBytes": 32493327348, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ── The SceneWorks re-host: q8 and q4, one complete standalone snapshot per subdir ───────
+        //
+        // `SceneWorks/qwen-image-2-1-turbo-mlx` with `q8/` and `q4/` subdirs, named and laid out
+        // exactly as base's `SceneWorks/qwen-image-2-1-mlx`: each a complete standalone tree whose
+        // DiT and tower are affine-quantized at group 64, produced by the inference converter over
+        // the Turbo snapshot (`QWEN21_SRC=<turbo snapshot> QWEN21_TIER=q8|q4 cargo run --release
+        // --example qwen_image_2_1_prequant -p mlx-gen-qwen-image-2-1`). The converter reads which
+        // checkpoint it re-packs off the source, so a Turbo tier keeps the saved `sample_sigmas`,
+        // the static scheduler config and the bf16 VAE byte for byte. Each tier dir carries the
+        // §3 licence record — LICENSE, README.md, CHANGES.md, SHA256SUMS and the attribution
+        // NOTICE — beside model_index.json + processor/ + scheduler/ + text_encoder/ +
+        // transformer/ + vae/ (17 files per tier; the repo-root README.md is outside both scopes).
+        //
+        // PUBLISHED (sc-25909, the epic's terminal story) at revision
+        // `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`. The 40-zero placeholder and its
+        // `pendingArtifact` flag left together, as `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
+        // requires, and `default` moved from bf16 to q4 — the lightest installable tier, base's
+        // convention, which `test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier`
+        // demands.
+        //
+        // `estimatedSizeBytes` is MEASURED from the published blobs at 9095dfbb…: the EXACT sum of
+        // every file under the tier's subdir as the Hub API reports it (`/api/models/…/revision/
+        // <sha>?blobs=true`), as base's tiers were measured:
+        //
+        //   q8 = 19_269_638_211 B (17.95 GiB)
+        //   q4 = 12_239_197_415 B (11.40 GiB)
+        //
+        // Cross-check against the derivation these rows carried while pending (the engine's
+        // `derived::tier_tree_bytes(Variant::Turbo, tier).weight_bytes()` plus base's published
+        // non-weight files): both tiers land EXACTLY 4_446_036 B below it — the same residue on
+        // both, so the packed-weight arithmetic is exact and only the non-weight files differ
+        // from base's.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` stay null on every tier: the epic-end memory
+        // campaign fills the measured rows, and the per-tier derived ladder lives in the
+        // `mlx`/`candle` blocks below where it is labelled derived.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+          "variant": "q8",
+          "files": ["q8/*"],
+          "estimatedSizeBytes": 19269638211,
+          "footprint": { "diskSizeBytes": 19269638211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/*"],
+          "estimatedSizeBytes": 12239197415,
+          "footprint": { "diskSizeBytes": 12239197415, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Qwen/Qwen-Image-2.1-Turbo"
+      },
+      // The SAME credential-free licence gate as base: the Hub repo is public (no token), and
+      // `requiresLicenseAcknowledgment` blocks every tier's download behind an in-app accept that
+      // surfaces `licenseNotice`. The accept is per MODEL — accepting base's notice does not
+      // accept this one, because the two are separate catalog entries (E8).
+      "gated": false,
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/fc13ba1986fcb905854dc8de2f52eee395f49b5b/LICENSE",
+      // Base's notice, adapted to name Turbo and its NOTICE file: the LICENSE beside the pinned
+      // Turbo weights is byte-identical to base's (sha256 8dc973f0…), so every clause cited holds.
+      "licenseNotice": "Qwen-Image 2.1 Turbo's weights are governed (the same Agreement, byte for byte, as the base Qwen Image 2.1 model's) by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own Qwen-Image-2.1-Turbo repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above (also as a NOTICE file) inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs), as base's does.
+      "nonCommercial": true,
+      "defaults": {
+        // The distilled schedule's own operating point: 8 steps (the snapshot's saved
+        // `sample_sigmas`), guidance 1.0 (true-CFG off until a negative prompt is supplied), the
+        // engine's 1:1 preset, one image, and the `default` sampler/scheduler — `default` is what
+        // keeps the saved distilled sigmas; a curated scheduler name replaces them.
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Base's request envelope, verbatim — the descriptor is base's under a second id: the
+        // seven presets in engine order, count up to 8, the [32, 2752] ÷32 free-size envelope
+        // (enforced at enqueue because all three keys are declared), and 1-10 ordered references
+        // counted over the flattened list.
+        "resolutions": [
+          "2048x2048",
+          "2400x1792",
+          "1792x2400",
+          "2528x1696",
+          "1696x2528",
+          "2752x1536",
+          "1536x2752"
+        ],
+        "count": [1, 2, 4, 8],
+        "minDimension": 32,
+        "maxDimension": 2752,
+        "requiresDimensionsMultipleOf": 32,
+        "maxReferenceAssets": 10,
+        // A PRODUCT floor of 4 steps, set from the epic's terminal step sweep on real weights
+        // (sc-25909): 4, 6, 8, 12 and 16 steps all rendered coherent, so 4 is the lowest count
+        // MEASURED to hold up. The engine itself would accept 1 (a distilled curve resampled to
+        // one step is still a legal schedule), but nothing below 4 was swept, and the floor is
+        // never set below evidence. Step counts other than 8 are a resample of the saved
+        // distilled curve.
+        "hardMinSteps": 4,
+        // Base's curated solver menu, verbatim (both providers publish the same menu under the
+        // Turbo id). ⚠️ On this id a non-`default` SCHEDULER replaces the distilled sigmas with
+        // that scheduler's own unshifted curve; `default` keeps them.
+        "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+        "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
+      },
+      // The SAME LoRA family as base (E9): the distilled transformer is the base architecture, so a
+      // `qwen-image-2-1` adapter loads on it, and a 2512 `qwen-image` adapter is refused with a 400
+      // naming both families, exactly as on base.
+      "loraCompatibility": {
+        "families": ["qwen-image-2-1"],
+        "types": ["style", "enhance", "character"]
+      },
+      // Base's admission envelope, verbatim: the joint-sequence geometry is a property of the
+      // architecture and the reference fit, both shared (`admission_geometry()` is one function
+      // for both ids). See the base entry for the derivation of each number.
+      "admissionGeometry": {
+        "maxSide": 2752,
+        "maxPresetArea": 4300800,
+        "maxTargetImageTokens": 16800,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 4096,
+        "maxJointTokens": 58016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8
+      },
+      // ── THE DERIVED MEMORY LADDER — Turbo's OWN derived numbers (E10) ──────────────────────────
+      //
+      // Same rule as base, applied to Turbo's derivation: floor = ceil(peak GiB x 1.25), the peak
+      // being `derived::default_path_peak_max_bytes_for(Variant::Turbo, tier)` on MLX. The ONLY
+      // input that differs from base on MLX is the resident VAE (bf16, 0.63 GiB where base's f32
+      // VAE is 1.26 GiB); every activation term is base's, unchanged (the engine deliberately
+      // claims no bf16-decode saving until the terminal campaign measures one):
+      //
+      //   tier | resident | default-path peak max | floor
+      //   bf16 |  27.98   |  34.35              |  43
+      //   q8   |  15.70   |  22.08              |  28
+      //   q4   |   9.15   |  15.53              |  20
+      //
+      // `qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source` pins these to the
+      // linked accessor on macOS. No `calibrations`, no measured row on either lane; Turbo's
+      // calibration fingerprints (`TURBO_MEMORY_CALIBRATION_FINGERPRINT`, a different value on
+      // each lane) key the hand-authored request-owned contracts below, so a record built for one
+      // id can never satisfy the other's handshake. The terminal campaign owns the anchors.
+      "mlx": {
+        "minMemoryGb": 43,
+        "minMemoryGbByTier": { "bf16": 43, "q8": 28, "q4": 20 },
+        // Base's default-tier declaration (an app-wide q8 default; no `minQualityTier`).
+        "quantize": 8,
+        // Base's request-owned MLX declaration under Turbo's provider id and fingerprint: Resident
+        // and BoundedDecode (decode tiles 768/640/512/384/256 at overlap 64), every public mode on
+        // the provider's one `text_to_image` memory mode with 0..=10 ordered references, and
+        // deliberately NO `staged_residency` row (base's reason: an MLX staged row stages every
+        // request unconditionally).
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1_turbo",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      // The off-Mac lane. Candle holds the bf16 Turbo VAE at its compute width exactly as it holds
+      // base's f32 VAE (`memory_strategy::compute_width()`), so Turbo's DERIVED Candle floors are
+      // base's arithmetic over the same inputs — resident + the 3-map untiled decode tail at
+      // 2400x1792, x1.25 — and land on the same integers. They are stated here as Turbo's own
+      // derivation, not copied as evidence: `binding` for `vram_gate::predicted_peak_gb`, the
+      // scalar the densest tier's floor, and no measured key.
+      //   bf16 45 — 28.61 + 6.92 = 35.53 GiB x1.25 = 44.41
+      //   q8   30 — 16.33 + 6.92 = 23.25 GiB x1.25 = 29.07
+      //   q4   21 —  9.78 + 6.92 = 16.70 GiB x1.25 = 20.88
+      "candle": {
+        "minMemoryGb": 45,
+        "minMemoryGbByTier": { "bf16": 45, "q8": 30, "q4": 21 },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_2_1_turbo",
+          "implementations": [
+            {"rung":"resident","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"staged_residency","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"},
+              {"rung":"bounded_decode","fingerprint":"qwen-image-2-1-turbo-candle-derived-2026-10-13-v1","tiers":["bf16","q8","q4"],"modes":["text_to_image","edit_image","image_to_image","character_image"],"overlays":["none","lora"],"loadProfiles":["plain","lora"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0,1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"edit_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"image_to_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"text_to_image","referenceCounts":[1,2,3,4,5,6,7,8,9,10],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512,384,256],"decodeOverlaps":[64]},"source":"inference:crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"}
+          ]
+        }
+      },
+      "ui": {
+        "label": "Qwen Image 2.1 Turbo",
+        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. Three precision tiers — bf16, Q8 and Q4: bf16 runs on both backends, and the Q8 and Q4 tiers are verified on Apple Silicon (MLX); they have not yet been run on an NVIDIA card. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
+        "recommendedFor": ["text_to_image", "edit_image"],
+        // Base's multi-reference editor surface; the picker's ceiling is `limits.maxReferenceAssets`.
+        "multiReference": true,
+        // Turbo's own guide (sc-25908): base's prompt format and ordered-reference conventions,
+        // plus what differs here — the 8-step distilled schedule, CFG-free defaults, no training
+        // base, the 4-step floor. It reaches the generic refiner as the selected model's guide.
+        "promptGuide": {
+          "title": "Qwen Image 2.1 Turbo Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1-turbo.md",
+          "sources": [
+            { "label": "Qwen-Image-2.1-Turbo model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo" },
             { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
             { "label": "Qwen-Image-2.1 repository", "url": "https://github.com/QwenLM/Qwen-Image-2.1" }
           ]
@@ -5864,6 +6448,331 @@
             { "label": "SenseNova-U1 prompt enhancement doc", "url": "https://huggingface.co/sensenova/SenseNova-U1-8B-MoT/blob/main/docs/prompt_enhancement.md" }
           ]
         }
+      }
+    },
+    {
+      // Iris-3B (epic sc-25678, story sc-25679) — the GENERATION task of speridlabs/iris-3b: a
+      // pixel-space (no VAE) flow-matching DiT conditioned on 12 intermediate layers of
+      // Qwen3-VL-4B-Instruct, served natively by inference's `mlx-gen-iris` (`iris_3b`).
+      //
+      // TASK IDENTITY (E4). The upstream repo ships THREE task backbones side by side — generation
+      // at the root, `depth/` and `upscaler/` — and only generation conditions on text. This entry
+      // is the generation task alone: its primary download fetches exactly the root `config.yaml` +
+      // `model.safetensors` (never `depth/*` / `upscaler/*`), and the Qwen3-VL encoder is a
+      // SEPARATE `coRequisite` component tagged `componentId: "text_encoder"`, so the depth and
+      // restoration tasks can be their own catalog entries that install and run without it.
+      // The worker stages that component as `LoadSpec::components["text_encoder"]`
+      // (gen_core::iris::TEXT_ENCODER_COMPONENT) from the pinned snapshot; it never downloads at
+      // generation time.
+      //
+      // CONTROL SURFACE (E3) — exactly what the engine honours (sc-25681): prompt, negative prompt
+      // (the CFG unconditional), size on a 16-px grid (16..=2048), count <= 8, seed, steps,
+      // guidance (= upstream cfg_scale), the FlowDPM-Solver++ order as a sampler (`dpmpp_2m` =
+      // order 2, the default; `euler` = order 1), the schedule shift (upstream `shift`, default
+      // the checkpoint's flow.shift = 4.0; there is one shifted time grid, so no scheduler menu),
+      // the CFG interval, the caption-overflow policy, and generation-task LoRA/LoKr adapters
+      // stamped family=iris + irisTask=generation. Prediction target / train timesteps come from
+      // the checkpoint (no knob). It refuses quantization by name, so there is no tier axis.
+      // A negative prompt or a CFG interval only exists under CFG: at guidance 1.0 the engine
+      // refuses either, so the API refuses them and Image Studio disables both controls there.
+      "id": "iris_3b",
+      "name": "Iris 3B",
+      "family": "iris",
+      "type": "image",
+      "adapter": "mlx_iris",
+      // Served on both lanes: `mlx-gen-iris` on Apple Silicon (sc-25679) and `candle-gen-iris` on
+      // Windows/Linux NVIDIA (sc-25680) register the same `iris_3b` engine id, so the entry is not
+      // platform-scoped and every download below applies on every OS.
+      "macOnly": false,
+      "capabilities": ["text_to_image"],
+      "image": {
+        "negativePromptRequiresGuidance": true,
+        "supportsSchedulerShift": true,
+        "supportsCfgInterval": true,
+        "captionOverflowPolicies": ["warn", "error", "silent"],
+        // The released checkpoint shows its 16-px patch grid below 1024² (upstream fp32 does too);
+        // Image Studio hints at it and never restricts the size.
+        "patchGridVisibleBelow": 1024,
+        // Upstream generate(prompts=[…]): one batched pass renders prompts × count <= 8 images
+        // (the engine's max_count), prompt-minor, image k on seed + k. Image Studio packs its prompt
+        // batch into these native jobs.
+        "maxPromptBatchImages": 8
+      },
+      "downloads": [
+        // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
+        // FP32 on disk; the engine casts to bf16 at load. EXACT bytes of the two pinned files.
+        {
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["config.yaml", "model.safetensors"],
+          "estimatedSizeBytes": 11950114087,
+          "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // The generation task's Qwen3-VL-4B-Instruct text encoder (Apache-2.0), pinned to the
+        // revision the backbone was trained against: config, tokenizer and the two bf16 shards.
+        // EXACT bytes of the listed files at the pinned revision.
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen3-VL-4B-Instruct",
+          "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "estimatedSizeBytes": 8882829131
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {
+        // Release sampling defaults (gen_core::iris::DEFAULT_STEPS / DEFAULT_CFG_SCALE / DEFAULT_SIZE
+        // / DEFAULT_SOLVER_ORDER, and the release config.yaml's flow.shift).
+        "resolution": "1024x1024",
+        "steps": 100,
+        "guidanceScale": 3.0,
+        "sampler": "dpmpp_2m",
+        "schedulerShift": 4.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "768x768", "512x512"],
+        "count": [1, 2, 4, 8],
+        "minDimension": 16,
+        "maxDimension": 2048,
+        "requiresDimensionsMultipleOf": 16,
+        // gen_core::iris::SAMPLERS, default first (both lanes advertise the same pair).
+        "samplers": ["dpmpp_2m", "euler"]
+      },
+      "loraCompatibility": {
+        "families": ["iris"],
+        "types": ["style", "enhance", "character"],
+        // The task backbones share one architecture: only a generation-task stamp is offered here.
+        "irisTask": "generation"
+      },
+      "mlx": {
+        // Conservative DECLARED floor (no measurement campaign): bf16 backbone (~6 GB) + Qwen3-VL-4B
+        // (~8.9 GB) resident plus pixel-space activations; the engine bring-up observed ~20 GB at
+        // 512² and ~22.6 GB at 1024². Replaced by measured evidence at the epic-end campaign.
+        "minMemoryGb": 32,
+        // sc-25690: what the pinned mlx-gen-iris contract declares beyond Resident and
+        // StagedResidency (both implemented). Bounded decode is a truth about the architecture, not
+        // undelivered work; bounded attention and bounded transformer residency are applicable but
+        // not enabled on this lane, so they stay Missing.
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              { "source": "inference:crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)." }
+            ]
+          }
+        }
+      },
+      "candle": {
+        // Conservative DECLARED floors (no measurement campaign), the Candle twin of the MLX value
+        // above: bf16 backbone (~6 GB) + Qwen3-VL-4B text encoder (~8.9 GB) resident plus 1024²
+        // pixel-space activations. Existing inference CUDA real-weight runs on an RTX PRO 6000
+        // (38068347300, 38075865079) recorded an overall nvidia-smi peak of 21.3–21.4 GB at 1024²,
+        // 100 steps, bf16, count 1, text encoder resident (load peak 15.7 GB); SceneWorks smoke
+        // 38106019178 ran at 512². Only the staged row below was measured (one bounded run, not a
+        // calibration), hence `measured: false`.
+        // * `minMemoryGb` — like every padded Candle floor it folds in the 2 GB allocator reserve
+        //   (21.4 + 2.0 = 23.4, rounded up to 24), because `vram_gate::predicted_peak_gb` adds no
+        //   headroom to this scalar. Without it the fit gate had no prediction and admitted a load on
+        //   any card (FitDecision::Unknown).
+        // * `sequentialPeakGb` — `candle-gen-iris` advertises sequential offload (encode with the
+        //   Qwen3-VL encoder, drop it, then denoise), so a card under the resident floor is routed to
+        //   staged residency, whose second-stage check reads this row. MEASURED ONCE (sc-25684, the
+        //   bounded dispatch-only `iris_staged_vram_measurement` — then named
+        //   `iris_worker_gpu_smoke_staged` — windows-candle run 38160084545,
+        //   RTX PRO 6000): a 1024², count-1, 30-step job routed to `OffloadPolicy::Sequential` peaked at
+        //   11.97 GB overall card memory (nvidia-smi, 100 ms sampling, 0.47 GB idle baseline) — rounded
+        //   up to 12.0. The gate adds its 2 GB reserve (14.0), so a 16 GB card runs 1024² staged
+        //   instead of being refused. One row per bits-derived key the gate can name: the single bf16
+        //   artifact has no tier subdir, so the gate names it from `advanced.mlxQuantize` (q8 by
+        //   default). The block's `measured` flag stays false: it covers the declared values too.
+        // * `imageActivationGbPerMegapixel` — the pixel-space activations of ONE image per output
+        //   megapixel (1024² = 1 MP): the recorded 1024² resident peak minus the load peak
+        //   (21.4 − 15.7 = 5.7 GB), rounded up. Both floors above carry one image at <= 1024²; the gate
+        //   (`lane_controls::declared_activation_overlay_bytes`) charges
+        //   this × (images × max(1, MP) − 1) on both predictions, so a native prompt batch
+        //   (image.maxPromptBatchImages) and an output above 1024² (limits allow 2048² = 4 MP: +18 GB)
+        //   are never admitted on a floor sized for one 1024² image. Linear in area because both
+        //   engines run fused attention (transient linear in tokens). Declared, not measured.
+        "measured": false,
+        "minMemoryGb": 24,
+        "sequentialPeakGb": { "bf16": 12.0, "q8": 12.0, "q4": 12.0 },
+        "imageActivationGbPerMegapixel": 6.0,
+        // sc-25690: what the pinned candle-gen-iris contract declares beyond Resident and
+        // StagedResidency (both implemented). Bounded attention is implemented at the one published
+        // score budget (the shared 64 Mi operating point — a derived candidate, unmeasured on Iris);
+        // bounded decode is structurally not applicable; bounded transformer residency has no
+        // block-streaming loader and stays Missing.
+        "memoryStrategyCapabilities": {
+          "bounded_attention": {
+            "parameters": { "attentionChunkSize": 67108864 },
+            "overlays": ["none", "lora"]
+          }
+        },
+        "memoryStrategyStructuralExemptions": {
+          "bounded_decode": {
+            "overlays": ["none", "lora"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies BoundedDecode as StructurallyNotApplicable: iris_3b denoises in pixel space, so there is no latent, no autoencoder and no decoder scratch to tile (the decode phase is the [-1, 1] to RGB8 conversion)." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B",
+        "description": "Speridlabs Iris-3B text-to-image: a 3B pixel-space flow-matching DiT (no VAE) conditioned on Qwen3-VL-4B. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 100-step FlowDPM-Solver++ at CFG 3.0 by default. Downloads ~12 GB backbone + ~8.9 GB text encoder; needs ~32 GB unified memory on a Mac, or ~16 GB VRAM on an NVIDIA GPU at 1024² (staged: the text encoder is dropped before denoising; ~24 GB keeps it resident).",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Iris 3B Prompt Guide",
+          "path": "/prompt-guides/iris-3b.md",
+          "sources": [
+            { "label": "Iris-3B model card", "url": "https://huggingface.co/speridlabs/iris-3b" },
+            { "label": "Iris-3B code", "url": "https://github.com/speridlabs/iris-3b" }
+          ]
+        }
+      }
+    },
+    {
+      // sc-25689 (epic 25678, E4) — the frozen DINOv2-B/14 REPA teacher of Iris 3B generation
+      // training (upstream `repa.teacher: dinov2_vitb14`, the Hugging Face mirror of the hub
+      // checkpoint at the revision `gen_core::iris::train::repa::DINOV2_BASE_HF_REVISION` pins).
+      // TRAINING-ONLY resource: read by the `iris_3b` TRAINER only, staged as its `repa_teacher`
+      // load component after the worker re-checks the pinned size + sha256
+      // (`iris_curricula::verify_repa_teacher_file`). Never part of the generation inference
+      // closure (`iris_3b` installs and generates without it), never downloaded at training time,
+      // and never a routable `model` of any job.
+      "id": "iris_repa_teacher_dinov2_base",
+      "name": "Iris REPA Teacher — DINOv2-B/14",
+      "family": "iris",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/facebook/dinov2-base",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (346345912,
+          // sha256 d73036b5…0841 — the LFS pointer at this revision).
+          "provider": "huggingface",
+          "repo": "facebook/dinov2-base",
+          "revision": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 346345912
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/facebook/dinov2-base"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris REPA Teacher — DINOv2-B/14",
+        "description": "Training-only: the frozen DINOv2-B/14 image encoder (facebook/dinov2-base, ~346 MB) that Iris 3B training aligns its features to when REPA / iREPA is on (the official stage-1 curriculum). Not needed for generating with Iris 3B. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25682 (epic 25678, E4/E5) — Iris-3B MONOCULAR DEPTH as its own TASK install. The depth
+      // task is a separate fine-tune shipped in the `depth/` folder of the same upstream repo: one
+      // forward of the widened backbone conditioned on the export's shipped empty-prompt states, so
+      // it installs and runs WITHOUT the Qwen3-VL text encoder and without the generation backbone
+      // (the engine refuses either if staged). Its resource closure is exactly the three files below
+      // at the pinned revision; the generation entry `iris_3b` owns the repo root files, and a
+      // whole-model delete of either entry is scoped so it never takes the other's files.
+      "id": "iris_3b_depth",
+      "name": "Iris 3B Depth",
+      "family": "iris",
+      "type": "utility",
+      // Served on both lanes: `mlx-gen-iris` (Apple Silicon) and `candle-gen-iris` (Windows/Linux
+      // NVIDIA) both implement the depth task, so the entry is not platform-scoped.
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream (Apache-2.0; no SceneWorks re-host). FP32 on disk; bf16 compute by default.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["depth/config.yaml", "depth/model.safetensors", "depth/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11989604079,
+          "footprint": { "diskSizeBytes": 11989604079, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      // DECLARED (measured: false) admission for the depth job (`depth_jobs::DepthAdmission`); the
+      // epic-end campaign (sc-25684) replaces it with measured evidence. Existing real-weight
+      // evidence: a 1024x2048 photo at the default 1024 cap (model input 512x1024 = 524288 px) peaked
+      // at 9.4 GB on MLX and 8.4 GB (nvidia-smi) on CUDA. `residentGb` is the bf16 backbone + reducer
+      // (~3B parameters) the forward keeps resident; the rest of the reference peak is treated as
+      // activations that grow with the model input's pixel count (both engines run fused/budgeted
+      // attention, so the transient is linear in tokens), padded by `extrapolationFactor` above the
+      // observed area. A request over the host budget is refused before load — never downscaled.
+      // The Candle `residentGb` is the card's own reading with the model loaded and nothing running
+      // (7306 MiB = 7.13 GiB over the idle baseline, sc-25690 catalog rehearsal run 38403658578):
+      // the gate compares against device-level free VRAM, which also counts the CUDA context, so
+      // the backbone's tensor bytes alone (6.5) under-stated an input smaller than the reference.
+      "depth": {
+        "admission": {
+          "measured": false,
+          "referenceModelPixels": 524288,
+          "extrapolationFactor": 1.5,
+          "mlx": { "residentGb": 6.5, "referencePeakGb": 9.4 },
+          "candle": { "residentGb": 7.2, "referencePeakGb": 8.4 }
+        }
+      },
+      "mlx": {
+        // Catalog display floor (unified memory) for the default 1024 cap; the job's own admission
+        // above is what gates a request.
+        "minMemoryGb": 16
+      },
+      "candle": {
+        // 8.4 GB recorded peak at the reference geometry + the 2 GB allocator reserve, rounded up.
+        "measured": false,
+        "minMemoryGb": 11,
+        // sc-25690: the pinned candle-gen-iris iris_3b_depth contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the depth task loads no text encoder (it runs one backbone forward on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B Depth",
+        "description": "Monocular depth estimation from the Iris-3B depth fine-tune (Sperid Labs, Apache-2.0). Saves a raw float32 relative-log-depth map (.npy) plus a colorized preview from the Image Editor or the Library. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; downloads only the ~12 GB depth export (no text encoder).",
+        "recommendedFor": []
       }
     },
     {
@@ -14190,15 +15099,15 @@
       // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG text-to-image (20 steps
       // / guidance 4.5). `adapter` is the asset stamp (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
-      // NSCLv1 (research & evaluation, non-commercial). On macOS the re-hosted
-      // `SceneWorks/Sana_1600M_1024px_mlx` mirror carries the upstream LICENSE + NOTICE + attribution
-      // (the Krea/Ideogram re-host precedent). Off-Mac the candle lane pulls the ORIGINAL public NVIDIA
-      // repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE
-      // documents the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA transformer + DC-AE VAE are Apache-2.0 — NVIDIA changed the NVlabs/Sana
+      // code-base license to Apache 2.0 on 2025-01-11, and `Efficient-Large-Model/Sana_1600M_1024px`
+      // (and its `_diffusers` snapshot, whose LICENSE is the Apache 2.0 text) is tagged apache-2.0. The
+      // bundled gemma-2-2b-it text encoder is under Google's Gemma Terms of Use + Prohibited Use Policy
+      // (upstream google/gemma-2-2b-it is gated). The earlier "NVIDIA Open Model License / NSCLv1,
+      // non-commercial" classification is superseded, so `nonCommercial` is false. On macOS the weights
+      // come from the re-hosted `SceneWorks/Sana_1600M_1024px_mlx` mirror; off-Mac the candle lane pulls
+      // the ORIGINAL public NVIDIA repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated —
+      // `gated: false` on HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA 1600M",
       "family": "sana",
@@ -14206,7 +15115,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
@@ -14215,13 +15124,13 @@
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — `gemma-2-2b-it.safetensors` packed q4/q8 else dense + `tokenizer.json`, sourced
         // from the SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated). Un-gated
-        // (the mirror carries the NVIDIA non-commercial NOTICE). mlx-gen #653 packs the transformer +
+        // (licensing: see the LICENSE comment above). mlx-gen #653 packs the transformer +
         // Gemma-2 TE offline and packed-detects on load (NO install-time quantize). This is the
         // shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured on-disk.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14232,7 +15141,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14242,7 +15151,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14257,8 +15166,8 @@
           // `tokenizer/`) directly and `resolve_component_files` tolerates the repo's fp16/fp32 +
           // single/sharded duplication, so NO curated allow-list is needed — the whole snapshot loads
           // dense bf16 (there is no packed q4/q8 tier off-Mac; the worker resolves this repo's snapshot
-          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open
-          // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
+          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
           "revision": "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
@@ -14343,7 +15252,7 @@
         // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -14378,15 +15287,16 @@
       // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. `adapter` is the asset stamp
       // (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
-      // (research & evaluation, non-commercial). On macOS the re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent).
-      // Off-Mac the candle lane pulls the ORIGINAL public NVIDIA repo
-      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE documents
-      // the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA-Sprint transformer + DC-AE VAE are Apache-2.0 — the
+      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px` model card states "released under the Apache
+      // License 2.0" (tag license:apache-2.0; the `_diffusers` snapshot's LICENSE is the Apache 2.0 text),
+      // and NVlabs/Sana moved to Apache 2.0 on 2025-01-11. The bundled gemma-2-2b-it text encoder is under
+      // Google's Gemma Terms of Use + Prohibited Use Policy (upstream google/gemma-2-2b-it is gated). The
+      // earlier "NVIDIA Open Model License / NSCLv1, non-commercial" classification is superseded, so
+      // `nonCommercial` is false. On macOS the weights come from the re-hosted
+      // `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` mirror; off-Mac the candle lane pulls the ORIGINAL public
+      // NVIDIA repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on
+      // HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA-Sprint 1.6B",
       "family": "sana",
@@ -14394,7 +15304,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
@@ -14402,13 +15312,13 @@
         // `transformer/` (the Sprint Linear-DiT trunk, packed q4/q8 else dense bf16), `vae/` (the 32×
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — packed q4/q8 else dense + `tokenizer.json`, from the SceneWorks/gemma-2-2b-it
-        // mirror, NOT duplicated). Un-gated (NVIDIA non-commercial NOTICE). mlx-gen #653 packs the
+        // mirror, NOT duplicated). Un-gated (licensing: see the LICENSE comment above). mlx-gen #653 packs the
         // transformer + Gemma-2 TE offline and packed-detects on load (no install-time quantize). This
         // is the shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14419,7 +15329,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14429,7 +15339,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14445,8 +15355,8 @@
           // `resolve_component_files` tolerates the repo's fp16/fp32 + single/sharded duplication, so NO
           // curated allow-list is needed — the whole snapshot loads dense bf16 (there is no packed q4/q8
           // tier off-Mac; the worker resolves this repo's snapshot ROOT, never a tier subdir). CFG-free
-          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open Model
-          // License LICENSE.txt. Size is the whole-repo on-disk footprint (single-precision — unlike the
+          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (single-precision — unlike the
           // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
@@ -14523,7 +15433,7 @@
         // few-step, so the strength window is narrower than base SANA — validate the band on-device.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -23513,8 +24423,8 @@
     //
     // ⚠️ NOT SHIPPED UPSTREAM (do not imply otherwise in copy — sc-17162): `H3-Context-IR` (hosted
     // prompt refinement, so prompt adherence differs from the Hailuo API), `H3-Regenerate-2K` (so
-    // "up to 2K" is NOT reachable from these weights), and the sparse-attention inference path
-    // (so the open weights run DENSE attention, which is why the cost table above looks like that).
+    // "up to 2K" is NOT reachable from these weights). Dense attention remains the default and
+    // the basis of the cost table above; optional native Veda uses its managed predictor.
     //
     // ⚠️ NO IMAGE LANE. `min_duration = 5.0` is hardcoded upstream, so `T = 1` does not render at
     // all. The epic's image-lane premise ("T=1 collapses ~31k tokens to ~1k") has no basis;
@@ -23559,6 +24469,21 @@
       "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
       "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
+        // sc-25773 — optional learned attention predictor; dense H3 stays usable without it.
+        {
+          "provider": "huggingface",
+          "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+          "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+          "files": ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"],
+          "expectedSizeBytes": 275415648,
+          "expectedSha256": "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a",
+          "estimatedSizeBytes": 275415648,
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "veda_predictor",
+          "platforms": ["macos", "windows", "linux"]
+        },
+
         // Quant matrix (sc-17150, epic 8506 shape): each tier is a SEPARATE user-selectable
         // artifact tagged with a `variant`; q4 (default) installs when no tier is chosen. Sizes are
         // the EXACT hosted directory bytes measured post-upload (sc-17150 activity 19106); the six
@@ -24322,8 +25247,8 @@
         //      `CANVAS_MAX_PIXELS` and every advertised resolution's long edge to the registered
         //      descriptor's `max_size`. A manifest that got ahead of the engine, or a pin that
         //      moved behind the manifest, is red there rather than a job-time reject.
-        //   2. Dense attention, because the sparse-attention inference path is unreleased — which
-        //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
+        //   2. Dense attention by default; optional Veda stages the managed learned predictor.
+        //      The dense cost table does not set the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
         //      lattice, which sparse attention does not touch. Do not conflate the two in copy.
         //   3. 15 s is REFUSED, not shortened. `limits.hardMaxDuration` is 14.375 and the next
@@ -24334,7 +25259,7 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {
@@ -24393,6 +25318,21 @@
       "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
       "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
+        // sc-25773 — optional learned attention predictor; dense H3 stays usable without it.
+        {
+          "provider": "huggingface",
+          "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+          "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+          "files": ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"],
+          "expectedSizeBytes": 275415648,
+          "expectedSha256": "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a",
+          "estimatedSizeBytes": 275415648,
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "veda_predictor",
+          "platforms": ["macos", "windows", "linux"]
+        },
+
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
@@ -24716,7 +25656,7 @@
         // reference. The two entries are separate model cards and a user can install THIS one
         // without ever reading that one's, so "see the other entry" would leave the withheld
         // components undisclosed on the surface where the decision is actually made.
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
         "recommendedFor": ["reference_to_video"],
         "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
         "promptGuide": {
@@ -24926,6 +25866,201 @@
         // component instead.
         "description": "One-step diffusion super-resolution behind the SeedVR2 image-upscale engine and video upscaling. Larger and slower than Real-ESRGAN, and generative rather than pixel-faithful; install it only if you want that engine.",
         "recommendedFor": ["image_upscale", "video_upscale"]
+      }
+    },
+    {
+      // Iris-3B RESTORATION (epic sc-25678, story sc-25683) — the `upscaler/` task of
+      // speridlabs/iris-3b, served as the `iris` engine of the image-upscale surfaces (Image Studio
+      // post-processing, Image Editor + Library restore actions) by the `iris_3b_restore` transform
+      // that BOTH native bundles register (`mlx-gen-iris` on Apple Silicon, `candle-gen-iris` on
+      // Windows/Linux NVIDIA).
+      //
+      // TASK IDENTITY (E4). Its own resource closure: EXACTLY the three files of the `upscaler/`
+      // export — the restoration backbone, its `config.yaml` (whose `task: restoration` section the
+      // engine checks) and the shipped `empty_prompt.safetensors` conditioning. No text encoder, no
+      // generation backbone (the root `config.yaml` / `model.safetensors` belong to `iris_3b`), and
+      // no `depth/` files: install state is per-file, so installing the generation model never marks
+      // restoration installed or vice versa. The worker resolves the folder cache-only at this
+      // revision (`iris_restore::resolve_restore_export_dir`, pinned to the same repo/revision by
+      // `manifest_declares_the_restore_closure_the_resolver_reads`); a missing / torn / wrong-task
+      // export is a typed refusal before anything loads, and nothing downloads at restore time.
+      //
+      // MEMORY. DECLARED conservative floors (`measured: false`, no calibration campaign — S6 /
+      // sc-25684 owns measured values) from the existing real-weight evidence for a 512x384 →
+      // 2048x1536 restore (6 tiles): MLX peak 11.7 GB, CUDA nvidia-smi peak 10.1 GB, rounded up ~20 %
+      // to 14 / 12 GB, plus each gate's 2 GB reserve (16 / 14). Tiles are a fixed 1024 px, so the
+      // model working set is per-tile bounded; on unified memory the worker adds the host output
+      // canvas beyond that reference geometry and refuses honestly rather than shrinking the request
+      // (`iris_restore::admission_error`). Mirrored by `declared_floors_match_the_catalog`.
+      "id": "iris_3b_restore",
+      "name": "Iris 3B Restoration",
+      "family": "iris",
+      "type": "utility",
+      "macOnly": false,
+      "capabilities": [],
+      "downloads": [
+        {
+          // Upstream, Apache-2.0, not re-hosted. EXACT bytes of the three pinned files.
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "files": ["upscaler/config.yaml", "upscaler/model.safetensors", "upscaler/empty_prompt.safetensors"],
+          "estimatedSizeBytes": 11986978607
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "mlx": {
+        // Declared, not measured (the `mlx` block carries no `measured` flag; see the note above).
+        "minMemoryGb": 16
+      },
+      "candle": {
+        "measured": false,
+        "minMemoryGb": 14,
+        // sc-25690: the pinned candle-gen-iris iris_3b_restore contract classifies StagedResidency
+        // StructurallyNotApplicable — a truth about the task, not undelivered work — so this lane's
+        // memory anchor is measured at the resident rung instead of the lane's staged default.
+        "memoryStrategyStructuralExemptions": {
+          "staged_residency": {
+            "overlays": ["none"],
+            "evidence": [
+              { "source": "inference:crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs", "reason": "The provider contract classifies StagedResidency as StructurallyNotApplicable: the restoration task loads no text encoder (it runs one backbone forward per tile on the export's shipped empty-prompt states), so the backbone is the only component and there is nothing to shed between phases." }
+            ]
+          }
+        }
+      },
+      "ui": {
+        "label": "Iris 3B Restoration",
+        // No `promptGuide`: a utility entry never reaches a Studio prompt-guide surface.
+        "description": "Iris-3B one-step restoration and tiled upscaling (default 4×, any positive scale including 1× restore-only) behind the Iris engine of Image Studio post-processing and the Image Editor / Library restore actions. Runs natively on MLX (Apple Silicon) and Candle/CUDA (NVIDIA). Downloads only the ~12 GB `upscaler/` export — no text encoder; needs ~16 GB unified memory on a Mac or ~14 GB VRAM on an NVIDIA GPU.",
+        "recommendedFor": ["image_upscale"]
+      }
+    },
+    {
+      // sc-25688 — LPIPS VGG16 trunk (torchvision IMAGENET1K_V1 `features.*`, bit-identical in timm's safetensors).
+      "id": "iris_restore_train_vgg16",
+      "name": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-3-Clause",
+      "licenseUrl": "https://github.com/pytorch/vision/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (553432986).
+          "provider": "huggingface",
+          "repo": "timm/vgg16.tv_in1k",
+          "revision": "b8d8aa2dd860af9233c8c67385a8097fd6c35d3f",
+          "files": ["model.safetensors"],
+          "estimatedSizeBytes": 553432986
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/timm/vgg16.tv_in1k"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — VGG16 (LPIPS trunk)",
+        "description": "Training-only: the frozen torchvision ImageNet VGG16 trunk (timm safetensors, ~553 MB) of the LPIPS perceptual loss used by Iris 3B restoration training in the Training Studio. Not needed for restoration itself. torchvision BSD-3-Clause; the VGG weights are credited to Simonyan & Zisserman.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — LPIPS v0.1 VGG linear heads (bit-identical to lpips==0.1.4's vgg.pth lin layers).
+      "id": "iris_restore_train_lpips_lin",
+      "name": "Iris Restoration Training — LPIPS linear heads",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "BSD-2-Clause",
+      "licenseUrl": "https://github.com/richzhang/PerceptualSimilarity/blob/master/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (6264).
+          "provider": "huggingface",
+          "repo": "vivym/lpips",
+          "revision": "270571f1fb2a2c4c5f920cec96cd87838c345982",
+          "files": ["vgg_lpips_linear.safetensors"],
+          "estimatedSizeBytes": 6264
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/vivym/lpips"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — LPIPS linear heads",
+        "description": "Training-only: the LPIPS v0.1 VGG linear heads (6 KB) of the perceptual loss used by Iris 3B restoration training. Not needed for restoration itself. BSD-2-Clause.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // sc-25688 — HYPIR's critic trunk (open_clip convnext_xxlarge, laion2b_s34b_b82k_augreg_soup); only `visual.*` is read.
+      "id": "iris_restore_train_critic_trunk",
+      "name": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+      "family": "iris",
+      "type": "utility",
+      // TRAINING-ONLY resource of Iris 3B restoration training (epic sc-25678, S10 sc-25688): read by
+      // the `iris_3b_restore` TRAINER only (`gen_core::iris::restoration_train::TRAINING_RESOURCES`),
+      // staged as a trainer component after the worker re-checks the pinned size + sha256
+      // (`verify_resource`). Never part of the restoration inference closure (`iris_3b_restore`
+      // installs and runs without it) and never a routable `model` of any job.
+      "componentOnly": true,
+      "capabilities": [],
+      "license": "MIT",
+      "licenseUrl": "https://github.com/mlfoundations/open_clip/blob/main/LICENSE",
+      "downloads": [
+        {
+          // Upstream, pinned to an immutable revision, not re-hosted. EXACT bytes (4802571739).
+          "provider": "huggingface",
+          "repo": "laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup",
+          "revision": "9f3e8ee3f383c672388d9178afe70af9e63ac9df",
+          "files": ["open_clip_pytorch_model.bin"],
+          "estimatedSizeBytes": 4802571739
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/laion/CLIP-convnext_xxlarge-laion2B-s34B-b82K-augreg-soup"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "Iris Restoration Training — OpenCLIP ConvNeXt-XXL critic trunk",
+        "description": "Training-only: the frozen OpenCLIP ConvNeXt-XXLarge image trunk (LAION laion2B-s34B-b82K-augreg-soup, ~4.8 GB) of the adversarial critic used by Iris 3B restoration training. Not needed for restoration itself. OpenCLIP / LAION model card licence: MIT.",
+        "recommendedFor": []
       }
     },
     {

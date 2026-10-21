@@ -254,6 +254,19 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(labelStartingWith("Steps").querySelector("input").getAttribute("min")).toBe("1");
   });
 
+  it("restores and submits H3 last-only FL2VA without inventing a first frame", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({mode:"image_to_video",model:"minimax_h3",prompt:"A cyclist rides",lastFrameAssetId:"last",sourceAssetId:"",resolution:"768x768",duration:5.1667}));
+    const context=baseContext({assets:[asset("last","image","last"),asset("other","image","other")],selectedAsset:asset("other","image","other")});
+    await render(context);expect(fieldLabelled("Last frame")).toBeTruthy();
+    const button=[...container.querySelectorAll("button")].find(b=>b.textContent.includes("Render clip"));expect(button.disabled).toBe(false);await click(button);
+    const payload=context.createVideoJob.mock.calls[0][0];expect(payload.mode).toBe("image_to_video");expect(payload.model).toBe("minimax_h3");expect(payload.sourceAssetId).toBeNull();expect(payload.lastFrameAssetId).toBe("last");
+  });
+  it("does not admit last-only Image-to-Video for other families", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({mode:"image_to_video",model:"bernini",prompt:"A cyclist rides",lastFrameAssetId:"last",sourceAssetId:""}));
+    await render(baseContext({videoModels:[BERNINI],assets:[asset("last","image","last")]}));expect(fieldLabelled("Last frame")).toBeFalsy();
+    expect([...container.querySelectorAll("button")].find(b=>b.textContent.includes("Render clip")).disabled).toBe(true);
+  });
+
   // ------------------------------------------------------------------- modes
 
   it("drives t2va and fl2va from the base partition and hides the axes it has none of", async () => {

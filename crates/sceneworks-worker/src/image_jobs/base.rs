@@ -641,8 +641,9 @@ impl ImageRoute {
             | ImageRoute::MageFinetuned
             | ImageRoute::FluxIpAdapterPoseReject
             | ImageRoute::PoseControlBaseMissing
-            | ImageRoute::PoseReject
-            | ImageRoute::Mlx => request.count,
+            | ImageRoute::PoseReject => request.count,
+            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
+            ImageRoute::Mlx => request.image_count(),
         }
     }
 
@@ -1049,6 +1050,8 @@ impl CandleImageRoute {
             {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
+            // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
+            CandleImageRoute::CandleTxt2Img => request.image_count(),
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -2197,7 +2200,9 @@ pub(crate) fn resolve_weights_dir(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    // Both 2.1 ids (base and its distilled Turbo sibling, sc-25907) are split-repo tier families:
+    // the upstream snapshot is bf16 and the SceneWorks re-host carries q8/q4.
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         if let Some((tier_dir, _tier)) = qwen_image_2_1_tier_dir(settings, request)? {
             return Ok(Some(tier_dir));
         }
@@ -2362,7 +2367,7 @@ pub(crate) fn tier_key_for_resolved_dir(
 
 /// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SPLIT_REPO_TIER_MODELS: &[&str] = &["qwen_image_2_1"];
+const SPLIT_REPO_TIER_MODELS: &[&str] = sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
@@ -2424,12 +2429,28 @@ fn qwen_image_2_1_declared_tier_dir(
     }
     let repo = download.get("repo").and_then(Value::as_str)?;
     let revision = download.get("revision").and_then(Value::as_str)?;
-    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
-    let subdir = download
+    let files: Vec<String> = download
         .get("files")
         .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    // An install made at a revision the pin has since SUPERSEDED (sc-25909: the q8/q4 re-host
+    // republished to add each tier's NOTICE) is carried forward cache-only before the exact lookup.
+    let root = crate::model_jobs::huggingface_pinned_tier_snapshot_dir(
+        &settings.data_dir,
+        repo,
+        revision,
+        &files,
+    )?;
+    let subdir = files
+        .first()
+        .map(String::as_str)
         .and_then(|pattern| pattern.split('/').next())
         // Confined to a single plain directory name. The value is a checked-in catalog string
         // rather than user input, but a glob is still a string a future edit could widen, and a
@@ -3844,9 +3865,45 @@ fn candle_certified_artifact_path(
             "SceneWorks/flux2-klein-9b-mlx",
             FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
         ),
+        // Iris-3B generation (sc-25690). The one dense artifact is the pinned upstream snapshot at
+        // its ROOT — there is no tier sub-directory to join — and its text encoder is a manifest
+        // co-requisite the worker stages cache-only at its own pinned revision
+        // (`attach_required_components`), so the backbone root is the whole caller-chosen identity.
+        // Without this arm the route was permanently uncertified: the shared ladder then submits
+        // the resident estimate alone, and the staged and bounded-attention rungs
+        // `candle-gen-iris` implements could never be selected for a request.
+        "iris_3b" => {
+            return candle_certified_hf_artifact_path(
+                settings,
+                gen_core::iris::UPSTREAM_WEIGHTS_REPO,
+                gen_core::iris::UPSTREAM_WEIGHTS_REVISION,
+                Path::new(""),
+                weights_dir,
+            );
+        }
         _ => return false,
     };
     candle_certified_hf_artifact_path(settings, repo, revision, Path::new(tier), weights_dir)
+}
+
+/// The numeric tier key the SHARED memory selector binds a request to.
+///
+/// The VRAM gate names a tier from the resolved directory's basename, or — for a flat root with no
+/// tier basename — from `advanced.mlxQuantize` (q8 by default; `requested_tier_key`). That key only
+/// has to index the manifest's per-tier floor rows there. The shared selector is stricter: it turns
+/// the key into the `MemoryNumericTier` of the selection, and the provider's safety check refuses a
+/// selection whose tier is not the one the generator LOADED. Iris-3B refuses quantization and has
+/// exactly one dense artifact, so its loaded tier is bf16 whatever the request's advisory quantize
+/// knob says; handing the selector the gate's `q8` would mint a `Q8` selection the loaded bf16
+/// generator rejects ("selected tier does not match loaded tier") the moment an optimized rung is
+/// chosen.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
+    if engine_id == "iris_3b" {
+        "bf16"
+    } else {
+        gate_tier
+    }
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4874,7 +4931,8 @@ fn reconcile_resolved_tier_quant(
     (load_quant, actual_bits)
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=max(80, family default)) else the family
+/// default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
@@ -4889,8 +4947,21 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
                 .as_u64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .map(|steps| (steps as u32).clamp(1, 80))
+        // The historical 80-step ceiling, raised to the model's own default where that is higher
+        // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
+        // than silently clamped below what the model ships with.
+        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
         .unwrap_or(model.default_steps())
+}
+
+/// The largest `advanced.steps` the generic image lane forwards: the historical 80, or the model's
+/// own default when that is higher. Mirrored by Image Studio's Steps input (`maxStepsForModel`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn max_requested_steps(default_steps: u32) -> u32 {
+    default_steps.max(80)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -5339,6 +5410,10 @@ fn mlx_raw_settings(
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
+    // Worker-owned too (epic 25899): only the image's own render report adds the record back.
+    raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::REPORT_KEY);
+    raw.remove("moss_image_execution_report");
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -5581,6 +5656,71 @@ fn apply_candle_qwen_load_shape(
         spec,
         false,
     )
+}
+
+/// The Candle shared lane's prefix-KV-cache surcharge for one request (epic 25899): priced from the
+/// LINKED provider's descriptor and pricing function, or `None` for every provider without a cache
+/// and for a request whose admitted block is not handed to ONE render at exactly this geometry and
+/// reference set (`single_pass == false`: hires fix, native prompt batch).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_prefix_kv_cache_surcharge(
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    negative_branch: bool,
+    single_pass: bool,
+) -> Option<u64> {
+    if !single_pass {
+        return None;
+    }
+    crate::inference_runtime::media_descriptor(engine_id).and_then(|descriptor| {
+        crate::execution_planner::prefix_kv_cache_surcharge_bytes(
+            engine_id,
+            &descriptor.capabilities.execution,
+            None,
+            width,
+            height,
+            reference_count,
+            negative_branch,
+        )
+    })
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_prefix_kv_cache_pricing_tests {
+    use super::*;
+
+    /// The production Candle pricing site, against the LINKED registry: a single-pass 2.1 request
+    /// is priced at exactly the provider's own `prefix_kv_cache_demand_bytes`, a multi-pass one and
+    /// a provider with no cache at nothing.
+    ///
+    /// *Mutations that red this:* returning `None` from the site (no surcharge for Turbo); dropping
+    /// the single-pass gate (the hires request is priced); passing another geometry, reference
+    /// count or branch flag through (the byte equality).
+    #[test]
+    fn the_candle_lane_prices_the_linked_turbo_cache_only_for_a_single_pass_request() {
+        let expected = runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+            1024, 768, 2, true,
+        );
+        for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, true),
+                Some(expected),
+                "{engine_id}"
+            );
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, false),
+                None,
+                "{engine_id}: a multi-pass request is priced no cache"
+            );
+        }
+        assert_eq!(
+            candle_prefix_kv_cache_surcharge("qwen_image", 1024, 768, 2, true, true),
+            None,
+            "a provider with no cache is priced nothing"
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -6929,6 +7069,22 @@ pub(crate) fn normalize_sampling_knob(
         "{engine}: requested {knob} {name:?} is not advertised (supported: {advertised:?}); \
          falling back to the engine default"
     );
+    emit_sampling_knob_unsupported(knob, json!(name), advertised, model_id, job_id, engine);
+    None
+}
+
+/// The `sampling_knob_unsupported` worker event [`normalize_sampling_knob`] emits when it drops a
+/// requested knob back to the engine default. Shared with the other per-request drops that remove a
+/// value the engine would refuse (Iris-3B's CFG-bound negative prompt and schedule shift, sc-25679),
+/// so every silent drop is observable through the one event.
+pub(crate) fn emit_sampling_knob_unsupported(
+    knob: &str,
+    requested: Value,
+    advertised: &[&str],
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) {
     emit_event(
         "sampling_knob_unsupported",
         json!({
@@ -6936,11 +7092,10 @@ pub(crate) fn normalize_sampling_knob(
             "engine": engine,
             "model": model_id,
             "knob": knob,
-            "requested": name,
+            "requested": requested,
             "supported": advertised,
         }),
     );
-    None
 }
 
 /// Read the raw per-generation sampler / scheduler / schedule-shift knobs from a job's `advanced`
@@ -7502,6 +7657,22 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `GenerationRequest::output_channels`. `Rgba` makes the provider answer with
     /// `GenerationOutput::ImagesRgba`, whose four channels the egress types as an RGBA PNG.
     pub(crate) output_channels: gen_core::OutputChannels,
+    /// The request controls beyond the positional knobs (sc-25681): CFG interval and
+    /// caption-overflow policy, resolved and refused by [`lane_controls`]. `Default` = the
+    /// engine's own for every model that declares none.
+    pub(crate) controls: lane_controls::LaneRequestControls,
+    /// Where the render's non-fatal engine warnings (`GenerationReport::warnings`, e.g. Iris's
+    /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
+    /// the lane always has for providers that report none.
+    pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
+    /// Where the render's `GenerationReport::prefix_kv_cache` — the prefix-KV-cache path that
+    /// actually RAN, its cache bytes and any shed-over-priced-bound overflow (epic 25899) — is
+    /// collected for the image's provenance and the job record. `None` discards it; a provider
+    /// with no cache reports none.
+    pub(crate) prefix_kv_cache: Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
+    /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
+    /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
+    pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
 }
 
 /// [`generate_one`] with an explicit [`LaneRgbaSurface`].
@@ -7534,18 +7705,87 @@ fn generate_one_on_surface(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    render_on_surface(
+        generator,
+        prompt,
+        width,
+        height,
+        seed,
+        steps,
+        guidance,
+        negative_prompt,
+        reference,
+        multi_references,
+        edit_mask,
+        true_cfg,
+        sampler,
+        scheduler,
+        scheduler_shift,
+        guidance_method,
+        use_pid,
+        text_style_gain,
+        memory,
+        memory_strategy_context,
+        enhance,
+        prompt_enhancement,
+        preview,
+        surface,
+        cancel,
+        on_progress,
+    )?
+    .pop()
+    .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))
+}
+
+/// The one generic-lane engine call: builds the request (one `prompt`, or the surface's native
+/// `prompt_batch` + `count`) and returns EVERY image the engine produced, in engine order.
+#[allow(clippy::too_many_arguments)]
+fn render_on_surface(
+    generator: &dyn Generator,
+    prompt: &str,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: Option<f32>,
+    negative_prompt: Option<String>,
+    reference: Option<&(Image, f32)>,
+    multi_references: &[Image],
+    edit_mask: Option<&Image>,
+    true_cfg: Option<f32>,
+    sampler: Option<&str>,
+    scheduler: Option<&str>,
+    scheduler_shift: Option<f32>,
+    guidance_method: Option<&str>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
+    preview: gen_core::PreviewSink,
+    surface: &LaneRgbaSurface<'_>,
+    cancel: &CancelFlag,
+    on_progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<Vec<(u32, u32, Vec<u8>)>> {
     let conditioning = build_lane_conditioning_with_alpha(
         reference,
         multi_references,
         surface.multi_reference_alpha,
         edit_mask,
     );
+    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
+    let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
+        None => (prompt.to_owned(), Vec::new(), 1),
+    };
     let mut request = GenerationRequest {
-        prompt: prompt.to_owned(),
+        prompt,
+        prompt_batch,
         negative_prompt,
         width,
         height,
-        count: 1,
+        count,
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
@@ -7559,34 +7799,44 @@ fn generate_one_on_surface(
         memory,
         conditioning,
         output_channels: surface.output_channels,
+        cfg_interval: surface.controls.cfg_interval,
+        caption_overflow: surface.controls.caption_overflow,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
     enhance.apply(&mut request, prompt_enhancement);
-    let output = crate::memory_strategy::generate_with_scope(
+    // `generate_with_report` (sc-25681): the default implementation is exactly `generate`, so every
+    // provider that reports nothing is unaffected; one that reports (Iris's `caption_truncated`)
+    // has its warnings collected for the image's provenance.
+    let report = crate::memory_strategy::generate_with_scope_report(
         generator,
         &mut request,
         memory_strategy_context,
         on_progress,
     )
-        .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
+    if let Some(sink) = surface.warnings {
+        sink.borrow_mut().extend(report.warnings);
+    }
+    if let Some(sink) = surface.prefix_kv_cache {
+        *sink.borrow_mut() = report.prefix_kv_cache;
+    }
+    let output = report
+        .output
+        .ok_or_else(|| WorkerError::Engine("generator produced no output".to_owned()))?;
     match output {
-        GenerationOutput::Images(mut images) => {
-            let image = images
-                .pop()
-                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
-            Ok((image.width, image.height, image.pixels))
-        }
+        GenerationOutput::Images(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
         // Only ever produced for an `OutputChannels::Rgba` request (the shared request floor refuses
         // one against a provider without `supports_alpha_output`). The flat interleaved RGBA buffer
         // flows on unchanged: `GeneratedPixels::from_engine_buffer` types it by its channel count.
-        GenerationOutput::ImagesRgba(mut images) => {
-            let image = images
-                .pop()
-                .ok_or_else(|| WorkerError::Engine("generator produced no image".to_owned()))?;
-            Ok((image.width, image.height, image.pixels))
-        }
+        GenerationOutput::ImagesRgba(images) => Ok(images
+            .into_iter()
+            .map(|image| (image.width, image.height, image.pixels))
+            .collect()),
         _ => Err(WorkerError::Engine(
             "generator returned non-image output".to_owned(),
         )),
@@ -7912,6 +8162,11 @@ fn generate_one_with_hires_on_surface(
     let base_surface = LaneRgbaSurface {
         multi_reference_alpha: surface.multi_reference_alpha,
         output_channels: gen_core::OutputChannels::Rgb,
+        controls: surface.controls,
+        warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
+    // A hires-fix render is per image; the arms refuse a prompt batch with it.
+        prompt_batch: None,
     };
     let (base_width, base_height, base_pixels) = generate_one_on_surface(
         generator,
@@ -7966,6 +8221,11 @@ fn generate_one_with_hires_on_surface(
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         output_channels: surface.output_channels,
+        controls: surface.controls,
+        warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
+    // A hires-fix render is per image; the arms refuse a prompt batch with it.
+        prompt_batch: None,
     };
     generate_one_on_surface(
         generator,
@@ -8687,15 +8947,17 @@ pub(crate) struct QwenImage21Reference {
 
 /// Is this the model whose edit route is ONE ordered conditioning list (sc-24110)?
 ///
-/// Deliberately a single id rather than a family predicate: the 2512-weights `qwen_image_edit*` ids
-/// are a different engine, a different latent space and a different edit contract, and they keep
-/// the `ImageRoute::QwenEdit` / `CandleImageRoute::QwenEdit` lanes they have always had.
+/// Deliberately the two 2.1 engine ids (base and Turbo, sc-25907 — one request contract) rather
+/// than a family predicate: the 2512-weights `qwen_image_edit*` ids are a different engine, a
+/// different latent space and a different edit contract, and they keep the `ImageRoute::QwenEdit`
+/// / `CandleImageRoute::QwenEdit` lanes they have always had.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
-    request.model == "qwen_image_2_1" && !qwen_image_2_1_reference_ids(request).is_empty()
+    sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model)
+        && !qwen_image_2_1_reference_ids(request).is_empty()
 }
 
 /// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
@@ -8729,7 +8991,7 @@ fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
     }
     let scalar = |value: &Option<String>| -> Option<String> {
@@ -8996,7 +9258,7 @@ fn guard_qwen_image_2_1_lane_slots(
     identity_init: Option<&(Image, f32)>,
     edit_mask: Option<&Image>,
 ) -> WorkerResult<()> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Ok(());
     }
     if edit_mask.is_some() {
@@ -9746,6 +10008,42 @@ async fn generate_stream(
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    generate_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_stream`] with the generator loader supplied by the caller (the `_using` seam, see
+/// [`start_cached_gen_stream_with_request_state_using`]): every pre-load decision, the cached
+/// load, the per-item drive, and `consume_gen_events` are the production code; only the engine
+/// is injectable, so a test can pin progress / cancel / failure on a real job arm without weights.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+async fn generate_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -9761,6 +10059,10 @@ async fn generate_stream(
     let weights_dir = resolve_weights_dir(request, settings)?
         .ok_or_else(|| WorkerError::InvalidPayload("model weights not found".to_owned()))?;
     let adapters = resolve_adapters(request, settings)?;
+    // Each adapter's identity (request id, path, sha256, scale, kind) for the image provenance,
+    // joined after the render with the engine's own apply report (sc-25681).
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &adapters).await;
     // sc-3723: surface the descriptor-derived backend ("mlx" for every linked family today; a
     // future candle row would self-describe) over the gpu-id-derived label. Falls back to the
     // passed-in label only if a descriptor ever advertised an empty backend (never today).
@@ -9820,6 +10122,16 @@ async fn generate_stream(
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
+    // The request controls beyond the positional knobs (sc-25681): CFG interval and caption-overflow
+    // policy against the linked descriptor, plus the CFG-bound negative prompt
+    // (`image.negativePromptRequiresGuidance`, Iris-3B) — each refused before load when the engine
+    // does not honour it or CFG-off would make it inert, never dropped.
+    let lane_controls = lane_controls::resolve_lane_request_controls(
+        request,
+        &model.descriptor.capabilities,
+        guidance,
+        negative_prompt.as_deref(),
+    )?;
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
@@ -9885,6 +10197,27 @@ async fn generate_stream(
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
     let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
     let use_pid = pid_weights.is_some();
+    // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
+    // before load when the linked engine cannot render it or a per-image lane feature is in use.
+    let native_batch = lane_controls::resolve_native_prompt_batch(
+        request,
+        &model.descriptor.capabilities,
+        &[
+            ("hires fix", hires_fix.is_some()),
+            (
+                "a reference image",
+                identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some(),
+            ),
+            ("prompt enhancement", enhance.enabled),
+        ],
+    )?;
+    let native_batch_images = native_batch.as_ref().map_or(1, |batch| batch.images());
+    // The images this job streams: `count` per-seed renders, or every image of the one batch call.
+    let stream_total = if native_batch.is_some() {
+        native_batch_images as usize
+    } else {
+        count
+    };
     // PiD output tier (sc-10054): PiD super-resolves the base latent by a fixed 4×, so the effective
     // base picks whether the output lands on ~2K or ~4K. `4k`/native leave the requested dims untouched;
     // `2k` caps the base (also lowering the F-013 decode peak). Rebind before `generate_one`.
@@ -9946,7 +10279,8 @@ async fn generate_stream(
         // `tokenizer_clip_l` / `tokenizer_clip_bigg` / `vae_fp16_fix`) via the generic seam. Keyed on the
         // resolved `engine_id` (the DESCRIPTOR id) rather than `request.model`, so a finetune sibling that
         // shares one engine under a distinct catalog id resolves the same descriptor (media_descriptor matches
-        // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
+        // on descriptor.id). The MLX SDXL turnkey is self-contained (no `required_components`); Iris-3B
+        // stages its Qwen3-VL `text_encoder` here (sc-25679).
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
@@ -10078,6 +10412,7 @@ async fn generate_stream(
             (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
         );
         let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+            native_batch: native_batch_images,
             width: memory_width,
             height: memory_height,
             count: request.count,
@@ -10092,6 +10427,17 @@ async fn generate_stream(
                 engine_id, &spec, &request.prompt,
                 &request.negative_prompt,
             )),
+            // The prompt branches the engine will evaluate (epic 25899): a prefix-KV-cache provider
+            // holds one cache per branch, so its surcharge doubles under true CFG.
+            negative_branch: crate::execution_planner::evaluates_negative_branch(
+                negative_prompt.as_deref().unwrap_or_default(),
+                true_cfg,
+                guidance,
+            ),
+            // A hires refinement hands this block to a first pass at the base size with the caller's
+            // own references and re-resolved CFG, and a native prompt batch renders one prefix per
+            // prompt in one pass: the cache is priced for neither render.
+            prefix_kv_cache_eligible: hires_fix.is_none() && native_batch.is_none(),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -10279,12 +10625,13 @@ async fn generate_stream(
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,
@@ -10328,6 +10675,76 @@ async fn generate_stream(
             // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
             // multi-image job settles exactly one decision and emits exactly one event.
             let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            // A native prompt batch (sc-25681) is ONE engine call over every image of the job,
+            // admitted against its `prompts × count` batch (`native_batch` above).
+            if let Some(batch) = native_batch.as_ref() {
+                return drive_native_prompt_batch(
+                    tx,
+                    seeds[0],
+                    batch.images() as usize,
+                    |preview, on_progress| {
+                        let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                            generator,
+                            &mlx_request_plan,
+                            &mlx_request_inputs,
+                            cache_state,
+                            loaded_policy.offload_policy,
+                            warm_policy.take(),
+                            request_external_committed_bytes,
+                        )?;
+                        let _request_memory_limit = memory_evaluation
+                            .process_limit_bytes
+                            .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                        let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                        let images = render_on_surface(
+                            generator,
+                            "",
+                            width,
+                            height,
+                            seeds[0],
+                            steps,
+                            guidance,
+                            negative_prompt.clone(),
+                            None,
+                            &[],
+                            None,
+                            true_cfg,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            Some(memory_evaluation.memory),
+                            Some(&memory_evaluation.context),
+                            &enhance,
+                            gen_core::PromptEnhancementSink::default(),
+                            preview,
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &[],
+                                output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                prompt_batch: Some(batch),
+                            },
+                            &cancel,
+                            on_progress,
+                        )?;
+                        let facts = lane_controls::image_facts(
+                            &warnings.take(),
+                            &adapter_identities,
+                            &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                memory_evaluation.prefix_kv_cache,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
+                        );
+                        Ok((images, facts))
+                    },
+                );
+            }
             drive_gen_items_scored_reported(
                 tx,
                 seeds,
@@ -10347,6 +10764,10 @@ async fn generate_stream(
                     let _request_memory_limit = memory_evaluation
                         .process_limit_bytes
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                    // This image's non-fatal engine warnings (sc-25681), reported with its asset.
+                    let warnings = std::cell::RefCell::new(Vec::new());
+                    // ...and the prefix-KV-cache path its render reports (epic 25899).
+                    let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -10378,6 +10799,10 @@ async fn generate_stream(
                             &LaneRgbaSurface {
                                 multi_reference_alpha: &edit_ref_alpha,
                                 output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                prompt_batch: None,
                             },
                             &cancel,
                             on_progress,
@@ -10411,6 +10836,19 @@ async fn generate_stream(
                             likeness_source_ref.as_deref(),
                         )
                     });
+                    // The image's provenance facts (sc-25681): engine warnings, and each adapter's
+                    // identity joined with the engine's own applied/skipped report.
+                    if let Some(facts) = lane_controls::image_facts(
+                        &warnings.take(),
+                        &adapter_identities,
+                        &generator.adapter_apply_reports(),
+                        crate::execution_planner::prefix_kv_cache_record(
+                            memory_evaluation.prefix_kv_cache,
+                            prefix_kv_cache_report.take().as_ref(),
+                        ),
+                    ) {
+                        prompt_enhancement.send_image_facts(facts);
+                    }
                     Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
@@ -10426,7 +10864,7 @@ async fn generate_stream(
         backend,
         adapter_label,
         &raw_settings,
-        count,
+        stream_total,
         rx,
         cancel,
         blocking,
@@ -10472,6 +10910,10 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
         // for the same reason, and neither is derived from the other.
         "qwen_image_2_1" => "candle_qwen_2_1",
+        // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
+        "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
+        "moss_image_base" => "candle_moss_image_base",
+        "moss_image_sft" => "candle_moss_image_sft",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -10498,6 +10940,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
+        // Iris-3B (sc-25680): the off-Mac sibling of the `mlx_iris` label.
+        "iris_3b" => "candle_iris",
+        // Bernini's production stream stamps this via its own route; the request-only fallback
+        // (`adapter_id`) reaches it through here.
+        "bernini_image" => CANDLE_BERNINI_IMAGE_ADAPTER,
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -12219,9 +12666,45 @@ async fn generate_candle_stream(
     job: &JobSnapshot,
     plan: &ImagePlan,
     project_path: &Path,
-    _device_backend: &str,
+    device_backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    generate_candle_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        device_backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_candle_stream`] with the generator loader supplied by the caller — the Candle twin of
+/// [`generate_stream_using`] (sc-25680): every pre-load decision, the cached load, the per-item drive
+/// and `consume_gen_events` are the production code; only the engine is injectable, so a test can pin
+/// progress / cancel / failure on a real candle job arm without weights or a CUDA device.
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    _device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
@@ -12314,7 +12797,16 @@ async fn generate_candle_stream(
     let guidance = resolve_guidance(request, &model);
     let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
+    // The same request controls the MLX arm resolves (sc-25681): CFG interval, caption-overflow
+    // policy and the CFG-bound negative prompt, each refused before load when the linked engine
+    // does not honour it or CFG-off would make it inert. Inert for every model that sends none.
     let negative_prompt = resolve_negative_prompt(request, &model);
+    let lane_controls = lane_controls::resolve_lane_request_controls(
+        request,
+        &model.descriptor.capabilities,
+        guidance,
+        negative_prompt.as_deref(),
+    )?;
 
     // Per-payload flash/accel-attention (sc-3674): the UI Advanced toggle sends `advanced.flashAttn`
     // (default on). Process-global toggle, set before the generator loads (the candle pipeline reads
@@ -12349,6 +12841,10 @@ async fn generate_candle_stream(
         Vec::new()
     };
     let adapter_count = adapters.len();
+    // Each adapter's identity for the image provenance, joined after the render with the engine's
+    // own apply report (sc-25681) — the MLX arm's twin.
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &adapters).await;
 
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
@@ -12471,6 +12967,27 @@ async fn generate_candle_stream(
         resolve_pid_weights(request, &settings.data_dir, &request.model)?
     };
     let use_pid = pid_weights.is_some();
+    // A native prompt batch (sc-25681): ONE engine call over `prompts × count` images, refused
+    // before load when the linked engine cannot render it or a per-image lane feature is in use.
+    let native_batch = lane_controls::resolve_native_prompt_batch(
+        request,
+        &model.descriptor.capabilities,
+        &[
+            ("hires fix", hires_fix.is_some()),
+            (
+                "a reference image",
+                edit_reference.is_some()
+                    || img2img_reference.is_some()
+                    || !edit_refs.is_empty()
+                    || edit_mask.is_some(),
+            ),
+            ("prompt enhancement", enhance.enabled),
+        ],
+    )?;
+    // The batch renders every image in one call: the stream reports all of them.
+    let total = native_batch
+        .as_ref()
+        .map_or(total, |batch| batch.images() as usize);
     // PiD output tier (sc-10054): 2K caps the effective base so PiD's fixed 4× lands on ~2048 (default
     // 4K/native leaves the requested dims untouched). Rebind before `generate_one`.
     let (width, height) = pid_effective_dims(width, height, use_pid, pid_output_tier(request));
@@ -12489,6 +13006,18 @@ async fn generate_candle_stream(
     // the tier's MEASURED sequential peak (`candle.sequentialPeakGb`) is known and STILL won't fit, reject
     // instead of running into a reactive OOM. Honors `SCENEWORKS_CUDA_VRAM_CAP_GB` to emulate a small
     // card. Unmeasured models (no `candle` block) and non-NVIDIA hosts yield `Unknown` → never block.
+    //
+    // sc-25684: a resident restoration transform (the Iris `upscaler/` task, sc-25683) is evicted by
+    // the generator cache's load anyway — evict it BEFORE probing, so its VRAM is not counted as
+    // occupied and a generation that fits once it is gone is not refused or demoted to staging
+    // (the reclaimable credit below covers only a resident GENERATOR). A no-op when none is loaded.
+    if crate::transform_cache::evict_resident_transform().await? {
+        tracing::info!(
+            event = "candle_generation_evicted_resident_transform",
+            job_id = %job.id,
+            model = %request.model,
+        );
+    }
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -12780,8 +13309,19 @@ async fn generate_candle_stream(
     );
     let mut raw_settings =
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
+    // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
+    // resident/sequential prediction below exactly like resident adapter bytes do:
+    // `candle.imageActivationGbPerMegapixel × (images × max(1, MP) − 1)`. Zero otherwise.
+    let batch_overlay_bytes = lane_controls::declared_activation_overlay_bytes(
+        request,
+        native_batch.as_ref(),
+        memory_width,
+        memory_height,
+    )?;
     let adapter_resident_bytes =
-        candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes);
+        candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
+            .saturating_add(batch_overlay_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -12870,6 +13410,10 @@ async fn generate_candle_stream(
     )?;
     let mut shared_contract_spec = attached_shared_contract_spec.into_load_spec();
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    // The numeric tier the shared selector binds this request to — the tier the provider LOADS,
+    // which for a single-artifact dense route is not the gate's bits-derived key (see
+    // `candle_shared_memory_tier`).
+    let shared_tier = candle_shared_memory_tier(engine_id, tier);
     // A supported Hires refinement is a fresh one-reference image-to-image request even when the
     // caller's first pass was Edit or Inpaint. Admit that final-pass identity independently; the
     // original mode/reference/geometry is admitted below for the first pass.
@@ -12889,7 +13433,7 @@ async fn generate_candle_stream(
     };
     shared_contract_spec = apply_declared_candle_image_load_shape(
         engine_id,
-        Some(tier),
+        Some(shared_tier),
         shared_admission_mode,
         &request.model_manifest_entry,
         shared_contract_spec,
@@ -12918,23 +13462,49 @@ async fn generate_candle_stream(
         settings,
         &shared_contract_spec,
         &request.model_manifest_entry,
-        tier,
+        shared_tier,
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
-    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
+    // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
+    // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
+    // follows the build's production device width, not the tier.
+    let prefix_kv_cache_surcharge = candle_prefix_kv_cache_surcharge(
+        engine_id,
+        memory_width,
+        memory_height,
+        reference_count,
+        crate::execution_planner::evaluates_negative_branch(
+            negative_prompt.as_deref().unwrap_or_default(),
+            true_cfg,
+            guidance,
+        ),
+        // A hires refinement is a second, differently shaped pass, and a native prompt batch holds
+        // one prefix per prompt: the cache is priced for neither (the MLX lane's same rule,
+        // `MlxRequestInputs::prefix_kv_cache_eligible`).
+        hires_fix.is_none() && native_batch.is_none(),
+    );
+    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(
         engine_id,
         &request.model,
         &shared_contract_spec,
         artifact_is_certified,
         &request.model_manifest_entry,
-        tier,
+        shared_tier,
         shared_admission_mode,
         (adapter_count > 0).then_some("lora"),
         gen_core::MemoryGeometry {
             width: memory_width,
             height: memory_height,
-            batch: 1,
+            // A native prompt batch (sc-25681) is ONE provider call over `prompts × count`
+            // images, so that is the batch the request is admitted at — the provider's request
+            // scope bounds the images it will render by exactly this figure (`candle-gen-iris`
+            // refuses `prompts × count > MemoryGeometry::batch`). The batch's memory is charged
+            // once, by the declared activation overlay above; the selector does not scale the
+            // same activations by this batch again (`candle_memory_strategy::law_geometry`).
+            batch: native_batch
+                .as_ref()
+                .map_or(1, lane_controls::NativePromptBatch::images),
             frames: 1,
             reference_count,
         },
@@ -12951,6 +13521,7 @@ async fn generate_candle_stream(
         } else {
             gen_core::MemoryCacheState::Cold
         },
+        prefix_kv_cache_surcharge,
     )?;
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
@@ -12968,7 +13539,7 @@ async fn generate_candle_stream(
             &shared_contract_spec,
             artifact_is_certified,
             &request.model_manifest_entry,
-            tier,
+            shared_tier,
             shared_request_mode,
             (adapter_count > 0).then_some("lora"),
             gen_core::MemoryGeometry {
@@ -13000,7 +13571,10 @@ async fn generate_candle_stream(
     // answer "did the receipt price this request?" — and that is exactly the question the executed
     // load policy has to agree with.
     let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
+    // What the admission decided about the prefix KV cache, recorded with each image (epic 25899).
+    let mut prefix_kv_cache_plan: Option<crate::execution_planner::PrefixKvCachePlan> = None;
     if let Some(evaluation) = shared_memory {
+        prefix_kv_cache_plan = evaluation.prefix_kv_cache;
         if receipt_priced_route {
             receipt_priced_selection = Some(evaluation.context.selection.strategy);
         } else {
@@ -13009,13 +13583,13 @@ async fn generate_candle_stream(
             // selection is attributable to the exact estimate that admitted it. The receipt-priced
             // families emit their own exact-receipt event after the load (below) and are not
             // duplicated here.
-            let telemetry = evaluation.selection_telemetry(engine_id, tier);
+            let telemetry = evaluation.selection_telemetry(engine_id, shared_tier);
             tracing::info!(
                 event = "image_memory_strategy_selected",
                 job_id = %job.id,
                 model = %request.model,
                 route = engine_id,
-                actual_tier = tier,
+                actual_tier = shared_tier,
                 strategy = crate::candle_memory_strategy::strategy_label(
                     evaluation.context.selection.strategy
                 ),
@@ -13611,12 +14185,13 @@ async fn generate_candle_stream(
     .await;
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("candle {engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,
@@ -13839,10 +14414,73 @@ async fn generate_candle_stream(
                 _ => None,
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            // A native prompt batch (sc-25681) is ONE engine call over every image of the job,
+            // admitted against its `prompts × count` batch (`batch_overlay_bytes` above).
+            if let Some(batch) = native_batch.as_ref() {
+                let seed = work[0].0;
+                return drive_native_prompt_batch(
+                    tx,
+                    seed,
+                    batch.images() as usize,
+                    |preview, on_progress| {
+                        let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
+                        let images = render_on_surface(
+                            generator,
+                            "",
+                            width,
+                            height,
+                            seed,
+                            steps,
+                            guidance,
+                            negative_prompt.clone(),
+                            None,
+                            &[],
+                            None,
+                            true_cfg,
+                            sampler.as_deref(),
+                            scheduler.as_deref(),
+                            scheduler_shift,
+                            guidance_method.as_deref(),
+                            use_pid,
+                            text_style_gain,
+                            generation_memory,
+                            memory_strategy_context.as_ref(),
+                            &enhance,
+                            gen_core::PromptEnhancementSink::default(),
+                            preview,
+                            &LaneRgbaSurface {
+                                multi_reference_alpha: &[],
+                                output_channels: rgba_output_channels,
+                                controls: lane_controls,
+                                warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
+                                prompt_batch: Some(batch),
+                            },
+                            &cancel,
+                            on_progress,
+                        )?;
+                        let facts = lane_controls::image_facts(
+                            &warnings.take(),
+                            &adapter_identities,
+                            &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                prefix_kv_cache_plan,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
+                        );
+                        Ok((images, facts))
+                    },
+                );
+            }
             drive_gen_items_scored_reported(
                 tx,
                 work,
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
+                // This image's non-fatal engine warnings (sc-25681), reported with its asset.
+                let warnings = std::cell::RefCell::new(Vec::new());
+                // ...and the prefix-KV-cache path its render reports (epic 25899).
+                let prefix_kv_cache_report = std::cell::RefCell::new(None);
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires_on_surface(
                         generator,
@@ -13888,6 +14526,10 @@ async fn generate_candle_stream(
                         &LaneRgbaSurface {
                             multi_reference_alpha: &edit_ref_alpha,
                             output_channels: rgba_output_channels,
+                            controls: lane_controls,
+                            warnings: Some(&warnings),
+                            prefix_kv_cache: Some(&prefix_kv_cache_report),
+                            prompt_batch: None,
                         },
                         &cancel,
                         on_progress,
@@ -13919,6 +14561,19 @@ async fn generate_candle_stream(
                         likeness_source_ref.as_deref(),
                     )
                 });
+                // The image's provenance facts (sc-25681): engine warnings, and each adapter's
+                // identity joined with the engine's own applied/skipped report.
+                if let Some(facts) = lane_controls::image_facts(
+                    &warnings.take(),
+                    &adapter_identities,
+                    &generator.adapter_apply_reports(),
+                    crate::execution_planner::prefix_kv_cache_record(
+                        prefix_kv_cache_plan,
+                        prefix_kv_cache_report.take().as_ref(),
+                    ),
+                ) {
+                    prompt_enhancement.send_image_facts(facts);
+                }
                 Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
                 },
             )
@@ -14299,6 +14954,21 @@ async fn consume_gen_events_with_disclosure(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let total_u32 = total as u32;
+    // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
+    // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
+    let one_pass = !plan.request.prompts.is_empty();
+    let (step_slices, step_label) = if one_pass {
+        (1, format!("Batch of {total}"))
+    } else {
+        (total_u32, String::new())
+    };
+    let step_text = |index: usize, detail: String| {
+        if one_pass {
+            format!("{step_label} — {detail}.")
+        } else {
+            format!("Image {}/{total} — {detail}.", index + 1)
+        }
+    };
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     // Per-image inference lifecycle events (sc-3450), parity with the Python worker's
@@ -14355,6 +15025,9 @@ async fn consume_gen_events_with_disclosure(
     // (sc-11045). `None` for every lane that holds no runtime handle — those assets keep whatever
     // the route stamped pre-load (including the honest `no-runtime-receipt` materialization).
     let mut measured_checkpoint_facts: Option<Value> = None;
+    // Per-image provenance facts (sc-25681), keyed by image index until that image is written.
+    let mut pending_image_facts: std::collections::HashMap<usize, JsonObject> =
+        std::collections::HashMap::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -14397,9 +15070,9 @@ async fn consume_gen_events_with_disclosure(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, current, step_total, total_u32),
+                        step_fraction(index, current, step_total, step_slices),
                         &progress_with_auto_tier_streaming(
-                            &format!("Image {}/{total} — step {current}/{step_total}.", index + 1),
+                            &step_text(index, format!("step {current}/{step_total}")),
                             auto_tier_streaming,
                         ),
                         Some(streaming_result_with_preview(
@@ -14421,8 +15094,8 @@ async fn consume_gen_events_with_disclosure(
                     image_progress(
                         JobStatus::Running,
                         ProgressStage::Generating,
-                        step_fraction(index, 1, 1, total_u32),
-                        &format!("Image {}/{total} — decoding.", index + 1),
+                        step_fraction(index, 1, 1, step_slices),
+                        &step_text(index, "decoding".to_owned()),
                         Some(streaming_result_with_preview(
                             plan,
                             asset_writes,
@@ -14482,6 +15155,9 @@ async fn consume_gen_events_with_disclosure(
                 // newest event always describes the most recent read.
                 measured_checkpoint_facts = Some(facts);
             }
+            GenEvent::ImageFacts { index, facts } => {
+                pending_image_facts.entry(index).or_default().extend(facts);
+            }
             GenEvent::PromptEnhancement {
                 index,
                 expected_prompt,
@@ -14535,6 +15211,16 @@ async fn consume_gen_events_with_disclosure(
                         crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
                         Value::Object(block),
                     );
+                }
+                // Worker-owned like the keys above: a replayed `advanced` block can never forge
+                // them, and only this image's own reported facts add them back (sc-25681). The
+                // prefix-KV-cache record (epic 25899) is the same: it says which path RAN, so only
+                // this image's own report may carry it onto the asset and the job result.
+                image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
+                image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
+                image_raw_settings.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+                if let Some(facts) = pending_image_facts.remove(&index) {
+                    image_raw_settings.extend(facts);
                 }
                 // A measured fact set from the loaded handle supersedes the route's pre-load stamp
                 // (whose materialization is honestly `no-runtime-receipt`): same three facts, now
@@ -14894,6 +15580,22 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("iris_3b"), "candle_iris");
+        assert_eq!(candle_adapter_label("bernini_image"), "candle_bernini");
+        // Only the SDXL-engine ids may fall through to `candle_sdxl`; any other candle-routed model
+        // landing there is missing from the map and would stamp the wrong provenance.
+        const SDXL_ENGINE_IDS: &[&str] = &[
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ];
+        for model in sceneworks_core::jobs_store::candle_routed_image_models() {
+            if !SDXL_ENGINE_IDS.contains(model) {
+                assert_ne!(candle_adapter_label(model), CANDLE_ADAPTER, "{model}");
+            }
+        }
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
         for model in [
             "z_image_turbo",
@@ -18089,7 +18791,7 @@ mod declared_sequential_resident_tests {
                 .expect(declaration);
             assert!(before < shaped && shaped < release && release < load, "{declaration}");
         }
-        let base = function_body(include_str!("base.rs"), "async fn generate_stream(");
+        let base = function_body(include_str!("base.rs"), "async fn generate_stream_using(");
         let prepared = base.find("prepare_mlx_load_policy(").expect("base policy step");
         let alternative = base
             .find("declared_sequential_resident_alternative(engine_id, &pre_policy_spec, &spec)")
@@ -18107,3 +18809,5 @@ mod declared_sequential_resident_tests {
         assert!(!admission_needs_no_staging(&rejected));
     }
 }
+
+include!("moss.rs");

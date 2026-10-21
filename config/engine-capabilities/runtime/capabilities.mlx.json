@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
+    "inferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -25,6 +25,7 @@
     "ideogram_4_turbo": "ideogram_4_turbo",
     "illustrious_xl_v1": "sdxl",
     "illustrious_xl_v2": "sdxl",
+    "iris_3b": "iris_3b",
     "kolors": "kolors",
     "krea_2_raw": "krea_2_raw",
     "krea_2_turbo": "krea_2_turbo",
@@ -36,8 +37,11 @@
     "mage_flow_edit_base": "mage_flow_edit_base",
     "mage_flow_edit_turbo": "mage_flow_edit_turbo",
     "mage_flow_turbo": "mage_flow_turbo",
+    "moss_image_base": "moss_image_base",
+    "moss_image_sft": "moss_image_sft",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
+    "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
     "qwen_image_edit": "qwen_image_edit",
     "qwen_image_edit_2509": "qwen_image_edit",
     "qwen_image_edit_2511": "qwen_image_edit",
@@ -369,6 +373,9 @@
     "anima_base_lora": "anima_base",
     "illustrious_xl_v1_lora": "sdxl",
     "illustrious_xl_v2_lora": "sdxl",
+    "iris_3b_depth": "iris_3b_depth",
+    "iris_3b_generation": "iris_3b",
+    "iris_3b_restore": "iris_3b_restore",
     "kolors_lora": "kolors",
     "krea_2_control": "krea_2_control",
     "krea_2_raw_lora": "krea_2_raw",
@@ -394,6 +401,7 @@
     "dataset_upscale",
     "face_likeness_compare",
     "gpu",
+    "image_depth",
     "image_detail",
     "image_edit",
     "image_generate",
@@ -442,6 +450,7 @@
       "flux2_dev_control",
       "ideogram_4",
       "ideogram_4_turbo",
+      "iris_3b",
       "kolors",
       "krea_2_turbo",
       "krea_2_raw",
@@ -461,11 +470,14 @@
       "mage_flow_edit_turbo",
       "minimax_h3",
       "mochi_1",
+      "moss_image_base",
+      "moss_image_sft",
       "pulid_flux",
       "qwen_image",
       "qwen_image_control",
       "qwen_image_edit",
       "qwen_image_2_1",
+      "qwen_image_2_1_turbo",
       "sana_1600m",
       "sana_sprint_1600m",
       "scail2_14b",
@@ -1307,6 +1319,24 @@
         "supported_guidance_methods": []
       },
       {
+        "id": "iris_3b",
+        "family": "iris",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "dpmpp_2m",
+          "euler"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
         "id": "kolors",
         "family": "kolors",
         "backend": "mlx",
@@ -1872,6 +1902,48 @@
         "supported_guidance_methods": []
       },
       {
+        "id": "moss_image_base",
+        "family": "moss_image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
+      },
+      {
+        "id": "moss_image_sft",
+        "family": "moss_image",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "moss_training_grid"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
+      },
+      {
         "id": "pulid_flux",
         "family": "pulid",
         "backend": "mlx",
@@ -2039,6 +2111,48 @@
       },
       {
         "id": "qwen_image_2_1",
+        "family": "qwen-image-2-1",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image_2_1_turbo",
         "family": "qwen-image-2-1",
         "backend": "mlx",
         "modality": "image",
@@ -2793,11 +2907,16 @@
         "supported_guidance_methods": []
       }
     ],
-    "transform_ids": [],
+    "transform_ids": [
+      "iris_3b_restore"
+    ],
     "trainer_ids": [
       "anima_base",
       "anima_aesthetic",
       "anima_turbo",
+      "iris_3b",
+      "iris_3b_depth",
+      "iris_3b_restore",
       "kolors",
       "krea_2_raw",
       "lens",
@@ -2883,6 +3002,78 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "iris_3b",
+        "family": "iris",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": true,
+        "max_reference_images": 0,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "iris_3b_depth",
+        "family": "iris",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": true,
+        "max_reference_images": 0,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "iris_3b_restore",
+        "family": "iris",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": true,
+        "max_reference_images": 0,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

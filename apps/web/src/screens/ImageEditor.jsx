@@ -20,7 +20,7 @@ import {
   describeOpenedImage,
   workflowStateFromInspect,
 } from "../editorSourceWorkflow.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
@@ -65,12 +65,15 @@ import {
   sam3SegmentModel,
   SAM3_SEGMENT_MODEL_ID,
   upscaleEngineHasSoftness,
+  upscaleEngineIsRestoration,
   upscaleFactorsForEngine,
 } from "../imageJobs.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
+import { IRIS_RESTORE_DEFAULTS, irisRestoreControls } from "../irisRestore.js";
+import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
 // Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
 // follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
 // helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
@@ -129,12 +132,14 @@ import {
   ImageEditorToolPanel,
   useStableImageEditorToolPanelScope,
 } from "./imageEditor/ImageEditorToolPanel.jsx";
+import { EditorDepthPanel } from "./imageEditor/EditorDepthPanel.jsx";
 import { EditorLoraPanel } from "./imageEditor/EditorLoraPanel.jsx";
 import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
 const UPSCALE_ENGINE_DESC = {
   "real-esrgan": "Fast, faithful general-purpose upscaler. Great default.",
   seedvr2: "Detail-restoring diffusion upscaler for degraded sources.",
+  iris: "Iris-3B restoration: any scale (1× restores only), tiled.",
   "aura-sr": "Sharpest output, best for print. Slower.",
 };
 
@@ -216,7 +221,7 @@ export function readStoredEditorLayout() {
 }
 
 // Tool identity for the rail / accordion headers / inspector header (epic 10243).
-export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "cutout", "edit", "boxes"];
+export const EDITOR_TOOL_ORDER = ["move", "transform", "crop", "upscale", "detail", "color", "cutout", "edit", "boxes", "depth"];
 export const EDITOR_TOOL_META = {
   move: { label: "Move", desc: "Pan and inspect the canvas" },
   transform: { label: "Transform", desc: "Move, scale & rotate the layer" },
@@ -227,6 +232,7 @@ export const EDITOR_TOOL_META = {
   cutout: { label: "Cutout", desc: "Remove a color-keyed background" },
   edit: { label: "AI Edit", desc: "Prompt-driven edit & inpaint" },
   boxes: { label: "Boxes", desc: "Region layout & color-keyed edit" },
+  depth: { label: "Depth map", desc: "Estimate relative depth (Iris-3B)" },
 };
 
 // Inline stroke icons ported from the design handoff `ICONS` map (epic 10243).
@@ -270,6 +276,9 @@ export const EDITOR_TOOL_ICONS = {
   boxes: strokeSvg({ key: "boxes" }, [
     <rect key="a" height="7" rx="1" width="8" x="3" y="4" />, <rect key="b" height="12" rx="1" width="8" x="13" y="4" />,
     <rect key="c" height="6" rx="1" width="8" x="3" y="14" />,
+  ]),
+  depth: strokeSvg({ key: "depth" }, [
+    <path key="a" d="M3 20l6-9 4 5 3-4 5 8z" />, <path key="b" d="M3 20h18" />,
   ]),
 };
 const IeChevron = () => (
@@ -1320,12 +1329,17 @@ export function ImageEditor() {
   // SeedVR2 detail/softness knob (0..1, sc-4815) — only meaningful for the seedvr2 engine.
   const [upscaleSoftness, setUpscaleSoftness] = useState(0);
   // Engines offered in the picker; AuraSR is dropped on every platform (sc-3668 / sc-5499).
-  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities);
+  // Iris restoration (sc-25683) joins only once its own task entry is installed (`models`).
+  const availableUpscaleEngines = upscaleEnginesForPlatform(macCapabilities, models);
+  // Iris restoration controls + the planner preview's status (a refused plan blocks the run).
+  const [irisRestore, setIrisRestore] = useState(IRIS_RESTORE_DEFAULTS);
+  const [irisPlanStatus, setIrisPlanStatus] = useState({ ready: false, blocked: false, error: null });
   // If the selected engine got gated out (e.g. a stale saved AuraSR selection), fall back to the
   // default real-esrgan engine (the guaranteed-available cross-platform upscaler) so the tool stays
   // usable. Shared with ImageStudio via the single fallback hook (sc-8853).
   useUpscaleEngineFallback({
     macCapabilities,
+    models,
     upscaleEngine,
     setUpscaleEngine,
     upscaleFactor,
@@ -2949,6 +2963,27 @@ export function ImageEditor() {
   runAiOpRef.current = runAiOp;
 
   function runUpscale() {
+    if (upscaleEngineIsRestoration(upscaleEngine)) {
+      // Iris restoration (sc-25683): sized by scale; the preview must have planned it (a refused
+      // plan is never submitted, and the request is never silently changed).
+      if (!irisPlanStatus.ready) return;
+      const restore = irisRestoreControls(irisRestore);
+      runAiOp({
+        label: "restore",
+        layerSource: "composite",
+        edit: { op: "upscale", engine: upscaleEngine, ...restore },
+        buildBody: (scratch) =>
+          buildUpscaleJobBody({
+            project: activeProject,
+            requestedGpu,
+            sourceAssetId: scratch.id,
+            engine: upscaleEngine,
+            displayName: working?.source?.name,
+            restore,
+          }),
+      });
+      return;
+    }
     const valid = upscaleFactorsForEngine(upscaleEngine);
     const factor = valid.includes(upscaleFactor) ? upscaleFactor : valid[0];
     const softness = upscaleEngineHasSoftness(upscaleEngine) ? upscaleSoftness : undefined;
@@ -3402,6 +3437,7 @@ export function ImageEditor() {
       : (colorKeySeed ? "Adjust the key, then apply the alpha cutout" : "Click the background color to preview a cutout"),
     edit: maskMode ? "Paint or box-select the region to edit" : "Describe the edit on the right",
     boxes: "Drag to draw a region, then describe it",
+    depth: "Pick a processing resolution, then estimate depth",
   }[tool];
 
   // Short engine blurbs for the upscale radio cards (design copy). Keyed by the
@@ -3434,6 +3470,13 @@ export function ImageEditor() {
     StudioUpdateBadge,
     StudioUpdateNotice,
     UPSCALE_ENGINE_DESC,
+    IrisRestoreControls,
+    irisPlanStatus,
+    irisRestore,
+    setIrisPlanStatus,
+    setIrisRestore,
+    token,
+    upscaleEngineIsRestoration,
     activeGradeIsIdentity,
     activeLayerOf,
     actualSize,
@@ -3585,7 +3628,12 @@ export function ImageEditor() {
     working,
   };
   const stableToolPanelScope = useStableImageEditorToolPanelScope(toolPanelScope);
-  const renderToolPanel = (key) => <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />;
+  const renderToolPanel = (key) =>
+    key === "depth" ? (
+      <EditorDepthPanel dirty={dirty} working={working} />
+    ) : (
+      <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />
+    );
 
   const handleLayerOpacityInput = (id, raw) => {
     const start = !layerOpacityGestureRef.current;

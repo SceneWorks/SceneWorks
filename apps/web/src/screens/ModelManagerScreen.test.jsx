@@ -1343,6 +1343,80 @@ describe("ModelManagerScreen type-grouped layout", () => {
     );
   });
 
+  // sc-25684 (E4): the three Iris-3B TASK installs share one upstream repo but are three catalog
+  // entries with their own closures. Each card reports its OWN state off the API row — the
+  // generation card is incomplete when only its Qwen3-VL text encoder is missing and its Fix
+  // re-fetches the generation entry; the depth card stays installed (it needs no encoder); the
+  // restoration card is a plain Download — and all three resolve to the one Apache-2.0 Iris licence
+  // component the About → Licenses screen lists.
+  it("reports each Iris task install on its own card and repairs only the incomplete one (sc-25684)", async () => {
+    const createModelDownloadJob = vi.fn();
+    await render({
+      createModelDownloadJob,
+      models: [
+        {
+          id: "iris_3b",
+          name: "Iris 3B",
+          type: "image",
+          family: "iris",
+          capabilities: ["text_to_image"],
+          installState: "missing",
+          cacheState: "incomplete",
+          repairAvailable: true,
+          missingRequiredFiles: ["Qwen/Qwen3-VL-4B-Instruct@ebb281e/config.json"],
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_depth",
+          name: "Iris 3B Depth",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "installed",
+          cacheState: "complete",
+          downloadable: true,
+        },
+        {
+          id: "iris_3b_restore",
+          name: "Iris 3B Restoration",
+          type: "utility",
+          family: "iris",
+          capabilities: [],
+          installState: "missing",
+          cacheState: "missing",
+          downloadable: true,
+        },
+      ],
+    });
+    const card = (name) =>
+      [...container.querySelectorAll(".model-card")].find(
+        (candidate) => candidate.querySelector(".model-card-title")?.textContent.includes(name),
+      );
+    const buttons = (element) => [...element.querySelectorAll("button")].map((button) => button.textContent);
+
+    const generation = card("Iris 3B");
+    expect(generation.textContent).toContain("incomplete");
+    expect(generation.textContent).toContain("Qwen3-VL-4B-Instruct");
+    const fix = [...generation.querySelectorAll("button")].find((button) => button.textContent === "Fix");
+    expect(fix, "the generation card offers a repair").toBeTruthy();
+    await click(fix);
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "iris_3b" }));
+
+    await selectTab(container, "Utility Models");
+    const depth = card("Iris 3B Depth");
+    const restore = card("Iris 3B Restoration");
+    expect(depth.querySelector(".model-card-status").textContent).toContain("installed");
+    expect(buttons(depth)).not.toContain("Fix");
+    expect(restore.querySelector(".model-card-status").textContent).toContain("missing");
+    expect(buttons(restore)).not.toContain("Fix");
+
+    const { licenseComponentForModel } = await import("../data/bundledLicenses.js");
+    const components = ["iris_3b", "iris_3b_depth", "iris_3b_restore"].map((id) => licenseComponentForModel(id));
+    expect(new Set(components.map((component) => component?.id))).toEqual(new Set(["iris-3b"]));
+    expect(components[0].license).toBe("Apache-2.0");
+  });
+
   // On the LoRAs tab, User LoRAs are grouped by family into `.models-subsection`s
   // (h4 heading); the Built-In / User scope sections are `.models-section`s (h3).
   function userFamilyHeadings() {

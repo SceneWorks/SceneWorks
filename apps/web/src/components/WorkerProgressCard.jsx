@@ -1,3 +1,4 @@
+import { AssetVedaOutcome, VedaOutcome } from "./VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
@@ -17,6 +18,43 @@ import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailConte
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
+// Keep chunk failures local to this optional result detail. A retry must create a new lazy
+// component: React.lazy caches rejected imports as well as successful ones.
+export class PrefixKvCacheDetailBoundary extends React.Component {
+  static loadDetail() {
+    return import("./PrefixKvCacheDetail.jsx");
+  }
+
+  createDetail = () => React.lazy(() =>
+    PrefixKvCacheDetailBoundary.loadDetail()
+      .then((module) => ({ default: module.PrefixKvCacheDetail })),
+  );
+
+  state = { error: null, Detail: this.createDetail() };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div role="alert">
+          Prompt cache details could not be loaded.{" "}
+          <button type="button" onClick={() => this.setState({ error: null, Detail: this.createDetail() })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    const { Detail } = this.state;
+    return (
+      <React.Suspense fallback={<p role="status">Loading prompt cache details…</p>}>
+        <Detail job={this.props.job} />
+      </React.Suspense>
+    );
+  }
+}
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -751,6 +789,11 @@ export function WorkerProgressCard({
   const canClear = !!onClear && isTerminal;
   const canRetryBase = actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
   const canRetry = onRetry && canRetryBase && !isModelDownload;
+  // sc-25785: a training retry either resumes from the checkpoint the API recorded when the run
+  // stopped, or explicitly restarts from step 0 (a bare retry would inherit a resumed plan's flag).
+  const isTraining = job.type === "lora_train" || job.type === "control_training";
+  const resumeStep = job.result?.resumeCheckpointStep;
+  const canResumeTraining = canRetry && isTraining && job.status !== "completed" && Number.isInteger(resumeStep);
   const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
   const canFreshDownload =
     onFreshRetry &&
@@ -857,6 +900,11 @@ export function WorkerProgressCard({
       {job.error ? (
         <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}
+      {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
+          a prefix KV cache; renders nothing for every other job. */}
+      {Array.isArray(job.result?.prefixKvCache) && job.result.prefixKvCache.length > 0 ? (
+        <PrefixKvCacheDetailBoundary job={job} />
+      ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (
           <button
@@ -886,8 +934,19 @@ export function WorkerProgressCard({
             Retry Download
           </button>
         ) : null}
+        {canResumeTraining ? (
+          <button className="secondary-action" onClick={() => onRetry(job, { resume: true })} type="button">
+            Resume from step {resumeStep}
+          </button>
+        ) : null}
         {canRetry ? (
-          <button className="secondary-action" onClick={() => onRetry(job)} type="button">Retry</button>
+          <button
+            className="secondary-action"
+            onClick={() => (isTraining ? onRetry(job, { resume: false }) : onRetry(job))}
+            type="button"
+          >
+            {isTraining ? "Restart from step 0" : "Retry"}
+          </button>
         ) : null}
         {canDuplicate ? (
           <>
@@ -918,6 +977,11 @@ export function WorkerProgressCard({
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
       </div>
+      {thumbnailAssets?.[0]?.recipe?.rawAdapterSettings?.vedaExecution ? (
+        <AssetVedaOutcome asset={thumbnailAssets[0]} />
+      ) : (
+        <VedaOutcome raw={job?.result?.assetWrites?.[0]?.rawAdapterSettings} />
+      )}
       <ThumbnailsRegion
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}

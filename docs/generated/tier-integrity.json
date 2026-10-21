@@ -2187,11 +2187,11 @@
         "q8": 1249001100
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision ac421696dd6eb0b41f446f4c45a53ccc057d82a1; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs — \"SANA quantizes two components … The DC-AE decoder stays dense\"; isolated artifact: SceneWorks/Sana_1600M_1024px_mlx@ac421696dd6eb0b41f446f4c45a53ccc057d82a1:q8/vae/diffusion_pytorch_model.safetensors",
+      "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs — \"SANA quantizes two components … The DC-AE decoder stays dense\"; isolated artifact: SceneWorks/Sana_1600M_1024px_mlx@bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2:q8/vae/diffusion_pytorch_model.safetensors",
       "note": null
     },
     {
@@ -2216,11 +2216,11 @@
         "q8": 1249001100
       },
       "vaeScope": "full-autoencoder",
-      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 0b0d18484cac2fb515e76d25a09a5911ae4ab58e; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
+      "isolation": "Summed the exact safetensors-header tensor shapes for q8/vae/diffusion_pytorch_model.safetensors at immutable revision 225fde6c092706aa603937e26b93a75c1dde0324; floating tensors were counted at the F32 runtime load dtype, while integer metadata tensors retained their native width. This is isolated weight residency, excluding activations and allocator overhead. VAE scope: full autoencoder (encoder + decoder), representing worst-case weight residency across advertised modes.",
       "triageDecision": "measure",
       "reviewedCause": "packing-exception",
       "triageNote": "Measure, not eliminate: the provider deliberately excludes this component from packing, and the tree contains no verified quality-neutral lower-tier artifact that could replace it before calibration.",
-      "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs; isolated artifact: SceneWorks/Sana_Sprint_1.6B_1024px_mlx@0b0d18484cac2fb515e76d25a09a5911ae4ab58e:q8/vae/diffusion_pytorch_model.safetensors",
+      "source": "crates/media/mlx-gen/mlx-gen-sana/src/quant.rs; isolated artifact: SceneWorks/Sana_Sprint_1.6B_1024px_mlx@225fde6c092706aa603937e26b93a75c1dde0324:q8/vae/diffusion_pytorch_model.safetensors",
       "note": null
     },
     {

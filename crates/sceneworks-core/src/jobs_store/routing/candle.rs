@@ -11,8 +11,8 @@ use crate::jobs_store::routing::catalog::{
     CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
-    instantid_mlx_eligible, pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible,
-    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
+    instantid_mlx_eligible, iris_mlx_eligible, pulid_flux_mlx_eligible,
+    qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -214,7 +214,8 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
     // because `CANDLE_IMAGE_CHECKS` would otherwise refuse the edit mode and the carriers.
     CandleImageRoute {
         lane: CandleImageLane::QwenImage21Edit,
-        models: ModelMatch::Any(&["qwen_image_2_1"]),
+        // Turbo (sc-25907) is the same request contract under a second engine id.
+        models: ModelMatch::Any(crate::jobs_store::routing::QWEN_IMAGE_2_1_MODEL_IDS),
         shape: qwen_image_2_1_edit_candle_eligible,
     },
     CandleImageRoute {
@@ -399,6 +400,11 @@ pub(crate) enum CandleImageRefusal {
     Phases,
     /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
     QuantTier,
+    /// Iris-3B (sc-25680): anything outside the text-to-image surface the MLX arm admits — a
+    /// non-`text_to_image` mode, controls, a quant carrier (`mlxQuantize` / `quantTier`), or an
+    /// enabled hires fix (adapters route since sc-25681). Delegates to [`iris_mlx_eligible`] so the two lanes refuse
+    /// exactly the same list.
+    IrisSurface,
 }
 
 impl CandleImageRefusal {
@@ -417,6 +423,7 @@ impl CandleImageRefusal {
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
+            Self::IrisSurface => "a carrier outside Iris-3B's plain text-to-image surface",
         }
     }
 }
@@ -455,7 +462,18 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+    (CandleImageRefusal::IrisSurface, candle_refuses_iris_surface),
 ];
+
+/// Iris-3B (sc-25680) serves ONE request shape on both lanes: text-to-image with no source,
+/// reference, mask, control, pose, quant carrier or hires fix (its adapters route, sc-25681). The generic checks above
+/// already refuse most of those; this one closes the rest (`controls`, `quantTier`, a non-
+/// `text_to_image` mode, the hires-fix second pass) by DELEGATING to the MLX predicate instead of
+/// restating it, so the Candle and MLX lanes can never disagree about what Iris accepts. Last in the
+/// table so a carrier the generic checks name is reported by them.
+fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "iris_3b" && !iris_mlx_eligible(payload)
+}
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
 /// singular carrier is populated or malformed, do not let it fall through as txt2img.
@@ -2125,6 +2143,17 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
             base_model == "mage_flow_base"
                 && (is_adapter || network_type.eq_ignore_ascii_case("full"))
         }
+        // Iris-3B generation (sc-25686): `candle-gen-iris` registers ONE trainer under the
+        // generation install's id, serving LoRA, LoKr and the full (weights- or random-init) run.
+        // Depth (sc-25687) is always a full fine-tune; restoration (sc-25688) is the full recipe or
+        // HYPIR's LoRA / LoKr arm (merged into the export).
+        "iris_train" => match base_model {
+            "iris_3b" | "iris_3b_restore" => {
+                is_adapter || network_type.eq_ignore_ascii_case("full")
+            }
+            "iris_3b_depth" => network_type.eq_ignore_ascii_case("full"),
+            _ => false,
+        },
         // Qwen Image 2.1 (sc-24160): LoRA/LoKr on the dense 2.1 base only — a plan naming the
         // distinct 2512 `qwen_image` (or its Edit model) never reaches the 2.1 trainer.
         // sc-24162: the instruction-edit kernel trains on the same Candle trainer, same gate.

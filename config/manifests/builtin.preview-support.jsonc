@@ -7,10 +7,11 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff"
+      "inferenceRevision": "16fbf98e6bd11074331d04608e1f71285b52e4a9",
+      "audioInferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
     },
     "mlx": {
-      "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff"
+      "inferenceRevision": "ddd0c81cfb975a6a11054d8961e7e063ab1ea583"
     }
   },
   "models": {
@@ -100,6 +101,10 @@
       "candle": true,
       "mlx": true
     },
+    "iris_3b": {
+      "candle": true,
+      "mlx": true
+    },
     "kokoro_82m": {
       "candle": false
     },
@@ -153,6 +158,14 @@
     "mmaudio_small_16k": {
       "candle": false
     },
+    "moss_image_base": {
+      "candle": false,
+      "mlx": false
+    },
+    "moss_image_sft": {
+      "candle": false,
+      "mlx": false
+    },
     "moss_sfx_v2": {
       "candle": false
     },
@@ -171,6 +184,10 @@
       "mlx": true
     },
     "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
       "candle": false,
       "mlx": false
     },

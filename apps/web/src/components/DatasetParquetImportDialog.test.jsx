@@ -70,6 +70,23 @@ describe("DatasetParquetImportDialog", () => {
     });
   });
 
+  it("sends extra caption columns as named caption fields, and nothing when empty", async () => {
+    const onRun = vi.fn(async () => ({ id: "job_1" }));
+    root = createRoot(container);
+    act(() => root.render(<DatasetParquetImportDialog onClose={vi.fn()} onRun={onRun} />));
+    change(fieldByLabel("Parquet file or folder"), "D:\\meta");
+    await act(async () => {
+      document.body.querySelector('button[type="submit"]').click();
+    });
+    expect(onRun.mock.calls[0][0]).not.toHaveProperty("captionFieldColumns");
+
+    change(fieldByLabel("Extra caption columns"), " short_caption, tags,, tags ");
+    await act(async () => {
+      document.body.querySelector('button[type="submit"]').click();
+    });
+    expect(onRun.mock.calls[1][0].captionFieldColumns).toEqual(["short_caption", "tags"]);
+  });
+
   it("surfaces a rejected submit without leaving an unhandled promise rejection", async () => {
     const onRun = vi.fn(() => Promise.reject(undefined));
     const unhandled = [];

@@ -263,7 +263,7 @@ const PREPARED_BUNDLE_COORDINATOR_LOCK: &str = ".prepared-bundles.lock";
 /// Owns every verified prepared-bundle snapshot used by one preflight/run. Request paths point
 /// inside `directory`; keeping this guard alive therefore keeps the exact verified copies alive.
 #[derive(Default)]
-struct PreparedTrainingInputs {
+pub(crate) struct PreparedTrainingInputs {
     directory: Option<tempfile::TempDir>,
     ownership_lock: Option<FileLock>,
     snapshots: BTreeMap<PreparedBundleKey, PathBuf>,
@@ -739,7 +739,7 @@ fn training_error_with_prepared_cleanup(error: WorkerError, cleanup: WorkerError
     }
 }
 
-fn finish_prepared_input_operation<T>(
+pub(crate) fn finish_prepared_input_operation<T>(
     operation: WorkerResult<T>,
     prepared_inputs: PreparedTrainingInputs,
 ) -> WorkerResult<T> {
@@ -758,10 +758,10 @@ fn finish_prepared_input_operation<T>(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Debug)]
-struct PreparedTrainingRun {
-    engine_id: &'static str,
-    request: TrainingRequest,
-    prepared_inputs: PreparedTrainingInputs,
+pub(crate) struct PreparedTrainingRun {
+    pub(crate) engine_id: &'static str,
+    pub(crate) request: TrainingRequest,
+    pub(crate) prepared_inputs: PreparedTrainingInputs,
 }
 
 #[cfg(any(
@@ -777,7 +777,7 @@ impl PreparedTrainingRun {
 
     /// Drop the typed request before snapshot cleanup, preserving a primary operation error if the
     /// cleanup independently fails.
-    fn finish<T>(self, operation: WorkerResult<T>) -> WorkerResult<T> {
+    pub(crate) fn finish<T>(self, operation: WorkerResult<T>) -> WorkerResult<T> {
         let Self {
             request,
             prepared_inputs,
@@ -795,7 +795,7 @@ impl PreparedTrainingRun {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn preflight_training_run(
+pub(crate) fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
     masks_pending: bool,
@@ -1129,6 +1129,43 @@ fn training_request_from_plan(
     prepared_inputs: &mut PreparedTrainingInputs,
     masks_pending: bool,
 ) -> WorkerResult<TrainingRequest> {
+    // Iris depth / restoration (sc-25687 / sc-25688): an item is an image plus its task sidecar(s),
+    // resolved under the dataset root; the engine options bag is the only `model_options` key.
+    if let Some(objective) =
+        crate::iris_task_training::task_objective(&plan.target.kernel, &plan.target.base_model)
+    {
+        let root = PathBuf::from(&plan.dataset.root_path);
+        let items = plan
+            .dataset
+            .items
+            .iter()
+            .map(|item| {
+                let image = resolve_dataset_item_path(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.image_path,
+                    "Training dataset imagePath",
+                )?;
+                crate::iris_task_training::task_item(objective, &root, image, &item.extra)
+                    .map_err(WorkerError::InvalidPayload)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?;
+        return Ok(TrainingRequest {
+            items,
+            config: crate::iris_task_training::shape_task_config(
+                finalize_training_config(map_training_config(&plan.config), plan),
+                objective,
+            ),
+            output_dir: resolve_training_output_dir(
+                settings,
+                &plan.output.output_dir,
+                "Training outputDir",
+            )?,
+            file_name: plan.output.file_name.clone(),
+            trigger_words: Vec::new(),
+            cancel: CancelFlag::new(),
+        });
+    }
     // Subject-masked loss (sc-24828): one mask path per item when on (refused here, naming the
     // images, when any lacks a non-empty mask); `None` keeps every item mask-free.
     let mask_paths = preflight_subject_mask_paths(settings, plan, masks_pending)?;
@@ -1182,7 +1219,7 @@ fn training_request_from_plan(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let mut config = finalize_training_config(map_training_config(&plan.config), plan);
+    let mut config = engine_training_config(plan);
     apply_depth_anchoring(settings, plan, &mut config)?;
     apply_body_losses(settings, plan, &mut config)?;
     apply_face_losses(settings, plan, &mut config)?;
@@ -2221,6 +2258,18 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Iris-3B generation (sc-25685 MLX / sc-25686 Candle): both backends register ONE trainer
+        // under the generation install's id (`gen_core::iris::train::TRAINER_ID`), serving LoRA, LoKr
+        // and the full (weights- or random-init) run; the network type travels in the config. The
+        // depth/restoration exports are different task installs and are never a training base here.
+        // The depth (S9 sc-25687) and restoration (S10 sc-25688) task trainers ride the same kernel,
+        // keyed on the task install they fine-tune.
+        "iris_train" => match base_model {
+            "iris_3b" => Some(gen_core::iris::train::TRAINER_ID),
+            "iris_3b_depth" => Some(gen_core::iris::train::depth::DEPTH_TRAINER_ID),
+            "iris_3b_restore" => Some(gen_core::iris::restoration_train::TRAINER_ID),
+            _ => None,
+        },
         // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
         // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
         // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
@@ -2622,12 +2671,38 @@ fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> 
     config
 }
 
+/// The shared plan-to-engine config mapping of a bare SceneWorks config (no backend finalization):
+/// the Iris pre-launch plan check (sc-25689) resolves exactly what [`map_training_config`] sends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn map_engine_config(
+    config: &sceneworks_core::training::TrainingConfig,
+) -> TrainingConfig {
+    map_training_config(config)
+}
+
+/// The engine [`TrainingConfig`] a plan trains with: the shared mapping, the backend finalization
+/// and the Iris dtype passthrough. The one source for the real request, the Iris plan resolution and
+/// every rank process (sc-25689).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
+    crate::iris_curricula::apply_iris_train_dtype(
+        finalize_training_config(map_training_config(&plan.config), plan),
+        plan,
+    )
+}
+
 /// One progress event streamed from the blocking training thread to the async side.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-enum TrainEvent {
+pub(crate) enum TrainEvent {
     Progress(TrainingProgress),
     Done(TrainingOutput),
 }
@@ -2743,6 +2818,95 @@ fn resolve_trainer_components(
     )
 }
 
+/// Everything a trainer's [`LoadSpec`] is built from, resolved from the plan before any weights
+/// load: the base weights directory, LTX-2.3's bundled Gemma-3 text encoder, and the caller-staged
+/// components (the base model's pinned `coRequisite`s and, for an Iris REPA run, the integrity-checked
+/// DINOv2 teacher TRAINING resource). Shared by the in-process trainer and every Iris rank process
+/// (sc-25689), so they can never load different inputs.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) struct TrainerLoadInputs {
+    weights_dir: PathBuf,
+    text_encoder: Option<WeightsSource>,
+    components: std::collections::BTreeMap<String, WeightsSource>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl TrainerLoadInputs {
+    pub(crate) fn resolve(
+        settings: &Settings,
+        plan: &TrainingPlan,
+        engine_id: &str,
+    ) -> WorkerResult<Self> {
+        let weights_dir = resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        )?;
+        // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
+        // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
+        // (sc-9989).
+        let text_encoder = training_text_encoder(engine_id, &weights_dir);
+        // Caller-staged model components (epic 13657, sc-13682): the base model's pinned
+        // `coRequisite` downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers +
+        // fp16-fix VAE on candle, Iris' Qwen3-VL text encoder. A missing one fails the job with an
+        // actionable error naming the component id + repo.
+        let mut components =
+            resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
+        // Iris REPA (sc-25689): the frozen teacher is a separately installed TRAINING resource,
+        // re-verified (size + sha256) before every run and never downloaded here.
+        if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
+            components.insert(
+                gen_core::iris::train::repa::TEACHER_COMPONENT.to_owned(),
+                teacher,
+            );
+        }
+        Ok(Self {
+            weights_dir,
+            text_encoder,
+            components,
+        })
+    }
+
+    /// The inputs of an Iris depth / restoration task run (sc-25687 / sc-25688): its resolved task
+    /// export and staged components.
+    pub(crate) fn from_task(
+        engine_id: &str,
+        weights_dir: PathBuf,
+        components: std::collections::BTreeMap<String, WeightsSource>,
+    ) -> Self {
+        Self {
+            text_encoder: training_text_encoder(engine_id, &weights_dir),
+            weights_dir,
+            components,
+        }
+    }
+
+    /// The trainer `LoadSpec`. Load precision tracks the requested `train_dtype` (advanced
+    /// `mixedPrecision`, default bf16). The MLX Lens trainer loads its DiT at this precision and
+    /// enforces `train_dtype` against it (sc-5148), so f32 training must load at Fp32; the
+    /// cast-based MLX trainers (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so
+    /// this is inert for them — the default bf16 path is byte-identical to before. The candle
+    /// trainers are lazy (sc-7817): they build the frozen base inside `train()` at the request's
+    /// `train_dtype`, so `LoadSpec.precision` is likewise inert for them and this mapping stays
+    /// harmless.
+    pub(crate) fn load_spec(self, engine_id: &str, train_dtype: &str) -> LoadSpec {
+        let load_precision = training_load_precision(engine_id, train_dtype);
+        let mut spec = LoadSpec::new(WeightsSource::Dir(self.weights_dir));
+        spec.precision = load_precision;
+        // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family.
+        spec.text_encoder = self.text_encoder;
+        self.components
+            .into_iter()
+            .fold(spec, |spec, (id, source)| spec.with_component(id, source))
+    }
+}
+
 /// The tier a training run resolves its base + shared components from. Dense by definition: the
 /// gradient path needs unpacked projections, and the app's `TrainingTierMissing` pre-flight plus the
 /// engine's own packed-weight refusal both key off this same tier.
@@ -2812,6 +2976,63 @@ pub(crate) async fn run_training_execution(
     job: &JobSnapshot,
     plan: &TrainingPlan,
 ) -> WorkerResult<()> {
+    run_training_execution_using(
+        api,
+        settings,
+        job,
+        plan,
+        crate::inference_runtime::load_trainer,
+    )
+    .await
+}
+
+/// [`run_training_execution`] with the trainer loader supplied by the caller — the training twin of
+/// the image lane's `generate_stream_using` seam. Every pre-load decision (plan preflight, the Iris
+/// memory floor + data walk, base/component resolution), the blocking drive, the progress/cancel
+/// consumer and the completion result are the production code; only the engine is injectable, so a
+/// test pins exactly what reaches `Trainer::train` and what the job API sees, without weights.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_execution_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    load_trainer: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Trainer>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
+    run_training_execution_drive(
+        api,
+        settings,
+        job,
+        plan,
+        load_trainer,
+        std::sync::Arc::new(crate::iris_dist::CurrentExeLauncher),
+    )
+    .await
+}
+
+/// [`run_training_execution_using`] with the multi-rank launcher supplied too (sc-25689): an Iris
+/// run that asks for more than one rank never loads a trainer in this process — the worker becomes
+/// the coordinator of `world_size` rank processes ([`crate::iris_dist::drive_rank_fleet`]) whose
+/// rank-0 events feed the very same consumer below. Tests inject fake rank processes here.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_execution_drive(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    load_trainer: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Trainer>>
+        + Send
+        + 'static,
+    launcher: std::sync::Arc<dyn crate::iris_dist::RankLauncher>,
+) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     let prepared_run = prepare_training_run(
@@ -2823,34 +3044,68 @@ pub(crate) async fn run_training_execution(
     )
     .await?;
 
-    let weights_dir = match resolve_app_managed_model_dir(
-        settings,
-        &plan.target.base_model_path,
-        "Training baseModelPath",
-    ) {
-        Ok(weights_dir) => weights_dir,
-        Err(error) => return prepared_run.finish(Err(error)),
-    };
-    let engine_id = prepared_run.engine_id;
-
-    // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto the
-    // trainer `LoadSpec` so a self-contained install trains without a separate gemma download (sc-9989).
-    let ltx_text_encoder = training_text_encoder(engine_id, &weights_dir);
-
-    // Caller-staged model components (epic 13657, sc-13682): the base model's pinned `coRequisite`
-    // downloads the trainer's engine consumes — SDXL's CLIP-L/bigG tokenizers + fp16-fix VAE on candle.
-    // Resolved BEFORE the blocking thread (a missing one fails the job with an actionable error naming the
-    // component id + repo), then moved into the closure and folded onto the trainer `LoadSpec`. Empty for
-    // the self-contained macOS MLX SDXL trainer (its descriptor advertises none), so a no-op on macOS.
-    let train_components =
-        match resolve_trainer_components(engine_id, &plan.target.base_model, settings) {
-            Ok(components) => components,
+    // Iris-3B (sc-25685/sc-25686): the declared memory floor refuses an undersized host BEFORE the
+    // model loads, and the trainer's unused-tail condition (it prints it on stderr only) is put in
+    // the job — progress message, structured log event and the result.
+    let run_notes = if sceneworks_core::training::iris::is_iris_training_kernel(&plan.target.kernel)
+    {
+        match iris_training_preflight(api, settings, job, plan, &prepared_run.request, backend)
+            .await
+        {
+            Ok(notes) => notes,
             Err(error) => return prepared_run.finish(Err(error)),
-        };
+        }
+    } else {
+        JsonObject::new()
+    };
+
+    let engine_id = prepared_run.engine_id;
+    // The trainer's load inputs (the base weights, LTX-2.3's bundled TE, the caller-staged
+    // components incl. the Iris REPA teacher) — resolved BEFORE the blocking thread so a missing one
+    // fails the job with an actionable error. A multi-rank run resolves them here too (each rank
+    // re-resolves its own), so a missing resource is refused before any rank process starts.
+    // Iris depth / restoration (sc-25687 / sc-25688): the task export the run fine-tunes and its
+    // caller-staged components (empty-prompt source, the integrity-checked training resources),
+    // resolved cache-only — nothing downloads at training time.
+    let load_inputs = match crate::iris_task_training::task_objective(
+        &plan.target.kernel,
+        &plan.target.base_model,
+    ) {
+        Some(objective) => {
+            let task_settings = settings.clone();
+            let config = plan.config.clone();
+            let resolved = tokio::task::spawn_blocking(move || {
+                crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
+            })
+            .await
+            .map_err(|error| task_join_error("Iris training resource check", error))
+            .and_then(|resolved| resolved.map_err(WorkerError::InvalidPayload));
+            match resolved {
+                Ok(inputs) => {
+                    TrainerLoadInputs::from_task(engine_id, inputs.weights, inputs.components)
+                }
+                Err(error) => return prepared_run.finish(Err(error)),
+            }
+        }
+        None => match TrainerLoadInputs::resolve(settings, plan, engine_id) {
+            Ok(inputs) => inputs,
+            Err(error) => return prepared_run.finish(Err(error)),
+        },
+    };
 
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
     }
+    // sc-25785: a step-0 run clears an earlier run's resume bundles; a resume run reports the
+    // checkpoint it continues from, so the job records it from its first progress update.
+    let resume_checkpoint_step = match prepare_training_resume_dir(
+        prepared_run.request.config.resume,
+        &prepared_run.request.output_dir,
+        &prepared_run.request.file_name,
+    ) {
+        Ok(step) => step,
+        Err(error) => return prepared_run.finish(Err(error)),
+    };
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
@@ -2883,36 +3138,61 @@ pub(crate) async fn run_training_execution(
     let cancel = request.cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<TrainEvent>(64);
 
+    // Multi-rank Iris (sc-25689): this process coordinates the rank processes; it loads no trainer.
+    let fleet_world = crate::iris_dist::fleet_world_size(plan);
+    if fleet_world > 1 {
+        drop(load_inputs);
+        drop(request);
+        finish_prepared_input_operation(Ok(()), prepared_inputs)?;
+        let mut run_notes = run_notes;
+        run_notes.insert(
+            "irisDistributed".to_owned(),
+            crate::iris_dist::fleet_receipt(plan, fleet_world),
+        );
+        let fleet_settings = settings.clone();
+        let fleet_job_id = job.id.clone();
+        let fleet_plan = plan.clone();
+        let fleet_cancel = cancel.clone();
+        let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            crate::iris_dist::drive_rank_fleet(
+                &fleet_settings,
+                &fleet_job_id,
+                &fleet_plan,
+                launcher.as_ref(),
+                &tx,
+                &fleet_cancel,
+            )
+        });
+        return consume_training_events(
+            api,
+            settings,
+            job,
+            plan,
+            sample_config,
+            backend,
+            total_steps,
+            resume_checkpoint_step,
+            rx,
+            cancel,
+            blocking,
+            run_notes,
+        )
+        .await;
+    }
+    drop(launcher);
+
     let blocking = {
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-            // Load precision tracks the requested `train_dtype` (advanced `mixedPrecision`, default
-            // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
-            // against it (sc-5148), so f32 training must load at Fp32; the cast-based MLX trainers
-            // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
-            // them — the default bf16 path is byte-identical to before. Every trainer is lazy: the
-            // candle trainers build the frozen base inside `train()` at the request's `train_dtype`
-            // (sc-7817), and the MLX trainers (`mlx_gen::train::lazy::LazyTrainer`, sc-2124) keep
-            // this spec and load the base on first need — in `train()`, or in `validate()` when
-            // custom `lora_target_modules` need the loaded model. So `load_trainer` below reads no
-            // weights, and a base-load failure surfaces from `validate`/`train` instead (see
-            // `trainer_validate_error`). Qwen Image 2.1 is pinned to Bf16 on BOTH native backends
-            // (`training_load_precision`).
-            let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
-            let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
-            spec.precision = load_precision;
-            // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
-            // inside `weights_dir`) and for legacy/env-override LTX installs.
-            spec.text_encoder = ltx_text_encoder;
-            // Fold the caller-staged components (epic 13657, sc-13682) resolved above onto the spec — the
-            // trainer's load-time gate requires them (SDXL on candle); an empty map is a no-op otherwise.
-            let spec = train_components
-                .into_iter()
-                .fold(spec, |spec, (id, source)| spec.with_component(id, source));
+            // Every trainer is lazy: the candle trainers build the frozen base inside `train()`
+            // (sc-7817) and the MLX trainers (`mlx_gen::train::lazy::LazyTrainer`, sc-2124) load it
+            // on first need — in `train()`, or in `validate()` when custom `lora_target_modules`
+            // need the loaded model. So `load_trainer` reads no weights, and a base-load failure
+            // surfaces from `validate`/`train` instead (see `trainer_validate_error`).
+            let spec = load_inputs.load_spec(engine_id, &request.config.train_dtype);
             let operation = (|| {
-                let mut trainer = crate::inference_runtime::load_trainer(engine_id, &spec)
-                    .map_err(|error| {
-                        WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
-                    })?;
+                let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
+                    WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+                })?;
                 trainer
                     .validate(&request)
                     .map_err(|error| trainer_validate_error(engine_id, error))?;
@@ -2949,11 +3229,143 @@ pub(crate) async fn run_training_execution(
         sample_config,
         backend,
         total_steps,
+        resume_checkpoint_step,
         rx,
         cancel,
         blocking,
+        run_notes,
     )
     .await
+}
+
+/// The Iris-only pre-load gate of [`run_training_execution_using`]: refuse a host under the
+/// declared memory floor (never admitted unbounded), and report the trainer's unused-tail condition.
+/// Returns the notes folded into the completion result (`dataWalk`, `warnings`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn iris_training_preflight(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    request: &TrainingRequest,
+    backend: &str,
+) -> WorkerResult<JsonObject> {
+    let lane = crate::iris_training::training_lane();
+    #[cfg(target_os = "macos")]
+    let capacity = {
+        let _ = settings;
+        crate::iris_training::mlx_training_capacity_gb()
+    };
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let capacity = Some(
+        crate::iris_training::candle_training_capacity_gb(&settings.gpu_id)
+            .await
+            .map_err(WorkerError::InvalidPayload)?,
+    );
+    // sc-25689: the topology this worker can host (its own device(s); more ranks than devices need
+    // the explicit `share_device` opt-in), then the declared floor of the busiest device — one
+    // rank's floor (+ the REPA teacher) times the ranks sharing it.
+    let devices = crate::iris_dist::visible_training_devices(settings);
+    if let Some(refusal) = sceneworks_core::training::iris::curricula::iris_topology_refusal(
+        &plan.config,
+        devices,
+        crate::iris_training::device_noun(lane),
+    ) {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    if let Some(refusal) = crate::iris_training::iris_plan_memory_refusal(
+        lane,
+        &plan.target.base_model,
+        &plan.config,
+        devices,
+        capacity,
+    ) {
+        return Err(WorkerError::InvalidPayload(refusal));
+    }
+    // S7: a generation run needs the pinned root backbone AND the Qwen3-VL text encoder — repeated
+    // here (cache-only, nothing downloads) so a job enqueued before an uninstall is refused with
+    // the same words before anything loads. (Depth / restoration repeat theirs in
+    // `task_load_inputs`.)
+    if sceneworks_core::training::iris::IrisObjective::from_base_model(&plan.target.base_model)
+        == Some(sceneworks_core::training::iris::IrisObjective::Generation)
+    {
+        if let Some(refusal) = crate::iris_task_training::iris_training_install_refusal(
+            &settings.data_dir,
+            sceneworks_core::training::iris::IrisObjective::Generation,
+            &plan.config,
+        ) {
+            return Err(WorkerError::InvalidPayload(refusal.message));
+        }
+    }
+    // S11: one resident Iris engine at a time. The trainer loads its own copy of the backbone, so a
+    // warm generator (an `iris_3b` render keeps 15–22 GB resident for the idle window) or a resident
+    // restoration transform leaves first — the declared floor above is judged against the whole
+    // capacity and does not see them. Depth jobs do the same before their estimator loads.
+    let generator = crate::generator_cache::evict_cached_generator().await?;
+    let transform = crate::transform_cache::evict_resident_transform().await?;
+    if generator || transform {
+        tracing::info!(
+            event = "iris_training_evicted_resident_engines",
+            job_id = %job.id,
+            generator,
+            transform
+        );
+    }
+    // The engine's own request resolution (stage lineage aside, which needs the checkpoint): every
+    // typed refusal — an invalid mesh, a global-batch mismatch, a REPA layer outside the trunk, a
+    // shape policy the backbone's patch cannot tile — before anything loads.
+    // (The generation objective's plan; the depth / restoration task trainers resolve their own.)
+    let mut notes = JsonObject::new();
+    if sceneworks_core::training::iris::IrisObjective::from_base_model(&plan.target.base_model)
+        == Some(sceneworks_core::training::iris::IrisObjective::Generation)
+    {
+        let backbone = resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        )?;
+        let resolved = crate::iris_curricula::resolve_iris_plan(&backbone, plan)
+            .map_err(|refusal| WorkerError::InvalidPayload(refusal.message()))?;
+        notes.insert("irisPlan".to_owned(), resolved.to_json());
+    }
+    let Some(report) = crate::iris_training::iris_data_walk_report(
+        request.items.len(),
+        request.config.batch_size.max(1) as usize,
+    ) else {
+        return Ok(notes);
+    };
+    notes.insert(
+        "dataWalk".to_owned(),
+        serde_json::to_value(&report).unwrap_or(Value::Null),
+    );
+    if let Some(warning) = &report.warning {
+        tracing::warn!(
+            event = "iris_training_unused_tail",
+            job_id = %job.id,
+            items = report.items,
+            covered = report.covered,
+            unused_items = report.unused_items,
+            "{warning}"
+        );
+        notes.insert("warnings".to_owned(), json!([warning]));
+        update_job(
+            api,
+            &job.id,
+            training_progress(
+                JobStatus::Preparing,
+                ProgressStage::Preparing,
+                0.05,
+                warning,
+                None,
+                backend,
+            ),
+        )
+        .await?;
+    }
+    Ok(notes)
 }
 
 /// First-detection handling for the in-loop training cancel poller (sc-5516): trip the engine
@@ -3239,7 +3651,7 @@ fn resolve_sample_root(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[allow(clippy::too_many_arguments)]
-async fn consume_training_events(
+pub(crate) async fn consume_training_events(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -3247,9 +3659,11 @@ async fn consume_training_events(
     sample_config: TrainingConfig,
     backend: &str,
     total_steps: u32,
+    mut resume_checkpoint_step: Option<u32>,
     mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
+    run_notes: JsonObject,
 ) -> WorkerResult<()> {
     // Bind the blocking training task to its cancel flag (sc-8804, F-003): every `update_job`/
     // `heartbeat` `?` below returns early on a transient POST failure or a 409 (stale-sweep
@@ -3261,6 +3675,12 @@ async fn consume_training_events(
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
+    // A trainer that honours a cancel by finishing durably (Iris: a cancel after the first optimizer
+    // step publishes the checkpoint AND the export, then returns `Ok`) still reports `Done` after the
+    // cancel was requested. Keep that output so the terminal `Canceled` carries — and the API
+    // registers — what the trainer published, instead of dropping it with the drained events.
+    let mut canceled_output: Option<TrainingOutput> = None;
+    let mut reported_resume_step: Option<u32> = None;
 
     // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
     // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
@@ -3299,6 +3719,15 @@ async fn consume_training_events(
                 }
             };
             if canceled {
+                // Only Iris finishes a cancel durably; every other trainer's post-cancel `Ok`
+                // (e.g. SDXL saving a partial adapter) stays a plain, result-less cancel (E8).
+                if let TrainEvent::Done(output) = event {
+                    if sceneworks_core::training::iris::is_iris_training_kernel(
+                        &plan.target.kernel,
+                    ) {
+                        canceled_output = Some(output);
+                    }
+                }
                 continue; // drain remaining events so the blocking sender never blocks.
             }
             match event {
@@ -3319,6 +3748,14 @@ async fn consume_training_events(
                     }
                     if let TrainingProgress::Checkpoint { step } = progress {
                         checkpoints.push(json!({ "step": step }));
+                        // An Iris checkpoint is not a generic resume bundle: the run resumes from
+                        // the Training Studio (`resumeFromJobId`), so the Queue's retry-resume
+                        // (sc-25785) is never offered for it.
+                        if !sceneworks_core::training::iris::is_iris_training_kernel(
+                            &plan.target.kernel,
+                        ) {
+                            resume_checkpoint_step = Some(step);
+                        }
                     }
                     // sc-5637 — a preview sample: persist it + stream the updated cumulative/this-cadence
                     // lists so Training Studio shows it live. Handled here (not in `map_training_progress`)
@@ -3349,10 +3786,22 @@ async fn consume_training_events(
                     }
                     let (status, stage, fraction, message) =
                         map_training_progress(progress, total_steps);
+                    // sc-25785: record the latest resume checkpoint whenever it changes, so a run
+                    // that stops by ANY path — cancel, failure, or a crash the API later marks
+                    // interrupted — still offers Resume. The jobs store carries it forward.
+                    let result = (resume_checkpoint_step != reported_resume_step).then(|| {
+                        reported_resume_step = resume_checkpoint_step;
+                        let mut result = JsonObject::new();
+                        result.insert(
+                            "resumeCheckpointStep".to_owned(),
+                            json!(resume_checkpoint_step),
+                        );
+                        result
+                    });
                     update_job(
                         api,
                         &job.id,
-                        training_progress(status, stage, fraction, &message, None, backend),
+                        training_progress(status, stage, fraction, &message, result, backend),
                     )
                     .await?;
                     // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
@@ -3362,7 +3811,7 @@ async fn consume_training_events(
                     // F-115) with no keepalive benefit.
                 }
                 TrainEvent::Done(output) => {
-                    let result = training_result(
+                    let mut result = training_result(
                         plan,
                         &output,
                         &checkpoints,
@@ -3372,6 +3821,7 @@ async fn consume_training_events(
                         samples.cfg.sample_guidance_scale,
                         backend,
                     );
+                    result.extend(run_notes.clone());
                     let artifact = match &plan.target.output_kind {
                         sceneworks_core::training::TrainingOutputKind::BaseCheckpoint => {
                             "Full base checkpoint"
@@ -3417,7 +3867,35 @@ async fn consume_training_events(
         // write is what frees the worker row (`jobs_store::update_job_progress`), so it lands as
         // the worker returns to its claim loop — the next queued job waits only until the GPU is
         // genuinely free (sc-5516; mirrors the image path sc-5515).
-        let message = "LoRA training canceled by user.";
+        // A cancel the trainer honoured BEFORE its first optimizer step publishes nothing (the
+        // engine returns its typed cancellation). One honoured after it may have published a
+        // durable checkpoint + an export (Iris); report it as such so the API registers the export
+        // (`trainedArtifactExported`) and the run stays resumable from the checkpoint.
+        let (message, result) = match canceled_output.filter(|_| task_result.is_ok()) {
+            Some(output) => {
+                let mut result = training_result(
+                    plan,
+                    &output,
+                    &checkpoints,
+                    &samples.all_samples,
+                    &samples.cfg.sample_prompts,
+                    samples.cfg.sample_steps,
+                    samples.cfg.sample_guidance_scale,
+                    backend,
+                );
+                result.extend(run_notes);
+                result.insert("trainedArtifactExported".to_owned(), Value::Bool(true));
+                (
+                    format!(
+                        "Training canceled by user at step {}; the checkpoint and the export \
+                         were saved.",
+                        output.steps
+                    ),
+                    Some(result),
+                )
+            }
+            None => ("LoRA training canceled by user.".to_owned(), None),
+        };
         update_job(
             api,
             &job.id,
@@ -3425,13 +3903,13 @@ async fn consume_training_events(
                 JobStatus::Canceled,
                 ProgressStage::Canceled,
                 1.0,
-                message,
-                None,
+                &message,
+                result,
                 backend,
             ),
         )
         .await?;
-        return Err(WorkerError::Canceled(message.to_owned()));
+        return Err(WorkerError::Canceled(message));
     }
     task_result
 }
@@ -3444,7 +3922,7 @@ async fn consume_training_events(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn map_training_progress(
+pub(crate) fn map_training_progress(
     progress: TrainingProgress,
     total_steps: u32,
 ) -> (JobStatus, ProgressStage, f64, String) {
@@ -5226,11 +5704,23 @@ mod tests {
             checked > 10,
             "only {checked} builtin targets resolved to a linked trainer"
         );
-        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle.
+        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle; the
+        // Iris-3B trainers declare no epic 2123 technique on either backend.
         let expected: &[&str] = if cfg!(target_os = "macos") {
-            &["ltx_2_5_video_lora"]
+            &[
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore",
+            ]
         } else {
-            &["krea_2_control", "ltx_2_5_video_lora"]
+            &[
+                "krea_2_control",
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore",
+            ]
         };
         assert_eq!(unsupported, expected);
     }
@@ -5414,7 +5904,15 @@ mod tests {
             "no builtin target resolved to a linked trainer"
         );
         // The refusal side is exercised, not just the agreeing side.
-        assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+        assert_eq!(
+            withheld,
+            [
+                "ltx_2_5_video_lora",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore"
+            ]
+        );
     }
 
     /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
@@ -8823,20 +9321,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            body_losses: Default::default(),
-            perceptual_decoder_dir: None,
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
-            subject_mask_loss: None,
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -8952,20 +9438,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            body_losses: Default::default(),
-            perceptual_decoder_dir: None,
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
-            subject_mask_loss: None,
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -9084,20 +9558,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            body_losses: Default::default(),
-            perceptual_decoder_dir: None,
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
-            subject_mask_loss: None,
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -9254,20 +9716,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            body_losses: Default::default(),
-            perceptual_decoder_dir: None,
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
-            subject_mask_loss: None,
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

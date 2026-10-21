@@ -72,6 +72,7 @@ on:
         options:
           - catalog
           - qwen-image-2-1-app-lifecycle
+          - iris-mlx-real-weights
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -86,6 +87,11 @@ on:
           - primary
           - secondary
         default: primary
+      iris_smoke_filter:
+        description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
+        required: false
+        type: string
+        default: all
       backend:
         description: "Which lane to walk. mlx runs on a Mac, candle on the Windows CUDA box."
         required: true
@@ -134,9 +140,10 @@ on:
         default: false
       qwen_persistent_weights:
         description: >-
-          MLX qwen_image_2_1-only: reuse ~/sceneworks-rw-weights/hub, shared with the
+          MLX Qwen-Image 2.1-only: reuse ~/sceneworks-rw-weights/hub, shared with the
           terminal real-weight evidence job. Missing manifest-pinned files can be fetched there
-          with download_missing. Requires models=qwen_image_2_1 and empty hf_cache_roots.
+          with download_missing. Requires models drawn from qwen_image_2_1 / qwen_image_2_1_turbo
+          (space-separated) and empty hf_cache_roots.
           This catalog measures base anchors; overlay/training evidence belongs to real-weights.
         required: false
         type: boolean
@@ -241,6 +248,17 @@ jobs:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       runner_target: ${{ inputs.qwen_app_runner_target }}
+  iris-mlx-real-weights:
+    if: ${{ inputs.profile == 'iris-mlx-real-weights' }}
+    permissions:
+      contents: read
+    # sc-25690 (epic 25678): the Iris-3B worker real-weight smokes on nax-macos-2, at the dispatch's
+    # exact commit (`ref` must be that 40-hex SHA). Like the app proof above it skips BOTH catalog
+    # jobs: no walk, no commit, no push, no PR.
+    uses: ./.github/workflows/iris-mlx-real-weights.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      filter: ${{ inputs.iris_smoke_filter }}
   mlx:
     if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
@@ -332,9 +350,27 @@ jobs:
         run: cargo fetch --locked
 
       - name: Build the MLX memory adapter
+        # Unstripped, like the other release producers on these Macs (iris-mlx-real-weights,
+        # qwen-image-2-1-app-lifecycle): Rust 1.97.1's bundled LLVM predates rust-lang/rust#158410's
+        # Mach-O string-table alignment fix, and a release build strips by default. On nax-macos-2
+        # the stripped mlx-rs proc-macro dylibs are then not found by the crate that uses them
+        # (E0463 on `pmetal-mlx-rs`, sc-25690 runs 38340620426, 38393909347, 38394612935; cleaning
+        # and rebuilding them stripped changed nothing). A failed build says what it saw.
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: "none"
         run: |
-          cargo build --release --locked -p sceneworks-memory-adapter \
-            --features mlx --bin memory-mlx-adapter
+          build() {
+            cargo build --release --locked -p sceneworks-memory-adapter \
+              --features mlx --bin memory-mlx-adapter "$@"
+          }
+          if ! build; then
+            ls -la "$CARGO_TARGET_DIR"/release/deps/libmlx_macros* \
+              "$CARGO_TARGET_DIR"/release/deps/libmlx_internal_macros* || true
+            env | grep -E '^(RUST|CARGO_BUILD|CARGO_PROFILE|CARGO_ENCODED)' || true
+            grep -nE 'rustflags|linker|strip|target-dir|^\[' "$CARGO_HOME/config.toml" || true
+            build -v 2>&1 | grep -E 'Running .*(mlx_macros|mlx_internal_macros|pmetal_mlx_rs)' | cut -c1-4000 || true
+            exit 1
+          fi
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
 
       - name: Bind the operator-staged identity bundles

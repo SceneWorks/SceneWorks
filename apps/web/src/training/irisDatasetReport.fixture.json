@@ -1,0 +1,13 @@
+{
+  "objective": "restoration",
+  "policy": "pairs",
+  "configError": null,
+  "ok": 1,
+  "invalid": 0,
+  "errors": 1,
+  "trainable": false,
+  "items": [
+    { "itemId": "a", "displayName": "a", "status": "ok", "reason": null },
+    { "itemId": "b", "displayName": "b", "status": "error", "reason": "the clean image and its degraded image are not an aligned integer-scale pair" }
+  ]
+}

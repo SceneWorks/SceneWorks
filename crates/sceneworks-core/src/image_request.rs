@@ -134,6 +134,11 @@ pub struct ImageRequest {
     pub project_id: String,
     pub mode: String,
     pub prompt: String,
+    /// A NATIVE prompt batch (sc-25681, `image.maxPromptBatchImages`): the prompts one engine call
+    /// renders together, verbatim. Empty for an ordinary request. When set, `prompt` is `prompts[0]`
+    /// (the API enforces it) and image `k` renders `prompts[k % prompts.len()]` — see
+    /// [`Self::image_prompt`].
+    pub prompts: Vec<String>,
     pub negative_prompt: String,
     pub model: String,
     /// Number of images, clamped to 1..=8.
@@ -178,6 +183,30 @@ pub struct ImageRequest {
 }
 
 impl ImageRequest {
+    /// The prompt image `index` of this job rendered: `prompt` for an ordinary request, and
+    /// `prompts[index % prompts.len()]` for a native prompt batch (prompt-minor order — the engine
+    /// renders the whole prompt list once per `count` repetition).
+    pub fn image_prompt(&self, index: usize) -> &str {
+        if self.prompts.is_empty() {
+            &self.prompt
+        } else {
+            // MOSS repeats each prompt's images together (prompt-major); other providers use
+            // the historical prompt-minor convention.
+            let prompt_index = if crate::moss_image::is_moss(&self.model) {
+                index / self.count.max(1) as usize
+            } else {
+                index % self.prompts.len()
+            };
+            &self.prompts[prompt_index % self.prompts.len()]
+        }
+    }
+
+    /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
+    pub fn image_count(&self) -> u32 {
+        self.count
+            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+    }
+
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
     /// missing fields fall back to the Python defaults and `project_id` may be empty
     /// — the caller validates it is present (the worker rejects an empty project id).
@@ -189,10 +218,29 @@ impl ImageRequest {
         let (default_width, default_height) = default_resolution(&model_manifest_entry)
             .unwrap_or((DEFAULT_DIMENSION, DEFAULT_DIMENSION));
         let default_count = default_count(&model_manifest_entry).unwrap_or(DEFAULT_COUNT);
+        // The sanity floor yields to a model's DECLARED `limits.minDimension` below it (sc-25681):
+        // the API admits a declared envelope down to its own floor (Iris-3B renders from 16 px,
+        // Qwen-Image 2.1 from 32), and the blanket 256 here silently re-sized those requests on the
+        // worker — an accepted size that never reached the engine. Every model that declares no
+        // floor (or one at/above 256) keeps the historical clamp.
+        let min_dimension = crate::video_request::image_dimension_envelope(&model_manifest_entry)
+            .min
+            .map_or(MIN_DIMENSION, |declared| declared.min(MIN_DIMENSION));
         Self {
             project_id: string_or(payload, "projectId", ""),
             mode: nonempty_string_or(payload, "mode", DEFAULT_MODE),
             prompt: string_or(payload, "prompt", ""),
+            prompts: payload
+                .get(crate::image_sampling_controls::PROMPTS_KEY)
+                .and_then(Value::as_array)
+                .map(|prompts| {
+                    prompts
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             negative_prompt: string_or(payload, "negativePrompt", ""),
             model: nonempty_string_or(payload, "model", DEFAULT_MODEL),
             count: clamped_u32(payload.get("count"), default_count, MIN_COUNT, MAX_COUNT),
@@ -201,13 +249,13 @@ impl ImageRequest {
             width: clamped_u32(
                 payload.get("width"),
                 default_width,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             height: clamped_u32(
                 payload.get("height"),
                 default_height,
-                MIN_DIMENSION,
+                min_dimension,
                 MAX_DIMENSION,
             ),
             style_preset: nonempty_string_or(payload, "stylePreset", DEFAULT_STYLE_PRESET),
@@ -449,6 +497,54 @@ mod tests {
 
         let low = ImageRequest::from_payload(&payload(json!({ "projectId": "p", "count": 0 })));
         assert_eq!(low.count, 1);
+    }
+
+    /// sc-25681: a model's declared `limits.minDimension` below the 256 sanity floor is honoured
+    /// (the API admits it, so the worker must not re-size it); a declared floor above 256, or none,
+    /// keeps the historical clamp.
+    ///
+    /// *Mutation that reds this:* clamp to the constant `MIN_DIMENSION` again.
+    #[test]
+    fn a_declared_floor_below_the_sanity_floor_reaches_the_request() {
+        let request = |entry: Value, side: u32| {
+            ImageRequest::from_payload(&payload(json!({
+                "projectId": "p", "width": side, "height": side, "modelManifestEntry": entry
+            })))
+        };
+        let iris = json!({ "limits": { "minDimension": 16, "maxDimension": 2048 } });
+        assert_eq!(request(iris.clone(), 64).width, 64);
+        assert_eq!(
+            request(iris, 8).height,
+            16,
+            "still clamped to the declared floor"
+        );
+        let high = json!({ "limits": { "minDimension": 512 } });
+        assert_eq!(
+            request(high, 300).width,
+            300,
+            "the sanity floor never rises"
+        );
+        assert_eq!(request(json!({}), 64).width, 256);
+    }
+
+    /// sc-25681: a native prompt batch maps image `k` to `prompts[k % len]` (prompt-minor) and
+    /// produces `prompts × count` images; an ordinary request is unchanged.
+    ///
+    /// *Mutation that reds this:* index `prompts[k / count]` (prompt-major).
+    #[test]
+    fn a_prompt_batch_is_prompt_minor() {
+        let batch = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "a", "prompts": ["a", "b", "c"], "count": 2
+        })));
+        assert_eq!(batch.image_count(), 6);
+        let order: Vec<&str> = (0..6).map(|k| batch.image_prompt(k)).collect();
+        assert_eq!(order, vec!["a", "b", "c", "a", "b", "c"]);
+        let plain = ImageRequest::from_payload(&payload(json!({
+            "projectId": "p", "prompt": "solo", "count": 3
+        })));
+        assert!(plain.prompts.is_empty());
+        assert_eq!(plain.image_count(), 3);
+        assert_eq!(plain.image_prompt(2), "solo");
     }
 
     #[test]

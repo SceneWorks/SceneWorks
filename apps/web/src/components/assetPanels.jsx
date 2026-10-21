@@ -1,9 +1,10 @@
+import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
 import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
 import {
   AssetMedia,
@@ -31,6 +32,7 @@ import { AudioTrackBadge, assetHasAudioTrack } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
 import { Modal } from "./Modal.jsx";
 import { assetImportedWorkflow } from "../workflowShare.js";
+import { depthAssetDetails, isDepthAsset } from "../depthJobs.js";
 
 // Zoom/pan model for the fullscreen image preview (sc-8728). Mirrors the Image
 // Editor canvas convention (`view = { scale, x, y }`, ImageEditor.jsx): `scale`
@@ -611,6 +613,8 @@ export function AssetDetail({
   createVqaJob,
   audioModels = [],
   audioPlayer = null,
+  // sc-25682: open the depth action for this image (absent when depth cannot run here).
+  onEstimateDepth = null,
 }) {
   if (!asset) {
     return <aside className="asset-detail empty-panel">No asset selected</aside>;
@@ -628,6 +632,7 @@ export function AssetDetail({
         <button className="preview-button" onClick={() => onPreview(asset)} type="button">
           <AssetMedia asset={asset} />
           <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
         </button>
       )}
       <h3>{asset.displayName}</h3>
@@ -656,6 +661,16 @@ export function AssetDetail({
             <button onClick={() => onSendEditor(asset)} type="button">
               Send to Editor
             </button>
+          ) : null}
+          {onEstimateDepth && asset.type === "image" ? (
+            <button onClick={() => onEstimateDepth(asset)} type="button">
+              Estimate depth
+            </button>
+          ) : null}
+          {isDepthAsset(asset) ? (
+            <a className="button" download href={assetUrl(asset)}>
+              Download raw depth (.npy)
+            </a>
           ) : null}
         </AssetStatusActions>
       </div>
@@ -690,6 +705,14 @@ export function AssetDetail({
           <dt>Generation set</dt>
           <dd>{asset.generationSetId ?? "None"}</dd>
         </div>
+        {/* sc-25682: a reloaded depth map states what its values are, where it came from and how it
+            was made — read from the persisted sidecar, not from the job that produced it. */}
+        {depthAssetDetails(asset).map(([label, value]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
       </dl>
       {vqaEnabled && asset.type === "image" ? (
         <VqaPanel asset={asset} entries={vqaEntries} pending={vqaPending} onAsk={createVqaJob} />
@@ -708,6 +731,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
         <AssetMedia asset={asset} />
         <LikenessBadge asset={asset} />
         <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
       </button>
       <div className="review-actions">
         <AssetStatusActions
@@ -1276,6 +1300,7 @@ function FullscreenPreviewComponent({
           )}
           <LikenessBadge asset={asset} />
           <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"

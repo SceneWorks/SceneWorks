@@ -145,13 +145,13 @@ test("reusable app workflow selects one exact app runner while preserving immuta
 
 function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /profile:[\s\S]*?default: catalog/);
-  assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml/);
-  assert.match(workflow, /source_sha: \$\{\{ inputs.ref \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/iris-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
   assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
-  assert.deepEqual(jobs, ["qwen-app-lifecycle", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["qwen-app-lifecycle", "iris-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const runs = (profile, backend) => jobs.filter((job) => {
     const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
     assert.ok(condition, `missing ${job} dispatch predicate`);
@@ -161,6 +161,7 @@ function assertDispatcherIsolation(workflow) {
   });
   for (const backend of ["mlx", "candle"]) {
     assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
+    assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
     assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
     assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
     assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");

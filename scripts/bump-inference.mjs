@@ -64,9 +64,9 @@ const INFERENCE_CRATES = [
   "mlx-gen",
   "candle-gen",
 ];
-// Resolved through the root [patch], not direct dependencies. Both vendored packages must move
-// with the inference pin and have their lock entries refreshed by Cargo.
-const PATCHED_CRATES = ["candle-core", "candle-kernels"];
+// Resolved through the root [patch], not direct dependencies. Every vendored package must move
+// with the inference pin and have its lock entry refreshed by Cargo.
+const PATCHED_CRATES = ["candle-core", "candle-kernels", "candle-metal-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -398,20 +398,38 @@ function verifyLicenseAudit(io = {}) {
 // too, instead of demanding the caller produce a clone by hand.
 // ---------------------------------------------------------------------------
 
-/** A local inference checkout at `sha` — the caller's `--repo`, else a shallow fetch. */
-function ensureInferenceCheckout(sha, explicitRepo) {
+/**
+ * Run `use` with a local inference checkout at `sha` — the caller's `--repo`, else a shallow fetch
+ * into a temp dir that is removed as soon as `use` returns or throws. The bump used to leave that
+ * clone behind on every run: 19 of them held 63 GB of the dev Mac's disk on 2026-09-16. A caller's
+ * `--repo` is never removed.
+ */
+export function withInferenceCheckout(
+  sha,
+  explicitRepo,
+  use,
+  { fetch = shallowFetchInference } = {},
+) {
   if (explicitRepo) {
     console.log(`bump-inference: using inference checkout ${explicitRepo}`);
-    return explicitRepo;
+    return use(explicitRepo);
   }
   const dir = mkdtempSync(join(tmpdir(), "bump-inference-"));
+  try {
+    fetch(sha, dir);
+    return use(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function shallowFetchInference(sha, dir) {
   console.log(`bump-inference: shallow-fetching inference ${sha.slice(0, 12)}… -> ${dir}`);
   execFileSync("git", ["init", "-q", dir], { stdio: "pipe" });
   const git = (...args) => execFileSync("git", ["-C", dir, ...args], { stdio: "pipe" });
   git("remote", "add", "origin", INFERENCE_GIT);
   git("fetch", "-q", "--depth=1", "origin", sha);
   git("checkout", "-q", "FETCH_HEAD");
-  return dir;
 }
 
 /** Re-derive the per-provider closure digests and every captured digest keyed to them. */
@@ -932,9 +950,16 @@ function selfTest() {
   const bothPatches = repin(
     `[patch."https://github.com/huggingface/candle"]\n` +
     `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
-    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
+    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-metal-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
   check("root Candle patches repin together", (() => {
     try { verifyCandlePatches(bothPatches, SHA); return true; } catch { return false; }
+  })());
+  check("a missing vendored Metal kernels patch refuses a later pin", (() => {
+    try {
+      verifyCandlePatches(bothPatches.replace(/^candle-metal-kernels.*\n/m, ""), SHA);
+      return false;
+    } catch { return true; }
   })());
   check("a missing vendored core patch refuses a later pin", (() => {
     try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
@@ -1579,8 +1604,50 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
 
 // --- entrypoint -------------------------------------------------------------------------------
 
+// Every argument the CLI understands. A bump shallow-fetches a clone, rewrites three manifests and
+// runs `cargo update`, so an argument this script cannot parse has to stop it BEFORE any of that.
+// Until 2026-10-15 nothing was validated: `--help` fell through to a REAL bump against the latest
+// inference SHA (that is how one agent started a bump it never asked for), and so did a typo
+// (`--halp`) or a SHA passed positionally instead of after `--sha` — the worst case, because the
+// caller naming a revision got the newest one instead.
+const VALUE_FLAGS = new Set(["--sha", "--repo"]);
+const KNOWN_FLAGS = new Set(["--help", "-h", "--dry-run", "--self-test", "--no-deps", ...VALUE_FLAGS]);
+
+const USAGE = [
+  "usage: node scripts/bump-inference.mjs [options]",
+  "",
+  "  --sha <sha40>   pin a specific inference revision (default: latest inference main)",
+  "  --repo <path>   derive from an existing inference checkout instead of a shallow fetch",
+  "  --dry-run       print the target SHA and any refusal; write nothing",
+  "  --no-deps       skip the cargo dependency refresh",
+  "  --self-test     exercise the pin rewrite and the facts checks",
+  "  -h, --help      print this and exit without bumping",
+].join("\n");
+
+/** Argument check that runs before the bump touches the network or a single file. */
+export function parseCliArgs(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (VALUE_FLAGS.has(arg)) {
+      i += 1; // its value, whatever it looks like
+      continue;
+    }
+    if (!KNOWN_FLAGS.has(arg)) return { error: `unexpected argument: ${arg}` };
+  }
+  return { help: args.includes("--help") || args.includes("-h") };
+}
+
 function main() {
   const args = process.argv.slice(2);
+  const cli = parseCliArgs(args);
+  if (cli.error) {
+    console.error(`bump-inference: ${cli.error}\n\n${USAGE}`);
+    process.exit(2);
+  }
+  if (cli.help) {
+    console.log(USAGE);
+    return;
+  }
   if (args.includes("--self-test")) return selfTest();
 
   const dryRun = args.includes("--dry-run");
@@ -1684,22 +1751,25 @@ function main() {
   // and still run — they now grade the derivation rather than the caller's diligence.
   reportCrossLaneWork(sha);
   reportStaleCurrencyAttestations(sha);
-  const repo = ensureInferenceCheckout(sha, explicitRepo);
-  deriveInferenceClosures(sha, repo);
-  verifyInferenceClosures(sha);
-  for (const m of manifests) {
-    if (m.bumped === m.current) {
-      console.log(`  unchanged ${m.path} (already at ${sha})`);
-      continue;
+  // Every step that reads the checkout runs inside the callback: a fetched clone is removed after
+  // the audit rescan, or as soon as any step before it throws.
+  withInferenceCheckout(sha, explicitRepo, (repo) => {
+    deriveInferenceClosures(sha, repo);
+    verifyInferenceClosures(sha);
+    for (const m of manifests) {
+      if (m.bumped === m.current) {
+        console.log(`  unchanged ${m.path} (already at ${sha})`);
+        continue;
+      }
+      writeFileSync(m.path, m.bumped);
+      console.log(`  wrote ${m.path}`);
     }
-    writeFileSync(m.path, m.bumped);
-    console.log(`  wrote ${m.path}`);
-  }
-  reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
-  verifyNoSkew();
-  // Historical measurement and inspection artifacts are deliberately not regenerated on a pin
-  // bump. Their recorded revisions remain provenance; measurement campaigns run once at epic end.
-  deriveLicenseAudit(sha, repo);
+    reconcileCargoLock(sha, cargoPinsAlreadyInManifests);
+    verifyNoSkew();
+    // Historical measurement and inspection artifacts are deliberately not regenerated on a pin
+    // bump. Their recorded revisions remain provenance; measurement campaigns run once at epic end.
+    deriveLicenseAudit(sha, repo);
+  });
   verifyLicenseAudit();
   // Beside the licence re-scan for the same reason: both are pin-keyed artifacts that need an input
   // this script cannot synthesize (a local inference clone / a lane that links engines), so both
@@ -1708,9 +1778,13 @@ function main() {
   console.log("bump-inference: done");
 }
 
-try {
-  main();
-} catch (err) {
-  console.error(`bump-inference: ${err?.message ?? err}`);
-  process.exit(1);
+// Guarded so scripts/bump-inference.test.mjs can import `withInferenceCheckout` without starting a
+// bump. Same check as scripts/inference-closure-digest.mjs, which explains why it is `fileURLToPath`.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (err) {
+    console.error(`bump-inference: ${err?.message ?? err}`);
+    process.exit(1);
+  }
 }

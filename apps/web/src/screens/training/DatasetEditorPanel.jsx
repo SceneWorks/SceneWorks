@@ -1,4 +1,5 @@
 import React from "react";
+import { itemSplit } from "../../training/irisCurricula.js";
 
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { CompactSelector } from "../../components/CompactSelector.jsx";
@@ -9,6 +10,7 @@ import { errorMessage } from "../../errorMessage.js";
 import { Icon } from "../../components/Icons.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { ValidationSummary } from "../../validation/Validation.jsx";
+import { IrisSidecarPanel } from "./IrisSidecarPanel.jsx";
 import {
   DatasetDoctorDistributions,
   DatasetDoctorReadout,
@@ -109,7 +111,7 @@ export function DatasetEditorPanel({
     onImportParquet, onDeleteDataset, deletingDataset,
   } = datasetSession;
   const {
-    captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+    captionDraftById, namedCaptionsById = {}, holdoutById = {}, onToggleHoldout, onPreview, updateCaption, captioning, addDialogOpen,
     selectedAssetIds, addAssets, handleImport, captionDialog, updateCaptionSetting,
     runCaptionJob, toggleCaptionExtraOption, displayedCaptionPrompt, captionSettings,
     captionModelMissing = false, onDownloadCaptionModel, captionModelSizeLabel = "",
@@ -118,7 +120,7 @@ export function DatasetEditorPanel({
   const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
   const {
     imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
-    gpuOptions, onUploadPreparedBundle,
+    gpuOptions, onUploadPreparedBundle, onIrisSidecar,
   } = config;
   const {
     referenceCap = 0, referenceDraftById = {}, setItemReferences, addItemReferences,
@@ -512,6 +514,10 @@ export function DatasetEditorPanel({
         </div>
       ) : null}
 
+      {activeDataset?.items?.length ? (
+        <IrisSidecarPanel items={activeDataset.items} onSidecar={onIrisSidecar} />
+      ) : null}
+
       <section className="dataset-results">
         <div className="dataset-results-head">
           <div className="section-heading">
@@ -587,6 +593,12 @@ export function DatasetEditorPanel({
               const readinessEntry = readinessByKey?.get(asset.id);
               const savedItem = savedItemBySelection.get(asset.id);
               const preparedPath = savedItem?.ltxPreparedBundlePath;
+              // Named caption fields (sc-25685): a fresh `.json` import's, else the saved item's.
+              const namedCaptions = namedCaptionsById[asset.id] ?? savedItem?.captions;
+              const namedCaptionFields =
+                namedCaptions && typeof namedCaptions === "object" && !Array.isArray(namedCaptions)
+                  ? Object.keys(namedCaptions)
+                  : [];
               const maskStatus = savedItem ? maskStatusByItemId.get(savedItem.id) : undefined;
               const maskSrc = showMaskOverlay && maskStatus?.hasMask ? subjectMaskUrl(maskProjectId, maskStatus) : "";
               const maskError = maskUploadErrors[asset.id];
@@ -663,6 +675,25 @@ export function DatasetEditorPanel({
                       rows={3}
                       value={draft.text ?? ""}
                     />
+                    {onToggleHoldout ? (
+                      <label className="training-checkbox-field" title="Iris training: a holdout item is never trained on; it is the holdout set the run validates against.">
+                        <input
+                          checked={itemSplit(holdoutById, asset.id, savedItem) === "holdout"}
+                          onChange={(event) => onToggleHoldout(asset.id, event.target.checked)}
+                          type="checkbox"
+                        />
+                        Holdout (validation only)
+                      </label>
+                    ) : null}
+                    {namedCaptionFields.length ? (
+                      <span
+                        className="training-field-hint training-caption-named-fields"
+                        title={namedCaptionFields.map((field) => `${field}: ${namedCaptions[field]}`).join("\n")}
+                      >
+                        +{namedCaptionFields.length} caption field{namedCaptionFields.length === 1 ? "" : "s"}:{" "}
+                        {namedCaptionFields.join(", ")}
+                      </span>
+                    ) : null}
                     <div className="training-caption-card-actions">
                       <label className="secondary-action strong">
                         {preparedUploadingId === asset.id
@@ -740,6 +771,8 @@ export function DatasetEditorPanel({
           onAdd={addAssets}
           onClose={() => setAddDialogOpen(false)}
           onImport={handleImport}
+          fileAccept="image/*,.txt,text/plain,.json,application/json"
+          fileHint="Drag images with caption .txt or .json sidecars here, or"
         />
       ) : null}
       {referencePickerFor ? (

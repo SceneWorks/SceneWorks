@@ -268,6 +268,21 @@ export function loraMatchesModel(lora, model) {
   // Absent `modelIds` means family gating alone, so no existing LoRA is affected. Gated on the
   // model actually having an id: with no model selected there is nothing to compare against, and
   // the permissive branch above already covers that case.
+  // The Iris TASK gate (sc-25681), mirroring the API's `iris_adapter_refusal`: Iris's generation,
+  // depth and restoration backbones share one architecture, so family cannot tell their adapters
+  // apart. A model declaring `loraCompatibility.irisTask` is offered only adapters whose recorded
+  // `irisTask` stamp matches (an unstamped adapter is never offered — the API would refuse it), and
+  // whose recorded base model, if any, is this model.
+  // A trained full Iris checkpoint is listed under its own id but RUNS on its engine (the API aliases
+  // it onto `iris_3b` before the adapter gate), so an adapter's recorded base is compared with that
+  // engine id — a `baseModel: iris_3b` adapter is offered for the trained checkpoint too.
+  const irisTask = model?.loraCompatibility?.irisTask;
+  if (irisTask) {
+    if (lora?.irisTask !== irisTask) return false;
+    const base = lora?.baseModel ?? lora?.base_model;
+    const engineId = model?.trainedCheckpoint?.engineModel ?? model?.id;
+    if (base && engineId && base !== engineId) return false;
+  }
   const declaredModelIds = loraModelIds(lora);
   if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
     return false;

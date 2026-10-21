@@ -6,6 +6,15 @@
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
+    "depthLaneAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["residentGb", "referencePeakGb"],
+      "properties": {
+        "residentGb": { "type": "number", "exclusiveMinimum": 0 },
+        "referencePeakGb": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
     "vectorProviderAvailability": {
       "type": "object",
       "required": ["id", "available"],
@@ -1064,14 +1073,14 @@
               "properties": {
                 "componentId": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_]*$",
+                  "pattern": "^[a-z][a-z0-9_-]*$",
                   "description": "The engine's component key for these files (inference `ProviderComponents` / licence-row key)."
                 },
                 "requiredFor": {
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "items": { "enum": ["cover"] },
+                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32"] },
                   "description": "The purposes that need the component. Base generation is never one of them."
                 },
                 "provider": { "enum": ["huggingface"] },
@@ -1136,7 +1145,12 @@
             "additionalProperties": false,
             "properties": {
               "families": { "type": "array", "items": { "type": "string" } },
-              "types": { "type": "array", "items": { "type": "string" } }
+              "types": { "type": "array", "items": { "type": "string" } },
+              "irisTask": {
+                "type": "string",
+                "enum": ["generation", "depth", "restoration"],
+                "description": "Iris-3B adapters only (sc-25681): the Iris TASK an adapter must have been trained for. The three Iris task backbones share one architecture, so family alone cannot tell a depth adapter from a generation one; the API, Image Studio's picker and the engine all require the adapter's `irisTask` metadata stamp (recorded on the LoRA entry at import) to equal this, and refuse an unstamped file."
+              }
             }
           },
           "quantization": { "type": "object" },
@@ -1781,6 +1795,12 @@
                 "description": "Candle/CUDA SEQUENTIAL-residency peak or conservative high-water VRAM (GB) at the vramMeasuredPixels geometry, keyed by quant tier — the largest single working set when the provider loads→uses→drops each component in phase order (text encoders dropped before the DiT). The sibling measured flag says whether it is calibrated evidence. Always ≤ the resident vramGbByTier. Present only for sequential-capable providers (the candle FLUX lane, epic 10765 sc-10769). The fit-gate consults it as the SECOND-stage check (sc-10856): when the resident peak forces sequential offload but this peak still exceeds free VRAM, reject before load instead of running into a reactive OOM. Absent this number the gate keeps its best-effort behavior (run sequentially, reactive-OOM backstop).",
                 "additionalProperties": { "type": "number" }
               },
+              "imageActivationGbPerMegapixel": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-worker/src/image_jobs/lane_controls.rs", "anchor": "get(\"imageActivationGbPerMegapixel\")" }],
+                "description": "DECLARED (never measured) pixel-space activation working set, in GB, of ONE image per output megapixel (1024² = 1 MP), for an entry whose candle.minMemoryGb / sequentialPeakGb floors carry exactly one image at <= 1024² (sc-25681 native prompt batch, sc-25684 area). The Candle fit gate charges this × (images × max(1, megapixels) − 1) on top of the resident and sequential predictions, so neither a native prompt batch (image.maxPromptBatchImages) nor an output above 1024² is admitted on a floor sized for one 1024² image. Required by any Candle-routed entry declaring image.maxPromptBatchImages: without it the gate refuses a batch before load."
+              },
               "supportsSequentialOffload": {
                 "type": "boolean",
                 "description": "Static provider capability: the registered Candle generator honors LoadSpec sequential residency. Separate from sequentialPeakGb, which records measurement evidence."
@@ -1906,6 +1926,30 @@
               }
             }
           },
+          "depth": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Monocular-depth task metadata (Iris-3B depth, sc-25682). Only a depth-task utility entry declares it.",
+            "properties": {
+              "admission": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["measured", "referenceModelPixels", "extrapolationFactor", "mlx", "candle"],
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-readers": [
+                  { "path": "crates/sceneworks-worker/src/depth_jobs.rs", "anchor": "entry.pointer(\"/depth/admission\")" }
+                ],
+                "description": "The depth job's DECLARED memory admission, read per lane before load: predicted peak = residentGb + (referencePeakGb - residentGb) x (model pixels / referenceModelPixels), the activation term padded by extrapolationFactor above the reference area. A request whose prediction exceeds the host budget is refused (never downscaled). measured=false until the epic-end campaign replaces it.",
+                "properties": {
+                  "measured": { "type": "boolean" },
+                  "referenceModelPixels": { "type": "integer", "minimum": 1 },
+                  "extrapolationFactor": { "type": "number", "minimum": 1 },
+                  "mlx": { "$ref": "#/$defs/depthLaneAdmission" },
+                  "candle": { "$ref": "#/$defs/depthLaneAdmission" }
+                }
+              }
+            }
+          },
           "image": {
             "type": "object",
             "additionalProperties": false,
@@ -1918,6 +1962,33 @@
               "supportsNegativePrompt": {
                 "type": "boolean",
                 "description": "Does the engine accept a negative prompt? An engine with no steerable unconditional branch has nothing for a negative prompt to do — `resolve_negative_prompt` returns None for any model whose descriptor advertises `supports_negative_prompt: false`. ABSENT MEANS TRUE. When false, Image Studio hides its Negative prompt field, never seeds `ui.defaultNegativePrompt` into it, and sends an empty one."
+              },
+              "negativePromptRequiresGuidance": {
+                "type": "boolean",
+                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance != 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the API (and the worker, before load) refuse a non-empty negative prompt at guidance 1.0 instead of dropping it (sc-25681)."
+              },
+              "supportsSchedulerShift": {
+                "type": "boolean",
+                "description": "Does the engine have a schedule-shift axis WITHOUT a scheduler menu (Iris-3B: one shifted linear time grid, sc-25681)? ABSENT MEANS FALSE. When true, Image Studio shows its Schedule shift control (seeded from `defaults.schedulerShift`) regardless of the scheduler picker, sends `advanced.schedulerShift`, and the API refuses a non-finite or non-positive shift."
+              },
+              "supportsCfgInterval": {
+                "type": "boolean",
+                "description": "Does the engine gate classifier-free guidance to a model-time interval `advanced.cfgInterval: [start, end]` (0 <= start < end <= 1; model time runs from 1 = noise to 0 = clean) (Iris-3B, sc-25681)? ABSENT MEANS FALSE: the API refuses an interval for a model that does not declare it, and refuses any interval at guidance 1.0, where it would have no effect."
+              },
+              "captionOverflowPolicies": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["warn", "error", "silent"] },
+                "description": "The caption-overflow policies (`advanced.captionOverflow`) the engine honours for a prompt that tokenizes past its text-encoder budget: `warn` truncates and reports a `caption_truncated` warning, `error` refuses the render, `silent` truncates quietly (Iris-3B, sc-25681). ABSENT MEANS NONE: the API refuses a policy the model does not list. Omitting the field runs the checkpoint's own configured policy."
+              },
+              "patchGridVisibleBelow": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Below this output side (pixels) the released checkpoint renders a visible patch grid (Iris-3B at 1024: its 16-px patches show below 1024², which upstream fp32 reproduces, sc-25681). Purely informational: Image Studio shows a hint whenever width or height is under it and never restricts the size."
+              },
+              "maxPromptBatchImages": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "The engine renders a LIST of prompts as one batched pass (upstream Iris-3B `generate(prompts=[…])`, sc-25681): a job's top-level `prompts` (with `prompt` = `prompts[0]`) renders `prompts × count` images in prompt-minor order on seeds seed, seed+1, …, at most this many per job (the engine's max_count). ABSENT MEANS NONE: the API refuses `prompts`, and Image Studio's prompt batch stays one job per prompt. When present, Image Studio packs its prompt batch into native jobs of up to floor(this / count) prompts."
               }
             }
           },
@@ -2066,6 +2137,13 @@
                   }
                 },
                 {
+                  "if": { "anyOf": [{ "required": ["expectedSha256"] }, { "required": ["expectedSizeBytes"] }] },
+                  "then": {
+                    "required": ["expectedSha256", "expectedSizeBytes", "revision", "files"],
+                    "properties": { "files": { "minItems": 1, "maxItems": 1, "items": { "type": "string", "pattern": "^[^*?]+$" } } }
+                  }
+                },
+                {
                   "$comment": "sc-14980: a subdir narrows WHICH directory of a coRequisite's snapshot is staged for its componentId, so like componentId it is valid ONLY on coRequisite: true entries.",
                   "if": { "required": ["subdir"] },
                   "then": {
@@ -2119,8 +2197,8 @@
                 },
                 "componentId": {
                   "type": "string",
-                  "pattern": "^[a-z][a-z0-9_]*$",
-                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case, same shape as a descriptor id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
+                  "pattern": "^[a-z][a-z0-9_-]*$",
+                  "description": "Optional stable component id this coRequisite download PROVISIONS for the model's engine (epic 13657, sc-13679). When set (valid ONLY on `coRequisite: true` entries — schema-enforced by the allOf conditional above, sc-13771), the worker stages the resolved local path under this id in the engine's `LoadSpec::components`, matched against the provider's `ModelDescriptor::required_components` advertisement — the explicit repo→component mapping (never inferred from repo names) that the generic `resolve_co_requisites` seam reads. Lowercase snake_case or kebab-case matching the exact provider component id. Examples: chatterbox_tts's ve/perth co-requisites carry `voice_embedding`/`perth`; SDXL's carry `tokenizer_clip_l`/`tokenizer_clip_bigg`/`vae_fp16_fix` (sc-13682). Absent on a co-requisite the engine does not read as a named component (e.g. the PiD-gemma / Wan-Lightning shared weights)."
                 },
                 "subdir": {
                   "type": "string",
@@ -2190,6 +2268,14 @@
                     "option": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
                     "default": { "type": "boolean" }
                   }
+                },
+                "expectedSizeBytes": {
+                  "type": "integer", "minimum": 1,
+                  "description": "Exact content length for a pinned single-file artifact, paired with expectedSha256."
+                },
+                "expectedSha256": {
+                  "type": "string", "pattern": "^[0-9a-f]{64}$",
+                  "description": "Authoritative SHA256 for the exact pinned single-file artifact; queue, transfer, cache and optional load enforce it."
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],

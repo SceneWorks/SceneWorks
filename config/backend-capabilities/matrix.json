@@ -2,64 +2,64 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 129,
+    "modelCount": 139,
     "importedFamilyCount": 4,
-    "cellCount": 1035,
+    "cellCount": 1078,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "80c3555220790631bb4967ad1226304ef2dd3d8b5ca03692916f2d7f0fd242c9",
-    "apiDto": "21aa41cafe6a2d9e47ffeedbc0d902874332e401511d439f44eecef7a904f3ab",
-    "apiGeneration": "75e502e31d13ac2018e9bfdc17e6bc939f24704fc04fd4a93008eb9c5cdffa12",
-    "apiValidation": "a3509e547a1551e73eccc417fef08e6b118e6d18eb8d4eb717aa7f4214746cbe",
+    "apiContractEntry": "5e1e7792101f0ef880a407e5fd64efb422cdb799e0f6df595df03915037050c6",
+    "apiDto": "e4938dead6f3c9679f2449f312a522f6307c1fabd9358a3e1e69adf7cbd72e27",
+    "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
+    "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "d7109d1b5d52706909cbb2d96b1856efb93973c0f135bb5a5d575238911997b3",
-    "descriptorCandleFacts": "98813d747cefc028460b8d9f98205e5be598354e76c66fae12e8c70299d37955",
-    "descriptorCandleRuntime": "928935914e6a01f45ff28cc49b26c3c738f43f0e48f99df988a8eba95cc19f5b",
-    "descriptorMlxFacts": "d9d42af87ac9cd7152fe8706757be9d49ad9fefe2ac9732731df60863b561425",
-    "descriptorMlxRuntime": "4c8f997e48115ab55d42fa152da3bed1501d647997ee54f03c717c2f45cb754a",
-    "descriptorPreviewFacts": "442a6e7f82626847ce06f6e17a44d4a6af386efac6db65a8c4f72963e57f3fae",
+    "descriptorAudioFacts": "6a4fb8bb8511613540e3be5ac8be4040226046a99b430bfd8e490d323e80c7a9",
+    "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
+    "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
+    "descriptorMlxFacts": "2b0429ca7a70927f431491167fca3d286c2d32bdbec41a36c200405fd4e607af",
+    "descriptorMlxRuntime": "0aef06d6dfd337a60b868ab0ce571a7bc24596761494dba969cd3ef9f76a1ef1",
+    "descriptorPreviewFacts": "f56fc1a517641838466ab695aea26fae855a8cc21b2cb4fbdaf8f4637717376f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "4f1de963e24e0fd8ff8a8527fdd81f7f767adde88a23646b7803ae4717326558",
-    "modelImportDefaults": "53f087f4749ef411c44a0b9b57fb1daf7d3b7e642f7512852d2453b24062bfb6",
-    "routerCandle": "b0148c4f70e2cada8e175cc91f3d3c83463f204375fd8dfa93acb56a49ae1a79",
-    "routerCatalog": "8fdeb7cec1a2579ce0d297eb25887a9fbf4d69b2b49b671d5a99151ddf57d4d9",
-    "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
-    "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
-    "scheduler": "546d662a915ffff4411087c6fa1fdb0a641c008804539d6fab452723216a78ad",
-    "trainingCatalog": "143774854151affc7a971f30ab3278cf0a64edbe91caab749d3e61239022b4da",
+    "manifest": "a370752e7764acfdf2f0e7fe94a11650191d520056e7f46b06a29f2947e056ad",
+    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
+    "routerCandle": "aefaabbd6210aef7c91775ef9ea22464189ca3576497531467f1278cc98f1910",
+    "routerCatalog": "7c15b7eaa510e9ac9ba0ef8c4fad44e5a46c54ffc4179e3a9a39edc658586022",
+    "routerGaps": "e553137bed2fb2880a66f8a9df72b326247708ab7e4d94776d4be68de8bdd6ad",
+    "routerMlx": "ccd9a5a746a0752a90691a9bc88594b288d5fc50670604397a51fbcf1aeb8a23",
+    "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
+    "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
-    "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
-    "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
-    "webImageRequest": "5a64c49b080d9e426ad0af92eeae9bfdb7a59b74556513476e7ef226c97bedf2",
-    "webMacGating": "4fdb497f1044f3827e3ba051c6386018f76f731dc49159ce87b72f82796f1b3e",
+    "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
+    "webImageAdvanced": "c99975b860ed59b20e1ec7a039f7a44c602efd65350bd8fbc250cddff1fbf9a1",
+    "webImageRequest": "4b9eb564dec18a44de0f3ec272457f6b1b8c9639a7104d73a203f09fb89de74a",
+    "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
     "webSimpleAudioStudio": "7ffbd94e291de76958b928b467591f153116362400be9c7deaa730b925538ae5",
-    "webSimpleJobs": "e72e036e0e6f28470fbd33bb02e76b30a5261ffd84d64424a782a159de3ec644",
-    "webSimpleVideo": "6404756ee8ed4d3d9139969f977933e72c82e11b02297d664eb97703acab6885",
-    "webUpscaleEngines": "31f3e26fbd009954126a324ea37dc9e2e1a9fa89955620c50794fb2df1ec40d4",
-    "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
+    "webSimpleJobs": "fbd28fe740e0ab6f4a48ebec918509bc137f80b088358cd28c32eeb14d0df1f2",
+    "webSimpleVideo": "97eaf71fc8aa99d0d032e83acbb6e075fe7a6caf72d21c2f867aa9728c5e12a3",
+    "webUpscaleEngines": "0d80f32e7e14a97773e5c8cc05a31c2dd9ea2657aa41904a5cc0123382dfee38",
+    "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
-    "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
+    "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "c74e95af625f5310b759300ba13a4831fda06fd89cce7e6aac7d856395294dc7",
-    "workerEngineTable": "cdd10c5672a8a447b67c5b33c341325b9cba015477440c412bd9aca1237573c6",
-    "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "ea8f8ff8df8eb2061a77f2bbe2dc028b1c808b6a930afb133bc0e5e816f6db78",
-    "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
-    "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
-    "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
+    "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
+    "workerEngineTable": "f8a32d610f5f6a54e7f9e1745a5da38a4714e59b461ea794f2b85e15b814855b",
+    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
+    "workerImageDispatch": "3b71abc3af987165956a36ce44af1e06eaf5b94a9654ab252ebe7c4cbef5421d",
+    "workerImageKreaImported": "badaa28f1889864095e9f14b6af34f0040ee7aaa101f464345aab99774646b79",
+    "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
+    "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "41b8190787fdbf975411b0e3d7701378ddd253cc76ba37f4024f3306c1d0bd50",
-    "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
+    "workerTrainingDispatch": "14208b1a60b21fea666670e1df66e2c51318f1f3955526ac102ca8a01ee7f7d1",
+    "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
-    "workerVideoDispatch": "14ebc949a182da1ecc3af1ba5b38c584fd2d629a55e1d16d2e13f10c4ac84697",
+    "workerVideoDispatch": "b0f6de63795eeb4db8cd149cfdcd5d036a0d86e39dfd12d276c4b997804b02bc",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "c6cb857c118b310bef3ae3398db11be5a7aaba813d9c6ef5efaecb48fbfa6607",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "6f5829fa696cee181f20a38798694a25ca1dc689d1f059b6730534584fb7d700"
+    "workerVideoWan": "dbd3edacbfff16154b010fe7be463c7b118e7ceccb5a3b09365a7529124ade25"
   },
   "models": [
     {
@@ -2184,6 +2184,164 @@
       }
     },
     {
+      "id": "iris_3b",
+      "family": "iris",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "id": "iris_3b_depth",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "image_depth",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_3b_restore",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [
+        {
+          "capability": "engine:iris",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_repa_teacher_dinov2_base",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_critic_trunk",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_lpips_lin",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_restore_train_vgg16",
+      "family": "iris",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "joycaption_beta_one",
       "family": "joycaption",
       "modelType": "utility",
@@ -3978,6 +4136,94 @@
       }
     },
     {
+      "id": "moss_image_base",
+      "family": "moss_image",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "family": "moss_image",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
       "id": "moss_sfx_v2",
       "family": "moss_soundeffect",
       "modelType": "audio",
@@ -4470,6 +4716,90 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "qwen_image_2_1_turbo",
+      "family": "qwen-image-2-1",
+      "modelType": "image",
+      "manifestOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
       }
     },
     {
@@ -7813,6 +8143,17 @@
       ]
     },
     {
+      "jobType": "image_depth",
+      "category": "utility",
+      "requests": [
+        {
+          "capability": "representative_request",
+          "mlx": true,
+          "candle": true
+        }
+      ]
+    },
+    {
       "jobType": "image_detail",
       "category": "per-model",
       "requests": [
@@ -8130,6 +8471,83 @@
       "target": "illustrious_xl_v2_lora",
       "baseModel": "illustrious_xl_v2",
       "kernel": "sdxl_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_depth",
+      "baseModel": "iris_3b_depth",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_generation",
+      "baseModel": "iris_3b",
+      "kernel": "iris_train",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "full",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "iris_3b_restore",
+      "baseModel": "iris_3b_restore",
+      "kernel": "iris_train",
       "networkType": "lora",
       "support": {
         "capability": "train",

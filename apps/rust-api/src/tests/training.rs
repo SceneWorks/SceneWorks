@@ -122,7 +122,9 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     for candle in [false, true] {
         let registry = crate::training::effective_training_targets_for_candle(candle);
         for target in &registry.targets {
-            let adapter = target.id != "krea_2_control";
+            // The Iris-3B trainers declare no epic 2123 technique.
+            let adapter = target.id != "krea_2_control"
+                && !sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
             assert_eq!(
                 sceneworks_core::training::target_supports_weight_noise(target),
                 adapter,
@@ -165,7 +167,7 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control")
+        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
         .collect();
     assert_eq!(mlx, all);
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
@@ -3343,6 +3345,53 @@ async fn create_training_job_queues_real_run_when_not_dry_run() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(queued[0]["id"], job_id);
     assert_eq!(queued[0]["type"], "lora_train");
+}
+
+/// Only Iris finishes a cancel durably (epic sc-25678, E8): a canceled NON-Iris run registers
+/// nothing even when its result claims an export and the adapter file exists.
+#[tokio::test]
+async fn canceled_non_iris_training_job_registers_nothing_even_when_marked_exported() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(&adapter_path);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "canceled",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": adapter_path.display().to_string(),
+                "trainedArtifactExported": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_eq!(canceled["status"], "canceled");
+    assert!(
+        canceled["result"].get("loraRegistered").is_none(),
+        "a non-Iris cancel registers nothing: {canceled}"
+    );
 }
 
 #[tokio::test]
@@ -7409,5 +7458,358 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
     assert!(
         detail.contains("11 reference images") && detail.contains("at most 10"),
         "the refusal names the count and the cap: {detail}"
+    );
+}
+
+/// sc-25785: the resume checkpoint a worker reports survives later results that omit it and the
+/// terminal transition; `{ "resume": true }` resumes the persisted plan in one call; a retry is
+/// refused while another run into the same output dir is in flight; and `{ "resume": false }`
+/// restarts from step 0 even when the persisted plan was itself a resume.
+#[tokio::test]
+async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_plan() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    let (_, original) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    claim_training_job(&app, &job_id).await;
+
+    let stem = adapter_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("adapter stem");
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for step in ["000050", "000100"] {
+        write_test_safetensors(&output_dir.join(format!("{stem}-step{step}.resume.safetensors")));
+    }
+
+    // The worker reports the checkpoint once, then later results (a preview sample) omit it.
+    let sample = json!({ "step": 100, "relativePath": "samples/s.png", "path": "/tmp/s.png" });
+    for result in [
+        json!({ "resumeCheckpointStep": 100 }),
+        json!({ "trainingSamples": [sample.clone()] }),
+    ] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "running",
+                "stage": "training",
+                "progress": 0.5,
+                "message": "Training step 101 of 200 (loss 0.1000).",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": result
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "LoRA training canceled by user.",
+            "workerId": TEST_TRAINING_WORKER_ID
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["result"]["resumeCheckpointStep"], 100);
+    assert_eq!(canceled["result"]["trainingSamples"], json!([sample]));
+
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{resumed}");
+    assert_ne!(resumed["id"], job_id);
+    let mut expected_plan = original["payload"]["plan"].clone();
+    assert_ne!(expected_plan["config"]["advanced"]["resume"], true);
+    expected_plan["config"]["advanced"]["resume"] = json!(true);
+    assert_eq!(resumed["payload"]["plan"], expected_plan);
+
+    // While the resumed run is queued, neither a restart nor a second resume of the source may
+    // start another run into the same output dir.
+    for body in [
+        json!({ "resume": false }),
+        json!({ "resume": true }),
+        json!({}),
+    ] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused.to_string().contains("still queued or running"),
+            "{refused}"
+        );
+    }
+
+    // The resumed run fails; restarting it must turn resume back off.
+    let resumed_id = resumed["id"].as_str().expect("resumed id").to_owned();
+    claim_training_job(&app, &resumed_id).await;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, restarted) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{restarted}");
+    assert_eq!(
+        restarted["payload"]["plan"]["config"]["advanced"]["resume"],
+        false
+    );
+}
+
+/// sc-25785: resume is refused, typed, when there is nothing to resume — no checkpoint of this
+/// run on disk (another stem's bundle does not count), a completed run, or a non-training job.
+#[tokio::test]
+async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (failed_id, failed_dir, _) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &failed_id).await;
+    std::fs::create_dir_all(&failed_dir).expect("output dir creates");
+    write_test_safetensors(&failed_dir.join("another-run-step000500.resume.safetensors"));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("no saved checkpoint"),
+        "{refused}"
+    );
+
+    // A completed run is not resumable even with its own bundle on disk.
+    let (completed_id, completed_dir, completed_adapter) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &completed_id).await;
+    stage_trained_adapter(&completed_dir, &completed_adapter);
+    let stem = completed_adapter
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("stem");
+    write_test_safetensors(&completed_dir.join(format!("{stem}-step000050.resume.safetensors")));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": completed_adapter.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused.to_string().contains("can be resumed"), "{refused}");
+
+    // A non-training job rejects the flag in either direction.
+    let (status, other_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "model_download", "payload": { "modelId": "resume_probe" }, "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_id = other_job["id"].as_str().expect("job id").to_owned();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{other_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{other_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("only to training jobs"),
+        "{refused}"
+    );
+}
+
+/// sc-25907 (epic 25899 E9): Qwen-Image 2.1 Turbo is not a training base. A hand-built plan naming
+/// it is a 400 on the raw route that names the reason and the base to train on instead — even with
+/// the licence acknowledged, so the refusal is about the base, not the licence — while the same
+/// plan on the base model still clears this gate.
+///
+/// *Mutation that reds this:* dropping the `raw_training_payload_base_error` call from the raw
+/// route (the Turbo plan is then answered by the licence gate or queued), or emptying
+/// `untrainable_base_model_reason`.
+/// sc-25907, the typed `create_training_job` route's gate: a registry target whose base is the
+/// distilled Turbo is a 400 naming the reason and the base to train on, and every built-in target
+/// passes it. (No user-target registry exists to POST such a target through the typed route; the
+/// gate is the handler's first check after the target lookup.)
+///
+/// *Mutations that red this:* returning `None` from `untrainable_target_base_error`; emptying
+/// `untrainable_base_model_reason`.
+#[test]
+fn typed_training_route_refuses_a_target_based_on_qwen_image_2_1_turbo() {
+    let registry = crate::training::effective_training_targets_for_candle(false);
+    for target in &registry.targets {
+        assert!(
+            crate::training::untrainable_target_base_error(target).is_none(),
+            "built-in target {} trains",
+            target.id
+        );
+    }
+    let mut turbo = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("the built-in Qwen-Image 2.1 LoRA target")
+        .clone();
+    turbo.base_model = "qwen_image_2_1_turbo".to_owned();
+    let error = crate::training::untrainable_target_base_error(&turbo)
+        .expect("a Turbo-based target is refused");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.detail.contains("qwen_image_2_1_turbo")
+            && error.detail.contains("no trainer")
+            && error.detail.contains("Train the LoRA on qwen_image_2_1"),
+        "the refusal names the reason and the base to train on: {}",
+        error.detail
+    );
+}
+
+#[tokio::test]
+async fn raw_jobs_route_refuses_qwen_image_2_1_turbo_as_a_training_base() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |base_model: &str, acknowledged: bool| {
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": {
+            "dryRun": false,
+            "licenseAcknowledged": acknowledged,
+            "plan": { "target": {
+                "targetId": "qwen_image_2_1_lora",
+                "kernel": "qwen_image_2_1_lora",
+                "baseModel": base_model
+            } }
+        } })
+    };
+    for acknowledged in [false, true] {
+        let body = raw("qwen_image_2_1_turbo", acknowledged);
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        let detail = response["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1_turbo")
+                && detail.contains("no trainer")
+                && detail.contains("Train the LoRA on qwen_image_2_1"),
+            "the refusal names the reason and the base to train on: {detail}"
+        );
+    }
+    let (_, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw("qwen_image_2_1", true),
+    )
+    .await;
+    assert!(
+        !response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no trainer"),
+        "the base model is still a training base: {response}"
+    );
+    assert!(
+        sceneworks_core::training::untrainable_base_model_reason("qwen_image_2_1").is_none(),
+        "base 2.1 trains"
     );
 }

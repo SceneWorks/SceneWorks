@@ -335,10 +335,10 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 
 /// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
 ///
-/// `qwen_image_2_1` — the one route that declares an envelope — is priced off the EXACT ordered
-/// list its lane renders ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an
-/// ORDINARY reference to this engine — it has no mask tensor), the plural list and the singular
-/// reference, deduped by asset id. Every entry is one reference block of the joint attention
+/// The Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — the routes that declare an
+/// envelope — is priced off the EXACT ordered list its lane renders
+/// ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an ORDINARY reference to this
+/// engine — it has no mask tensor), the plural list and the singular reference, deduped by asset id. Every entry is one reference block of the joint attention
 /// sequence, so counting anything else prices a different request than the one that runs: a
 /// `max` over the carriers priced source + mask + 8 references as 8.
 ///
@@ -350,7 +350,7 @@ fn reference_image_count(request: &ImageRequest) -> u32 {
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
     }
     let plural = request
@@ -478,6 +478,15 @@ pub(crate) async fn run_image_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let request = ImageRequest::from_payload(&job.payload);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -1699,6 +1708,23 @@ pub(crate) async fn run_image_generate_job(
     // window.
     drop(preload_heartbeat);
 
+    // A render's non-fatal engine warnings (sc-25681, e.g. Iris's `caption_truncated`) are on each
+    // asset's provenance; the completion message names them too, so the user sees them on the job
+    // without opening an asset.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let warnings = lane_controls::job_warning_messages(&asset_writes);
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    let warnings: Vec<String> = Vec::new();
+    let mut message = format!("Generated {} image(s).", plan.image_count);
+    if !warnings.is_empty() {
+        message.push_str(&format!(" Warning: {}", warnings.join(" ")));
+    }
     update_job(
         api,
         &job.id,
@@ -1706,7 +1732,7 @@ pub(crate) async fn run_image_generate_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            &format!("Generated {} image(s).", plan.image_count),
+            &message,
             Some(streaming_result(&plan, &asset_writes)),
             backend,
         ),
@@ -2468,6 +2494,67 @@ pub(crate) fn standalone_upscale_workflow_share(
     )
 }
 
+/// The workflow envelope for a standalone Iris restoration (`image_upscale` with `engine: "iris"`,
+/// sc-25683). The same rule as [`standalone_upscale_workflow_share`] — the pass is a distinct job, so
+/// nothing is inherited from whatever generated the source — with the Iris controls in place of the
+/// factor: the APPLIED scale, input sizing and colour fix the engine ran (`plan`), never the requested
+/// ones. Geometry is the SOURCE image's, so the recipe reads "this image, restored at N×".
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn standalone_restore_workflow_share(
+    job_payload: &JsonObject,
+    plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
+) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
+    let mut overlay = job_payload.clone();
+    overlay.insert(
+        "upscale".to_owned(),
+        iris_upscale_overlay(plan, trained_model),
+    );
+    embeddable_workflow_share(
+        &WorkflowAssetFacts {
+            mode: "image_upscale".to_owned(),
+            model: trained_model
+                .unwrap_or(crate::iris_restore::IRIS_RESTORE_MODEL_ID)
+                .to_owned(),
+            prompt: String::new(),
+            negative_prompt: String::new(),
+            seed: 0,
+            width: Some(plan.source.width),
+            height: Some(plan.source.height),
+        },
+        &overlay,
+    )
+}
+
+/// The envelope's `upscale` record for an applied Iris restoration: exactly the reopenable controls
+/// (incl. `irisModel` when a trained restoration model ran).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn iris_upscale_overlay(
+    plan: &gen_core::iris::restoration::RestorationPlan,
+    trained_model: Option<&str>,
+) -> Value {
+    let mut overlay = json!({
+        "enabled": true,
+        "engine": sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+        "scale": plan.scale,
+        "inputSizing": match plan.input_sizing {
+            gen_core::InputSizing::Budgeted => "budgeted",
+            gen_core::InputSizing::Original => "original",
+        },
+        "colorFix": plan.color_fix,
+    });
+    if let Some(model) = trained_model {
+        overlay[sceneworks_core::image_restoration::IRIS_MODEL_KEY] = json!(model);
+    }
+    overlay
+}
+
 impl ImagePlan {
     /// Test-only convenience: a plan whose image count is the request count, embedding nothing.
     /// Production always goes through [`ImagePlan::with_count`] (the FLUX.2 angle/pose sets need an
@@ -2708,6 +2795,10 @@ pub(crate) fn reattach_alpha(
     }))
 }
 
+/// `rawAdapterSettings` key of a native prompt batch's full prompt list (sc-25681), recorded on
+/// every image of the batch so reopening any one restores the batch.
+pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
+
 /// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
 /// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -2768,6 +2859,14 @@ pub(crate) fn write_image_asset(
     let requested_channels =
         crate::qwen_alpha::resolve_output_channels(&request.model, &request.advanced)?;
     crate::qwen_alpha::record_requested_channels(&mut raw_settings, requested_channels);
+    // A native prompt batch (sc-25681): THIS image's prompt is `prompts[index % len]`, and the
+    // whole list is recorded (worker-owned — a replayed `advanced` can never forge it) so the
+    // studio reopens the batch, not just this one prompt.
+    let prompt = request.image_prompt(index).to_owned();
+    raw_settings.remove(PROMPT_BATCH_KEY);
+    if !request.prompts.is_empty() {
+        raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
+    }
 
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
@@ -2800,7 +2899,7 @@ pub(crate) fn write_image_asset(
             &WorkflowAssetFacts {
                 mode: request.mode.clone(),
                 model: request.model.clone(),
-                prompt: request.prompt.clone(),
+                prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
                 seed,
@@ -2816,6 +2915,20 @@ pub(crate) fn write_image_asset(
         }
         if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
             share.advanced.insert("sampler".to_owned(), json!(sampler));
+        }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
+            {
+                // Preserve requested steps separately from the provider's deduplicated actual grid.
+                if let Some(steps) = report.pointer("/resolved/steps") {
+                    share.advanced.insert("steps".to_owned(), steps.clone());
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
         }
         share.model_hash = plan.model_hash.clone();
         // Replace request-derived hints with the exact adapter stack the worker resolved. This is
@@ -2838,7 +2951,7 @@ pub(crate) fn write_image_asset(
         let _ = std::fs::remove_file(&temp_path);
     })?;
 
-    let title: String = request.prompt.chars().take(56).collect();
+    let title: String = prompt.chars().take(56).collect();
     let title = title.trim();
     let display_name = format!(
         "{} #{}",
@@ -2873,7 +2986,9 @@ pub(crate) fn write_image_asset(
         "height": height,
         "normalizedWidth": request.width,
         "normalizedHeight": request.height,
-        "count": plan.image_count,
+        // MOSS records the whole native prompt batch in the recipe. Its replay count is
+        // images per prompt; the generation set and expectedCount retain the total.
+        "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
         "family": plan.family,
         "seed": seed,
         "index": index,
@@ -2882,7 +2997,7 @@ pub(crate) fn write_image_asset(
         "mode": request.mode,
         "model": request.model,
         "adapter": adapter,
-        "prompt": request.prompt,
+        "prompt": prompt,
         "negativePrompt": request.negative_prompt,
         "loras": request.loras,
         "stylePreset": request.style_preset,
@@ -2929,6 +3044,20 @@ async fn apply_inline_upscale(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    // Iris restoration (sc-25683) is sized by `scale`, not `factor`, and runs as a transform.
+    if request.upscale.is_iris() {
+        return apply_inline_iris_restore(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            backend,
+            asset_writes,
+            crate::iris_restore::registry_transform_loader,
+        )
+        .await;
+    }
     let factor: u8 = if request.upscale.factor == 4 { 4 } else { 2 };
     let engine_id = normalize_upscale_engine(&request.upscale.engine);
     let softness = request.upscale.softness();
@@ -3018,11 +3147,136 @@ async fn apply_inline_upscale(
                 &engine_for_task,
                 factor,
                 softness,
+                None,
                 &project_path_for_task,
             )
         })
         .await
         .map_err(|error| crate::task_join_error("upscaled asset write task", error))??;
+        asset_writes.push(Value::Object(fact));
+        heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    }
+    Ok(())
+}
+
+/// The Image Studio inline post-processing pass with the Iris restoration engine (sc-25683): restore
+/// every base image the generation produced into a second, lineage-linked asset. Same placement and
+/// lifetime as the other engines' inline pass (the base images are already streamed, so they persist
+/// if a late restore refuses or is canceled; a canceled restore writes nothing for its image).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_inline_iris_restore(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    loader: crate::iris_restore::TransformLoader,
+) -> WorkerResult<()> {
+    let params = plan
+        .request
+        .upscale
+        .iris_params()
+        .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let trained_model = sceneworks_core::image_restoration::parse_iris_restore_model(
+        &plan.request.upscale.iris_controls(),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(format!("upscale: {error}")))?;
+    let base_facts: Vec<JsonObject> = asset_writes
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|fact| fact.get("type").and_then(Value::as_str) == Some("image"))
+        .cloned()
+        .collect();
+    let total_images = base_facts.len();
+
+    for (i, base_fact) in base_facts.iter().enumerate() {
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
+        let media_rel = base_fact
+            .get("mediaPath")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("restoration source asset missing mediaPath".to_owned())
+            })?;
+        let source_path = project_path.join(media_rel);
+        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
+            crate::iris_restore::decode_oriented(&source_path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "Restoration source could not be loaded: {error}"
+                    ))
+                })
+                .map(|decoded| split_alpha(&decoded))
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restoration source decode task", error))??;
+
+        let streaming = streaming_result(plan, asset_writes);
+        let backend_label = backend.to_owned();
+        let index = i + 1;
+        update_job(
+            api,
+            &job.id,
+            image_progress(
+                JobStatus::Running,
+                ProgressStage::Running,
+                0.9,
+                &format!("Restoring image {index}/{total_images} with Iris."),
+                Some(streaming.clone()),
+                backend,
+            ),
+        )
+        .await?;
+        let outcome = crate::upscale_jobs::restore_with_progress(
+            api,
+            settings,
+            &job.id,
+            loader,
+            source,
+            params,
+            trained_model.clone(),
+            move |current, total| {
+                image_progress(
+                    JobStatus::Running,
+                    ProgressStage::Running,
+                    0.9,
+                    &format!(
+                        "Restoring image {index}/{total_images} with Iris: tile {current}/{total}."
+                    ),
+                    Some(streaming.clone()),
+                    &backend_label,
+                )
+            },
+        )
+        .await?;
+        // A cancel requested after the last per-tile reply trips no flag; re-check the job before
+        // writing the restored variant so a canceled pass publishes nothing new.
+        check_cancel(api, &job.id, "Iris restoration canceled by user.").await?;
+
+        let plan_for_task = plan.clone();
+        let base_fact_for_task = base_fact.clone();
+        let project_path_for_task = project_path.to_owned();
+        let trained_model_for_task = trained_model.clone();
+        let fact = tokio::task::spawn_blocking(move || {
+            write_upscaled_asset(
+                &plan_for_task,
+                &base_fact_for_task,
+                &outcome.image,
+                source_alpha.as_ref(),
+                sceneworks_core::image_restoration::IRIS_RESTORE_ENGINE,
+                0,
+                0.0,
+                Some((&outcome.plan, trained_model_for_task.as_deref())),
+                &project_path_for_task,
+            )
+        })
+        .await
+        .map_err(|error| crate::task_join_error("restored asset write task", error))??;
         asset_writes.push(Value::Object(fact));
         heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     }
@@ -3047,17 +3301,29 @@ fn write_upscaled_asset(
     engine_id: &str,
     factor: u8,
     softness: f32,
+    // The applied Iris restoration plan (sc-25683) when the pass was the `iris` engine — it sizes by
+    // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead —
+    // with the trained restoration model it ran, if any (sc-25688).
+    iris: Option<(&gen_core::iris::restoration::RestorationPlan, Option<&str>)>,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;
     let index = base_fact.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
     let (width, height) = (upscaled.width(), upscaled.height());
+    let (iris, iris_model) = match iris {
+        Some((iris, model)) => (Some(iris), model),
+        None => (None, None),
+    };
+    let size_tag = match iris {
+        Some(iris) => crate::iris_restore::file_tag(iris),
+        None => format!("up{factor}x"),
+    };
 
     // Sanitize the untrusted model id before it becomes a path component (F-003 / sc-11159),
     // mirroring `write_image_asset` so the upscaled variant is confined identically.
     let model_slug = slugify(&request.model, "model", None);
     let filename = format!(
-        "{}_{}_{}_{:04}_up{factor}x.png",
+        "{}_{}_{}_{:04}_{size_tag}.png",
         &plan.created_at[..10],
         model_slug,
         plan.slug,
@@ -3071,10 +3337,18 @@ fn write_upscaled_asset(
     // The APPLIED pass, not the requested one. Hoisted above the write because two things now read
     // it: the embedded workflow (sc-15948) and the `rawAdapterSettings.upscale` record below, and a
     // shared image must not describe a different pass from the one the sidecar records.
-    let upscale_record = if engine_id == "seedvr2" {
+    let upscale_record = if let Some(iris) = iris {
+        crate::iris_restore::applied_settings_record(iris, iris_model)
+    } else if engine_id == "seedvr2" {
         json!({ "enabled": true, "engine": engine_id, "factor": factor, "softness": softness })
     } else {
         json!({ "enabled": true, "engine": engine_id, "factor": factor })
+    };
+    // The envelope carries the reopenable controls only (the record's plan/dimension facts are
+    // sidecar observability, not a recipe).
+    let envelope_record = match iris {
+        Some(iris) => iris_upscale_overlay(iris, iris_model),
+        None => upscale_record.clone(),
     };
 
     let temp_path = media_path.with_extension("tmp.png");
@@ -3083,7 +3357,7 @@ fn write_upscaled_asset(
     let mut share = plan
         .workflow_source
         .as_deref()
-        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &upscale_record));
+        .and_then(|payload| upscaled_workflow_share(request, base_fact, payload, &envelope_record));
     if let Some(share) = share.as_mut() {
         share.model_hash = plan.model_hash.clone();
         share.loras = plan.loras.clone();
@@ -3100,7 +3374,13 @@ fn write_upscaled_asset(
         .get("displayName")
         .and_then(Value::as_str)
         .unwrap_or("Generated image");
-    let display_name = format!("{base_display} ({factor}x upscaled)");
+    let display_name = match iris {
+        Some(iris) => format!(
+            "{base_display} ({})",
+            crate::iris_restore::display_suffix(iris)
+        ),
+        None => format!("{base_display} ({factor}x upscaled)"),
+    };
 
     // rawAdapterSettings: the base settings + an `upscale` record (mirrors the Python worker so the
     // gallery / preset restore can read back the engine/factor/softness).
@@ -3135,7 +3415,18 @@ fn write_upscaled_asset(
         .unwrap_or_default();
     extra.insert("isUpscaled".to_owned(), json!(true));
     extra.insert("upscaledFromAssetId".to_owned(), source_asset_id);
-    extra.insert("factor".to_owned(), json!(factor));
+    match iris {
+        Some(iris) => {
+            extra.insert("scale".to_owned(), json!(iris.scale));
+            extra.insert(
+                "restoration".to_owned(),
+                json!(crate::iris_restore::RestorePlanView::from_plan(iris)),
+            );
+        }
+        None => {
+            extra.insert("factor".to_owned(), json!(factor));
+        }
+    }
     extra.insert("engine".to_owned(), json!(engine_id));
     fact.insert("extra".to_owned(), Value::Object(extra));
     Ok(fact)
@@ -3151,7 +3442,7 @@ fn write_upscaled_asset(
 /// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
 /// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
-    json!({
+    let mut result = json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.image_count,
         "adapter": plan.adapter,
@@ -3161,7 +3452,35 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     })
     .as_object()
     .cloned()
-    .expect("json! object literal")
+    .expect("json! object literal");
+    let prefix_kv_cache = job_prefix_kv_cache_records(asset_writes);
+    if !prefix_kv_cache.is_empty() {
+        result.insert(
+            PREFIX_KV_CACHE_RESULT_KEY.to_owned(),
+            Value::Array(prefix_kv_cache),
+        );
+    }
+    result
+}
+
+/// The job result's prefix-KV-cache summary (epic 25899): each written image's
+/// `rawAdapterSettings.prefixKvCache` record — what the admission selected and priced, the path
+/// the render REPORTS it ran, its cache bytes and any shed-over-priced-bound overflow — in asset
+/// order, so a finished job says which path ran without opening an asset. Absent (not empty) for a
+/// job whose provider prices no cache.
+pub(crate) const PREFIX_KV_CACHE_RESULT_KEY: &str = "prefixKvCache";
+
+fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
+    asset_writes
+        .iter()
+        .filter_map(|write| {
+            write
+                .get("rawAdapterSettings")
+                .and_then(|settings| settings.get(PREFIX_KV_CACHE_RESULT_KEY))
+                .filter(|record| record.is_object())
+                .cloned()
+        })
+        .collect()
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle
@@ -3186,6 +3505,9 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
+    // reach the asset or the job result's `prefixKvCache` summary.
+    raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
     raw.insert("realModelInference".to_owned(), Value::Bool(false));
     raw
 }
@@ -3447,6 +3769,29 @@ fn lerp(a: u8, t: f32) -> u8 {
 ))]
 // MLX/candle generator stream helpers.
 include!("image_jobs/stream.rs");
+
+// Iris-3B generation-task wiring (sc-25679 MLX / sc-25680 Candle / sc-25681 controls): its tests
+// drive the MLX `generate_stream` arm and the Candle `generate_candle_stream` arm end to end.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod iris;
+
+// The generic image lane's request controls beyond the positional knobs (CFG interval,
+// caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine
+// warnings, adapter apply reports), resolved identically by both arms (sc-25681).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod lane_controls;
+// The Candle shared-ladder selector reads the declared activation term so it never prices the same
+// batch and area twice (sc-25690, `candle_memory_strategy::law_geometry`).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) use lane_controls::{
+    declared_activation_gb_per_megapixel, DECLARED_ACTIVATION_FLOOR_PIXELS,
+};
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 mod tier_resolver;

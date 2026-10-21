@@ -24,6 +24,47 @@ use crate::training::{
     TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
 
+/// Which Iris training sidecar of a dataset item ([`TrainingDatasetStore::set_iris_item_sidecar`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrisSidecarKind {
+    /// The aligned numerical depth map (`.npy` / 8- or 16-bit grayscale `.png`).
+    Depth,
+    /// The depth map's validity mask (`.npy` / `.png`, non-zero = valid).
+    DepthMask,
+    /// The aligned degraded input of a restoration pair.
+    Degraded,
+}
+
+impl IrisSidecarKind {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "depth" => Some(Self::Depth),
+            "mask" => Some(Self::DepthMask),
+            "degraded" => Some(Self::Degraded),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Depth => "depth",
+            Self::DepthMask => "mask",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+/// One sidecar write: the staged file + its extension (`None` removes the sidecar), and — for a
+/// depth map — the per-item value conversion (`scale`, `minDepth`, `maxDepth`).
+#[derive(Debug, Clone)]
+pub struct IrisItemSidecar {
+    pub kind: IrisSidecarKind,
+    pub source: Option<(PathBuf, String)>,
+    pub scale: Option<f64>,
+    pub min_depth: Option<f64>,
+    pub max_depth: Option<f64>,
+}
+
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
 // Tier-1 CLIP embeddings sidecar (sc-6535) — kept out of the manifest (768×f32 per item is too big
 // to inline like tier0_scalars); content-hash-keyed so it survives dataset edits.
@@ -549,6 +590,173 @@ impl TrainingDatasetStore {
         }
         if let Some(backup) = backup {
             let _ = fs::remove_file(backup);
+        }
+        Ok(dataset)
+    }
+
+    /// Install (or, with `source: None`, remove) one Iris training sidecar of a dataset item
+    /// (sc-25687 depth / sc-25688 restoration): the aligned depth map, its validity mask, or the
+    /// aligned degraded input. The file is copied to `sidecars/<item>.<kind>.<ext>` beside the
+    /// dataset and the item is stamped with its dataset-relative path (`extra.irisDepth` /
+    /// `extra.irisDegradedImage`). Callers cannot choose a destination; the CONTENT (format,
+    /// alignment with the item's image) is checked by the caller with the engine's own readers
+    /// before this runs.
+    pub fn set_iris_item_sidecar(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        sidecar: &IrisItemSidecar,
+    ) -> ProjectStoreResult<TrainingDataset> {
+        use crate::training::iris::depth::ITEM_DEPTH_KEY;
+        use crate::training::iris::restore::ITEM_DEGRADED_KEY;
+        if !is_safe_id(dataset_id) || !is_safe_id(item_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid training dataset or item ID".to_owned(),
+            ));
+        }
+        let mut dataset = self.read_dataset_by_id(dataset_id)?;
+        ensure_dataset_project(project_id, &dataset)?;
+        let root = dataset_root(&self.project_path, dataset_id);
+        let item = dataset
+            .items
+            .iter_mut()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| {
+                ProjectStoreError::NotFound("Training dataset item not found".to_owned())
+            })?;
+        let kind = sidecar.kind.as_str();
+        let installed = match &sidecar.source {
+            None => None,
+            Some((source, extension)) => {
+                let extension = extension.to_ascii_lowercase();
+                let allowed: &[&str] = match sidecar.kind {
+                    IrisSidecarKind::Depth | IrisSidecarKind::DepthMask => &["npy", "png"],
+                    IrisSidecarKind::Degraded => &["png", "jpg", "jpeg", "webp"],
+                };
+                if !allowed.contains(&extension.as_str()) {
+                    return Err(ProjectStoreError::BadRequest(format!(
+                        "A {kind} sidecar must be one of: {}.",
+                        allowed.join(", ")
+                    )));
+                }
+                if !fs::metadata(source)?.is_file() {
+                    return Err(ProjectStoreError::BadRequest(
+                        "The sidecar upload must be a regular file".to_owned(),
+                    ));
+                }
+                let dir = root.join("sidecars");
+                fs::create_dir_all(&dir)?;
+                let relative = format!("sidecars/{item_id}.{kind}.{extension}");
+                let staged = dir.join(format!(".{item_id}.{kind}.{}.tmp", random_hex(8)?));
+                fs::copy(source, &staged)?;
+                Some((relative, staged))
+            }
+        };
+        let previous_files = |value: Option<&Value>, keys: &[&str]| -> Vec<String> {
+            keys.iter()
+                .filter_map(|key| {
+                    value
+                        .and_then(|value| value.get(*key))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut stale: Vec<String> = Vec::new();
+        match sidecar.kind {
+            IrisSidecarKind::Depth => {
+                let previous = item.extra.get(ITEM_DEPTH_KEY).cloned();
+                match &installed {
+                    Some((relative, _)) => {
+                        stale.extend(previous_files(previous.as_ref(), &["path"]));
+                        let mut depth = serde_json::Map::new();
+                        depth.insert("path".to_owned(), Value::String(relative.clone()));
+                        if let Some(mask) = previous
+                            .as_ref()
+                            .and_then(|value| value.get("maskPath"))
+                            .cloned()
+                        {
+                            depth.insert("maskPath".to_owned(), mask);
+                        }
+                        for (key, number) in [
+                            ("scale", sidecar.scale),
+                            ("minDepth", sidecar.min_depth),
+                            ("maxDepth", sidecar.max_depth),
+                        ] {
+                            if let Some(number) = number {
+                                depth.insert(key.to_owned(), Value::from(number));
+                            }
+                        }
+                        item.extra
+                            .insert(ITEM_DEPTH_KEY.to_owned(), Value::Object(depth));
+                    }
+                    None => {
+                        stale.extend(previous_files(previous.as_ref(), &["path", "maskPath"]));
+                        item.extra.remove(ITEM_DEPTH_KEY);
+                    }
+                }
+            }
+            IrisSidecarKind::DepthMask => {
+                let Some(Value::Object(depth)) = item.extra.get_mut(ITEM_DEPTH_KEY) else {
+                    if let Some((_, staged)) = &installed {
+                        let _ = fs::remove_file(staged);
+                    }
+                    return Err(ProjectStoreError::BadRequest(
+                        "Attach the item's depth map before its validity mask.".to_owned(),
+                    ));
+                };
+                if let Some(previous) = depth.get("maskPath").and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        depth.insert("maskPath".to_owned(), Value::String(relative.clone()));
+                    }
+                    None => {
+                        depth.remove("maskPath");
+                    }
+                }
+            }
+            IrisSidecarKind::Degraded => {
+                if let Some(previous) = item.extra.get(ITEM_DEGRADED_KEY).and_then(Value::as_str) {
+                    stale.push(previous.to_owned());
+                }
+                match &installed {
+                    Some((relative, _)) => {
+                        item.extra.insert(
+                            ITEM_DEGRADED_KEY.to_owned(),
+                            Value::String(relative.clone()),
+                        );
+                    }
+                    None => {
+                        item.extra.remove(ITEM_DEGRADED_KEY);
+                    }
+                }
+            }
+        }
+        if let Err(error) = crate::training::iris::validate_item_iris_extras(&item.extra) {
+            if let Some((_, staged)) = &installed {
+                let _ = fs::remove_file(staged);
+            }
+            return Err(ProjectStoreError::BadRequest(error));
+        }
+        if let Some((relative, staged)) = &installed {
+            let destination = root.join(relative);
+            if let Err(error) = fs::rename(staged, &destination) {
+                let _ = fs::remove_file(staged);
+                return Err(ProjectStoreError::Io(error));
+            }
+            stale.retain(|path| path != relative);
+        }
+        dataset.version = dataset.version.saturating_add(1);
+        dataset.updated_at = utc_now();
+        self.save_dataset(&dataset)?;
+        // Only sidecars this method owns are ever removed (never the item's image).
+        for path in stale {
+            if path.starts_with("sidecars/") && is_safe_relative_path(&path) {
+                let _ = fs::remove_file(root.join(&path));
+            }
         }
         Ok(dataset)
     }
@@ -1642,6 +1850,10 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
     validate_caption_input_mode(input.item.caption.as_ref())?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
@@ -1739,6 +1951,13 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    // Per-item named captions (`captions: {field: text}`, the Iris trainer's `caption_field(s)`
+    // source) ride in the forward-compatible extra bag; refuse a malformed map at the store
+    // boundary rather than at the trainer mid-epoch.
+    crate::training::iris::validate_item_iris_extras(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
+    crate::training::iris::curricula::validate_item_split(&input.extra)
+        .map_err(ProjectStoreError::BadRequest)?;
     validate_caption_input_mode(input.caption.as_ref())?;
     let reference_ceiling = max_training_reference_images() as usize;
     if input.references.len() > reference_ceiling {

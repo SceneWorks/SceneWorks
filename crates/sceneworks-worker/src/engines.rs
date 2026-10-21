@@ -201,6 +201,47 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen_2_1",
     },
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899) — the distilled checkpoint under its OWN engine id;
+    // the same `mlx-gen-qwen-image-2-1` crate registers it beside the base id. 8 steps is the
+    // snapshot's saved distilled schedule (its 8 `sample_sigmas`); guidance 1.0 is true-CFG off,
+    // as on base. `default_repo` is the upstream Turbo repo, public and ungated, for base's reason.
+    ModelRow {
+        sceneworks_id: "qwen_image_2_1_turbo",
+        engine_id: "qwen_image_2_1_turbo",
+        default_repo: "Qwen/Qwen-Image-2.1-Turbo",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_qwen_2_1_turbo",
+    },
+    ModelRow {
+        sceneworks_id: "moss_image_base",
+        engine_id: "moss_image_base",
+        default_repo: "OpenMOSS-Team/MOSS-Image-Base",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_base",
+    },
+    ModelRow {
+        sceneworks_id: "moss_image_sft",
+        engine_id: "moss_image_sft",
+        default_repo: "OpenMOSS-Team/MOSS-Image-SFT",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_sft",
+    },
+    // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
+    // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
+    // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
+    // as `LoadSpec::components["text_encoder"]` by the generic `attach_required_components`. Defaults are the release's own
+    // (`gen_core::iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
+    ModelRow {
+        sceneworks_id: "iris_3b",
+        engine_id: "iris_3b",
+        default_repo: "speridlabs/iris-3b",
+        default_steps: 100,
+        default_guidance: 3.0,
+        adapter_label: "mlx_iris",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -687,7 +728,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 5.0,
         adapter_label: "mlx_sd3",
     },
-    // SANA 1600M 1024px (epic 8485 / sc-8489) — native MLX, NVIDIA non-commercial. NVIDIA's efficient
+    // SANA 1600M 1024px (epic 8485 / sc-8489) — native MLX, Apache-2.0 (SANA) + Gemma Terms of Use (text encoder). NVIDIA's efficient
     // Linear-DiT (ReLU linear-attn + Mix-FFN + NoPE) 1.6B trunk + a gemma-2-2b-it CHI caption encoder +
     // the 32× DC-AE (f32) decoder. True-CFG text-to-image: 20 steps / guidance 4.5 + negative prompt
     // (the `sana_1600m` descriptor advertises supports_guidance + supports_negative + supports_true_cfg).
@@ -715,8 +756,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
     // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
     // NOT duplicated). Quant matrix (sc-8490/sc-8513): pre-packed q4/q8/bf16 tiers, packed-detected on
-    // load. 32× DC-AE divisor → width/height multiples of 32. NVIDIA non-commercial (NSCLv1) — the
-    // re-host carries the upstream LICENSE + NOTICE.
+    // load. 32× DC-AE divisor → width/height multiples of 32. Apache-2.0 (NVIDIA relicensed 2026-07-31)
+    // + Gemma Terms of Use for the text encoder — the re-host carries LICENSE, NOTICE and the Gemma terms.
     ModelRow {
         sceneworks_id: "sana_sprint_1600m",
         engine_id: "sana_sprint_1600m",
@@ -1751,6 +1792,9 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "iris_3b",
+        "moss_image_base",
+        "moss_image_sft",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -1762,6 +1806,7 @@ mod tests {
         "z_image_edit",
         "qwen_image",
         "qwen_image_2_1",
+        "qwen_image_2_1_turbo",
         "qwen_image_edit_2511",
         "qwen_image_edit_2511_lightning",
         "lens",
@@ -1881,7 +1926,10 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
+            // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
+            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1927,7 +1975,10 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
+            // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
+            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2190,6 +2241,8 @@ mod tests {
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),
+            ("qwen_image_2_1_turbo", 32),
+            ("iris_3b", 16),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];
@@ -2472,6 +2525,7 @@ mod tests {
             supports_full_finetune: false,
             // Not an instruction-edit trainer.
             max_reference_images: 0,
+            // Implements none of the optional epic 2123 training techniques.
             techniques: gen_core::TrainingTechniques::NONE,
         }
     }

@@ -123,6 +123,20 @@ mod resolved_cache_promotion;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// Resident-model cache for image→image `gen_core::Transform`s (the Iris-3B restorer, sc-25683): the
+// third thin wrapper over `cache_thread`, sharing one resident engine with the generator cache.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod transform_cache;
+// Iris-3B restoration (sc-25683): the engine's pure planner for the pre-submission preview (public:
+// the rust-api plan endpoint calls it), the cache-only install resolver, admission and the run.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub mod iris_restore;
 // sc-21027: MiniMax-H3's FL2VA provider labels its two conditioning-force boundaries. A Metal
 // watchdog timeout there poisons this process's command queue, so record the first timeout, refuse
 // the next claim, and clean-exit exactly once for the existing auto-worker supervisor to replace.
@@ -229,6 +243,65 @@ mod video_admission;
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
 pub use mlx_fit_gate::full_finetune_memory_error;
+// Iris-3B generation training seams (sc-25685/sc-25686): the trainer's data-walk report the API
+// surfaces before launch, and the declared memory-floor gate (the macOS submit-time twin is public).
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod iris_training;
+pub use iris_training::{
+    iris_checkpoint_root, iris_data_walk_report, iris_plan_memory_error, iris_run_checkpoint_dirs,
+    iris_training_memory_error, IrisDataWalkReport,
+};
+// Iris-3B depth (sc-25687) / restoration (sc-25688) training seams: task items + load inputs for the
+// executor, and the pre-launch checks the API serves (install availability, sidecar format/alignment,
+// the per-item dataset report, the degradation parser).
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod iris_task_training;
+pub use iris_task_training::{
+    check_degraded_sidecar, check_depth_sidecar, check_restore_degradation,
+    iris_generation_backbone_dir, iris_task_dataset_report, iris_task_training_unavailable,
+    iris_training_install_refusal, task_objective as iris_task_objective, IrisInstallRefusal,
+};
+// Iris-3B curricula, REPA, holdout and fp16 (sc-25689): the engine's stage presets, its plan
+// resolution (typed refusals + receipts) and the REPA teacher TRAINING resource.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code, unused_imports)
+)]
+mod iris_curricula;
+pub use iris_curricula::{
+    installed_repa_teacher, iris_stage_presets, IrisPlanRefusal, ResolvedIrisPlan,
+};
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
+// Multi-rank Iris training on one host (sc-25689): the worker launches `world_size` rank processes
+// (this same executable, re-entered through [`iris_rank_entry`]) and coordinates them.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code, unused_imports)
+)]
+mod iris_dist;
+pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
 pub use training_jobs::installed_aux_training_model_dir;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
@@ -469,6 +542,28 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+// Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
+// `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
+// native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod iris_gpu_smoke;
+// Real-weight Iris-3B generation TRAINING smoke (sc-25685 MLX / sc-25686 Candle): one bounded LoRA
+// `lora_train` job through the production executor, then the adapter applied by an `image_generate`
+// job. Backend-neutral, so the same test runs on Apple Silicon and on the CUDA real-weights card.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+mod iris_training_gpu_smoke;
 // Real-weight GPU smoke for the candle Anima 2B lane (epic 10512, sc-10625 — the hardware-gated
 // acceptance extracted from sc-10525). Test-only + candle-only; drives `crate::inference_runtime::load("anima_base" |
 // "anima_aesthetic" | "anima_turbo")` against the dense bf16 circlestone-labs/Anima split_files
@@ -590,6 +685,11 @@ mod lens_turbo_q4_mlx_smoke;
 // sc-14979 split, which is exactly the ordering hazard the pin bump closes.
 #[cfg(all(test, target_os = "macos"))]
 mod mage_flow_q8_mlx_smoke;
+// Real-weight MLX smoke for an imported bare-keyed Krea 2 Turbo transformer such as lodestones/Kroma
+// (sc-25855): the load the imported-Krea lane builds, against a checkpoint with no
+// `model.diffusion_model.` key prefix.
+#[cfg(all(test, target_os = "macos"))]
+mod krea_imported_bare_keys_mlx_smoke;
 // Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
 // Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
 // turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the
@@ -853,6 +953,20 @@ mod person_segment_sam3;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod segment_jobs;
+// Iris-3B monocular depth (sc-25682): the `image_depth` job — a raw float32 `.npy` depth asset plus a
+// derived preview, served by the native MLX worker on macOS and the Candle worker off-Mac.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod depth_jobs;
+// Reading a saved depth asset as a consumer (sc-25682): the depth-control adapter. Compiled on every
+// build; its only caller (strict depth control) is gated behind a native lane.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod depth_asset;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
 // replace the SAM2 box-prompt STUB in the off-Mac person-track (`media_jobs` `maskState = "missing"`).
@@ -1584,6 +1698,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
     // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
     generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
+    // sc-26610: keep proven weight-seal digests across worker restarts, so a restart does not
+    // re-hash every multi-GB weight file before its next load.
+    gen_core::ArtifactSeal::persist_proven_digests_in(
+        settings.data_dir.join("cache").join("seal-digests"),
+    );
     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
     // do no MLX work) don't clobber the file with zeros.
@@ -2368,6 +2487,16 @@ async fn run_utility_job(
             JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Smart-select segmentation failed.", error)),
+            // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export on the native MLX
+            // worker (macOS) or the Candle worker (off-Mac); a build without either lane never
+            // advertises `image_depth`, so the job remains queued.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            JobType::ImageDepth => depth_jobs::run_image_depth_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Depth estimation failed.", error)),
             // SeedVR2 video upscaling (epic 4811): one-step super-resolution — native MLX on Mac (sc-4816)
             // / candle CUDA on Windows (sc-5928). SceneWorks' first video upscaler: decodes the source
             // clip, runs the temporal-chunked 5D upscale, re-encodes, and passes the source audio through.
@@ -2631,6 +2760,9 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 
 #[cfg(test)]
 mod test_env;
+
+#[cfg(test)]
+mod iris_test_weights;
 
 // NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
 // The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations

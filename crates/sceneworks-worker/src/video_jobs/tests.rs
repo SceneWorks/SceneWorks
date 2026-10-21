@@ -2711,12 +2711,11 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
 /// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
 /// elapses inside a sub-second transcode.
 ///
-/// **The id is a parameter because it is the scratch directory's name.** The resolver stages every
-/// reference under `<temp>/sw-reference-audio-<job id>-<index>` and REMOVES that directory on every
-/// exit, so two tests sharing one id delete each other's work mid-transcode and read each other's
-/// `reference.wav` — which is exactly what the two resolver tests did to each other when the
-/// sc-24070 one reused this snapshot verbatim. One id per test keeps them independent under
-/// `cargo test`'s default parallelism.
+/// The id is a parameter so each test is legibly its own job. The resolver's scratch directory
+/// used to be named by the id alone, so two tests (or two test PROCESSES on one host — sc-25777,
+/// two Windows CI runners sharing `%TEMP%`) sharing one id deleted each other's work
+/// mid-transcode; it now carries a random suffix (`reference_audio_scratch_dir`), so ids no longer
+/// need to be unique for isolation.
 fn reference_audio_job_snapshot(id: &str) -> JobSnapshot {
     serde_json::from_value(json!({
         "id": id,
@@ -3657,6 +3656,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         fps: 25,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let clip = EncodedClip::measure(&decoded);
     assert_eq!(clip.frames, 149, "counted off the frames, not predicted");
@@ -3678,6 +3678,7 @@ fn encoded_clip_measures_the_file_not_the_request() {
         fps: 0,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let clip = EncodedClip::measure(&zero_fps);
     assert_eq!(clip.fps, 1, "mirrors encode_inner's `decoded.fps.max(1)`");
@@ -3702,6 +3703,7 @@ fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
         fps: 24,
         audio,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let track = AudioTrack {
         samples: vec![0.0; 64],
@@ -15136,6 +15138,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
                 channels: 2,
             }),
             adapter_apply_reports: Vec::new(),
+            veda_execution: None,
         };
         let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
         encode_media(&media_path, decoded, None, None)
@@ -15180,6 +15183,7 @@ async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
             channels: 2,
         }),
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     let media_path = dir_guard.path().join("long_audio.mp4");
     encode_media(&media_path, decoded, None, None)
@@ -16065,6 +16069,7 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
         fps: 24,
         audio: None,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
 
     let error = encode_media(&media_path, decoded, None, None)
@@ -17701,7 +17706,10 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
 // ---------------------------------------------------------------------------
 
 /// A MiniMax-H3 payload for `model`, with whatever extra keys the test needs.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
     let mut payload = json!({
         "projectId": "p",
@@ -17924,12 +17932,30 @@ fn drive_minimax_h3_arm_in_project_with_env(
     project_path: &Path,
     extra_env: &[(&str, &str)],
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    drive_minimax_h3_arm_in_project_with_loader(
+        tier_root,
+        base_root,
+        request,
+        project_path,
+        extra_env,
+        probe.loader(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project_with_loader(
+    tier_root: &Path,
+    base_root: &Path,
+    request: &VideoRequest,
+    project_path: &Path,
+    extra_env: &[(&str, &str)],
+    loader: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
+) -> WorkerResult<(DecodedVideo, Value)> {
     let settings = Settings {
         data_dir: minimax_h3_data_dir(tier_root),
         ..offline_settings()
     };
     let job = minimax_h3_job_snapshot();
-    let loader = probe.loader();
     let hf_cache = tier_root.join("unused-hf-cache");
     let project_path = project_path.to_path_buf();
     let mut env: Vec<(&str, &str)> = vec![
@@ -20279,6 +20305,7 @@ async fn stage_minimax_h3_clip_asset(
             channels: 2,
         }),
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     };
     encode_media(&media_path, decoded, None, None)
         .await
@@ -20322,7 +20349,7 @@ async fn stage_minimax_h3_clip_asset(
 /// Skips when no ffmpeg is reachable, like the sibling encode tests.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_reference_clip_reaches_the_engine_as_reference_video_conditioning() {
+fn a_reference_clip_with_veda_reaches_the_engine_as_reference_video_conditioning() {
     if !ffmpeg_reachable() {
         eprintln!(
             "skipping a_reference_clip_reaches_the_engine_as_reference_video_conditioning: no \
@@ -20389,6 +20416,7 @@ fn a_reference_clip_reaches_the_engine_as_reference_video_conditioning() {
             "projectId": project.id,
             "duration": 5.2,
             "fps": 24,
+            "advanced": {"veda":{"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49","fullAttentionSteps":"0,49"}},
             "sourceClipAssetIds": [
                 "mm_h3_clip_wide", "mm_h3_clip_long", "mm_h3_clip_silent",
             ],
@@ -20409,6 +20437,14 @@ fn a_reference_clip_reaches_the_engine_as_reference_video_conditioning() {
         .clone()
         .expect("the arm reached the engine");
 
+    assert_eq!(
+        engine.veda.as_ref().unwrap().reference,
+        gen_core::VedaBudget::SparsityPercent(0.0)
+    );
+    assert_eq!(
+        engine.veda.as_ref().unwrap().full_attention_steps,
+        vec![0, 49]
+    );
     let clips: Vec<(&Vec<gen_core::Image>, f32, Option<&gen_core::AudioTrack>)> = engine
         .conditioning
         .iter()
@@ -20703,7 +20739,7 @@ fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
 /// sampling recipe. This is the plumbing shape used by sc-21028 (Turbo + Civitai/Kohya style).
 #[cfg(target_os = "macos")]
 #[test]
-fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
+fn built_in_turbo_and_community_lora_with_veda_reach_the_engine_as_one_stack() {
     let tiers = minimax_h3_tier_root("mm_stacked_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_stacked_base_");
     let probe = ArmProbe::default();
@@ -20715,7 +20751,10 @@ fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
                 .expect("staged adapter canonicalizes")
         })
         .to_vec();
-    let request = minimax_h3_request("minimax_h3", json!({ "loras": [turbo, community] }));
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({ "loras": [turbo, community],"advanced":{"veda":{"enabled":true}} }),
+    );
 
     let (_decoded, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
         .expect("Turbo plus a community LoRA runs as one adapter stack");
@@ -20730,6 +20769,7 @@ fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
         (Some(4), Some(6.0)),
         "the built-in id must still drive its non-default recipe"
     );
+    assert!(engine_request.veda.as_ref().unwrap().enabled);
     let load = probe.spec.lock().unwrap().clone().expect("a load ran");
     assert_eq!(
         load.adapters
@@ -20758,7 +20798,7 @@ fn built_in_turbo_and_community_lora_reach_the_engine_as_one_stack() {
 /// collapses the set to one recipe fails at least one arm.
 #[cfg(target_os = "macos")]
 #[test]
-fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
+fn every_turbo_variant_with_veda_drives_its_own_recipe_to_the_engine() {
     let tiers = minimax_h3_tier_root("mm_variants_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_variants_base_");
     // The ref2v arm is driven at the ENGINE SEAM like the other three, not through the pure sampling
@@ -20786,7 +20826,8 @@ fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
         } else {
             json!({ "loras": [lora] })
         };
-        let request = minimax_h3_request(model, extra);
+        let mut request = minimax_h3_request(model, extra);
+        request.advanced.insert("veda".into(),json!({"enabled":true,"generated":"90%","reference":"12","fullAttentionLayers":"0,49","fullAttentionSteps":"0,3"}));
         let probe = ArmProbe::default();
         drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
             .unwrap_or_else(|error| panic!("{lora_id} renders: {error}"));
@@ -20796,6 +20837,14 @@ fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
             .unwrap()
             .clone()
             .expect("the arm reached the engine");
+        assert_eq!(
+            engine.veda.as_ref().unwrap().reference,
+            gen_core::VedaBudget::KeyTiles(12)
+        );
+        assert_eq!(
+            engine.veda.as_ref().unwrap().full_attention_steps,
+            vec![0, 3]
+        );
         assert_eq!(
             (engine.steps, engine.scheduler_shift),
             (Some(steps), Some(shift)),
@@ -21147,4 +21196,337 @@ fn the_ltx25_weights_inventory_describes_the_shipped_bundle_revision() {
          shipped bundle — regenerate it for the new pin, or the component deltas price files from \
          a revision the product does not load"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_veda_enabled_and_off_reach_the_real_offline_load_and_request_seams() {
+    for enabled in [None, Some(false), Some(true)] {
+        let tiers =
+            minimax_h3_tier_root("mm_veda_arm_", &["q4"], &["transformer", "transformer_ref"]);
+        let base = minimax_h3_base_root("mm_veda_base_");
+        let probe = ArmProbe::default();
+        let advanced = enabled
+            .map(|enabled| json!({"veda":{"enabled":enabled}}))
+            .unwrap_or(json!({}));
+        let request = minimax_h3_request("minimax_h3", json!({"advanced":advanced}));
+        drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
+        let req = probe.request.lock().unwrap().clone().unwrap();
+        assert_eq!(req.veda.as_ref().map(|v| v.enabled), enabled.filter(|v| *v));
+        assert!(
+            !probe
+                .spec
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .components
+                .contains_key("veda_predictor"),
+            "empty offline cache must not stage a predictor or fetch one, even when enabled"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_veda_complete_controls_reach_native_request_without_changing_tiers_or_turbo() {
+    for tier in ["q4", "q8", "bf16"] {
+        let tiers = minimax_h3_tier_root(
+            "mm_veda_full_",
+            &[tier],
+            &["transformer", "transformer_ref"],
+        );
+        let base = minimax_h3_base_root("mm_veda_full_base_");
+        let probe = ArmProbe::default();
+        let lora = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_8step");
+        let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
+        let request = minimax_h3_request(
+            "minimax_h3",
+            json!({"loras":[lora],"advanced":{"veda":controls,"mlxQuantize": if tier == "bf16" { 0 } else if tier == "q8" { 8 } else { 4 }}}),
+        );
+        let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
+        let captured = probe.request.lock().unwrap().clone().unwrap();
+        let veda = captured.veda.unwrap();
+        assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
+        assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));
+        assert_eq!(veda.full_attention_layers, vec![0, 1, 2, 49]);
+        assert_eq!(veda.full_attention_steps, vec![0, 7]);
+        assert_eq!(captured.steps, Some(8));
+        assert_eq!(
+            probe.spec.lock().unwrap().as_ref().unwrap().adapters.len(),
+            1
+        );
+        assert_eq!(raw["veda"], controls);
+        assert_eq!(raw["minimaxH3Tier"], tier);
+        assert!(!probe
+            .spec
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .components
+            .contains_key("veda_predictor"));
+    }
+}
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn minimax_h3_veda_shared_native_conversion_matches_frozen_contract_and_refuses_before_work() {
+    for model in ["minimax_h3", "minimax_h3_ref"] {
+        for (generated, reference) in [("90%", "12"), ("32", "0%"), ("2.5%", "99.9%")] {
+            let request = minimax_h3_request(
+                model,
+                json!({"advanced":{"veda":{"enabled":true,"generated":generated,"reference":reference,"fullAttentionLayers":"2–0;49","fullAttentionSteps":"7~0"}}}),
+            );
+            let v = super::minimax_h3::requested_h3_veda(&request, Some(8))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                v.generated,
+                generated.parse::<gen_core::VedaBudget>().unwrap()
+            );
+            assert_eq!(
+                v.reference,
+                reference.parse::<gen_core::VedaBudget>().unwrap()
+            );
+            assert_eq!(
+                v.full_attention_layers,
+                gen_core::VedaRequest::parse_indices("2–0;49", 50).unwrap()
+            );
+            assert_eq!(
+                v.full_attention_steps,
+                gen_core::VedaRequest::parse_indices("7~0", 8).unwrap()
+            );
+            v.validate(50, 8).unwrap();
+        }
+    }
+    for wire in [
+        json!({"enabled":"true"}),
+        json!({"enabled":false,"reference":"100%"}),
+        json!({"enabled":true,"fullAttentionSteps":"4"}),
+    ] {
+        let request = minimax_h3_request("minimax_h3", json!({"advanced":{"veda":wire}}));
+        assert!(super::minimax_h3::requested_h3_veda(&request, Some(4)).is_err());
+    }
+}
+// The report getter must run after generate, on the same generator, for each job.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn veda_outcome_survives_post_generation_conversion_and_never_replays_stale_facts() {
+    struct OutcomeGenerator {
+        inner: ProbeGenerator,
+        next: std::cell::RefCell<Option<gen_core::VedaExecutionReport>>,
+        observed: std::cell::RefCell<Option<gen_core::VedaExecutionReport>>,
+    }
+    impl Generator for OutcomeGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            self.inner.descriptor()
+        }
+        fn validate(&self, _: &GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn veda_execution_report(&self) -> Option<gen_core::VedaExecutionReport> {
+            self.observed.borrow().clone()
+        }
+        fn generate(
+            &self,
+            request: &GenerationRequest,
+            progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<GenerationOutput> {
+            *self.observed.borrow_mut() = self.next.borrow_mut().take();
+            self.inner.generate(request, progress)
+        }
+    }
+    let generator = OutcomeGenerator {
+        inner: ProbeGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "minimax_h3",
+                family: "minimax_h3",
+                backend: "test",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            request: Default::default(),
+            adapter_reports: Default::default(),
+            audio: None,
+        },
+        next: Default::default(),
+        observed: Default::default(),
+    };
+    let sparse = gen_core::VedaExecutionReport {
+        requested: true,
+        kernel: Some("actual-native-kernel".into()),
+        plan: Some("trained_T".into()),
+        plan_grid: Some([2, 8, 9]),
+        execution_grid: Some([2, 7, 9]),
+        sparse_calls: 2,
+        dense_calls: 1,
+        selected_token_pairs: 4375,
+        dense_token_pairs: 10000,
+        ..Default::default()
+    };
+    let controls = json!({"enabled":true,"generated":"90%","reference":"12"});
+    let mut raw = json!({"veda":controls,"vedaExecution":{"effective":"forged-request-value"}});
+    for report in [
+        sparse,
+        gen_core::VedaExecutionReport {
+            requested: true,
+            dense_calls: 3,
+            selected_token_pairs: 10000,
+            dense_token_pairs: 10000,
+            fallback_reason: Some("missing managed predictor".into()),
+            ..Default::default()
+        },
+        gen_core::VedaExecutionReport {
+            requested: true,
+            dense_calls: 3,
+            selected_token_pairs: 10000,
+            dense_token_pairs: 10000,
+            fallback_reason: Some("actual-device self-test forced failure".into()),
+            ..Default::default()
+        },
+    ] {
+        *generator.next.borrow_mut() = Some(report.clone());
+        let decoded = run_loaded_video_generation(
+            &generator,
+            VideoGenInput {
+                veda: Some(gen_core::VedaRequest {
+                    enabled: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            &CancelFlag::new(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.veda_execution.as_ref(),
+            Some(&report.outcome_json())
+        );
+        let mut metrics = sceneworks_core::contracts::GenerationMetrics::default();
+        wan::record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
+        assert_eq!(
+            serde_json::to_value(&metrics).unwrap()["vedaExecution"],
+            report.outcome_json()
+        );
+        raw = record_veda_outcome(raw, decoded.veda_execution.as_ref());
+        let saved: Value = serde_json::from_str(&serde_json::to_string(&raw).unwrap()).unwrap();
+        assert_eq!(saved["vedaExecution"], report.outcome_json());
+        assert_eq!(saved["veda"], controls);
+        if report.sparse_calls == 0 {
+            assert_eq!(saved["vedaExecution"]["effective"], "dense");
+            assert_eq!(saved["vedaExecution"]["totalAttentionFraction"], 1.0);
+        }
+    }
+    let later = run_loaded_video_generation(
+        &generator,
+        VideoGenInput::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(later.veda_execution.is_none());
+    let mut metrics = sceneworks_core::contracts::GenerationMetrics {
+        veda_execution: Some(json!({"effective":"sparse"})),
+        ..Default::default()
+    };
+    wan::record_video_veda_metrics(&mut metrics, later.veda_execution.as_ref());
+    assert!(metrics.veda_execution.is_none());
+    assert!(record_veda_outcome(raw, later.veda_execution.as_ref())
+        .get("vedaExecution")
+        .is_none());
+}
+
+#[test]
+fn veda_result_persistence_discards_request_carried_observations_without_provider_report() {
+    let raw = json!({"veda":{"enabled":true},"vedaExecution":{"effective":"sparse"}});
+    let cleaned = record_veda_outcome(raw, None);
+    assert!(cleaned.get("vedaExecution").is_none());
+    assert_eq!(cleaned["veda"]["enabled"], true);
+}
+
+#[cfg(target_os = "macos")]
+struct VedaAdmissionProbe(Box<dyn Generator>);
+#[cfg(target_os = "macos")]
+impl Generator for VedaAdmissionProbe {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        self.0.descriptor()
+    }
+    fn validate(&self, r: &GenerationRequest) -> gen_core::Result<()> {
+        self.0.validate(r)
+    }
+    fn generate(
+        &self,
+        r: &GenerationRequest,
+        p: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        self.0.generate(r, p)
+    }
+    fn veda_workspace_bound(
+        &self,
+        r: gen_core::veda::workspace::Request<'_>,
+    ) -> gen_core::Result<Option<gen_core::veda::workspace::WorkspaceBound>> {
+        if let Some(veda) = r.veda.filter(|v| v.enabled) {
+            assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
+            assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));
+            assert_eq!(veda.full_attention_layers, vec![0, 1, 49]);
+            assert_eq!(veda.full_attention_steps, vec![0, 7]);
+            Err(gen_core::Error::Msg(
+                "CPU Veda admission bound refusal before generate".into(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
+    for enabled in [false, true] {
+        let tiers = minimax_h3_tier_root(
+            "h3_veda_admission_",
+            &["q4"],
+            &["transformer", "transformer_ref"],
+        );
+        let base = minimax_h3_base_root("h3_veda_admission_base_");
+        let probe = ArmProbe::default();
+        let request = minimax_h3_request(
+            "minimax_h3",
+            json!({"advanced":{"steps":8,"veda":{"enabled":enabled,"generated":"32","reference":"0%","fullAttentionLayers":"0-1,49","fullAttentionSteps":"0,7"}}}),
+        );
+        let loader = probe.loader();
+        let result = drive_minimax_h3_arm_in_project_with_loader(
+            tiers.path(),
+            base.path(),
+            &request,
+            &tiers.path().join("unused-project"),
+            &[],
+            move |id, spec| {
+                let inner = loader(id, spec)?;
+                Ok(Box::new(VedaAdmissionProbe(inner)))
+            },
+        );
+        if enabled {
+            let error = result
+                .err()
+                .expect("enabled bound refusal must propagate before generation");
+            assert!(error
+                .to_string()
+                .contains("CPU Veda admission bound refusal"));
+            assert!(probe.request.lock().unwrap().is_none());
+        } else {
+            assert!(result.is_ok());
+            assert!(probe.request.lock().unwrap().is_some());
+        }
+    }
 }

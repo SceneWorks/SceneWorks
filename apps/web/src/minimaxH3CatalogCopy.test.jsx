@@ -3,7 +3,8 @@
 //
 // Three upstream pieces of MiniMax's own stack ship with the hosted Hailuo product and NOT with
 // these weights — `H3-Context-IR` (prompt understanding), `H3-Regenerate-2K` (2K upsampling) and
-// the sparse-attention inference path — plus a fourth surface, the `<d>` dialogue markers, which
+// MiniMax's own sparse-attention inference path. Veda is a separate optional path (sc-25140).
+// A fourth surface, the `<d>` dialogue markers, which
 // the model card's own examples use and which resolve to untrained embedding rows here. The engine
 // side of the story is recorded in inference `docs/reference/minimax-h3-withheld-upstream-components.md`;
 // this file is the SceneWorks half: it pins that the product copy says so.
@@ -64,7 +65,8 @@ const familyEntries = manifestModels.filter((model) => model.family === FAMILY);
 //   `contextIr`   — the component is unreleased; the engine does no prompt rewriting at all.
 //   `noTwoK`      — `max_size: 1344` per edge is ENFORCED (`resolve_geometry`), not just declared,
 //                   and `limits.maxPixels` here is 1,032,192 = 768 x 1344.
-//   `denseAttention` + `twoHourCost` — no sparse-attention path, and the measured 50-step cost of
+//   `denseAttention` — dense by default; optional Veda requires its managed predictor and can
+//                   fall back to dense. `twoHourCost` — the measured dense 50-step cost of
 //                   the SHORTEST clip at the shipped default canvas (1344x768 @ 124 f) is ~7 394 s.
 //   `fifteenRefused` — `limits.hardMaxDuration` is 14.375 and the next `17n + 5` rung is 15.083 s,
 //                   so a flat 15 s request has no lattice point and ERRORS. It is not clamped, and
@@ -74,7 +76,9 @@ const DESCRIPTION_CLAIMS = [
   { name: "names the withheld prompt front end", re: /H3-Context-IR/ },
   { name: "names the withheld 2K upsampler", re: /H3-Regenerate-2K/ },
   { name: "says 2K is unreachable from these weights", re: /2K is not reachable from these weights/ },
-  { name: "says attention runs dense", re: /attention runs dense/ },
+  { name: "says attention defaults to dense", re: /attention runs dense by default/i },
+  { name: "names the optional managed Veda predictor", re: /optional Veda[^.]*managed predictor/i },
+  { name: "says Veda falls back to dense when unavailable", re: /Veda[^.]*falls back to dense when it cannot run/ },
   { name: "gives the two-hour default-canvas cost", re: /two-hour render/ },
   { name: "says 15s is refused, not shortened", re: /\b15s\b[^.]{0,120}\brefused\b/ },
   { name: "says there is no still-image mode", re: /no still-image mode/ },

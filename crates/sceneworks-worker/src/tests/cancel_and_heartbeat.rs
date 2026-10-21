@@ -1021,11 +1021,20 @@ mod stub_fallback_gate {
     use sceneworks_core::video_request::VideoRequest;
     use serde_json::Map;
 
-    fn settings_with_empty_data_dir() -> (tempfile::TempDir, Settings) {
+    fn settings_with_empty_data_dir() -> (tempfile::TempDir, Settings, crate::test_env::EnvVars) {
         let dir = tempdir().expect("tempdir");
+        // An empty data_dir alone still sees installed HF snapshots and the Wan override.
+        // Hold the existing process-wide lock through each synchronous test. With all three
+        // HF vars absent, hf_home resolves only <data_dir>/cache/huggingface/hub.
+        let environment = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_MLX_WAN14B_I2V_DIR", ""),
+        ]);
         let mut settings = test_settings("http://127.0.0.1:1".to_owned(), None);
         settings.data_dir = dir.path().to_path_buf();
-        (dir, settings)
+        (dir, settings, environment)
     }
 
     fn object(value: serde_json::Value) -> Map<String, serde_json::Value> {
@@ -1034,7 +1043,7 @@ mod stub_fallback_gate {
 
     #[test]
     fn image_engine_model_without_weights_is_a_precise_error_not_a_stub() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let request = ImageRequest::from_payload(&object(json!({ "model": "z_image_turbo" })));
         let gap = mlx_weights_gap(&request, &settings).expect("missing weights flagged");
         assert!(gap.contains("z_image_turbo"), "{gap}");
@@ -1043,14 +1052,14 @@ mod stub_fallback_gate {
 
     #[test]
     fn image_non_engine_model_keeps_the_stub_path() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let request = ImageRequest::from_payload(&object(json!({ "model": "base-model" })));
         assert_eq!(mlx_weights_gap(&request, &settings), None);
     }
 
     #[test]
     fn image_explicit_model_path_resolves_and_passes_the_gate() {
-        let (dir, settings) = settings_with_empty_data_dir();
+        let (dir, settings, _environment) = settings_with_empty_data_dir();
         let request = ImageRequest::from_payload(&object(json!({
             "model": "z_image_turbo",
             "advanced": { "modelPath": dir.path().to_string_lossy() },
@@ -1060,7 +1069,7 @@ mod stub_fallback_gate {
 
     #[test]
     fn image_explicit_model_path_outside_data_dir_is_rejected() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let outside = tempdir().expect("outside tempdir");
         let request = ImageRequest::from_payload(&object(json!({
             "model": "z_image_turbo",
@@ -1073,7 +1082,7 @@ mod stub_fallback_gate {
 
     #[test]
     fn video_engine_model_without_weights_is_a_precise_error_not_a_stub() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let request = VideoRequest::from_payload(&object(json!({ "model": "wan_2_2_i2v_14b" })));
         let error = ensure_video_engine_weights(&request, &settings)
             .expect_err("missing Wan weights flagged");
@@ -1085,7 +1094,7 @@ mod stub_fallback_gate {
 
     #[test]
     fn video_svd_without_source_asset_is_an_invalid_payload_error() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let request = VideoRequest::from_payload(&object(json!({ "model": "svd" })));
         let error = ensure_video_engine_weights(&request, &settings)
             .expect_err("svd without a source image flagged");
@@ -1094,7 +1103,7 @@ mod stub_fallback_gate {
 
     #[test]
     fn video_non_engine_model_keeps_the_stub_path() {
-        let (_dir, settings) = settings_with_empty_data_dir();
+        let (_dir, settings, _environment) = settings_with_empty_data_dir();
         let request = VideoRequest::from_payload(&object(json!({ "model": "stub-model" })));
         ensure_video_engine_weights(&request, &settings).expect("non-engine model passes");
     }

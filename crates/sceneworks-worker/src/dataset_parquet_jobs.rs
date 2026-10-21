@@ -27,6 +27,9 @@ struct Candidate {
     url: String,
     caption: String,
     item_id: String,
+    /// Extra caption columns read into the item's named captions (`captions: {column: text}`,
+    /// the Iris trainer's `caption_field(s)` source; sc-25685).
+    captions: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -35,6 +38,7 @@ struct MaterializedItem {
     path: PathBuf,
     display_name: String,
     caption: String,
+    captions: std::collections::BTreeMap<String, String>,
     width: u32,
     height: u32,
 }
@@ -60,6 +64,7 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let concurrency = payload_usize(&job.payload, "concurrency", 16).clamp(1, 64);
     let caption_includes = normalized_filter_terms(&job.payload, "captionIncludes");
     let caption_excludes = normalized_filter_terms(&job.payload, "captionExcludes");
+    let caption_field_columns = caption_field_columns(&job.payload);
 
     if !project_root.is_absolute() || !dataset_root.is_absolute() || !source_path.is_absolute() {
         return Err(WorkerError::InvalidPayload(
@@ -110,6 +115,7 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let scan_caption_column = caption_column.clone();
     let scan_caption_includes = caption_includes.clone();
     let scan_caption_excludes = caption_excludes.clone();
+    let scan_caption_fields = caption_field_columns.clone();
     let scan_task = tokio::task::spawn_blocking(move || {
         read_candidates(
             &scan_source,
@@ -119,6 +125,7 @@ pub(crate) async fn run_dataset_parquet_import_job(
             min_edge,
             &scan_caption_includes,
             &scan_caption_excludes,
+            &scan_caption_fields,
         )
     });
     let candidates =
@@ -229,7 +236,7 @@ pub(crate) async fn run_dataset_parquet_import_job(
                         "Parquet import output is outside its project.".to_owned(),
                     )
                 })?;
-            Ok(json!({
+            let mut entry = json!({
                 "id": item.id,
                 "path": relative.to_string_lossy().replace('\\', "/"),
                 "displayName": item.display_name,
@@ -240,7 +247,11 @@ pub(crate) async fn run_dataset_parquet_import_job(
                 },
                 "width": item.width,
                 "height": item.height,
-            }))
+            });
+            if !item.captions.is_empty() {
+                entry["captions"] = json!(item.captions);
+            }
+            Ok(entry)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
     let committed: Value = api
@@ -321,6 +332,24 @@ fn parquet_files(source: &Path) -> WorkerResult<Vec<PathBuf>> {
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
+/// The validated `captionFieldColumns` the API forwarded (it refuses malformed names at submit).
+fn caption_field_columns(payload: &JsonObject) -> Vec<String> {
+    payload
+        .get("captionFieldColumns")
+        .and_then(Value::as_array)
+        .map(|columns| {
+            columns
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|column| !column.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn read_candidates(
     source: &Path,
     url_column: &str,
@@ -329,6 +358,7 @@ fn read_candidates(
     min_edge: u32,
     caption_includes: &[String],
     caption_excludes: &[String],
+    caption_field_columns: &[String],
 ) -> WorkerResult<Vec<Candidate>> {
     let files = parquet_files(source)?;
     let mut candidates = Vec::with_capacity(limit.min(16_384));
@@ -398,10 +428,24 @@ fn read_candidates(
                 continue;
             }
             let digest = Sha256::digest(url.as_bytes());
+            let captions = caption_field_columns
+                .iter()
+                .filter_map(|column| {
+                    let text = row_string(&row, column)?;
+                    let text = text.trim();
+                    (!text.is_empty()).then(|| {
+                        (
+                            column.clone(),
+                            text.chars().take(MAX_CAPTION_CHARS).collect(),
+                        )
+                    })
+                })
+                .collect();
             candidates.push(Candidate {
                 url,
                 caption: caption.chars().take(MAX_CAPTION_CHARS).collect(),
                 item_id: format!("pq_{}", hex_prefix(&digest, 20)),
+                captions,
             });
             if candidates.len() >= limit {
                 return Ok(candidates);
@@ -529,6 +573,7 @@ fn materialized_item(
         id: candidate.item_id,
         path,
         caption: candidate.caption,
+        captions: candidate.captions,
         width,
         height,
     }
@@ -561,6 +606,7 @@ mod tests {
                 "message laion {
                     REQUIRED BINARY URL (UTF8);
                     REQUIRED BINARY TEXT (UTF8);
+                    REQUIRED BINARY short_caption (UTF8);
                 }",
             )
             .expect("test schema"),
@@ -580,6 +626,7 @@ mod tests {
                 "https://example.com/logo.png",
             ],
             ["a cinematic portrait", "a portrait company logo"],
+            ["portrait", "logo"],
         ] {
             let mut column = row_group
                 .next_column()
@@ -603,10 +650,16 @@ mod tests {
             0,
             &["portrait".to_owned()],
             &["logo".to_owned()],
+            &["short_caption".to_owned(), "missing_column".to_owned()],
         )
         .expect("rows read");
 
         assert_eq!(candidates.len(), 1);
+        // sc-25685: named caption columns become per-item captions; an absent column adds nothing.
+        assert_eq!(
+            candidates[0].captions,
+            std::collections::BTreeMap::from([("short_caption".to_owned(), "portrait".to_owned())])
+        );
         assert_eq!(candidates[0].url, "https://example.com/one.jpg?a=1&b=2");
         assert_eq!(candidates[0].caption, "a cinematic portrait");
         assert!(candidates[0].item_id.starts_with("pq_"));
@@ -625,7 +678,7 @@ mod tests {
         file.extend_from_slice(b"PAR1");
         std::fs::write(&path, file).expect("fixture writes");
 
-        let import_error = read_candidates(&path, "url", "text", 1, 0, &[], &[])
+        let import_error = read_candidates(&path, "url", "text", 1, 0, &[], &[], &[])
             .expect_err("truncated metadata cannot be imported");
         assert!(
             import_error

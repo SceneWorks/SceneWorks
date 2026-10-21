@@ -66,6 +66,7 @@ export function SimpleVideoStudio() {
   const [duration, setDuration] = useStudioState("video", "duration", 5);
   const [styleId, setStyleId] = useStudioState("video", "styleId", null);
   const [sourceAssetId, setSourceAssetId] = useStudioState("video", "sourceAssetId", null);
+  const [lastFrameAssetId, setLastFrameAssetId] = useStudioState("video", "lastFrameAssetId", null);
   const [refineOpen, setRefineOpen] = useStudioState("video", "refineOpen", false);
   const [submitting, setSubmitting] = useState(false);
 
@@ -163,7 +164,8 @@ export function SimpleVideoStudio() {
 
   const latestJob = newestLocalJob(videoLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
-  const needsSource = mode === "image_to_video" && !sourceAssetId;
+  const supportsLastFrame = model === "minimax_h3" && mode === "image_to_video";
+  const needsSource = mode === "image_to_video" && !sourceAssetId && !(supportsLastFrame && lastFrameAssetId);
   const canGenerate =
     Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
 
@@ -185,6 +187,7 @@ export function SimpleVideoStudio() {
         duration,
         styleId,
         sourceAssetId,
+        lastFrameAssetId,
         loras: lora.serializedLoras,
       });
       if (!request) {
@@ -286,11 +289,20 @@ export function SimpleVideoStudio() {
         <ReferenceTile
           asset={sourceAsset}
           assets={recentImageAssets}
-          hint={mode === "image_to_video" ? "Required for Image → Video" : "Optional start frame"}
+          hint={supportsLastFrame ? "Choose a first frame, a last frame, or both" : mode === "image_to_video" ? "Required for Image → Video" : "Optional start frame"}
           label="Reference image"
           onChange={setSourceAssetId}
-          required={mode === "image_to_video"}
+          required={mode === "image_to_video" && !supportsLastFrame}
         />
+        {supportsLastFrame ? (
+          <ReferenceTile
+            asset={assets.find((asset) => asset.id === lastFrameAssetId) ?? null}
+            assets={recentImageAssets}
+            hint="Choose a first frame, a last frame, or both"
+            label="Last frame"
+            onChange={setLastFrameAssetId}
+          />
+        ) : null}
       </div>
 
       <div className="su-settings-bar">

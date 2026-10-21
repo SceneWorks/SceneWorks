@@ -7,6 +7,7 @@
 
 import { terminalStatuses } from "./constants.js";
 import { buildDetailJobBody, buildEditJobBody, buildUpscaleJobBody } from "./imageJobs.js";
+import { buildDepthJobBody, DEPTH_ENDPOINT } from "./depthJobs.js";
 
 // The three batch-capable ops + the endpoint each posts to (mirrors the editor:
 // upscale/detail are generic jobs, edit is the image-jobs route). `needsPrompt`
@@ -15,6 +16,9 @@ export const BATCH_OPS = [
   { key: "upscale", label: "Upscale", endpoint: "/api/v1/jobs", needsPrompt: false },
   { key: "detail", label: "Detail enhance", endpoint: "/api/v1/jobs", needsPrompt: false },
   { key: "edit", label: "AI edit", endpoint: "/api/v1/image/jobs", needsPrompt: true },
+  // Iris-3B monocular depth (sc-25682): one typed depth job per image; each result is a new depth
+  // asset (raw .npy + preview) linked to its source — the source is never modified.
+  { key: "depth", label: "Depth map", endpoint: DEPTH_ENDPOINT, needsPrompt: false },
 ];
 
 export function batchOpByKey(key) {
@@ -48,6 +52,8 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         engine: params.engine,
         displayName,
         softness: params.softness,
+        // Iris restoration controls (sc-25683); ignored by the factor engines.
+        restore: params.restore,
       }),
     };
   }
@@ -82,6 +88,19 @@ export function buildBatchJob({ op, asset, params = {}, project, requestedGpu, d
         height: dims.height,
         // Same-size edit (no canvas extend) — each image is edited at its native size.
         fitMode: "crop",
+      }),
+    };
+  }
+  if (op === "depth") {
+    return {
+      endpoint: DEPTH_ENDPOINT,
+      body: buildDepthJobBody({
+        project,
+        requestedGpu,
+        sourceAssetId,
+        resolution: params.resolution,
+        displayName,
+        irisModel: params.irisModel,
       }),
     };
   }
@@ -149,11 +168,13 @@ export function settlePromptBatchRun(run, jobs, observedJobs) {
   const activeJobIds = [];
   for (const jobId of run.activeJobIds) {
     const status = batchItemStatus(jobId, jobs, observedJobs);
+    // A native prompt-batch job (sc-25681) settles every prompt it carries.
+    const n = run.sizes?.[jobId] ?? 1;
     if (status === "completed") {
-      completed += 1;
+      completed += n;
       observedJobs?.delete(jobId);
     } else if (status === "failed") {
-      failed += 1;
+      failed += n;
       observedJobs?.delete(jobId);
     } else {
       activeJobIds.push(jobId);
@@ -178,7 +199,7 @@ export function summarizeBatchRun(run, jobs, observedJobs) {
     failed: run?.failed ?? 0,
   };
   for (const jobId of run?.activeJobIds ?? []) {
-    summary[batchItemStatus(jobId, jobs, observedJobs)] += 1;
+    summary[batchItemStatus(jobId, jobs, observedJobs)] += run.sizes?.[jobId] ?? 1;
   }
   summary.done = summary.completed + summary.failed;
   summary.active = summary.queued + summary.running;

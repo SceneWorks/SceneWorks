@@ -5,7 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+# Explicit per-data-directory cache roots for CPU integration fixtures only.
+test-support = []
+
 [dependencies]
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "a0ddfd180909f1581016f4b8b521d50238a8e1a0" }
 directories = "5"
 fs2 = "0.4"
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's

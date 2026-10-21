@@ -1,6 +1,7 @@
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./fitMode.js";
-import { upscaleEngineHasSoftness } from "./upscaleEngines.js";
+import { upscaleEngineHasSoftness, upscaleEngineIsRestoration } from "./upscaleEngines.js";
+import { irisRestoreControls } from "./irisRestore.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } from "./ideogramCaption.js";
 
@@ -89,6 +90,7 @@ export function buildImageJobRequest(state) {
     upscaleFactor,
     upscaleEngine,
     upscaleSoftness,
+    upscaleRestore,
     hiresFixEnabled,
     hiresFixSteps,
     hiresFixDenoisingStrength,
@@ -98,6 +100,9 @@ export function buildImageJobRequest(state) {
     sampler,
     scheduler,
     schedulerShift,
+    supportsSchedulerShift,
+    cfgInterval,
+    captionOverflow,
     stepsOverride,
     guidanceOverride,
     guidanceMethod,
@@ -236,13 +241,17 @@ export function buildImageJobRequest(state) {
     loras,
     ...(upscaleEnabled
       ? {
-          upscale: {
-            enabled: true,
-            factor: upscaleFactor,
-            engine: upscaleEngine,
-            // SeedVR2-only detail/softness knob (sc-4815); omitted for engines that ignore it.
-            ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
-          },
+          upscale: upscaleEngineIsRestoration(upscaleEngine)
+            ? // Iris restoration (sc-25683) is sized by `scale` (plus input sizing / colour fix) —
+              // never `factor`, which the API refuses for it rather than silently ignoring.
+              { enabled: true, engine: upscaleEngine, ...irisRestoreControls(upscaleRestore) }
+            : {
+                enabled: true,
+                factor: upscaleFactor,
+                engine: upscaleEngine,
+                // SeedVR2-only detail/softness knob (sc-4815); omitted for engines that ignore it.
+                ...(upscaleEngineHasSoftness(upscaleEngine) ? { softness: upscaleSoftness } : {}),
+              },
         }
       : {}),
     ...(hiresFixEnabled
@@ -263,6 +272,10 @@ export function buildImageJobRequest(state) {
     // builder. Every omit-when-default rule (which keeps saved recipes byte-identical)
     // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
     advanced: buildImageJobAdvanced({
+      model,
+      mossImage: state.mossImage,
+      mossDmdSteps: state.mossDmdSteps,
+      mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride
         ? `${resolutionOverride.width}x${resolutionOverride.height}`
         : resolution,
@@ -273,6 +286,9 @@ export function buildImageJobRequest(state) {
       sampler,
       scheduler,
       schedulerShift,
+      supportsSchedulerShift,
+      cfgInterval,
+      captionOverflow,
       stepsOverride,
       guidanceOverride,
       guidanceMethod,

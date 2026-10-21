@@ -1432,17 +1432,31 @@ mod tests {
             derived_snapshot_state(&dir, &derivation),
             DerivedSnapshotState::Invalid(_)
         ));
-        std::fs::write(dir.join("model.safetensors"), b"short").unwrap();
+        // The digest cache keys on mtime. Rapid same-size rewrites can share a timestamp
+        // on coarse filesystems, so each fixture state gets an explicit distinct mtime.
+        let write_weights = |bytes: &[u8], seconds: u64| {
+            let path = dir.join("model.safetensors");
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + seconds),
+                )
+                .unwrap();
+        };
+        write_weights(b"short", 0);
         assert!(matches!(
             derived_snapshot_state(&dir, &derivation),
             DerivedSnapshotState::Invalid(why) if why.contains("bytes")
         ));
-        std::fs::write(dir.join("model.safetensors"), vec![b'x'; weights.len()]).unwrap();
+        write_weights(&vec![b'x'; weights.len()], 60);
         assert!(matches!(
             derived_snapshot_state(&dir, &derivation),
             DerivedSnapshotState::Invalid(why) if why.contains("hashes to")
         ));
-        std::fs::write(dir.join("model.safetensors"), weights).unwrap();
+        write_weights(weights, 120);
         assert_eq!(
             derived_snapshot_state(&dir, &derivation),
             DerivedSnapshotState::Verified

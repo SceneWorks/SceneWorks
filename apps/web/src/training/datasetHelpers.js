@@ -5,6 +5,7 @@
 
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { issue } from "../validation/issues.js";
+import { itemSplit } from "./irisCurricula.js";
 
 export function imageAssetName(asset) {
   const path = asset?.file?.path ?? asset?.path ?? asset?.displayName ?? asset?.id ?? "asset";
@@ -176,11 +177,16 @@ function datasetItemExtras(item) {
   return extra;
 }
 
+// `namedCaptionsById` (sc-25685): per-item named captions (`{ field: text }`) freshly imported from
+// `.json` sidecars, keyed by selection id. A saved item keeps its stored `captions` through
+// `datasetItemExtras`; an imported map replaces it.
 export function datasetPayload({
   activeDataset,
   assetsById,
   associatedCharacterId,
   captionDraftById = {},
+  namedCaptionsById = {},
+  holdoutById = {},
   referenceDraftById = {},
   name,
   selectedAssetIds,
@@ -241,6 +247,11 @@ export function datasetPayload({
           ...source,
           displayName: asset.displayName ?? imageAssetName(asset),
           caption,
+          ...(namedCaptionsById[selectionId] && Object.keys(namedCaptionsById[selectionId]).length
+            ? { captions: namedCaptionsById[selectionId] }
+            : {}),
+          // sc-25689: the Iris holdout flag (validation-only item), edited or kept from the saved item.
+          ...(itemSplit(holdoutById, selectionId, previous) ? { split: itemSplit(holdoutById, selectionId, previous) } : {}),
           ...(references.length ? { references } : {}),
         };
       })

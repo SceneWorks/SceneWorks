@@ -32,12 +32,14 @@ the existing `/api/v1/*` surface (no side-door into the engine or DB).
 | Tool | Kind | What it does |
 | --- | --- | --- |
 | `list_projects` | read | Project ids/names — `projectId` for every other call |
-| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, the resolution/duration/fps menus, `minSteps`, the reference-media caps, `promptGuide`, and any licence-required `attribution` |
-| `list_loras` | read | LoRA adapter catalog (filter by `modelFamily` / `projectId`) |
+| `list_models` | read | Generation model catalog: id, family, type (image/video), capabilities, `installState`, defaults, the resolution/duration/fps menus, `minSteps`, the reference-media caps, `promptGuide`, any licence-required `attribution`, and a trained model's `trainedCheckpoint` `{task, engineModel, baseModel}` |
+| `list_loras` | read | LoRA adapter catalog (filter by `modelFamily` / `projectId`); an Iris adapter carries its `irisTask` / `baseModel` / `networkType` |
 | `generate_image` | **blocking** | Submits an image job, relays progress notifications, returns the images inline as base64 (default `count` 1) |
 | `submit_video_job` | non-blocking | Submits a video job (`generate` / `reference` / `extend` / `bridge` / `person_replace` / `video_to_video` / `reference_video_to_video` / `multi_video_to_video` / `ads2v` / `animate_character` — every mode the API admits, sc-19576) and returns the job id immediately |
+| `estimate_depth` | non-blocking | Submits an Iris-3B depth job for an image asset (`resolutionMode` `capped` (default, `maxSide` 1024) or `native`, sc-25682; `irisModel` = an installed trained depth model) and returns the job id; the result is a depth asset — raw float32 `.npy` plus a PNG preview |
+| `restore_image` | non-blocking | Submits an Iris-3B restoration (`image_upscale` on the `iris` engine) for an image asset — `scale` (default 4, any positive factor), `inputSizing` `budgeted` (default) / `original`, `colorFix`, `irisModel` = an installed trained restoration model — and returns the job id; the result is a new linked asset recording the actual processing and output size |
 | `get_job_status` | read | Status/stage/progress/eta for any job id (video and image) |
-| `get_job_result` | read | For a completed job: ticketed download links (media bytes are never inlined) |
+| `get_job_result` | read | For a completed job: ticketed download links (media bytes are never inlined); an asset with a separate preview (depth `.npy`, vector SVG) also links its preview PNG |
 
 `generate_image` blocks until the job is terminal (poll interval 1 s, overall
 deadline 30 min — generous because a cold first run legitimately spends minutes

@@ -159,6 +159,11 @@ on:
   # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
+      capability_facts_only:
+        description: "Build and capture native Candle capability facts without running GPU or runtime tests"
+        required: false
+        type: boolean
+        default: false
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -221,6 +226,24 @@ on:
         required: false
         type: boolean
         default: false
+      run_iris_worker_smoke:
+        description: "Run the Iris-3B Candle worker jobs once on real weights (sc-25680 generation 512², 30 steps, with sc-25681 non-default controls + a stamped LoRA and a 2-prompt native prompt batch; sc-25682 depth on a 1024x768 EXIF-rotated photo; sc-25683 restoration jobs (4x 6-tile + 1x); sc-25686 Iris LoRA training; snapshots must already be in E:\\huggingface\\hub)"
+        required: false
+        type: boolean
+        default: false
+      iris_worker_smoke_filter:
+        description: "cargo test filter for the Iris worker smoke step (default: every Iris worker smoke + the training smokes). sc-25684: iris_staged_vram_measurement runs only the staged-residency VRAM measurement, alone in a fresh process, and skips the training smoke (the default filter never selects it). sc-25689: a filter starting with iris_training_gpu_smoke skips the worker smokes and runs only the matching training smokes (e.g. iris_training_gpu_smoke_two_rank_ddp). sc-25690: iris_training_gpu_smoke_full_ft runs only the two FULL fine-tune job-path smokes (generation stage1_256 cancel/resume and restoration; the facebook/dinov2-base REPA teacher must be in the hub), and iris_training_gpu_smoke_lokr_cancel_resume only the LoKr cancel/resume smoke; the default filter runs every training smoke including those"
+        required: false
+        type: string
+        default: iris_worker_gpu_smoke
+      iris_smoke_cards:
+        description: "Cards the Iris worker smoke job exposes (CUDA_VISIBLE_DEVICES, PCI bus order). '1' (default): the one-card smokes selected by iris_worker_smoke_filter. '0,1' (sc-25690, epic 25678 acceptance 5): ONLY the two-card distributed smoke iris_two_card_distributed_smoke — two rank processes, one per physical card, share_device off. The job checks BEFORE any build that both cards are free and fails fast naming an occupied card; it never shares a card with another tenant. Dispatch-only, gates nothing."
+        required: false
+        type: choice
+        options:
+          - "1"
+          - "0,1"
+        default: "1"
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -329,7 +352,7 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) }}
     # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
     # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
     # runs retain a unique group and therefore the full four-listener pool.
@@ -354,7 +377,8 @@ jobs:
       # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
       CUDA_COMPUTE_CAP: "120"
@@ -386,6 +410,8 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
         env:
+          CAPABILITY_FACTS_ONLY: ${{ inputs.capability_facts_only }}
+          RUN_IRIS_WORKER_SMOKE: ${{ inputs.run_iris_worker_smoke }}
           RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
@@ -394,6 +420,9 @@ jobs:
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
           YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
+          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE) -contains 'true')) {
+            throw 'capability_facts_only cannot share a dispatch with provisioning or a GPU/runtime profile'
+          }
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
             throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'
           }
@@ -805,7 +834,9 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle
+          set "capability_facts_test_args="
+          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
+          cargo test -p sceneworks-worker --features backend-candle %capability_facts_test_args%
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
       # compile) and typechecks the full graph, so a candle sidecar build break is
@@ -847,7 +878,9 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          cargo test -p sceneworks-memory-adapter --features candle
+          set "capability_facts_test_args="
+          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
+          cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -986,12 +1019,12 @@ jobs:
           echo ::error::config/engine-capabilities/runtime/capabilities.candle.json does not match inference's fresh runtime capability snapshot. Download the backend-capability-facts-candle artifact from this run; never hand-author descriptor facts.
           exit /b 1
       - name: Upload fresh Candle capability facts after a verification failure
-        if: ${{ always() && steps.verify_candle_capabilities.outcome == 'failure' }}
+        if: ${{ always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success')) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: backend-capability-facts-candle
           path: ${{ runner.temp }}/engine-capability-facts-verify
-          if-no-files-found: warn
+          if-no-files-found: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && 'error' || 'warn' }}
       # SC-18902's product decision required an actual Eros render, not source inference. These
       # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
       # do not restore an Eros Candle product route. A candidate is intentionally absent: the
@@ -1250,7 +1283,7 @@ jobs:
         id: terminal_node
         continue-on-error: true
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         with:
           node-version: 22
           cache: npm
@@ -1258,19 +1291,19 @@ jobs:
       - name: Install the pinned terminal Node dependencies
         id: terminal_npm
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
         run: npm ci --ignore-scripts
       - name: Run the targeted cross-platform terminal harness tests
         id: terminal_tests
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
         run: |
           node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
           python -m unittest scripts/provision_epic_20738_terminal_artifact_test.py
       - name: Validate the frozen epic-20738 terminal dispatch
         id: terminal_validation
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
         shell: powershell
         env:
           SCENEWORKS_TERMINAL_CACHE_ROOT: 'E:\huggingface\hub'
@@ -1297,7 +1330,7 @@ jobs:
       - name: Discover the exact audited 19-PASS OpenPose recovery source
         id: terminal_prefix
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1341,7 +1374,7 @@ jobs:
       - name: Validate the pinned terminal artifact Python runtime
         id: terminal_python
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
         shell: powershell
         run: |
           $venv = Join-Path $env:RUNNER_TEMP "sc-20974-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
@@ -1356,7 +1389,7 @@ jobs:
       - name: Check out the exact terminal inference source
         id: terminal_inference
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -1366,7 +1399,7 @@ jobs:
       - name: Run the exact sparse epic-20738 terminal CUDA recovery
         id: terminal_campaign
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
         shell: cmd
         env:
           SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1"
@@ -1381,7 +1414,7 @@ jobs:
           echo .terminal/>>.git\info\exclude
           node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
       - name: Upload every epic-20738 terminal receipt
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sc-20945-epic-20738-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1389,7 +1422,7 @@ jobs:
           if-no-files-found: error
       - name: Enforce the epic-20738 terminal verdict after receipt upload
         id: terminal_verdict
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         shell: powershell
         env:
           NODE_OUTCOME: ${{ steps.terminal_node.outcome }}
@@ -1469,7 +1502,7 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only }}
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -1656,3 +1689,112 @@ jobs:
           if ($env:ACCEPTANCE_OUTCOME -ne 'success' -or ($env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and $env:PROFILE_OUTCOME -ne 'success')) {
             throw "YuE2 terminal evidence failed after upload: acceptance $env:ACCEPTANCE_OUTCOME, profile $env:PROFILE_OUTCOME"
           }
+
+  # SC-25680 (epic 25678): one real-weight Iris-3B `image_generate` job through the production Candle
+  # worker arm, on the real-weights card. Dispatch only — never on PR/push — and bounded (one 512²
+  # image, 30 steps). SC-25681: non-default controls (euler, shift, CFG interval, caption overflow)
+  # plus a tiny stamped generation-task LoRA the test writes itself; preview, warning and adapter
+  # provenance are asserted, then a 2-prompt × count-1 NATIVE prompt batch (one engine call, two
+  # assets) runs in the same filter. Offline: the pinned speridlabs/iris-3b + Qwen3-VL-4B-Instruct snapshots must
+  # already be in E:\huggingface\hub (inference's `candle-iris` real-weight profile materializes
+  # them there); a missing snapshot fails the job rather than downloading.
+  # SC-25682 extends it with one real-weight `image_depth` job (`iris_worker_gpu_smoke_depth`, matched
+  # by the same test filter): the installed `depth/` export only — no text encoder.
+  # SC-25683: the same `iris_worker_gpu_smoke` filter also selects `iris_worker_gpu_smoke_restore` —
+  # two `image_upscale` jobs with `engine: "iris"` (a 6-tile 4x and a 1x restore) from the task's own
+  # `upscaler/` export of the same snapshot, run sequentially (`--test-threads=1`).
+  #   gh workflow run windows-candle.yml --ref <branch> -f run_iris_worker_smoke=true
+  iris-worker-smoke:
+    needs: candle-worker
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${{ inputs.iris_smoke_cards || '1' }}
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the Iris worker smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      # SC-25690: the two-card smoke puts one rank on EACH card, so both must be free before
+      # anything is fetched or built. A card another tenant holds (the campaign found card 0 at
+      # 95,262 MiB used) fails the job here, named, in seconds - never by sharing it.
+      - name: Require both cards free for the two-card Iris smoke
+        if: ${{ inputs.iris_smoke_cards == '0,1' }}
+        env:
+          IRIS_TWO_CARD_MAX_USED_MIB: "2048"
+        run: node scripts/ci/iris-two-card-preflight.mjs
+      - name: Isolate Cargo dependency checkout for the Iris worker smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned inference revision for the Iris worker smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the Iris-3B Candle worker smoke
+        if: ${{ inputs.iris_smoke_cards != '0,1' && !startsWith(inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke', 'iris_training_gpu_smoke') }}
+        shell: cmd
+        env:
+          IRIS_SMOKE_FILTER: ${{ inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke' }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
+      # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
+      # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
+      # SC-25687 / SC-25688: the same filter selects `iris_training_gpu_smoke_depth` (a 4-step depth
+      # full fine-tune at 128² → its export selected by id in an `image_depth` job) and
+      # `iris_training_gpu_smoke_restore` (a 2-step restoration LoRA at 256² with the three pinned
+      # training resources → its export selected by id in an Iris `image_upscale` job).
+      # SC-25689: the same filter also selects `iris_training_gpu_smoke_two_rank_ddp` — the run as
+      # two ddp rank processes sharing this job's one visible card (`share_device`), over loopback
+      # TCP. The card inventory is printed first: the runner exposes one card to CUDA.
+      - name: Show the cards the Iris training smoke sees
+        if: ${{ inputs.iris_smoke_cards != '0,1' && ((inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke')) }}
+        shell: cmd
+        run: |
+          nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv
+          echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
+      - name: Run the Iris-3B Candle training smoke
+        if: ${{ inputs.iris_smoke_cards != '0,1' && ((inputs.iris_worker_smoke_filter || 'iris_worker_gpu_smoke') == 'iris_worker_gpu_smoke' || startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke')) }}
+        shell: cmd
+        env:
+          IRIS_TRAINING_FILTER: ${{ startsWith(inputs.iris_worker_smoke_filter, 'iris_training_gpu_smoke') && inputs.iris_worker_smoke_filter || 'iris_training_gpu_smoke' }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1 --skip iris_two_card_distributed_smoke
+      # SC-25690 (epic 25678 acceptance 5): REAL two-GPU distributed training through the job path —
+      # DDP on two cards canceled after a durable checkpoint and resumed, a killed rank failing the
+      # job typed, and FSDP on two cards. Each rank's card is read from the run (its own pid's
+      # context in nvidia-smi), not from the plan. It lives in the `iris_training_gpu_smoke`
+      # module, so the one-card step's filter matches its path: that step passes
+      # `--skip iris_two_card_distributed_smoke` (run 38455663460 showed the default dispatch
+      # selecting it on one card, where it refuses).
+      - name: Run the Iris-3B two-card distributed smoke
+        if: ${{ inputs.iris_smoke_cards == '0,1' }}
+        shell: cmd
+        run: |
+          nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used --format=csv
+          echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1

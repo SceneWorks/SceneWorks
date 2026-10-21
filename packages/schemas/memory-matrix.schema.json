@@ -169,6 +169,7 @@
         "videoMlxStagedStaticCoverageDenominator",
         "unroutedEntries",
         "outOfMatrixEntries",
+        "taskRouteEntries",
         "anchors",
         "analyticOnlyCells",
         "anchoredCells",
@@ -209,6 +210,19 @@
           }
         },
         "outOfMatrixEntries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "epic", "reason"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "epic": { "type": "integer", "minimum": 1 },
+              "reason": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "taskRouteEntries": {
           "type": "array",
           "items": {
             "type": "object",

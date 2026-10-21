@@ -1,0 +1,186 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "speridlabs/iris-3b",
+        "resolvedRevision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "iris-3b-candle-derived-2026-10-12-v1",
+      "capturedAt": "2026-10-13T18:54:52Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:iris-3b-anchor",
+        "blockers": [
+          "sc-25690 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Iris-3B lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned crate exposes no calibration fault-injection site"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 8837398528
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12360613888
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12360613888
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12360613888
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 1024
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 1024
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-iris-3b-bf16-1024-seed16402-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-8a22fa05fc612e4ab577",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "speridlabs/iris-3b@7445443349bc9abe3c96f01ff793e2098ca012b3:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-e8228637b455b84fa6a9",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 8837398528,
+          "allocatorBytes": 8837398528,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 12360613888,
+          "allocatorBytes": 12360613888,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 12360613888,
+          "allocatorBytes": 12360613888,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 12360613888,
+          "allocatorBytes": 12360613888,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "055592ab54faea5bf70058343867bf3b3755f3846892eaa2ac05627ad92277a3",
+          "dirty": false,
+          "revision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:494d67f97eef7e4845d047216a1ffb1b21485a70f5013c0604820f927c7c7609",
+          "revision": "ff2342e7116b208f95eb7591fdb77398f672622e"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-25690 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Iris-3B lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned crate exposes no calibration fault-injection site",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded Iris admission check rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded Iris admission check rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-25690 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Iris-3B lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned crate exposes no calibration fault-injection site",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-25690 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Iris-3B lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned crate exposes no calibration fault-injection site",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-25690 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Iris-3B lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned crate exposes no calibration fault-injection site",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the iris_3b resident path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "iris_3b",
+        "overlay": "none",
+        "provider": "iris_3b",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

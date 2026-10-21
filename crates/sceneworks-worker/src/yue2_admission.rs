@@ -2721,7 +2721,7 @@ async fn probe_budget(_gpu_id: &str) -> Option<Yue2Budget> {
 /// Host RAM available right now: `MemAvailable` on Linux, `FreePhysicalMemory` on Windows. `None`
 /// when it cannot be read (the host pool is then not checked).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-async fn host_available_bytes() -> Option<u64> {
+pub(crate) async fn host_available_bytes() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
         let meminfo = tokio::fs::read_to_string("/proc/meminfo").await.ok()?;

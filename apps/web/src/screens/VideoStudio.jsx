@@ -1,3 +1,4 @@
+import { VedaOutcome } from "../components/VedaOutcome.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
@@ -123,6 +124,8 @@ import {
   referenceLimitError,
 } from "../videoModelLimits.js";
 import { ModelAttribution } from "../components/ModelAttribution.jsx";
+import { VedaControls } from "../components/VedaControls.jsx";
+import { restoreVedaSettings, vedaAdvancedSettings, vedaControlError } from "../vedaControls.js";
 
 // "8" / "4 or 8" / "4, 8, or 12" — the same phrasing `humanized_number_menu` gives the enqueue
 // gate's own rejection (crates/sceneworks-core/src/video_request.rs, sc-19502), so the Steps
@@ -347,6 +350,7 @@ export function VideoStudio() {
   // picker state so an unavailable/disallowed replay can block instead of being clamped to whatever
   // installed tier the current model would normally seed.
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
+  const [veda, setVeda] = useState(() => restoreVedaSettings(saved));
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // LTX-2.3 remains the default video route. LTX-2.5 is deliberately opt-in even though its
   // catalog entry can arrive first (the manifest groups the shared LTX family together).
@@ -535,7 +539,7 @@ export function VideoStudio() {
   // (sendAssetToVideo) still sets the source directly in an effect below, overriding this seed. A
   // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
   // / person-track catalogs land.
-  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId);
+  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (saved.model === "minimax_h3" && saved.lastFrameAssetId));
   const [sourceAssetId, setSourceAssetId] = useState(
     hasRestoredSource
       ? (saved.sourceAssetId ?? "")
@@ -1282,6 +1286,7 @@ export function VideoStudio() {
     // `advanced` passthrough: every real *_raw_settings builder clones it, so these are the knobs
     // exactly as the client sent them. Steps/guidance record the OVERRIDE — blank means "no
     // override", which correctly replays as blank and lets the engine re-derive its own default.
+    setVeda(restoreVedaSettings(rawSettings));
     setStepsOverride(rawSettings.steps ?? "");
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
@@ -1421,6 +1426,7 @@ export function VideoStudio() {
       ["quality", setQuality],
       ["guidanceScale", setGuidanceOverride],
       ["steps", setStepsOverride],
+      ["veda", (value) => setVeda(restoreVedaSettings({ veda: value }))],
       ["sampler", setSampler],
       ["scheduler", setScheduler],
       ["schedulerShift", setSchedulerShift],
@@ -1457,6 +1463,7 @@ export function VideoStudio() {
       quality,
       mode,
       guidanceScale: finiteNumberOrUndefined(guidanceOverride),
+      ...vedaAdvancedSettings(veda),
       steps: finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
@@ -1489,6 +1496,7 @@ export function VideoStudio() {
   });
 
   useStudioSettingsWriter("video", activeProject?.id ?? null, {
+    veda,
     motion,
     mode,
     prompt,
@@ -1699,7 +1707,7 @@ export function VideoStudio() {
     outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
-    (mode === "image_to_video" && sourceAssetId) ||
+    (mode === "image_to_video" && (sourceAssetId || (model === "minimax_h3" && lastFrameAssetId))) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
@@ -1792,6 +1800,8 @@ export function VideoStudio() {
   // One summary gates Generate and carries every reason it might be dead, so the button
   // and the messages can't drift — the bug this screen used to embody, where `canSubmit`
   // and `blockedMessage` re-derived the same rules side by side (epic 10644).
+  const vedaSteps = finiteNumberOrUndefined(stepsOverride) ?? activeTurboVariant?.sampling?.steps ?? selectedModel?.defaults?.steps ?? 50;
+  const vedaBlockMessage = vedaControlError(showTurbo, veda);
   const videoDraft = useMemo(
     () => ({
       activeProject,
@@ -1812,6 +1822,7 @@ export function VideoStudio() {
       referenceLimitMessage,
       audioOnlyReferenceSet,
       executionTierBlockMessage,
+      vedaBlockMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1833,6 +1844,7 @@ export function VideoStudio() {
       referenceLimitMessage,
       audioOnlyReferenceSet,
       executionTierBlockMessage,
+      vedaBlockMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1905,7 +1917,7 @@ export function VideoStudio() {
         fitMode: ["image_to_video", "first_last_frame"].includes(mode)
           ? effectiveFitMode(fitMode, false)
           : undefined,
-        lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? lastFrameAssetId || null : null,
         sourceClipAssetId: [
           "extend_clip",
           "replace_person",
@@ -1944,6 +1956,9 @@ export function VideoStudio() {
           mode === "replace_person" && replacementModeApplies(model) ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
+          // Keep the portable Veda object visible to workflow-share coverage. The helper call hid
+          // its emitted key from the source scanner; this is the same enabled-only wire shape.
+          ...(veda?.enabled ? { veda } : {}),
           resolution,
           durationHint,
           motion,
@@ -2166,7 +2181,7 @@ export function VideoStudio() {
               />
             ) : null}
 
-            {mode === "first_last_frame" ? (
+            {mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? (
               <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"
@@ -2579,6 +2594,7 @@ export function VideoStudio() {
             open={advancedOpen}
           >
             <div className="advanced-panel">
+              {showTurbo || veda.enabled ? <VedaControls value={veda} onChange={setVeda} steps={vedaSteps} /> : null}
               <label>
                 Frames
                 <select onChange={(event) => setFps(Number(event.target.value))} value={fps}>
@@ -3133,6 +3149,10 @@ export function VideoStudio() {
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          <VedaOutcome
+            label="Recorded recipe attention"
+            raw={launchRequest?.recipe?.rawAdapterSettings}
+          />
           {canStartNewGenerationFromReplay ? (
             <button
               className="secondary-action"

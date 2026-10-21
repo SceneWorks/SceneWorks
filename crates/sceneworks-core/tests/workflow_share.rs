@@ -5859,3 +5859,32 @@ fn the_rust_scanner_survives_a_generic_test_only_struct_field() {
     );
     assert!(!stripped.contains("cfg(test)"));
 }
+
+/// sc-25681: Iris-3B's CFG interval travels only as a pair of finite numbers, and its
+/// caption-overflow policy as a slug; any other shape is dropped rather than passed through.
+#[test]
+fn the_cfg_interval_travels_only_as_a_number_pair() {
+    use sceneworks_core::workflow_share::sanitize_advanced;
+    let advanced = serde_json::json!({
+        "cfgInterval": [0.1, 0.9],
+        "captionOverflow": "warn",
+    });
+    let kept = sanitize_advanced(advanced.as_object().unwrap());
+    assert_eq!(kept["cfgInterval"], serde_json::json!([0.1, 0.9]));
+    assert_eq!(kept["captionOverflow"], "warn");
+    for smuggled in [
+        serde_json::json!("0.1,0.9"),
+        serde_json::json!([0.1]),
+        serde_json::json!([0.1, 0.5, 0.9]),
+        serde_json::json!(["/etc/passwd", 1]),
+        serde_json::json!({ "start": 0.1 }),
+    ] {
+        let advanced = serde_json::json!({ "cfgInterval": smuggled.clone() });
+        assert!(
+            sanitize_advanced(advanced.as_object().unwrap())
+                .get("cfgInterval")
+                .is_none(),
+            "{smuggled} must be dropped"
+        );
+    }
+}

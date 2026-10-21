@@ -122,6 +122,8 @@ const GENERATION_CAPABILITIES = new Set([
 // Candle cells to a story scoped to Metal — which is precisely the false green this epic exists to
 // prevent, and which shipped in the generated matrix until this change.
 export const MODEL_STORIES = {
+  moss_image_base: { mlx: 26323, candle: 26324 },
+  moss_image_sft: { mlx: 26323, candle: 26324 },
   mage_flow_edit_base: { mlx: 15450, candle: 15841 },
   mage_flow_edit: { mlx: 15451, candle: 15844 },
   mage_flow_edit_turbo: { mlx: 15452, candle: 15847 },
@@ -136,6 +138,12 @@ export const MODEL_STORIES = {
   // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
   // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
   qwen_image_2_1: { mlx: 24108, candle: 24109 },
+  // Qwen-Image 2.1 Turbo (epic 25899): the distilled sibling's own engine id, ported to MLX by
+  // sc-25900 and to Candle/CUDA by sc-25901 — the same per-backend split base's lanes follow.
+  qwen_image_2_1_turbo: { mlx: 25900, candle: 25901 },
+  // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
+  // backend's cells are owned by the story that brought that lane through SceneWorks.
+  iris_3b: { mlx: 25679, candle: 25680 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -185,6 +193,7 @@ export const MODEL_STORIES = {
 // `candle` key owns no dual-backend model; adding one to the catalog fails generation until its
 // Candle family twin is filed.
 export const FAMILY_STORIES = {
+  26323: { mlx: 26323, candle: 26324 },
   15509: { mlx: 15509, candle: 15813 },
   15510: { mlx: 15510, candle: 15815 },
   15511: { mlx: 15511, candle: 15817 },
@@ -205,6 +214,14 @@ export const FAMILY_STORIES = {
   15526: { mlx: 15526, candle: 15837 },
   15527: { mlx: 15527, candle: 15839 },
   15528: { mlx: 15528, candle: 17414 },
+  // Iris-3B: the MLX family is owned by its epic (sc-25678) — the model stories sc-25679/sc-25680
+  // already own the iris_3b cells, and one id may own only one thing. The Candle family twin is
+  // sc-25684 (S6: Iris task resource management and memory admission), which delivered the Candle
+  // lane's admission: the staged-residency row measured once on CUDA (12.0 GB at 1024²) and the
+  // declared per-megapixel activation term for batches and outputs above 1024². No memory anchor
+  // exists for either lane (the epic-end campaign owns anchors), so the cells stay
+  // Implemented/Missing by implementation, never Anchored.
+  25678: { mlx: 25678, candle: 25684 },
 };
 
 /**
@@ -352,6 +369,8 @@ export function familyGroup(modelId) {
   if (modelId === "instantid_realvisxl") return 15526;
   if (modelId === "pulid_flux_dev") return 15527;
   if (modelId === "bernini_image") return 15528;
+  if (modelId.startsWith("iris")) return 25678;
+  if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
   throw new Error(`no family story for ${modelId}`);
 }
 
@@ -394,15 +413,35 @@ export function modelStory(modelId, backend) {
  * other's. Not vacuous, but no longer proof of anything. So one id means one owner and one backend,
  * enforced here rather than assumed downstream.
  */
+// The approved MOSS backend stories each implement both exact variants and their family.
+// This declaration permits only these three claims per story, on its single native backend.
+// It does not relax the legacy one-owner rule for any other story, model or family.
+export const COMPOSITE_STORY_OWNERSHIP = Object.freeze([
+  { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+  { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+]);
+
 export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
   const scope = new Map();
   const claim = (storyId, backend, role, owner) => {
     if (!Number.isInteger(storyId)) {
       throw new Error(`${role} for ${owner}: story id ${JSON.stringify(storyId)} is not an integer`);
     }
-    // Any repeat is a defect, not just a cross-backend one: two models sharing a story would
+    // Every undeclared repeat is a defect: two models sharing a legacy story would
     // under-count the split, and a story used as both a model and a family owner is a typo.
     const existing = scope.get(storyId);
+    const composite = COMPOSITE_STORY_OWNERSHIP.find((entry) => entry.story === storyId);
+    if (composite) {
+      const allowed = composite.backend === backend && (
+        (role === "family story" && owner === `family SC-${composite.family}`) ||
+        (role === "model story" && composite.model_ids.includes(owner))
+      );
+      if (!allowed) throw new Error(`SC-${storyId}: claim ${backend} ${role} of ${owner} is outside its declared composite scope`);
+      const claims = existing?.claims ?? [];
+      if (claims.some((claim) => claim.role === role && claim.owner === owner)) throw new Error(`SC-${storyId}: duplicate composite claim`);
+      scope.set(storyId, { backend, role: "composite story", owner: `family SC-${composite.family}`, claims: [...claims, { role, owner }] });
+      return;
+    }
     if (existing) {
       throw new Error(
         `SC-${storyId} is claimed as the ${existing.backend} ${existing.role} of ${existing.owner} and as the ${backend} ${role} of ${owner}: an ownership story belongs to exactly one owner and one backend`,
@@ -416,6 +455,15 @@ export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStori
   for (const [group, byBackend] of Object.entries(familyStories)) {
     for (const [backend, storyId] of Object.entries(byBackend)) {
       claim(storyId, backend, "family story", `family SC-${group}`);
+    }
+  }
+  for (const composite of COMPOSITE_STORY_OWNERSHIP) {
+    const owner = scope.get(composite.story);
+    if (!owner) continue;
+    const required = [ { role: "family story", owner: `family SC-${composite.family}` },
+      ...composite.model_ids.map((model) => ({ role: "model story", owner: model })) ];
+    if (owner.claims.length !== required.length || required.some((claim) => !owner.claims.some((actual) => actual.role === claim.role && actual.owner === claim.owner))) {
+      throw new Error(`SC-${composite.story}: incomplete declared composite scope`);
     }
   }
   return scope;
@@ -472,7 +520,8 @@ export function assertCellOwnershipIsBackendScoped(
         );
       }
       const expectedOwner = expected.owner(cell);
-      if (owner.role !== expected.role || owner.owner !== expectedOwner) {
+      const claims = owner.claims ?? [owner];
+      if (!claims.some((claim) => claim.role === expected.role && claim.owner === expectedOwner)) {
         throw new Error(
           `${cell.id}: ${field} SC-${storyId} is the ${owner.backend} ${owner.role} of ${owner.owner}, but this cell needs the ${cell.backend} ${expected.role} of ${expectedOwner} — a cell credited to another entry's story names a story that cannot close it`,
         );
@@ -558,7 +607,15 @@ export function assertTwinCoverage(
       throw new Error(`family SC-${group}: owns no dual model but carries Candle twin SC-${stories.candle}`);
     }
   }
-  const candleModelTwins = new Set(dual.map((model) => modelStories[model.id].candle));
+  const candleModelTwins = new Set(dual.map((model) => {
+    const story = modelStories[model.id].candle;
+    const composite = COMPOSITE_STORY_OWNERSHIP.find((entry) => entry.story === story);
+    if (!composite) return story;
+    if (composite.backend !== "candle" || !composite.model_ids.includes(model.id)) {
+      throw new Error(`SC-${story}: Candle model twin ${model.id} is outside its declared composite scope`);
+    }
+    return `${story}:${model.id}`;
+  }));
   if (candleModelTwins.size !== dual.length) {
     throw new Error(`${dual.length} dual models map onto only ${candleModelTwins.size} distinct Candle model twins`);
   }
@@ -2453,6 +2510,57 @@ export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
 ]);
 
 /**
+ * Catalog entries OUTSIDE the matrix modalities that nonetheless carry a memory anchor (sc-25690).
+ *
+ * The matrix universe is image and video entries (`MATRIX_MODALITIES`): a `utility` entry has no
+ * rung ladder for this generator to enumerate, so it is absent by design rather than subtracted.
+ * Iris-3B's depth and restoration tasks are `utility` entries, and they are also real engine
+ * routes with their own memory-strategy contract on both lanes — `mlx-gen-iris` and
+ * `candle-gen-iris` register `iris_3b_depth` and `iris_3b_restore` as composed (non-generator)
+ * memory routes, resident-only, each with its own calibration identity. Their peak is exactly what
+ * the worker's depth and restoration admission needs measured, so each carries one plan anchor per
+ * lane and an adapter arm.
+ *
+ * The anchor plan may only name a model id this artifact enumerates
+ * (`memory-calibration-harness.mjs` `matrixModelIds`), which is the guard against an invented id
+ * buying a second measurement of an existing cell. These ids are real catalog entries rather than
+ * inventions, so they are enumerated here — by name, with the reason — instead of loosening that
+ * guard. Not `OUT_OF_MATRIX_CATALOG_ENTRIES`: that table is for entries of a MATRIX modality the
+ * generator cannot route, and it is validated against the routing catalog, which lists neither.
+ */
+const IRIS_TASK_ROUTE_REASON =
+  "a utility-modality entry with its own engine memory-strategy contract (a composed, " +
+  "resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video " +
+  "matrix universe by modality, and anchored — planned, armed and closed over on both lanes";
+
+export const TASK_ROUTE_CATALOG_ENTRIES = new Map([
+  ["iris_3b_depth", { epic: 25678, reason: IRIS_TASK_ROUTE_REASON }],
+  ["iris_3b_restore", { epic: 25678, reason: IRIS_TASK_ROUTE_REASON }],
+]);
+
+/**
+ * A task-route entry must be a real catalog entry, and must stay OUTSIDE the matrix modalities: one
+ * the catalog no longer ships is a stale declaration, and one that became an image or video entry
+ * belongs in the universe (where its cells are enumerated) rather than in this side list.
+ */
+export function assertTaskRouteEntriesAreCatalogEntriesOutsideTheMatrix(manifestModels) {
+  for (const [id, entry] of TASK_ROUTE_CATALOG_ENTRIES) {
+    const model = manifestModels.find((candidate) => candidate.id === id);
+    if (!model) {
+      throw new Error(
+        `TASK_ROUTE_CATALOG_ENTRIES names ${id}, which the catalog no longer carries (epic ${entry.epic})`,
+      );
+    }
+    if (MATRIX_MODALITIES.has(model.type)) {
+      throw new Error(
+        `${id} is declared a task route, but its catalog type ${JSON.stringify(model.type)} is a matrix ` +
+          `modality: admit it to the universe instead (epic ${entry.epic})`,
+      );
+    }
+  }
+}
+
+/**
  * The subtraction may never outlive its reason. An out-of-matrix entry the catalog no longer carries
  * is a stale declaration, and one the generator CAN now resolve must join the universe rather than
  * stay silently subtracted.
@@ -2715,6 +2823,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );
+  assertTaskRouteEntriesAreCatalogEntriesOutsideTheMatrix(manifest.models);
   // NUL-separated (sc-16268): normalisation strips each body's trailing newline, so concatenating
   // bare would let content shift across a source boundary without moving the hash. A NUL cannot
   // occur in any of these text sources, so it is an unambiguous delimiter.
@@ -3039,6 +3148,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       outOfMatrixEntries: [...OUT_OF_MATRIX_CATALOG_ENTRIES]
         .map(([id, entry]) => ({ id, ...entry }))
         .sort((left, right) => left.id.localeCompare(right.id)),
+      // sc-25690: catalog entries outside the matrix modalities that carry a memory anchor anyway —
+      // named so the anchor plan can cite them without the matrix claiming a ladder for them.
+      taskRouteEntries: [...TASK_ROUTE_CATALOG_ENTRIES]
+        .map(([id, entry]) => ({ id, ...entry }))
+        .sort((left, right) => left.id.localeCompare(right.id)),
       // sc-22513: the anchor census. `anchors` counts the store's measured rows, `analyticOnlyCells`
       // the rows it explicitly classifies as underivable from retained evidence, and
       // `anchoredCells`/`staleAnchors` say how far the store reaches and how much of it the loader
@@ -3111,6 +3225,13 @@ export function renderMarkdown(matrix) {
     ...(matrix.summary.outOfMatrixEntries.length
       ? [
           `- Out-of-matrix entries (subtracted from the universe): ${matrix.summary.outOfMatrixEntries
+            .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.epic})`)
+            .join("; ")}`,
+        ]
+      : []),
+    ...(matrix.summary.taskRouteEntries.length
+      ? [
+          `- Task-route entries (outside the matrix modalities, anchored): ${matrix.summary.taskRouteEntries
             .map((entry) => `\`${entry.id}\` — ${entry.reason} (sc-${entry.epic})`)
             .join("; ")}`,
         ]

@@ -1638,7 +1638,26 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
         external_model_roots: Vec::new(),
         gpu_memory_limit_bytes: 0,
     };
-    let worker = tokio::spawn(sceneworks_worker::run_worker_loop(worker_settings));
+    // Poll the real worker on its own thread with the shipped worker entry's stack
+    // (`run_on_worker_entry_thread`). Its future holds every platform-compiled job handler, and on
+    // macOS (MLX handlers included) an unoptimized build overflows libtest's 2 MiB test thread.
+    let (stop_worker, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let worker = std::thread::Builder::new()
+        .name(sceneworks_worker::WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("worker runtime builds")
+                .block_on(async move {
+                    tokio::select! {
+                        _ = sceneworks_worker::run_worker_loop(worker_settings) => {}
+                        _ = stop_rx => {}
+                    }
+                });
+        })
+        .expect("worker thread spawns");
     // Wait for the real worker to register with `timeline_export`, bounded.
     let mut registered = false;
     for _ in 0..400 {
@@ -1831,7 +1850,8 @@ async fn a_real_timeline_export_mixes_the_harness_four_track_sequence() {
         "asset_missing"
     );
 
-    worker.abort();
+    let _ = stop_worker.send(());
+    worker.join().expect("the real worker thread exits");
     server.abort();
 }
 

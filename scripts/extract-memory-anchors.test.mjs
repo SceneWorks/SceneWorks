@@ -926,6 +926,11 @@ test("the staged-residency inversion governs every exempt candle lane, not only 
     "anima_base",
     "anima_aesthetic",
     "anima_turbo",
+    // sc-25690: the two Iris-3B task routes. Depth and restoration load no text encoder (one
+    // backbone forward on the export's shipped empty-prompt states), so their candle contracts
+    // classify staged residency structurally not applicable and their anchors invert the same way.
+    "iris_3b_depth",
+    "iris_3b_restore",
   ];
   for (const modelId of NON_SENSENOVA_EXEMPT) {
     assert.ok(
@@ -936,7 +941,7 @@ test("the staged-residency inversion governs every exempt candle lane, not only 
   assert.deepEqual(
     expectedCandle.filter((lane) => !lane.startsWith("sensenova_u1_8b")).sort(),
     NON_SENSENOVA_EXEMPT.map((modelId) => `${modelId}:candle`).sort(),
-    "the exempt candle lanes outside the SenseNova family are exactly these six",
+    "the exempt candle lanes outside the SenseNova family are exactly the ones named above",
   );
 
   const candidate = (modelId, regime) => ({

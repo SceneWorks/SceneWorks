@@ -693,6 +693,26 @@ fn validate_parquet_import_request(
             )));
         }
     }
+    // Named caption columns become item caption FIELD names, so they follow the store's field-name
+    // rule (non-empty, no surrounding whitespace, at most 64 characters) and must be distinct.
+    if payload.caption_field_columns.len() > 16 {
+        return Err(ApiError::bad_request(
+            "Parquet captionFieldColumns accepts at most 16 columns.",
+        ));
+    }
+    let mut seen_columns = std::collections::BTreeSet::new();
+    for column in &payload.caption_field_columns {
+        if column.trim().is_empty()
+            || column.trim() != column
+            || column.chars().count() > 64
+            || !seen_columns.insert(column.as_str())
+        {
+            return Err(ApiError::bad_request(format!(
+                "Parquet captionFieldColumns entries must be distinct column names of 1 to 64 \
+                 characters with no surrounding whitespace (got {column:?})."
+            )));
+        }
+    }
     let source = std::path::PathBuf::from(payload.source_path.trim());
     if !source.is_absolute() {
         return Err(ApiError::bad_request(
@@ -762,6 +782,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         "concurrency": payload.concurrency,
         "captionIncludes": payload.caption_includes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
         "captionExcludes": payload.caption_excludes.iter().map(|term| term.trim()).collect::<Vec<_>>(),
+        "captionFieldColumns": payload.caption_field_columns,
     }) {
         Value::Object(map) => map,
         _ => {
@@ -1764,6 +1785,9 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    if let Some(error) = untrainable_target_base_error(target) {
+        return Err(error);
+    }
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
     // directly to clients, so every advertised numeric bound is a submit-time
@@ -1964,7 +1988,10 @@ pub(crate) async fn create_training_job(
     // every submit, including the offline dry-run path — makes no network calls.
     let normalized_family = normalize_lora_family(&target.family);
     let known_families = known_lora_families_from_manifests(&state).await?;
-    if !known_families.is_empty()
+    // A full base fine-tune produces a MODEL, not a LoRA, so "an installed model must accept this
+    // LoRA family" is not its guardrail (sc-25685: an Iris full export registers as a model).
+    if !is_base_checkpoint
+        && !known_families.is_empty()
         && !known_families
             .iter()
             .any(|family| family == &normalized_family)
@@ -1980,6 +2007,18 @@ pub(crate) async fn create_training_job(
     // A real run loads the base model and writes weights, so it must have the
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
+    // Iris depth / restoration (sc-25687 / sc-25688): a task run needs its own task export (and, for
+    // restoration, the pinned training-only resources), not the shared repo's generation files — so
+    // availability is judged per resource, not off the repo-level install marker.
+    // Iris GENERATION is judged per task resource too (S7): the root backbone at the pinned
+    // revision AND the Qwen3-VL text encoder — never the repo-wide marker, which any depth/ or
+    // upscaler/ file satisfies. Every Iris refusal is typed (`iris_training_refused` + `kind`, S8).
+    let iris_task = sceneworks_worker::iris_task_objective(&target.kernel, &target.base_model);
+    let iris_objective = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+        .then(|| {
+            sceneworks_core::training::iris::IrisObjective::from_base_model(&target.base_model)
+        })
+        .flatten();
     if !payload.dry_run {
         // A base whose licence binds derivatives (Qwen Image 2.1's Qwen RESEARCH licence, epic 24107
         // E12) needs the user's explicit acceptance before a run starts. The Training Studio shows
@@ -1993,7 +2032,15 @@ pub(crate) async fn create_training_job(
         {
             return Err(ApiError::bad_request(message));
         }
-        if let Some(message) = training_base_unavailable_message(
+        if let Some(objective) = iris_objective {
+            if let Some(refusal) = sceneworks_worker::iris_training_install_refusal(
+                &data_dir,
+                objective,
+                &payload.config,
+            ) {
+                return Err(crate::iris_curricula::iris_install_refused(refusal));
+            }
+        } else if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
         ) {
@@ -2028,7 +2075,16 @@ pub(crate) async fn create_training_job(
         // platform-aware, with an actionable message. Only the full path needs this; a LoRA/LoKr run
         // rides the base-installed check above. Inert for non-full runs and for non-MLX platforms
         // (the worker probe returns no budget), and a no-op when the base isn't installed.
-        if training_is_full_finetune(&payload.config) {
+        // Iris-3B (sc-25685/sc-25686): a routed training lane is never admitted unbounded. On the
+        // co-located macOS API the declared unified-memory floor refuses an undersized Mac here,
+        // before a job exists; the worker repeats the gate on every lane (VRAM on Candle).
+        if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+            if let Some(message) =
+                sceneworks_worker::iris_plan_memory_error(&target.base_model, &payload.config)
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        } else if training_is_full_finetune(&payload.config) {
             let base_model_dir = resolve_base_model_path(target, &data_dir);
             if let Some(message) = sceneworks_worker::full_finetune_memory_error(
                 FsPath::new(&base_model_dir),
@@ -2062,7 +2118,7 @@ pub(crate) async fn create_training_job(
     .await?;
 
     // Rust resolves and validates the normalized plan before any job is queued.
-    let plan = build_training_plan(BuildTrainingPlan {
+    let mut plan = build_training_plan(BuildTrainingPlan {
         job_id: &job_id,
         target,
         dataset: &dataset,
@@ -2076,6 +2132,24 @@ pub(crate) async fn create_training_job(
         created_at: now_rfc3339(),
     })
     .map_err(training_plan_error_to_api_error)?;
+    // Iris resume / new phase / load-from: the client named a previous run; SceneWorks derives the
+    // checkpoint/export path from that run's trusted ids and hands it to the trainer.
+    crate::iris_training::resolve_iris_run_sources(&state, &project_id, &mut plan).await?;
+    // Iris curricula / REPA / distributed (sc-25689): lineage, teacher, topology and the engine's
+    // own plan resolution, and the receipts the run and its registered output carry.
+    let iris_receipts = crate::iris_curricula::check_iris_submit(
+        &state,
+        &project_id,
+        target,
+        &plan,
+        payload.dry_run,
+    )
+    .await?;
+    // Restoration's synthetic-degradation overrides go through the engine's own parser (unknown
+    // Real-ESRGAN keys, bad ranges, a kernel larger than the crop) before a job exists.
+    if iris_task == Some(sceneworks_core::training::iris::IrisObjective::Restoration) {
+        crate::iris_training::check_restore_degradation_overrides(&plan)?;
+    }
 
     // Pre-build the LoRA registry entry the completed job will register, mirroring
     // the `lora_import` pattern: Rust owns LoRA registration. The descriptive
@@ -2174,6 +2248,24 @@ pub(crate) async fn create_training_job(
         }
     }
 
+    if sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel) {
+        if let Some(entry) = manifest_entry.as_object_mut() {
+            crate::iris_training::shape_iris_manifest_entry(
+                entry,
+                &output_dir,
+                &plan.output.file_name,
+                is_base_checkpoint,
+                &target.base_model,
+            );
+            if let Some(receipts) = &iris_receipts {
+                entry.insert(
+                    crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+                    receipts.clone(),
+                );
+            }
+        }
+    }
+
     if is_control {
         let (control_engine, inference_base) = control_overlay_inference_identity(&target.family)
             .ok_or_else(|| {
@@ -2226,6 +2318,12 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some(receipts) = iris_receipts {
+        job_payload.insert(
+            crate::iris_curricula::IRIS_RECEIPTS_KEY.to_owned(),
+            receipts,
+        );
+    }
     if let Some(prepass) = subject_mask_prepass {
         job_payload.insert("subjectMaskPrepass".to_owned(), prepass);
     }
@@ -2473,7 +2571,7 @@ fn training_file_with_suffix(file_name: &str, suffix: &str) -> String {
 /// Best-effort and purely informational: the worker and LoRA registration both drive off the job
 /// payload, never this file, so any dir/serialize/write failure is logged and swallowed rather
 /// than failing the training submit.
-async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
+pub(crate) async fn write_training_config_snapshot(output_dir: &std::path::Path, plan: &Value) {
     if let Err(error) = tokio::fs::create_dir_all(output_dir).await {
         tracing::warn!(
             event = "training_config_snapshot_dir_failed",
@@ -3239,6 +3337,16 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
     )
 }
 
+/// sc-25907: the typed route's refusal for a registry target whose base is deliberately not
+/// trainable — the distilled Qwen-Image 2.1 Turbo — by name, with what to do instead; `None` for
+/// every trainable base. No built-in target names such a base and there is no user-target registry
+/// today, so this guards a mis-edited built-in or a future registry from queuing a Turbo run (the
+/// raw `/jobs` route has its own check, `jobs::raw_training_payload_base_error`).
+pub(crate) fn untrainable_target_base_error(target: &TrainingTarget) -> Option<ApiError> {
+    sceneworks_core::training::untrainable_base_model_reason(&target.base_model)
+        .map(ApiError::bad_request)
+}
+
 /// The refusal for a real run against a target whose base licence requires acceptance
 /// (`ui.requiresLicenseAcknowledgment`) when the request does not assert `licenseAcknowledged:
 /// true`, or `None` when the run may proceed. Same status + machine code as the pre-download gate
@@ -3309,6 +3417,20 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
                 .unwrap_or_default();
             training_license_acknowledgment_error(target, &extra)
         })
+}
+
+/// The refusal for a hand-built `lora_train` / `control_training` plan on the raw
+/// `POST /api/v1/jobs` route whose target names a catalog model that is deliberately not a training
+/// base (`sceneworks_core::training::untrainable_base_model_reason` — Qwen-Image 2.1 Turbo, epic
+/// 25899). The typed route cannot name one (no registered target has it as a base); this closes
+/// the raw route with a 400 that says what to do instead, rather than a job the worker would fail.
+pub(crate) fn raw_training_payload_base_error(payload: &JsonObject) -> Option<ApiError> {
+    let base_model = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)?;
+    sceneworks_core::training::untrainable_base_model_reason(base_model).map(ApiError::bad_request)
 }
 
 /// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose

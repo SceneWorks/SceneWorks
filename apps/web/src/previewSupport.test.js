@@ -8,6 +8,7 @@ import {
   PRE_DENOISE_STAGES,
   previewBackendForWorker,
 } from "./previewSupport.js";
+import previewSupportTable from "./data/previewSupport.json";
 
 // sc-16965 (epic 16948). These are the predicates the card reads; the point of pinning them here is
 // that "unknown" must stay a distinct third answer everywhere. Folding it into `false` is the exact
@@ -209,5 +210,23 @@ describe("livePreviewPlaceholderAssets", () => {
     for (const state of ["live", "supported", "unsupported", "unknown"]) {
       expect(livePreviewPlaceholderAssets(state), state).toEqual([]);
     }
+  });
+});
+
+// sc-25681: Iris-3B emits one x0 preview per step at (W/16)×(H/16) on BOTH lanes, so the generated
+// support table (from the pinned engines' capability facts) says so and an Iris job shows the
+// pending placeholder, then the streamed frame, on either backend through the shared preview path.
+describe("Iris-3B live preview (sc-25681)", () => {
+  const iris = { id: "iris_3b", preview: { byBackend: previewSupportTable.models.iris_3b } };
+  it.each(["mlx", "candle"])("previews on %s", (backend) => {
+    expect(modelPreviewSupport(iris, backend)).toBe(true);
+    const job = { type: "image_generate", status: "running", stage: "loading_model", payload: { model: "iris_3b" } };
+    expect(livePreviewState(job, iris, backend)).toBe("pending");
+    const streaming = {
+      ...job,
+      stage: "generating",
+      result: { previewFrame: { imageIndex: 0, current: 3, total: 100, dataUrl: "data:image/jpeg;base64,QQ==" } },
+    };
+    expect(livePreviewState(streaming, iris, backend)).toBe("live");
   });
 });

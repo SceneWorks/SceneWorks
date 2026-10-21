@@ -1,0 +1,62 @@
+name: H3 Veda terminal owned campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "Explicit physical backend; no automatic host selection."
+        required: true
+        type: choice
+        options: [mlx, candle_cuda]
+      mode:
+        description: "Inspect or stage the host, build a durable source-bound binary, prepare/import, resume a bounded batch, or export selected closed-batch media."
+        required: true
+        type: choice
+        options: [inventory, stage, build, prepare, resume, review]
+      review_case_ids:
+        description: "Review mode only; JSON array of 1-4 exact owned case IDs. Selection is never acceptance."
+        required: false
+        type: string
+      sceneworks_sha:
+        description: "Exact frozen SceneWorks commit containing this workflow."
+        required: true
+        type: string
+      inference_main_sha:
+        description: "Exact inference source; prepare/resume/review require permanent main and Cargo pin."
+        required: true
+        type: string
+      expected_runner:
+        description: "Exact runner name; Mac must be nax-macos-2, Windows must be an explicitly selected cuda-windows host."
+        required: true
+        type: string
+      manifest_path:
+        description: "Build: absolute source-frozen template; prepare/resume/review: absolute host manifest; unused by inventory/stage."
+        required: false
+        type: string
+      corpus_root:
+        description: "Prepare: absolute staged corpus root; stage defaults to owned source-bound directory."
+        required: false
+        type: string
+      offline_cache_root:
+        description: "HF_HOME parent containing hub; prepare/resume require complete cache, inventory needs no cache."
+        required: false
+        type: string
+      run_dir:
+        description: "Persistent external owned directory; stage may derive it from the observed Actions checkout."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Register the workflow on default main. This job performs no product or GPU work.
+# The exact feature-ref workflow replaces this body when manually dispatched there.
+jobs:
+  registration_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm default-branch registration only
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          echo "S9 workflow registered; this run is not campaign evidence."

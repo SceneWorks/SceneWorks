@@ -1,3 +1,4 @@
+import { VedaOutcome } from "../components/VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import {
@@ -174,6 +175,7 @@ function RunDetail({ row, onClose }) {
           ×
         </button>
       </div>
+      <VedaOutcome outcome={m.vedaExecution} />
       <div className="stats-detail-grid">
         {items.map(([label, value]) => (
           <div className="stats-kv" key={label}>

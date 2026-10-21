@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff";
+pub const INFERENCE_PIN: &str = "a0ddfd180909f1581016f4b8b521d50238a8e1a0";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
@@ -205,6 +205,154 @@ pub const QWEN_IMAGE_2_1_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-mlx";
 /// The Qwen-Image 2.1 bf16 tier: the released upstream snapshot, loaded at its snapshot ROOT (no tier
 /// sub-directory), the same root the worker's `qwen_image_2_1_declared_tier_dir` resolves.
 pub const QWEN_IMAGE_2_1_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1";
+/// The distilled Qwen-Image 2.1 Turbo packed re-host (sc-25907, epic 25899): `q8/` and `q4/`
+/// subdirs laid out exactly as [`QWEN_IMAGE_2_1_REPOSITORY`]'s, but a DIFFERENT repository at a
+/// different revision, bound through its own `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` family the way
+/// [`LENS_TURBO_REPOSITORY`] is split from [`LENS_REPOSITORY`] — so a Turbo plan can never be
+/// satisfied by base weights. Published by the epic's terminal story (sc-25909) at
+/// `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`.
+pub const QWEN_IMAGE_2_1_TURBO_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-turbo-mlx";
+/// The Qwen-Image 2.1 Turbo bf16 tier: the upstream distilled snapshot at its ROOT, as
+/// [`QWEN_IMAGE_2_1_BF16_REPOSITORY`] is for base.
+pub const QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1-Turbo";
+/// The ONE upstream repository all three Iris-3B task routes load from (sc-25690): the generation
+/// backbone at the snapshot ROOT, the depth export in [`IRIS_3B_DEPTH_SUBDIR`] and the restoration
+/// export in [`IRIS_3B_RESTORE_SUBDIR`]. Three separate fine-tunes at one revision, never re-hosted;
+/// bf16 is the only tier and no root carries a tier sub-directory.
+pub const IRIS_3B_REPOSITORY: &str = "speridlabs/iris-3b";
+/// The depth task export's folder inside the [`IRIS_3B_REPOSITORY`] snapshot — the directory the
+/// worker's `depth_jobs::resolve_depth_export` hands the engine.
+pub const IRIS_3B_DEPTH_SUBDIR: &str = "depth";
+/// The restoration task export's folder inside the [`IRIS_3B_REPOSITORY`] snapshot — the directory
+/// the worker's `iris_restore::resolve_restore_export_dir` hands the engine.
+pub const IRIS_3B_RESTORE_SUBDIR: &str = "upscaler";
+/// The staged directory of the generation task's Qwen3-VL-4B-Instruct text encoder — the snapshot
+/// the worker attaches as `LoadSpec::components["text_encoder"]`. Generation only: the depth and
+/// restoration engines refuse a staged text encoder.
+pub const IRIS_3B_TEXT_ENCODER_COMPONENT_ENV: &str = "SCENEWORKS_IRIS_3B_COMPONENT_TEXT_ENCODER";
+
+/// One Iris-3B task route's capture binding (sc-25690): its registry id, the plan `target.mode` it
+/// is admitted under, and the env family + snapshot folder its weights root is read from. The
+/// SHAPE is shared by both adapter binaries; each binary's Iris module spells its own three route
+/// values out (`mlx_iris.rs`, `candle_iris.rs`), because the catalog runner's env-name binding test
+/// reads the names off each lane's own sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IrisRoute {
+    /// The registry id, which is also the catalog model id.
+    pub provider: &'static str,
+    /// The plan's `target.mode`, and the provider's `MemoryRunContext::mode` key.
+    pub mode: &'static str,
+    pub repository_env: &'static str,
+    pub revision_env: &'static str,
+    pub root_env: &'static str,
+    /// The folder of the snapshot the route loads, or `None` for the snapshot root itself.
+    pub subdir: Option<&'static str>,
+    /// The fixture prefix and diagnostics slug.
+    pub slug: &'static str,
+}
+
+/// What an Iris capture must agree with BEFORE any environment variable or weight is read: the
+/// route's own mode, the one dense tier, a still single-image geometry, no overlay, and the eager
+/// materialization shape (no Iris loader has a deferred one — a deferred spec fails the load).
+/// Returns the planned `(width, height)`.
+pub fn validate_iris_plan(request: &Value, route: IrisRoute) -> Result<(u32, u32), String> {
+    let label = format!("{} calibration", route.provider);
+    validate_still_geometry(request, &label)?;
+    validate_plain_overlay_target(request, &format!("the {} resident path", route.provider))?;
+    let planned = planned(request)?;
+    let mode = planned
+        .pointer("/target/mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != route.mode {
+        return Err(format!(
+            "{} is measured in mode {:?}, not {mode:?}",
+            route.provider, route.mode
+        ));
+    }
+    let tier = planned
+        .pointer("/target/tier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.tier must be a string".to_owned())?;
+    if tier != "bf16" {
+        return Err(format!(
+            "{} ships one dense bf16 artifact; no {tier:?} tier exists to measure",
+            route.provider
+        ));
+    }
+    match planned.get("loadShape").and_then(Value::as_str) {
+        Some(LOAD_SHAPE_EAGER) => {}
+        other => {
+            return Err(format!(
+                "{} loads eagerly only (planned.loadShape {other:?}): no Iris loader has a \
+                 deferred materialization shape",
+                route.provider
+            ))
+        }
+    }
+    target_geometry(request)
+}
+
+/// The fixture a plan row must name for an Iris capture, so a record can never be emitted against
+/// another route's, lane's or geometry's capture that merely reused the string. Generation renders
+/// `steps` solver steps from `seed`; depth is one deterministic estimate; restoration is one tiled
+/// pass from `seed`.
+pub fn iris_fixture(
+    route: IrisRoute,
+    lane: &str,
+    width: u32,
+    height: u32,
+    seed: u64,
+    steps: u32,
+) -> String {
+    match route.mode {
+        "text_to_image" if lane == "candle" => format!(
+            "fresh-five-rung-{}-bf16-{width}-seed{seed}-step{steps}",
+            route.slug
+        ),
+        "text_to_image" => format!("{}-{lane}-bf16-{width}-seed{seed}-step{steps}", route.slug),
+        "depth" => format!("{}-{lane}-bf16-{width}x{height}-estimate1", route.slug),
+        _ => format!(
+            "{}-{lane}-bf16-{width}x{height}-seed{seed}-tiled1",
+            route.slug
+        ),
+    }
+}
+
+/// Resolve and validate an Iris route's weights root from its env family: the fixed upstream
+/// repository, an exact revision, and a canonical root that IS that revision's snapshot directory
+/// (generation) or the task's folder inside it. Returns `(repository, revision, root)`.
+pub fn iris_weights_root(route: IrisRoute) -> Result<(String, String, PathBuf), String> {
+    let repository = required_env(route.repository_env)?;
+    let revision = required_env(route.revision_env)?;
+    let root = PathBuf::from(required_env(route.root_env)?);
+    iris_weights_root_at(route, repository, revision, root)
+}
+
+/// The env-free half of [`iris_weights_root`], so the binding is testable without weights.
+pub fn iris_weights_root_at(
+    route: IrisRoute,
+    repository: String,
+    revision: String,
+    root: PathBuf,
+) -> Result<(String, String, PathBuf), String> {
+    validate_artifact_identity(&repository, &revision, IRIS_3B_REPOSITORY)?;
+    let root = std::fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalize {}: {error}", route.root_env))?;
+    match route.subdir {
+        None => {
+            validate_huggingface_revision_root(&root, &repository, &revision, IRIS_3B_REPOSITORY)?
+        }
+        Some(subdir) => validate_huggingface_snapshot_subpath(
+            &root,
+            &repository,
+            &revision,
+            &[subdir],
+            IRIS_3B_REPOSITORY,
+        )?,
+    }
+    Ok((repository, revision, root))
+}
 /// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
 /// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
 /// and the VAE are bit-identical across all six variants and are hosted ONCE in

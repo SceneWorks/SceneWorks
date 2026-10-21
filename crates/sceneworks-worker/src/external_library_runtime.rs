@@ -967,6 +967,7 @@ fn job_requires_typed_model_source(job_type: &JobType) -> bool {
         | JobType::ImageUpscale
         | JobType::ImageDetail
         | JobType::ImageSegment
+        | JobType::ImageDepth
         | JobType::VideoUpscale
         | JobType::ModelDownload
         | JobType::ModelConvert

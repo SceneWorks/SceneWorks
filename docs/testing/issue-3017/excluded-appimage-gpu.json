@@ -1,0 +1,59 @@
+{
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "appdir": "/home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root",
+  "api_sha256": "84e35de20f0b2bf6f54c94ec385e65a88ea9a479edc236213deba744d1f70da7",
+  "bundled_host_driver_libraries": [],
+  "packaging_passed": true,
+  "scope": "AppImage packaging and one-shot CUDA probe; not a Bazzite desktop or model-generation test",
+  "artifact": {
+    "name": "SceneWorks_0.9.0_without-host-nvidia.AppImage",
+    "sha256": "cc249c25c7c32f76d2f331d50def8679850497e0263a75cebc138dfd37ee0420"
+  },
+  "nvidia_smi": {
+    "exit_code": 0,
+    "stdout": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\nNVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition, 596.36, 12.0\n",
+    "stderr": ""
+  },
+  "bundled_driver": {
+    "ldd": {
+      "exit_code": 0,
+      "stdout": "\tlinux-vdso.so.1 (0x00007ffcb5169000)\n\tlibcuda.so.1 => /usr/lib/wsl/lib/libcuda.so.1 (0x0000797adc109000)\n\tlibnvrtc.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libnvrtc.so.12 (0x0000797ab7c00000)\n\tlibcurand.so.10 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcurand.so.10 (0x0000797aad400000)\n\tlibcublas.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublas.so.12 (0x0000797aa6c00000)\n\tlibcublasLt.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublasLt.so.12 (0x0000797a74800000)\n\tlibcudart.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcudart.so.12 (0x0000797a74200000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x0000797a73e00000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x0000797adc0d9000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x0000797abe517000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x0000797a73a00000)\n\t/lib64/ld-linux-x86-64.so.2 (0x0000797adc147000)\n\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x0000797adc0d2000)\n\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x0000797adc0cd000)\n\tlibrt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x0000797adc0c8000)\n",
+      "stderr": ""
+    },
+    "gpu_check": {
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "host_driver_first": {
+    "ldd": {
+      "exit_code": 0,
+      "stdout": "\tlinux-vdso.so.1 (0x00007ffded566000)\n\tlibcuda.so.1 => /usr/lib/wsl/lib/libcuda.so.1 (0x000078a710108000)\n\tlibnvrtc.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libnvrtc.so.12 (0x000078a6ebc00000)\n\tlibcurand.so.10 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcurand.so.10 (0x000078a6e1400000)\n\tlibcublas.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublas.so.12 (0x000078a6dac00000)\n\tlibcublasLt.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublasLt.so.12 (0x000078a6a8800000)\n\tlibcudart.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcudart.so.12 (0x000078a6a8200000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000078a6a7e00000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000078a7100ca000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000078a6f2517000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000078a6a7a00000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000078a710138000)\n\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x000078a7100c3000)\n\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x000078a7100be000)\n\tlibrt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x000078a7100b9000)\n",
+      "stderr": ""
+    },
+    "gpu_check": {
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  },
+  "fault_injector_build": {
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "injected_803": {
+    "ldd": {
+      "exit_code": 0,
+      "stdout": "\tlinux-vdso.so.1 (0x00007ffd1df16000)\n\t/tmp/sceneworks-appimage-probe-j357g9cn/cuda803.so (0x000079e47777a000)\n\tlibcuda.so.1 => /usr/lib/wsl/lib/libcuda.so.1 (0x000079e47774c000)\n\tlibnvrtc.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libnvrtc.so.12 (0x000079e453200000)\n\tlibcurand.so.10 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcurand.so.10 (0x000079e448a00000)\n\tlibcublas.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublas.so.12 (0x000079e442200000)\n\tlibcublasLt.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcublasLt.so.12 (0x000079e40fe00000)\n\tlibcudart.so.12 => /home/sceneworks/sc3017/exclusion-experiment/candidate-extracted/squashfs-root/usr/lib/libcudart.so.12 (0x000079e40f800000)\n\tlibstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x000079e40f400000)\n\tlibgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x000079e47770e000)\n\tlibm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x000079e459b17000)\n\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x000079e40f000000)\n\t/lib64/ld-linux-x86-64.so.2 (0x000079e477781000)\n\tlibdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x000079e477707000)\n\tlibpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x000079e477702000)\n\tlibrt.so.1 => /lib/x86_64-linux-gnu/librt.so.1 (0x000079e4776fd000)\n",
+      "stderr": ""
+    },
+    "gpu_check": {
+      "exit_code": 2,
+      "stdout": "The NVIDIA kernel driver and the CUDA driver library on this machine are different versions, so SceneWorks can't use the GPU. This almost always means a driver update has been installed but the machine has not been rebooted onto it yet \u2014 reboot, then reopen SceneWorks. On an immutable/atomic Linux distribution (Bazzite, Silverblue, Bluefin, \u2026) a driver update is staged into the NEXT boot, so a reboot is required even if the app has been running for days. Note that `nvidia-smi` can still look healthy in this state: it queries NVML, which version-checks separately from CUDA.\n\nUnderlying CUDA error: candle op failed: DriverError(CUDA_ERROR_SYSTEM_DRIVER_MISMATCH, \"<Failure when calling cuGetErrorString()>\")\n",
+      "stderr": ""
+    }
+  },
+  "injected_803_detected": true
+}

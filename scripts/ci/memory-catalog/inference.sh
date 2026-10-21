@@ -93,10 +93,16 @@ echo "revisions this walk needs: ${#WANTED[@]} (pin + $(( ${#WANTED[@]} - 1 )) a
 # A space-separated string, not an array: the macOS runners' `bash` is 3.2, where `${#arr[@]}` on an
 # EMPTY array is an unbound-variable error under `set -u` -- and "nothing is missing" is the case
 # this step exists to make normal. A 40-hex SHA needs no quoting, so word splitting is exact here.
+#
+# "Present" means its whole TREE reads, which is what the stamping walk does (`ls-tree -r`), not
+# that the commit object exists. The Windows clone held 563c44e1's commit without its tree
+# (sc-25690 run 38402519490): the commit-only test called it present, nothing fetched it, and the
+# stamp died after the capture with `fatal: not a tree object`.
+tree_reads() { git -C "$REPO_U" ls-tree -r "$1" >/dev/null 2>&1; }
 MISSING=""
 MISSING_COUNT=0
 for rev in "${WANTED[@]}"; do
-  if ! git -C "$REPO_U" cat-file -e "${rev}^{commit}" 2>/dev/null; then
+  if ! tree_reads "$rev"; then
     MISSING="${MISSING}${rev} "
     MISSING_COUNT=$(( MISSING_COUNT + 1 ))
   fi
@@ -124,6 +130,15 @@ else
     echo "::error title=Could not fetch the inference revisions::5 shallow fetch attempts of ${MISSING}from $INFERENCE_URL all failed"
     exit 1
   fi
+  for rev in $MISSING; do
+    # A commit object already on disk can make the fetch above a no-op for it; ask for its objects
+    # again, ignoring what the clone claims to hold.
+    tree_reads "$rev" || git -C "$REPO_U" fetch --refetch --depth 1 --no-tags origin "$rev" || true
+    if ! tree_reads "$rev"; then
+      echo "::error title=Inference revision is still unreadable::the tree of $rev does not read in $REPO_U after the fetch; remove that clone on the runner and re-dispatch"
+      exit 1
+    fi
+  done
 fi
 
 # A reused clone can carry leftovers from an interrupted earlier run. Reset it hard: the harness

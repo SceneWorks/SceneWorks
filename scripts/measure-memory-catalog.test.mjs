@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   OUT_OF_MATRIX_CATALOG_ENTRIES,
@@ -35,6 +36,8 @@ import {
   RUSTFMT_EDITION,
   capturedInCampaign,
   classifyAnchor,
+  requiredComponentsFor,
+  artifactRootSuffix,
   incompleteTierWeights,
   compiledInferencePin,
   familyFor,
@@ -118,6 +121,8 @@ import {
   assertStageable,
   MAX_STAGED_FILE_BYTES,
   readExceededBounds,
+  readTaskRouteCurrency,
+  PROVIDER_CLOSURE_CONFIG_PATH,
   anchorDownloadTargets,
   hfDownloadArgv,
   hfDownloadArgvs,
@@ -532,6 +537,127 @@ test("qwen_image_2_1 binds the packed re-host per tier and the upstream snapshot
     assert.deepEqual(familyArtifact(family, backend, "bf16"), {
       env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat",
     });
+  }
+});
+
+// sc-25690. The three Iris-3B task routes are three fine-tunes in ONE upstream snapshot: the
+// generation backbone at its ROOT and the depth / restoration exports in a named folder each. bf16 is
+// the only tier, so no root carries a tier component on either lane, and one task's weights can
+// never satisfy another task's cell. Structural: nothing here names a revision or counts a cell.
+test("the Iris task routes bind the snapshot root, depth/ and upscaler/ of one upstream repository", () => {
+  const roots = { iris_3b: [], iris_3b_depth: ["depth"], iris_3b_restore: ["upscaler"] };
+  const envFamilies = new Set();
+  for (const [id, suffix] of Object.entries(roots)) {
+    const family = PROVIDER_FAMILIES[id];
+    assert.deepEqual([...family.arms].sort(), ["candle", "mlx"], id);
+    for (const backend of family.arms) {
+      const artifact = familyArtifact(family, backend, "bf16");
+      assert.equal(artifact.repo, "speridlabs/iris-3b", `${id} ${backend}`);
+      assert.equal(artifact.layout, suffix.length === 0 ? "flat" : "subdir", `${id} ${backend}`);
+      assert.deepEqual(artifactRootSuffix(artifact, "bf16"), suffix, `${id} ${backend}: never a tier folder`);
+      envFamilies.add(artifact.env);
+    }
+  }
+  assert.equal(envFamilies.size, 3, "one env family per task, never a shared one");
+  // Generation alone stages a text encoder, on both lanes; the downstream engines refuse one.
+  assert.deepEqual(
+    requiredComponentsFor(PROVIDER_FAMILIES.iris_3b, "mlx"),
+    requiredComponentsFor(PROVIDER_FAMILIES.iris_3b, "candle"),
+  );
+  assert.equal(requiredComponentsFor(PROVIDER_FAMILIES.iris_3b, "mlx").length, 1);
+  for (const id of ["iris_3b_depth", "iris_3b_restore"]) {
+    for (const backend of ["mlx", "candle"]) assert.deepEqual(requiredComponentsFor(PROVIDER_FAMILIES[id], backend), [], id);
+  }
+  assert.throws(
+    () => artifactRootSuffix({ layout: "subdir", repo: "speridlabs/iris-3b", subdir: "depth/../.." }, "bf16"),
+    /exactly one path segment/,
+  );
+});
+
+// sc-25690. A host that holds ONE Iris task's files must classify the other two `weights_missing`
+// by name — the snapshot directory exists for all three, so asking only whether the root holds a
+// file called every cell runnable. Generation additionally needs its staged text encoder, whole:
+// the tower config, the tokenizer, the shard index and every shard that index names.
+test("an Iris cell is runnable only on the files its own task loads", async () => {
+  const repo = "speridlabs/iris-3b";
+  const encoder = "Qwen/Qwen3-VL-4B-Instruct";
+  const models = [
+    {
+      id: "iris_3b",
+      downloads: [
+        { provider: "huggingface", repo, revision: REVISION, files: ["config.yaml", "model.safetensors"] },
+        { provider: "huggingface", repo: encoder, revision: UPSTREAM, coRequisite: true, componentId: "text_encoder", files: ["config.json", "model-*.safetensors"] },
+      ],
+    },
+    { id: "iris_3b_depth", downloads: [{ provider: "huggingface", repo, revision: REVISION, files: ["depth/config.yaml"] }] },
+    { id: "iris_3b_restore", downloads: [{ provider: "huggingface", repo, revision: REVISION, files: ["upscaler/config.yaml"] }] },
+  ];
+  const hub = await fakeHub([[repo, REVISION]], { empty: true });
+  const snapshot = snapshotPath(hub, repo, REVISION);
+  const stage = async (dir, files) => {
+    await mkdir(dir, { recursive: true });
+    for (const file of files) await writeFile(path.join(dir, file), "w");
+  };
+  const classify = (id, backend) => classifyAnchor(`${id}:bf16:${backend}`, { provider: id },
+    { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  // Only the depth export is staged.
+  await stage(path.join(snapshot, "depth"), ["config.yaml", "model.safetensors", "empty_prompt.safetensors"]);
+  for (const backend of ["mlx", "candle"]) {
+    const depth = await classify("iris_3b_depth", backend);
+    assert.equal(depth.status, "runnable", depth.reason);
+    assert.deepEqual(depth.env, {
+      SCENEWORKS_IRIS_3B_DEPTH_REPOSITORY: repo,
+      SCENEWORKS_IRIS_3B_DEPTH_REVISION: REVISION,
+      SCENEWORKS_IRIS_3B_DEPTH_ROOT: path.join(snapshot, "depth"),
+    });
+    assert.equal(depth.inventoryFiles, undefined, "a task folder is inventoried whole");
+    const restore = await classify("iris_3b_restore", backend);
+    assert.equal(restore.status, "weights_missing");
+    assert.match(restore.reason, /upscaler on this host$/);
+    const generation = await classify("iris_3b", backend);
+    assert.equal(generation.status, "weights_missing");
+    assert.match(generation.reason, /is missing config\.yaml, model\.safetensors/);
+  }
+
+  // A torn restoration export names what it lacks.
+  await stage(path.join(snapshot, "upscaler"), ["config.yaml", "model.safetensors"]);
+  const torn = await classify("iris_3b_restore", "candle");
+  assert.equal(torn.status, "weights_missing");
+  assert.match(torn.reason, /is missing empty_prompt\.safetensors/);
+
+  // The generation backbone without its text encoder, then with a half-fetched one, then whole.
+  await stage(snapshot, ["config.yaml", "model.safetensors"]);
+  const noEncoder = await classify("iris_3b", "mlx");
+  assert.equal(noEncoder.status, "weights_missing");
+  assert.match(noEncoder.reason, /^no Qwen\/Qwen3-VL-4B-Instruct@/);
+  const encoderRoot = snapshotPath(hub, encoder, UPSTREAM);
+  await stage(encoderRoot, ["config.json", "tokenizer.json"]);
+  await writeFile(
+    path.join(encoderRoot, "model.safetensors.index.json"),
+    JSON.stringify({ weight_map: { a: "model-00001-of-00002.safetensors", b: "model-00002-of-00002.safetensors" } }),
+  );
+  await writeFile(path.join(encoderRoot, "model-00001-of-00002.safetensors"), "w");
+  const halfEncoder = await classify("iris_3b", "candle");
+  assert.equal(halfEncoder.status, "weights_missing");
+  assert.match(halfEncoder.reason, /is missing model-00002-of-00002\.safetensors/);
+  await writeFile(path.join(encoderRoot, "model-00002-of-00002.safetensors"), "w");
+  for (const backend of ["mlx", "candle"]) {
+    const generation = await classify("iris_3b", backend);
+    assert.equal(generation.status, "runnable", generation.reason);
+    assert.deepEqual(generation.env, {
+      SCENEWORKS_IRIS_3B_REPOSITORY: repo,
+      SCENEWORKS_IRIS_3B_REVISION: REVISION,
+      SCENEWORKS_IRIS_3B_ROOT: snapshot,
+      SCENEWORKS_IRIS_3B_COMPONENT_TEXT_ENCODER: encoderRoot,
+    });
+    // The snapshot root also holds the two task folders, so the generation cell inventories ONLY
+    // its own files: its artifact identity must not depend on which other tasks are installed.
+    assert.deepEqual(generation.inventoryFiles, ["config.yaml", "model.safetensors"]);
+    const own = await hashArtifactInventory(generation.tierRoot, { includeFiles: generation.inventoryFiles });
+    const whole = await hashArtifactInventory(generation.tierRoot);
+    assert.equal(own.bytes, 2, "two one-byte files");
+    assert.ok(whole.bytes > own.bytes, "the whole tree also counts the staged task folders");
   }
 });
 
@@ -2087,6 +2213,68 @@ test("the committed exceeded bound keeps its own cell out of the runnable set of
       !rows.filter((row) => row.status === "runnable").some((row) => bounds.get(row.key)?.current),
       "no cell with a current bound is scheduled for a capture",
     );
+  }
+});
+
+// sc-25690: a task route (Iris-3B depth / restoration) is captured but sits outside the matrix
+// modalities, so the anchor store carries no row for it and the matrix publishes no currency. Its
+// capture listed `runnable` minutes after it ran. Currency comes from the record's own provider
+// closure digest against the pinned provider closure table.
+test("a task-route capture is current while its provider closure is the pinned one", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "catalog-task-route-"));
+  const digest = "d".repeat(64);
+  const record = (closureDigest, backend = "mlx") => ({
+    backend,
+    target: { modelId: "iris_3b_depth", tier: "bf16", provider: "iris_3b_depth" },
+    repositories: { inference: { closureDigest } },
+  });
+  const seed = async (records, { taskRoutes = ["iris_3b_depth"], bundle = "sc-1" } = {}) => {
+    await mkdir(path.join(root, "docs/generated"), { recursive: true });
+    await mkdir(path.join(root, "config"), { recursive: true });
+    await mkdir(path.join(root, "docs/calibration", bundle), { recursive: true });
+    await writeFile(
+      path.join(root, MATRIX_PATH),
+      JSON.stringify({ anchors: [], summary: { taskRouteEntries: taskRoutes.map((id) => ({ id })) } }),
+    );
+    await writeFile(
+      path.join(root, PROVIDER_CLOSURE_CONFIG_PATH),
+      JSON.stringify({ providers: { "mlx:iris_3b_depth": { digest } } }),
+    );
+    await writeFile(path.join(root, "docs/calibration", bundle, "depth-evidence.json"), JSON.stringify({ records }));
+  };
+  await seed([record(digest)]);
+  assert.deepEqual([...(await readTaskRouteCurrency(root))], [["iris_3b_depth:bf16:mlx", true]]);
+  await seed([record("e".repeat(64))]);
+  assert.equal(
+    (await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:mlx"), false,
+    "a capture under another provider closure is stale",
+  );
+  await seed([record(digest, "candle")]);
+  assert.equal(
+    (await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:candle"), false,
+    "the digest is looked up per (LANE, provider); the mlx digest does not keep a candle capture current",
+  );
+  // A stale capture in a later-sorting campaign beside a current one leaves the cell current.
+  await seed([record(digest)]);
+  await seed([record("e".repeat(64))], { bundle: "sc-2" });
+  assert.equal((await readTaskRouteCurrency(root)).get("iris_3b_depth:bf16:mlx"), true);
+  // Only the matrix's named task routes are read this way: every other cell's currency is the store's.
+  await seed([record(digest)], { taskRoutes: [] });
+  assert.equal((await readTaskRouteCurrency(root)).size, 0);
+  assert.equal((await readTaskRouteCurrency(await mkdtemp(path.join(tmpdir(), "catalog-empty-")))).size, 0);
+});
+
+// The same question against the committed tree, through the walk: every task-route cell the tree
+// carries a current capture for lists `current`, and `--skip-current` does not schedule it.
+test("a committed task-route capture lists current in a real --list", async () => {
+  const taskRoutes = await readTaskRouteCurrency();
+  for (const backend of ["mlx", "candle"]) {
+    const { rows } = await planRun({ backend, anchors: null, campaign: "sc-catalog-test", hfCache: [], list: true, models: [] });
+    for (const [key, isCurrent] of taskRoutes) {
+      const row = rows.find((candidate) => candidate.key === key);
+      if (!row || row.backend !== backend || !isCurrent) continue;
+      if (["runnable", "current"].includes(row.status)) assert.equal(row.status, "current", `${key} has a current capture`);
+    }
   }
 });
 
@@ -4909,7 +5097,18 @@ async function stubCheckout() {
     const [command, ...args] = process.argv.slice(2);
     const value = (flag) => args[args.indexOf(flag) + 1];
     if (command === "capture") {
-      if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); process.exit(1); }
+      // sc-26246: the real harness's completion handshake, so a guarded stub capture exits the
+      // way a real one does — after the guard's final sample, never racing it.
+      const { mkdir } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      const { connectWatchdogCompletion } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, "scripts/lib/watchdog-completion.mjs")).href)});
+      const completion = await connectWatchdogCompletion();
+      const finish = async (code) => {
+        await mkdir(dirname(value("--output")), { recursive: true });
+        await completion.complete(dirname(value("--output")));
+        process.exit(code);
+      };
+      if (process.env.STUB_CAPTURE_FAILS) { console.error("Error: stub capture refused"); await finish(1); }
       // sc-22738 review: the guard MEASURED a bound and wrote it down, and the post-stop reap then
       // wedged. The runner's backstop is what ends such a probe, minutes later, with the bound
       // already in the event log — so the stub writes exactly what the guard writes at the instant
@@ -4945,7 +5144,7 @@ async function stubCheckout() {
       if (process.env.STUB_CAPTURE_DEFERRED_NOTE) {
         console.error("memory-strategy provider adapter: LTX-2.3 admission rejected an exact-fit calibrated budget: ltx_2_3: incremental live demand 9 exceeds effective budget 7");
         console.error("memory-strategy provider adapter: note: GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
-        process.exit(1);
+        await finish(1);
       }
       // sc-22738: the adapter's exit-1 stderr on a process-scoped Metal refusal, verbatim from the
       // flux2_dev:bf16:mlx run of 2026-09-06 (paths shortened).
@@ -4955,11 +5154,11 @@ async function stubCheckout() {
       if (process.env.STUB_CAPTURE_ARTIFACT_UNSUPPORTED) {
         console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
         console.error("load real wan2_2_i2v_14b q4 provider: unsupported: /hub/q4/high_noise_model.safetensors packed head.head lacks scales");
-        process.exit(1);
+        await finish(1);
       }
       if (process.env.STUB_CAPTURE_METAL_REFUSAL) {
         console.error('Error: memory-mlx-adapter exited 1: memory-strategy provider adapter: generate measured render: "[METAL] Command buffer execution failed: Ignored (for causing prior/excessive GPU errors) (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored). at /out/mlx-c-staged/mlx/c/transforms.cpp:73"');
-        process.exit(1);
+        await finish(1);
       }
       // sc-22738: the two MLX arms that emit a provider sourceCapture (mlx.rs qwen_source_capture,
       // mlx_ltx25.rs prepare_source_capture) required_env the capture dir UNCONDITIONALLY, before
@@ -4971,9 +5170,10 @@ async function stubCheckout() {
       if (/^(ltx_2_5|qwen_image):/.test(value("--anchor") ?? "") && !captureDir) {
         console.error("GPU-view coherence retries during this render: mlx_gen=0 mlx_llm=0 (sc-22414)");
         console.error("memory-strategy provider adapter: required environment variable SCENEWORKS_MEMORY_CAPTURE_DIR is not set");
-        process.exit(1);
+        await finish(1);
       }
       await writeFile(value("--output"), JSON.stringify({ records: [{ backend: "mlx", target: { modelId: "z_image_turbo", tier: "q4" }, env: process.env.SCENEWORKS_Z_IMAGE_ROOT ?? null, captureDir, sourcePathPrefix, rawLogDir: value("--raw-log-dir") ?? null }] }));
+      await finish(0);
     } else if (command === "record-exceeded") {
       const events = (await readFile(value("--watchdog-events"), "utf8")).trim().split("\\n").map(JSON.parse);
       const stop = events.find((event) => event.event === "hard_stop");
@@ -5459,6 +5659,9 @@ test("the watchdog guard's footprint hard stop is the incident and host RAM, nev
   assert.equal(flag("--host-memory-bytes"), 137_438_953_472);
   assert.equal(flag("--min-memory-free-bytes"), UNIFIED_RESERVE_BYTES, "the whole-host floor is the absolute 2 GiB reserve, not the non-wired remainder");
   assert.equal(guard[guard.indexOf("--event-file") + 1], "/tmp/events.jsonl");
+  // sc-26246: the capture's exit must follow the guard's final sample, or an exit that lands between
+  // its census and its footprint sample reads as `RootTelemetryLost` and discards a finished render.
+  assert.ok(guard.includes("--require-completion-handshake"), "catalog captures complete through the guard");
   // The footprint ceiling is below the incident, and the two ceilings together leave room for
   // the host's own baseline: the guarded group can reach its ceiling without the whole-host floor
   // firing first (sc-22738 review: `memoryBytes − wiredLimitBytes` as the floor turned the
@@ -6311,6 +6514,12 @@ test(
       async () => (await readFile(eventFile, "utf8").catch(() => "")).includes('"event": "sample"')
         || (await readFile(eventFile, "utf8").catch(() => "")).includes('"event":"sample"'),
       { realSetTimeout, what: "the footprint guard's first sample" },
+    );
+    // The stub reaches its hang only after the guard's completion GO (sc-26246), which follows that
+    // first sample: wait until the adapter it stands in for actually exists before stopping it.
+    await untilReal(
+      async () => (await readFile(adapterPidFile, "utf8").catch(() => "")).trim().split("\n").length === 2,
+      { realSetTimeout, what: "the stub capture's adapter" },
     );
 
     // ONE MILLISECOND SHORT. The unguarded bound (60,000 ms) and the guard's own deadline are both

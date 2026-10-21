@@ -269,6 +269,26 @@ fn resolve_user_control_map(
     else {
         return Ok(None);
     };
+    // A saved depth-map asset (Iris-3B, sc-25682) is a raw float32 `.npy`, not a picture: the
+    // depth-control consumer derives the near-bright control image from a decoded copy through the
+    // engine's adapter, leaving the raw map untouched. It is a DEPTH map, so it is refused as the
+    // control map of any other kind rather than being passed off as edges or a pose.
+    if let Some(control) = crate::depth_asset::depth_asset_control_image(
+        &settings.data_dir,
+        &request.project_id,
+        asset_id,
+        project_path,
+    )? {
+        let kind = requested_control_kind(request)?;
+        if kind != ControlKind::Depth {
+            return Err(WorkerError::InvalidPayload(format!(
+                "control asset {asset_id} is a depth map; it can only drive depth control \
+                 (controlMode depth), not {}",
+                control_kind_label(&kind)
+            )));
+        }
+        return Ok(Some(control));
+    }
     let image = load_reference_image(&settings.data_dir, &request.project_id, asset_id, project_path)?;
     Ok(Some(image))
 }

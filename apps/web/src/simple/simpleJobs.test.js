@@ -478,3 +478,11 @@ describe("simpleNativeControls", () => {
     expect(simpleNativeControls({})).toBe(false);
   });
 });
+
+
+it("H3 Simple last-only requests keep the last carrier and other families omit it",()=>{
+  const common={prompt:"A cyclist rides",mode:"image_to_video",resolution:"768x768",duration:5.1667,sourceAssetId:null,lastFrameAssetId:"last"};
+  expect(buildSimpleVideoRequest({...common,model:"minimax_h3"}).lastFrameAssetId).toBe("last");
+  expect(buildSimpleVideoRequest({...common,model:"minimax_h3_ref"}).lastFrameAssetId).toBeNull();
+  expect(buildSimpleVideoRequest({...common,model:"bernini"}).lastFrameAssetId).toBeNull();
+});

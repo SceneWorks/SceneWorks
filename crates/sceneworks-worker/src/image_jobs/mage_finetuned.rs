@@ -493,6 +493,7 @@ async fn generate_mage_finetuned_stream(
     )?;
     #[cfg(target_os = "macos")]
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count: request.count,
@@ -504,6 +505,8 @@ async fn generate_mage_finetuned_stream(
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
 
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(

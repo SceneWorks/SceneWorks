@@ -66,7 +66,8 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
-        "qwen_image_2_1" => qwen_image_2_1_mlx_eligible(payload),
+        // Turbo (sc-25907): the distilled checkpoint under its own engine id, same request shape.
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => qwen_image_2_1_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
@@ -96,6 +97,15 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
             mage_flow_edit_mlx_eligible(payload)
         }
+        "moss_image_base" | "moss_image_sft" => {
+            let entry = payload
+                .get("modelManifestEntry")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            crate::moss_image::native_request(payload, &entry).is_ok()
+        }
+        "iris_3b" => iris_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -462,6 +472,27 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         || has_nonempty_array(payload, "controls")
         || has_nonempty_array(payload, "controlnets")
         || has_nonempty_nested_array(payload, "advanced", "poses"))
+}
+
+/// Iris-3B generation (sc-25679) is text-to-image: the `iris_3b` engine takes no source, reference,
+/// mask, control or pose, and has no quant tier — it refuses `LoadSpec::quantize` by name. It DOES
+/// apply generation-task LoRA / LoKr adapters (sc-25681): `loras` routes, and the API's Iris task
+/// gate plus the engine's stamp check refuse an incompatible file. An enabled hires fix is refused:
+/// its second pass is an img2img refinement (a `Reference` at the hires strength) the engine refuses,
+/// after a full first pass. Any refused carrier keeps the job off MLX (an `mlx_unsupported`
+/// affordance) instead of reaching an engine that would refuse it.
+pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
+        && !["mlxQuantize", "quantTier"]
+            .iter()
+            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
@@ -1117,6 +1148,18 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;
     }
+    // Iris (sc-25685 / sc-25687 / sc-25688): `mlx-gen-iris` registers one trainer per task install
+    // (generation, depth, restoration); a forged or stale plan naming another base must not be
+    // claimed (the worker repeats this identity gate).
+    if kernel == "iris_train" {
+        return matches!(
+            plan.get("target")
+                .and_then(Value::as_object)
+                .and_then(|target| target.get("baseModel"))
+                .and_then(Value::as_str),
+            Some("iris_3b" | "iris_3b_depth" | "iris_3b_restore")
+        );
+    }
     true
 }
 
@@ -1140,6 +1183,8 @@ pub(crate) fn caption_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// Engine defaults to `real-esrgan` when absent (mirrors `run_image_upscale`).
 /// SeedVR2 runs here through MLX on Mac and through the native Candle/CUDA backend on Windows/Linux
 /// (sc-5928 / sc-5160). The platform capability mirrors those two production lanes.
+/// `iris` (sc-25683) is the Iris-3B restoration transform (`iris_3b_restore`), registered by both
+/// native bundles (`mlx-gen-iris` / `candle-gen-iris`), so it is served by both lanes too.
 pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !matches!(job.job_type, JobType::ImageUpscale) {
         return false;
@@ -1153,7 +1198,7 @@ pub(crate) fn upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(
         engine.as_str(),
         "" | "real-esrgan" | "realesrgan" | "real_esrgan" | "seedvr2"
-    )
+    ) || crate::image_restoration::is_iris_engine(&engine)
 }
 
 /// Whether a `video_upscale` job is MLX-eligible (epic 4811 / sc-4816). The only Mac engine is the
@@ -1174,17 +1219,23 @@ pub(crate) fn video_upscale_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     matches!(engine.as_str(), "" | "seedvr2" | "seedvr2_3b")
 }
 
-/// Whether an `image_upscale` job explicitly requests the SeedVR2 engine (`engine=seedvr2`, the id the
-/// web sends and the worker accepts). SeedVR2 runs on MLX (Mac) or candle (Windows/Linux), so this
-/// also drives every generic worker descriptor's refusal (the inverse of the AuraSR gate).
-/// The image default engine is Real-ESRGAN, so an absent engine is NOT SeedVR2.
+/// Whether an `image_upscale` job explicitly requests a NATIVE-ONLY engine: SeedVR2 (`engine=seedvr2`)
+/// or the Iris-3B restoration transform (`engine=iris`, sc-25683). Both run on MLX (Mac) or candle
+/// (Windows/Linux) only, so this drives every generic worker descriptor's refusal (the inverse of the
+/// AuraSR gate). The image default engine is Real-ESRGAN, so an absent engine is neither.
+///
+/// The persisted claim fact keeps its historical `claim_seedvr2_upscale` column name; what it means
+/// is "a native-only upscale engine was requested".
 pub(crate) fn upscale_job_requests_seedvr2(job: &JobSnapshot) -> bool {
     matches!(job.job_type, JobType::ImageUpscale)
         && job
             .payload
             .get("engine")
             .and_then(Value::as_str)
-            .is_some_and(|engine| engine.trim().eq_ignore_ascii_case("seedvr2"))
+            .is_some_and(|engine| {
+                engine.trim().eq_ignore_ascii_case("seedvr2")
+                    || crate::image_restoration::is_iris_engine(engine)
+            })
 }
 
 /// Whether this training job targets a native-only kernel (see

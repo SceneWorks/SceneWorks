@@ -25,7 +25,10 @@ vi.mock("../api.js", async (importOriginal) => {
   return { ...actual, apiFetch: vi.fn(async () => ({})) };
 });
 
+import { apiFetch } from "../api.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 import { AppContext } from "../context/AppContext.js";
+import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -409,4 +412,86 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     expect(lastJob(context).advanced.steps).toBe(6);
     expect(jobLoraIds(context)).toContain(TURBO_768P.id);
   });
+  const vedaToggle = () => [...container.querySelectorAll("label.checkline")].find((n) => n.textContent.includes("Veda sparse attention")).querySelector("input");
+  const field = (label) => container.querySelector(`[aria-label="${label}"]`);
+  it("Veda starts off and keeps the off job payload unchanged", async () => {
+    const context = baseContext();
+    await render(context); await openAdvanced();
+    expect(vedaToggle().checked).toBe(false);
+    await generate();
+    expect(lastJob(context).advanced).not.toHaveProperty("veda");
+  });
+  it("Veda independently serializes budget modes, exact dense lists, Turbo and style", async () => {
+    const context = baseContext({ loras: [...ALL_TURBO, PLAIN_LORA], preferencesHydrated: true });
+    await render(context); await openAdvanced();
+    await addFromPicker(PLAIN_LORA.name);
+    await click(vedaToggle());
+    await act(async () => setInput(field("Generated sparsity"), "32"));
+    await act(async () => setInput(field("Reference sparsity"), "0%"));
+    await act(async () => setInput(field("Full-attention layers"), "49, 2–0"));
+    await act(async () => setInput(field("Full-attention steps"), "0; 3"));
+    const expected = { enabled: true, generated: "32", reference: "0%", fullAttentionLayers: "49, 2–0", fullAttentionSteps: "0; 3" };
+    await generate();
+    expect(lastJob(context).advanced.veda).toEqual(expected);
+    expect(jobLoraIds(context)).toContain(TURBO_768P.id);
+    expect(jobLoraIds(context)).toContain(PLAIN_LORA.id);
+    expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")).veda).toEqual(expected);
+    await unmountRoot(root, container); ({ container, root } = mountRoot());
+    const relaunched = baseContext({ loras: [...ALL_TURBO, PLAIN_LORA], preferencesHydrated: true });
+    await render(relaunched); await openAdvanced(); await generate();
+    expect(lastJob(relaunched).advanced.veda).toEqual(expected);
+  });
+  it("Veda malformed-request feedback retains the API detail through the real creator", async () => {
+    const setError = vi.fn();
+    const context = baseContext();
+    context.createVideoJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.video, token: context.token, project: context.activeProject, setJobs: vi.fn(), setError });
+    await render(context); await openAdvanced(); await click(vedaToggle());
+    await act(async () => setInput(field("Full-attention steps"), "4"));
+    const detail = "advanced.veda.fullAttentionSteps: zero-based index 4 outside 0..4";
+    apiFetch.mockRejectedValueOnce(new Error(detail));
+    await generate();
+    expect(JSON.parse(apiFetch.mock.calls.at(-1)[2].body).advanced.veda.fullAttentionSteps).toBe("4");
+    expect(setError).toHaveBeenCalledWith(detail);
+    await act(async () => setInput(labelStartingWith("Steps").querySelector("input"), "8"));
+    apiFetch.mockResolvedValueOnce({ id: "valid", status: "queued" });
+    await generate();
+    expect(JSON.parse(apiFetch.mock.calls.at(-1)[2].body).advanced.steps).toBe(8);
+    expect(setError).toHaveBeenLastCalledWith("");
+  });
+  it("Veda replay restores controls, excludes observed facts, and old recipes reset off", async () => {
+    const veda = {
+      enabled: true,
+      generated: "90.5%",
+      reference: "12",
+      fullAttentionLayers: Array.from({ length: 50 }, (_, index) => index).join(","),
+      fullAttentionSteps: Array.from({ length: 200 }, (_, index) => index).join(","),
+    };
+    const recipe = recipeFromWorkflowShare(
+      {
+        sceneworksWorkflow: "video",
+        mode: "text_to_video",
+        prompt: "a lighthouse",
+        advanced: { veda, vedaExecution: { effective: "dense", fallbackReason: "observed fact" } },
+      },
+      { model: { state: "resolved", catalogId: MINIMAX.id }, loras: [] },
+    );
+    const context = baseContext({ studioLaunch: { view: "Video", id: "veda-replay", recipe } });
+    await render(context); await openAdvanced(); await generate();
+    expect(lastJob(context).advanced.veda).toEqual(veda);
+    expect(lastJob(context).advanced).not.toHaveProperty("vedaExecution");
+    await render({ ...context, studioLaunch: { view: "Video", id: "old-replay", recipe: { ...recipe, rawAdapterSettings: {} } } });
+    await generate(); expect(lastJob(context).advanced).not.toHaveProperty("veda");
+  });
+
+  it("Veda remains answerable after an incompatible model change", async () => {
+    const context = baseContext({ videoModels: [MINIMAX, BERNINI] });
+    await render(context); await openAdvanced(); await click(vedaToggle());
+    await act(async () => setSelect(container.querySelector(".settings-field-model select"), BERNINI.id));
+    expect(vedaToggle().checked).toBe(true);
+    await generate(); expect(context.createVideoJob).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Veda requires MiniMax-H3");
+    await click(vedaToggle()); await generate();
+    expect(lastJob(context).advanced).not.toHaveProperty("veda");
+  });
+
 });

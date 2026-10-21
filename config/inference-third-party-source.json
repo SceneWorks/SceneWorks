@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision c1f5989e (the merge of inference #1226, the epsilon-prediction aux-loss gain Parameterization::aux_gain plus the PIXEL_PERCEPTUAL_SCHEDULE and BODY_SURFACE_SCHEDULE window defaults): 754 provenance candidates and 108 production-Rust crate prefixes. The advance from the previously pinned inference main revision d5c30733 adds and removes no candidate paths and changes no matched markers; the rescan only refreshes blob digests of existing first-party gen-core trainer and body-schedule files and candle-gen/mlx-gen training files, which stay covered by the existing gen-core, candle-gen and mlx-gen architecture areas. The four production crates crates/media/{candle-gen/candle-gen,mlx-gen/mlx-gen}-{perceptual,body} remain unclassified open advisory items for the epic's compliance pass. The vendored candle-core classification and the first-party speculative benchmark baseline driver carried from 25bd55cd are unchanged. This mapping grants no model-weight redistribution. Generated inventories and digests describe this exact source. Other open compliance items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
-  "auditDigest": "c8fd55ab28cba8e3a0d983b6937ed723c54d40bdf37031dbd7332ea0799da7e1",
+  "_comment": "Audit inventory reviewed at inference revision a0ddfd18 for the artifact-seal digest persistence fix (sc-26610): 772 provenance candidates and 113 production-Rust crate prefixes. The two marker-free MOSS MLX/Candle provider crates remain classified as native architecture reimplementations of frozen Base/SFT and DMD behavior; the seal fix changes no scanned population. Four pre-existing, marker-free body/perceptual crate prefixes are now classified by their concrete Rust source: the body twins implement ViTPose+, HybrIK and Sapiens architecture/loss behavior, while the perceptual twins compose SceneWorks trainer loss arms. These source dispositions do not settle separately reported model-weight license gaps. Official Base/SFT Apache-2.0 LICENSE texts and the optional DMD README Apache-2.0 declaration are disclosed in About; DMD publishes no standalone LICENSE, and no MIT grant is inferred. Other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "a0ddfd180909f1581016f4b8b521d50238a8e1a0",
+  "auditDigest": "ff90b0535da763da1d62e6afe0fe56d61234b1317612e5abcd520453aa717bc6",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,14 +17,33 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
+    "revision": "a0ddfd180909f1581016f4b8b521d50238a8e1a0",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 754,
-    "populationSha256": "be322db5ff0a08a33c4191d0e6cae0750d9dda56eda960b0e5b402cedb16fe51"
+    "matchedFiles": 772,
+    "populationSha256": "9cc69521b01c6c52c738c75d37573a8db4471a5438a7e588337bedcf4bf919f7"
   },
   "portedSourceAreas": [
+    {
+      "id": "veda-sparse-source",
+      "paths": [
+        "crates/contracts/gen-core/src/veda/contract.rs",
+        "crates/contracts/gen-core/src/veda/topk.rs",
+        "crates/contracts/gen-core/src/veda/workspace.rs",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/contract.rs",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/metal.rs",
+        "crates/media/candle-gen/candle-gen-minimax-h3/src/veda.rs",
+        "crates/kernels/candle-quant-kernels/src/veda_int8.rs",
+        "crates/kernels/candle-quant-kernels/src/veda_int8.cu",
+        "crates/kernels/candle-quant-kernels/src/veda_score.rs",
+        "crates/kernels/candle-quant-kernels/src/veda_score.cu"
+      ],
+      "provenance": "Native modified ports of Veda-on-ComfyUI at 60bfae688897dc41bc8685ca9f3130d7ed8f3b0c, its SageAttention 1.0.6 arithmetic, and LLVM partial-sort selection; source attribution and modification notices are retained in inference.",
+      "disposition": "about-license",
+      "component": "minimax-h3"
+    },
     {
       "id": "architecture:crates/audio/candle-audio-acestep",
       "pathPrefix": "crates/audio/candle-audio-acestep/src/",
@@ -170,7 +189,8 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
       "excludePaths": [
         "crates/contracts/gen-core/src/sampling/cfgpp.rs",
-        "crates/contracts/gen-core/src/sampling/solvers.rs"
+        "crates/contracts/gen-core/src/sampling/solvers.rs",
+        "crates/contracts/gen-core/src/veda/topk.rs"
       ]
     },
     {
@@ -581,11 +601,28 @@
       ]
     },
     {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-iris",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Iris-3B provider (MLX lane, epic sc-25678 / sc-25679): an architecture reimplementation of the upstream speridlabs/iris-3b reference pipeline (pixel-space hybrid dual-/single-stream DiT with its PiT pixel head, the layerwise Qwen3-VL text adapter, the FlowDPM-Solver++ on the shifted rectified-flow schedule) and the Qwen3-VL-4B-Instruct text conditioning. The applicable terms (Apache-2.0 for both speridlabs/iris-3b and Qwen/Qwen3-VL-4B-Instruct) are mapped in the About manifest's iris-3b component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-iris",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Iris-3B provider (Candle/CUDA lane, epic sc-25678 / sc-25680): the Candle port of the same upstream speridlabs/iris-3b reference pipeline the MLX lane reimplements (pixel-space hybrid DiT with its PiT pixel head, the layerwise Qwen3-VL text adapter, the FlowDPM-Solver++ schedule, plus the depth and restoration task heads) and the Qwen3-VL-4B-Instruct text conditioning. The applicable terms (Apache-2.0 for both speridlabs/iris-3b and Qwen/Qwen3-VL-4B-Instruct) are mapped in the About manifest's iris-3b component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (MLX lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation) and the SceneWorks tier converter and memory strategy. The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers."
+      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (MLX lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation) and the SceneWorks tier converter and memory strategy. The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers.",
+      "excludePaths": [
+        "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs"
+      ]
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -943,10 +980,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff",
+    "revision": "a0ddfd180909f1581016f4b8b521d50238a8e1a0",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 108,
-    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
+    "cratePrefixes": 113,
+    "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"
   },
   "crateDispositions": [
     {
@@ -1034,6 +1071,44 @@
       "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
       "disposition": "first-party-original",
       "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+    },
+    {
+      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
+      "disposition": "upstream-content-existing-terms",
+      "component": "candle-transformers-source",
+      "evidence": "NOT first-party: vendored Hugging Face Candle candle-metal-kernels 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision vendor/candle-core is taken from) with upstream commit 2395577a43cc704e486edf5389cb14ba97eba0f8 (Metal rank-5+ strided reduce fix, #3873) applied unmodified, as documented in its VENDORED.md; the directory ships upstream's LICENSE-APACHE and LICENSE-MIT. Its production source carries no provenance marker, so it has no candidate in the inventory; its terms are the Hugging Face Candle About component already covering the vendored candle-core."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "SceneWorks Rust/Candle body-loss implementation of frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals, backed by the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "SceneWorks Rust/MLX body-loss twin implements frozen ViTPose+ keypoints, HybrIK shape and Sapiens normals against the shared gen-core body contracts. The crate's production source has no matched provenance marker or copied upstream source inventory row. Its model structures and reference-time preprocessing follow those architectures; separately reported model-weight license gaps remain open."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks Candle trainer composition seam: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks MLX trainer composition twin: selects configured auxiliary loss arms, computes footprints, and builds the shared decoded-x0 perceptual path from native crates. The production crate is a single Rust module with no matched upstream-source marker or copied-content inventory row; model and decoder terms remain separate."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native Candle MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "moss-image-sft",
+      "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
     }
   ]
 }

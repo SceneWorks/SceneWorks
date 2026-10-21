@@ -143,11 +143,16 @@ all = "warn"
 #
 # Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
 # candle-llm. Cargo ignores dependency-workspace patches, so both root patches must resolve from
-# the same inference revision as the direct crates. The bump script moves both revs and the lock
-# guard refuses a missing, upstream, or skewed resolution.
+# the same inference revision as the direct crates. The bump script moves every patched rev and
+# the lock guard refuses a missing, upstream, or skewed resolution.
+#
+# candle-metal-kernels is vendored for the upstream rank > 4 strided-reduce out-of-bounds fix
+# (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
+# Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "c1f5989ec88596b7a9b171cb2862e5a12c5cb8ff" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "a0ddfd180909f1581016f4b8b521d50238a8e1a0" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "a0ddfd180909f1581016f4b8b521d50238a8e1a0" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "a0ddfd180909f1581016f4b8b521d50238a8e1a0" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #
@@ -177,3 +182,7 @@ opt-level = 3
 # Provenance and removal criteria: vendor/glib-0.18.5/VENDORED.md.
 [patch.crates-io]
 glib = { path = "vendor/glib-0.18.5" }
+
+# Keep the published updater API while moving its Windows archive reader to zip 9.
+# Provenance and removal criteria: vendor/tauri-plugin-updater-2.11.0/VENDORED.md.
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater-2.11.0" }

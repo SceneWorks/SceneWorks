@@ -227,3 +227,37 @@ describe("data URL passthrough", () => {
     expect(thumbnailUrl(asset)).toBe(asset.url);
   });
 });
+
+describe("depth assets paint their preview, never the raw .npy (sc-25682)", () => {
+  const depthAsset = {
+    id: "depth", type: "depth", projectId: "p1", displayName: "photo (depth)",
+    file: { path: "assets/depth/g/map.npy", mimeType: "application/x-npy" },
+    preview: { path: "assets/depth/g/map.preview.png", mimeType: "image/png" },
+  };
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("thumbnails and media render the separate preview; the asset URL stays the raw map", async () => {
+    expect(thumbnailUrl(depthAsset)).toContain("/files/assets/depth/g/map.preview.png");
+    expect(assetUrl(depthAsset)).toContain("/files/assets/depth/g/map.npy");
+    expect(assetCanRenderAsImage(depthAsset)).toBe(false);
+    await act(() => root.render(<AssetThumbnail asset={depthAsset} />));
+    expect(container.querySelector("img").getAttribute("src")).toContain("map.preview.png");
+    await act(() => root.render(<AssetMedia asset={depthAsset} />));
+    expect(container.querySelector("img").getAttribute("src")).toContain("map.preview.png");
+    expect(container.innerHTML).not.toContain("map.npy");
+  });
+});
+

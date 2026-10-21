@@ -774,7 +774,37 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24163, epic 24107's terminal pin bump (inference 457f1a37), where both 2.1
+    Last moved: sc-25907 (epic 25899) adds the `qwen_image_2_1_turbo` catalog entry, the distilled
+    sibling of `qwen_image_2_1`, routed on BOTH lanes. It adds exactly ten NEW lanes
+    (`qwen_image_2_1_turbo:<backend>:<rung>`, 18 coordinates each = 3 tiers x 3 catalog modes x
+    {none, lora}) and moves NOTHING else. Each is base's lane profile verbatim — including
+    `mlx:staged_residency` [18,0,0], because the same commit adds the Turbo id to the worker's
+    `mlx_fit_gate.rs#engine_engages_staged_residency_is_derived_from_the_registered_capability`
+    sweep (the generator's MLX staged-residency authority). This is an IMPLEMENTATION claim only:
+    no anchor and no measurement is involved, and every Turbo cell is analytic (E10) — base's
+    `mlx` lanes read Anchored where Turbo's read Implemented, and both fold to the same axis here.
+
+    Previously: the sc-25680 review round gives `iris_3b` a `candle` block (declared
+    `minMemoryGb` + `sequentialPeakGb` floors, so the Candle fit gate has a prediction). Exactly two
+    lanes move, each [0,0,2] -> [2,0,0]: `iris_3b:candle:resident` (a lane with a per-backend block
+    is no longer the generator's "routed but untriaged" all-Missing slice) and
+    `iris_3b:candle:staged_residency` (the block declares a sequential peak, and `candle-gen-iris`
+    does advertise sequential offload). The three bounded rungs stay [0,0,2] (no ladder at this
+    pin) and nothing else moves.
+
+    Previously: sc-25680 routes `iris_3b` to Candle/CUDA. It adds exactly five NEW lanes
+    (`iris_3b:candle:*`), each [0,0,2]: the catalog entry carries no `candle` block yet, so the
+    whole Candle slice is the generator's "routed but untriaged" Missing (its memory declaration is
+    sc-25684's, S6), and nothing else moves.
+
+    Previously: sc-25679 adds the MLX-only `iris_3b` catalog entry (one untagged artifact, so a
+    single tier; text_to_image x {none, lora} = 2 coordinates per lane). It contributes exactly
+    five NEW lanes and moves nothing else: `resident` [2,0,0]; `staged_residency` [2,0,0] because
+    the descriptor advertises sequential offload and the engine joined the fit gate's
+    staged-residency sweep; the three bounded rungs [0,0,2] because the provider publishes no
+    memory-strategy ladder at this pin.
+
+    Previously: sc-24163, epic 24107's terminal pin bump (inference 457f1a37), where both 2.1
     providers apply LoRA/LoKr. The five hand-authored `qwen_image_2_1` contract rows gain the
     `lora` overlay and load profile, and the worker's memory-route rows move PLAIN -> PLAIN_LORA
     with the re-dump. Three `qwen_image_2_1` lanes move and nothing else — the `lora` half of each

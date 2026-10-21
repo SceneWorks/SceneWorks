@@ -14,6 +14,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { maxReferencesForModel } from "../../imageReferenceLimits.js";
+import { editCapableModels } from "../../imageJobs.js";
 
 let container;
 let root;
@@ -398,5 +399,94 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
     await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
     expect(addButton().disabled, "nine references + the working image is the cap of ten").toBe(true);
+  });
+
+  // sc-25908: Turbo serves the editor exactly as base does — it is an edit model, the rail opens
+  // at ITS declared cap, and the transparency toggle follows ITS `supportsAlphaOutput`. Every value
+  // is read from the shipped Turbo entry, derived the way ImageEditor.jsx derives it.
+  // *Mutation that reds this:* dropping `edit_image`, `ui.multiReference` or `supportsAlphaOutput`
+  // from the Turbo manifest entry.
+  it("opens the reference rail and the transparency toggle for Qwen Image 2.1 Turbo", async () => {
+    const manifest = JSON5.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../config/manifests/builtin.models.jsonc"), "utf8"),
+    );
+    const turbo = manifest.models.find((entry) => entry.id === "qwen_image_2_1_turbo");
+    expect(editCapableModels(manifest.models).map((entry) => entry.id)).toContain("qwen_image_2_1_turbo");
+    const scopeFor = (refAssetIds) =>
+      editScope({
+        editModel: turbo.id,
+        editModels: [turbo],
+        selectedEditModel: turbo,
+        multiRefCapable: Boolean(turbo.ui?.multiReference),
+        maxEditReferences: maxReferencesForModel(turbo, 4),
+        refAssetIds,
+        editPrompt: "isolate the cyclist",
+        editTransparent: true,
+      });
+    const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine.slice(0, 8))} />));
+    expect(container.querySelector(".ie-ref-add")?.disabled).toBe(false);
+    expect(container.querySelector(".transparency-toggle input")?.checked).toBe(true);
+    expect(container.querySelector(".transparency-prompt-hint button")).not.toBeNull();
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
+    expect(container.querySelector(".ie-ref-add").disabled, "nine + the working image is ten").toBe(true);
+  });
+});
+
+describe("ImageEditorToolPanel upscale tool with Iris restoration (sc-25683)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("swaps the factor buttons for the Iris controls + planner preview and gates Restore on the plan", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ items: [{ assetId: null, plan: { summary: "4×: 640x480 → 2560x1920 (processed at 2560x1920 in 12 tiles)" }, error: null }] }),
+    });
+    const { IrisRestoreControls } = await import("../../components/IrisRestoreControls.jsx");
+    const runUpscale = vi.fn();
+    function Harness() {
+      const [irisRestore, setIrisRestore] = React.useState({ scale: 4, inputSizing: "budgeted", colorFix: true });
+      const [irisPlanStatus, setIrisPlanStatus] = React.useState({ ready: false, blocked: false, error: null });
+      return (
+        <ImageEditorToolPanel
+          panelKey="upscale"
+          scope={{
+            IrisRestoreControls,
+            UPSCALE_ENGINE_DESC: {},
+            aiOp: null,
+            availableUpscaleEngines: [
+              { key: "real-esrgan", label: "Real-ESRGAN", factors: [2, 4] },
+              { key: "iris", label: "Iris restore", factors: [4], restoration: true },
+            ],
+            irisPlanStatus,
+            irisRestore,
+            runUpscale,
+            setIrisPlanStatus,
+            setIrisRestore,
+            setTool: vi.fn(),
+            setUpscaleEngine: vi.fn(),
+            setUpscaleFactor: vi.fn(),
+            setUpscaleSoftness: vi.fn(),
+            token: "t",
+            upscaleEngine: "iris",
+            upscaleEngineHasSoftness: () => false,
+            upscaleEngineIsRestoration: (key) => key === "iris",
+            upscaleFactor: 4,
+            upscaleFactorsForEngine: () => [4],
+            upscaleSoftness: 0,
+            working: { width: 640, height: 480 },
+          }}
+        />
+      );
+    }
+    await act(async () => root.render(<Harness />));
+    const restore = () => Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Restore image");
+    expect(container.textContent).not.toContain("Scale factor");
+    expect(restore().disabled).toBe(true);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(container.querySelector(".iris-restore-preview").textContent).toContain("4×: 640x480 → 2560x1920");
+    expect(restore().disabled).toBe(false);
+    await act(async () => restore().dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(runUpscale).toHaveBeenCalledTimes(1);
   });
 });

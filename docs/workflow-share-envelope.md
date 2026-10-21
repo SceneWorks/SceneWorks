@@ -301,6 +301,9 @@ keys in either direction: a key this table does not name is dropped on write **a
 | `upscale.factor` | The upscale factor. |
 | `upscale.engine` | The upscale engine label. |
 | `upscale.softness` | The upscale softness. |
+| `upscale.scale` | The Iris restoration output scale (any positive factor; 1 restores without resizing). |
+| `upscale.inputSizing` | The Iris restoration input sizing: `budgeted` or `original`. |
+| `upscale.colorFix` | Whether the Iris restoration colour correction ran. |
 | `loras[].name` | For a generated image, the safe readable stem of the exact adapter filename. It associates the prompt tag with the hash map but is not resource identity. A foreign or unresolved recipe may instead carry its portable display hint. |
 | `loras[].weight` | Its weight. |
 | `loras[].repo` | Its Hugging Face `owner/name`, when the catalog entry resolved to one. Never a path, never a local id. |
@@ -382,11 +385,15 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
+| `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
+| `mossImageExecutionReport` | `MossImageReport` | Actual completed native MOSS execution receipt, including frozen asset hashes and adapter application. Local adapter location is replaced with its frozen relative filename. Imported receipts are display metadata; replay discards them and computes a new receipt. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
 | `sampler` | `Scalar` | Sampler choice. |
 | `scheduler` | `Scalar` | Scheduler choice. |
 | `schedulerShift` | `Scalar` | Time-shift (mu) for the curated schedule. |
+| `cfgInterval` | `NumberPair` | Classifier-free-guidance interval `[start, end]` in model time (Iris-3B). Any other shape is dropped. |
+| `captionOverflow` | `Scalar` | Caption-overflow policy (`warn` / `error` / `silent`) for an over-long prompt (Iris-3B). |
 | `steps` | `Scalar` | Step-count override. |
 | `guidanceScale` | `Scalar` | Guidance override. |
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
@@ -428,6 +435,7 @@ smuggled under a scalar key.
 | `videoRescaleScale` | `Scalar` | **Video.** LTX guidance-rescale factor. |
 | `videoConditioningStrength` | `Scalar` | **Video.** Source-clip conditioning strength for extend / bridge / v2v — the video lane's `strength`. |
 | `bridgeRightVideoConditioningStrength` | `Scalar` | **Video.** The right-clip strength for a bridge. Without it a shared bridge replays lopsided. |
+| `veda` | `H3VedaSettings` | **Video.** The complete MiniMax-H3 Veda control object, validated as one closed request shape so sparsity and full-attention settings replay together. |
 | `timelineAction` | `Scalar` | **Video.** Which timeline operation made the clip (`extend` / `replace` / `bridge`). A closed vocabulary with no id in it; its companion `timelineContext` is withheld. |
 
 <!-- END PINNED: advanced-shared -->
@@ -440,6 +448,7 @@ Classified and deliberately dropped. A key here is a decision someone wrote down
 
 | Key | Why it is withheld |
 | --- | --- |
+| `mossOrdinarySettings` | Inactive ordinary studio choices retained locally for switching acceleration OFF; these did not generate the accelerated image. |
 | `keypointCollectionId` | A local Key Point Library collection id. Resolves to nothing on another install. |
 | `flashAttn` | A backend kernel toggle — what this install's attention path can do. |
 | `mlxQuantize` | Quant tier: a memory accommodation for this machine. |
@@ -667,8 +676,9 @@ whether the key describes **what to make** or **what this machine can afford to 
 
 - `allow(key, shape, reason)` — it describes the intended output. It travels, and a stranger opening
   your image sees it. Pick the `shape` that matches: `Scalar` for a string, number or bool (an
-  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel); one
-  of the structured shapes otherwise.
+  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel);
+  `H3VedaSettings` for the complete five-field MiniMax-H3 controls validated by the shared H3
+  request validator; or one of the other structured shapes.
 - `deny(key, reason)` — it describes this install (a tier, a kernel, a GPU) or names something local
   (an id, a path, a preset). It is dropped, and a shared image will not reproduce whatever it did.
 
@@ -855,7 +865,9 @@ deferred.
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_upscale_workflow_share` | Embeds — the standalone upscale job's envelope. |
+| `crates/sceneworks-worker/src/image_jobs.rs` | `standalone_restore_workflow_share` | Embeds — the standalone Iris restoration job's envelope (sc-25683). |
 | `crates/sceneworks-worker/src/image_jobs/detail.rs` | `run_image_detail_job` | Embeds — writes the refined PNG. macOS-gated; the scan is textual, so it is read on every platform. |
+| `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_iris_restore_job_using` | Embeds — hands the standalone Iris restoration's envelope to the shared single-child writer (sc-25683). |
 | `crates/sceneworks-worker/src/upscale_jobs.rs` | `run_image_upscale_job` | Embeds — hands the standalone upscale's envelope to the shared single-child writer. |
 | `crates/sceneworks-worker/src/single_child_asset.rs` | `write_single_child_asset` | Conduit — writes the envelope its caller decided on, and builds none itself. |
 | `crates/sceneworks-worker/src/video_jobs/mod.rs` | `video_workflow_metadata` | Embeds — the funnel every *generated* clip is encoded through, whatever engine or studio produced it. |

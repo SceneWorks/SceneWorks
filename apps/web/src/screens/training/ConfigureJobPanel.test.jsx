@@ -1,4 +1,5 @@
 import React, { act } from "react";
+import workerReport from "../../training/irisDatasetReport.fixture.json";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -7,6 +8,7 @@ import {
   configValidation,
   trainingTargetLicense,
 } from "../../training/trainingConfig.js";
+import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "../../training/iris.testSupport.js";
 import { summarize } from "../../validation/issues.js";
 import { ConfigureJobPanel } from "./ConfigureJobPanel.jsx";
 
@@ -544,6 +546,242 @@ describe("ConfigureJobPanel — missing control preprocessor", () => {
   it("renders no notice for a LoRA target", () => {
     mount(<ConfigureJobPanel {...baseProps({ missingControlModels: [] })} />);
     expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+});
+
+// sc-25685/sc-25686: the Iris-3B target. Every control maps to an option the trainer accepts, and a
+// control the trainer ignores or refuses is not offered.
+describe("ConfigureJobPanel — Iris", () => {
+  const IRIS_DATASET = { id: "ds1", name: "Set", items: [{ id: "i1", captions: { short: "a", tags: "b" } }] };
+
+  function irisProps(overrides = {}, draftOverrides = {}, irisOverrides = {}) {
+    const selectedTarget = irisTarget();
+    const seeded = configDraftFromTarget(selectedTarget, IRIS_DATASET, ["auto"], "trg");
+    const configDraft = { ...seeded, ...draftOverrides, iris: { ...seeded.iris, ...irisOverrides } };
+    return baseProps({
+      selectedTarget,
+      configDraft,
+      activeDataset: IRIS_DATASET,
+      showAdvancedConfig: true,
+      showNetworkType: true,
+      networkTypeOptions: ["lora", "lokr", "full"],
+      visibleOptimizerOptions: ["adamw", "muon"],
+      visibleLrSchedulerOptions: ["constant", "cosine"],
+      visibleResolutionOptions: [256, 512, 1024],
+      configValidity: summarize(configValidation(configDraft, { activeDataset: IRIS_DATASET, selectedTarget })),
+      irisContext: {
+        previousRuns: [irisJob({ id: "job_a", outputName: "Run A" })],
+        fullRuns: [],
+        captionFieldOptions: ["caption", "short", "tags"],
+        trainingLane: "mlx",
+        dataWalk: null,
+      },
+      ...overrides,
+    });
+  }
+
+  const labelled = (text, selector = "select") =>
+    [...container.querySelectorAll("label")].find((label) => label.textContent.startsWith(text))?.querySelector(selector);
+  const optionValues = (select) => [...select.options].map((option) => option.value);
+
+  it("renders the collapsed Iris section for iris_train only", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    const section = container.querySelector("details.training-iris-options");
+    expect(section).not.toBeNull();
+    expect(section.open).toBe(false);
+
+    act(() => root.render(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true })} />));
+    expect(container.querySelector("details.training-iris-options")).toBeNull();
+  });
+
+  it("hides gradient checkpointing and says why", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    expect(container.textContent).not.toMatch(/^Gradient checkpointing$/m);
+    const checkbox = [...container.querySelectorAll("label.training-checkbox-field")].find((label) =>
+      label.textContent.includes("Gradient checkpointing"),
+    );
+    expect(checkbox).toBeUndefined();
+    expect(container.textContent).toContain("does not implement gradient checkpointing");
+  });
+
+  it("keeps the gradient checkpointing checkbox for a legacy target", () => {
+    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true })} />);
+    const checkbox = [...container.querySelectorAll("label.training-checkbox-field")].find((label) =>
+      label.textContent.includes("Gradient checkpointing"),
+    );
+    expect(checkbox).toBeDefined();
+  });
+
+  it("offers exactly the advertised schedules, bias, loss and precisions", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    expect(optionValues(labelled("Timestep type"))).toEqual(["logit_normal", "uniform"]);
+    const bias = labelled("Timestep bias");
+    expect(optionValues(bias)).toEqual(["balanced"]);
+    expect(bias.disabled).toBe(true);
+    const loss = labelled("Loss type");
+    expect(optionValues(loss)).toEqual(["mse"]);
+    expect(loss.disabled).toBe(true);
+    expect(optionValues(labelled("Precision"))).toEqual(["bf16", "f32"]);
+  });
+
+  it("keeps the legacy menus and free-text precision for a target that advertises none", () => {
+    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true })} />);
+    expect(optionValues(labelled("Timestep bias"))).toEqual(["balanced", "high_noise", "low_noise"]);
+    expect(labelled("Timestep bias").disabled).toBe(false);
+    expect(optionValues(labelled("Loss type"))).toEqual(["mse", "mae"]);
+    expect(labelled("Precision", "input")).toBeTruthy();
+    expect(labelled("Precision", "select")).toBeFalsy();
+  });
+
+  it("shows the muon extras only under muon and init only for a full run", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    expect(labelled("Muon momentum", "input")).toBeFalsy();
+    expect(labelled("Initialization")).toBeFalsy();
+    act(() => root.render(<ConfigureJobPanel {...irisProps({}, { optimizer: "muon", networkType: "full" })} />));
+    expect(labelled("Muon momentum", "input")).toBeTruthy();
+    expect(labelled("Muon Nesterov")).toBeTruthy();
+    expect(optionValues(labelled("Initialization"))).toEqual(["weights", "random"]);
+    expect(labelled("Start from a previous full run's weights")).toBeTruthy();
+  });
+
+  it("offers the dataset's caption fields and the previous Iris runs", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    expect(optionValues(labelled("Caption field"))).toEqual(["caption", "short", "tags"]);
+    expect(optionValues(labelled("Resume a previous run"))).toEqual(["", "job_a"]);
+    // Resume knobs are only offered once a run is picked.
+    expect(labelled("Data policy")).toBeFalsy();
+    act(() => root.render(<ConfigureJobPanel {...irisProps({}, { resumeFromJobId: "job_a" })} />));
+    expect(optionValues(labelled("Data policy"))).toEqual(["", "exact", "new_phase"]);
+  });
+
+  it("disables the sample prompts while Iris' upstream prompts are on", () => {
+    mount(<ConfigureJobPanel {...irisProps({}, {}, { upstream_validation_prompts: true })} />);
+    expect(container.querySelector(".training-sample-prompts textarea").disabled).toBe(true);
+    expect(container.textContent).toContain("seven built-in validation prompts replace these");
+  });
+
+  it("shows the declared memory floor for the active lane", () => {
+    mount(<ConfigureJobPanel {...irisProps()} />);
+    const hint = container.querySelector('[aria-label="Memory floor"]');
+    expect(hint.textContent).toContain("16 GiB");
+    expect(hint.textContent).toContain("16 GiB (declared, not yet measured)");
+    expect(hint.textContent).not.toContain("24 GiB");
+  });
+
+  it("renders the data-walk warning when the preflight returns one", () => {
+    const warning = "Only 640 of 700 items will be used: Iris walks whole 640-item chunks.";
+    mount(<ConfigureJobPanel {...irisProps({ irisContext: { dataWalk: { applies: true, warning } } })} />);
+    expect(container.querySelector(".inline-warning[role=status]")?.textContent).toBe(warning);
+    // Non-blocking: the run is still startable.
+    expect(submitButton().disabled).toBe(false);
+  });
+
+  it("outlines a micro-step field that is not a multiple of the accumulation", () => {
+    mount(<ConfigureJobPanel {...irisProps({}, { gradientAccumulation: "4", sampleEvery: "250", saveEvery: "200" })} />);
+    expect(labelled("Sample cadence", "input").getAttribute("aria-invalid")).toBe("true");
+    expect(labelled("Checkpoint cadence", "input").getAttribute("aria-invalid")).toBeNull();
+    expect(submitButton().disabled).toBe(true);
+  });
+});
+
+describe("Iris depth / restoration (sc-25687 / sc-25688)", () => {
+  // A label's own text (its direct text nodes), not its control's options.
+  const labels = () =>
+    [...container.querySelectorAll("label")].map((label) =>
+      [...label.childNodes].filter((node) => node.nodeType === 3).map((node) => node.textContent).join("").trim(),
+    );
+  const mountTask = (selectedTarget, extra = {}) => {
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out" };
+    const configValidity = summarize(configValidation(configDraft, { activeDataset: DATASET, selectedTarget }));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ selectedTarget, configDraft, configValidity, showAdvancedConfig: true, isFullFinetune: configDraft.networkType === "full", ...extra })}
+      />,
+    );
+    return configValidity;
+  };
+
+  const checkpointingToggle = () =>
+    [...container.querySelectorAll("label.training-checkbox-field")].find((label) => label.textContent.includes("Gradient checkpointing"));
+
+  it("offers gradient checkpointing for a task on a lane that implements it, with the full_ac floor", () => {
+    mountTask(irisDepthTarget(), { irisContext: { trainingLane: "candle" } });
+    expect(checkpointingToggle()).toBeDefined();
+    expect(container.querySelector('[aria-label="Gradient checkpointing availability"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("84 GiB (extrapolated");
+    // Toggle on: the hint reads the lane's full_ac row, as the gate does.
+    const selectedTarget = irisDepthTarget();
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out", gradientCheckpointing: true };
+    act(() =>
+      root.render(
+        <ConfigureJobPanel
+          {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true, isFullFinetune: true, irisContext: { trainingLane: "candle" } })}
+        />,
+      ),
+    );
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("68 GiB (extrapolated");
+  });
+
+  it("explains where gradient checkpointing is implemented on a lane that lacks it", () => {
+    const selectedTarget = irisDepthTarget();
+    const configDraft = { ...configDraftFromTarget(selectedTarget, DATASET, ["auto"]), outputName: "out", gradientCheckpointing: true };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ selectedTarget, configDraft, showAdvancedConfig: true, isFullFinetune: true, irisContext: { trainingLane: "mlx" } })}
+      />,
+    );
+    expect(checkpointingToggle()).toBeUndefined();
+    const why = container.querySelector('[aria-label="Gradient checkpointing availability"]');
+    expect(why.textContent).toContain("implemented on Candle/CUDA (GPU memory)");
+    expect(container.textContent).not.toContain("does not implement gradient checkpointing");
+    // A stale toggle never moves the floor on a lane that would refuse it.
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("80 GiB (declared");
+  });
+
+  it("hides the prompt/sampler controls, shows the start, size and invalid-example policy, and is ready", () => {
+    const validity = mountTask(irisDepthTarget(), { irisContext: { checkDataset: async () => ({}) } });
+    expect(validity.ready).toBe(true);
+    const shown = labels();
+    for (const hidden of ["Trigger phrase", "Sample count", "Sample steps", "Timestep type", "Guidance scale", "Rank", "Resolution"]) {
+      expect(shown).not.toContain(hidden);
+    }
+    expect(container.querySelector(".training-sample-prompts textarea")).toBeNull();
+    expect(shown).toEqual(expect.arrayContaining(["Start from", "Training size height", "Invalid examples"]));
+    expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toContain("Check dataset");
+    expect(container.textContent).toContain("Base checkpoint name");
+  });
+
+  it("states the full fine-tune's floor up front and offers LoRA as an explicit switch", () => {
+    const calls = [];
+    mountTask(irisRestoreTarget(), {
+      networkTypeOptions: ["full", "lora", "lokr"],
+      updateConfigDraft: (key, value) => calls.push([key, value]),
+      irisContext: { trainingLane: "mlx" },
+    });
+    expect(container.querySelector('[aria-label="Memory floor"]').textContent).toContain("128 GiB");
+    const offer = container.querySelector('[aria-label="Lighter restoration option"]');
+    expect(offer.textContent).toContain("56 GiB");
+    expect(calls).toEqual([]);
+    act(() => [...offer.querySelectorAll("button")].find((button) => button.textContent === "Use LoRA instead").click());
+    expect(calls).toEqual([["networkType", "lora"]]);
+  });
+
+  it("keeps rank for a restoration adapter and reports the dataset check", async () => {
+    // The worker's real report shape (a worker test compares this fixture with a real report).
+    const report = workerReport;
+    mountTask(irisRestoreTarget(), { irisContext: { checkDataset: async () => report } });
+    expect(labels()).not.toContain("Rank");
+    expect(labels()).toContain("Resolution");
+    const check = [...container.querySelectorAll("button")].find((button) => button.textContent === "Check dataset");
+    await act(async () => check.click());
+    const status = container.querySelector('[aria-label="Dataset check"]');
+    expect(status.textContent).toContain("Blocked");
+    expect(status.textContent).toContain("1 trainable · 0 invalid · 1 unreadable");
+    expect(status.textContent).toContain(`b: ${workerReport.items[1].reason}`);
+
+    const lora = { ...configDraftFromTarget(irisRestoreTarget(), DATASET, ["auto"]), outputName: "out", networkType: "lora" };
+    mount(<ConfigureJobPanel {...baseProps({ selectedTarget: irisRestoreTarget(), configDraft: lora, showAdvancedConfig: true })} />);
+    expect(labels()).toContain("Rank");
   });
 });
 

@@ -545,7 +545,7 @@ async fn spawn_progress_capture_stub() -> (String, std::sync::Arc<std::sync::Mut
 /// sc-8845 (F-043) — capture stub whose job GET reports NO user cancel, so the only cancel that can
 /// fire in `run_placeholder_job` is the process-shutdown flag. Records every progress POST body and
 /// answers heartbeats.
-async fn spawn_no_user_cancel_capture_stub(
+pub(crate) async fn spawn_no_user_cancel_capture_stub(
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;

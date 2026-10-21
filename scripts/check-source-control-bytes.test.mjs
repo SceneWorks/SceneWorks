@@ -36,7 +36,7 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".yaml",
 ];
 
-const REQUIRED_TEXT_BASENAMES = ["COPYRIGHT"];
+const REQUIRED_TEXT_BASENAMES = ["COPYRIGHT", ".appimageignore"];
 
 const DECLARED_BINARY_EXTENSIONS = [
   ".bin",

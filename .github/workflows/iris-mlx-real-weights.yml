@@ -1,0 +1,83 @@
+# sc-25690 (epic 25678): the Iris-3B SceneWorks worker real-weight smokes on nax-macos-2.
+#
+# Reusable only: the registered dispatcher (memory-catalog-campaign.yml, profile
+# `iris-mlx-real-weights`) calls it at the dispatch's exact commit and skips both catalog jobs, so it
+# never walks, commits, pushes or opens a PR. It gates nothing (FEATURE_DEVELOPMENT.md "Gate
+# teardown"): terminal real-weight evidence collected once, on explicit request.
+#
+# `rw-krea` is the label verified on nax-macos-2 (see memory-catalog-campaign.yml's runner_label
+# note); the script refuses any other runner name BEFORE any GPU work, so a relabelled dev Mac can
+# never run it. Bounded: 60-minute job ceiling; every test runs under a summed process-tree
+# phys_footprint guard with a stated cap and wall limit (scripts/ci/iris-mlx-real-weights/run.sh).
+name: Iris-3B MLX worker real weights
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks commit to build (40 hex)
+        required: true
+        type: string
+      filter:
+        description: "all | inference | training | full_ft | <one smoke test name> | cleanup"
+        required: false
+        type: string
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  iris-mlx-worker:
+    runs-on: [self-hosted, macOS, ARM64, rw-krea]
+    timeout-minutes: 60
+    concurrency:
+      group: iris-mlx-real-weights-nax-macos-2
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      IRIS_SMOKE_FILTER: ${{ inputs.filter }}
+    steps:
+      - name: Require the exact source commit
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be 40 lowercase hex" >&2; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Refuse any runner but nax-macos-2 before build
+        run: |
+          echo "runner: $RUNNER_NAME"
+          [[ "$RUNNER_NAME" == "nax-macos-2" ]] || { echo "::error::Iris MLX evidence runs only on nax-macos-2"; exit 1; }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Guarded Iris worker real-weight smokes
+        env:
+          IRIS_EVIDENCE_DIR: ${{ runner.temp }}/iris-mlx-real-weights-${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/ci/iris-mlx-real-weights/run.sh
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iris-mlx-real-weights-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/iris-mlx-real-weights-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+          retention-days: 30

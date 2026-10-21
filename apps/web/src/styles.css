@@ -16367,6 +16367,14 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+.vector-studio__result-preview {
+  display: block;
+  width: 100%;
+  max-width: 384px;
+  max-height: 240px;
+  object-fit: contain;
+}
+
 .worker-progress-card__message {
   margin: 0;
   font-size: 12px;
@@ -16381,6 +16389,26 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .worker-progress-card__message.error {
   color: var(--danger);
+}
+
+.worker-progress-card__prefix-cache > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__prefix-cache-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.worker-progress-card__prefix-cache-overflow {
+  margin: 2px 0 0;
+  color: color-mix(in oklch, var(--warn) 80%, var(--text));
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 480px) {

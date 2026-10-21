@@ -133,6 +133,11 @@ export function macUpscaleEngineBlocked(caps, engine) {
   if (engine === "aura-sr") {
     return caps?.features?.imageUpscaleAuraSr?.supported !== true;
   }
+  // Iris restoration (sc-25683): platform-intrinsic like SeedVR2 (native MLX on Mac, Candle on
+  // Windows/Linux). Whether the task is INSTALLED is a separate gate (upscaleEngines.js).
+  if (engine === "iris") {
+    return caps?.features?.imageUpscaleIris?.supported !== true;
+  }
   return false;
 }
 

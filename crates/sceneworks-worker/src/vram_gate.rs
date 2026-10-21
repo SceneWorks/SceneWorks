@@ -2757,12 +2757,31 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
 /// real-weight whole-render peak measured at the shipped 1344x768 geometry; admitting without the
 /// exact tier row (or without a live free-VRAM reading) would make the catalog flip an unproved OOM
 /// path. User LoRA bytes are independently resident and are charged above that baseline.
+#[cfg(test)]
 pub(crate) fn minimax_h3_fit_error(
     manifest_entry: &JsonObject,
     tier_key: &str,
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    minimax_h3_fit_error_with_sparse(
+        manifest_entry,
+        tier_key,
+        adapter_bytes,
+        gpu_id,
+        budget,
+        None,
+    )
+}
+
+pub(crate) fn minimax_h3_fit_error_with_sparse(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
 ) -> Option<WorkerError> {
     const MEASURED_PIXELS: u64 = 1_032_192;
     let candle = manifest_entry.get("candle");
@@ -2794,11 +2813,21 @@ pub(crate) fn minimax_h3_fit_error(
                 .to_owned(),
         ));
     };
-    let needed_gb = peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB;
+    // This catalog row remains the dense baseline; sparse has its own explicit additional
+    // requirement including predictor loading, retained state and forced dense fallback.
+    let needed_gb = crate::video_admission::veda_cold_peak_gb(
+        peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB,
+        sparse,
+    );
+    let sparse_reason = if sparse.is_some() {
+        " plus the Veda predictor/workspace and safe dense fallback"
+    } else {
+        ""
+    };
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         WorkerError::InvalidPayload(format!(
             "MiniMax-H3 needs ~{needed} GB of free GPU VRAM for its measured {tier_key} render \
-             peak plus CUDA reserve, but GPU {gpu_id} has ~{available} GB available. Select a \
+             peak plus CUDA reserve{sparse_reason}, but GPU {gpu_id} has ~{available} GB available. Select a \
              smaller quant tier or use a GPU with more free VRAM.",
             needed = needed_gb.ceil() as u64,
             available = budget.free_gb.round() as u64,
@@ -5979,69 +6008,76 @@ mod tests {
                 .1,
         ))
         .expect("builtin.models.jsonc parses");
-        let entry = obj(manifest["models"]
-            .as_array()
-            .expect("models array")
+        // sc-25907: Turbo holds its bf16 VAE at the Candle compute width exactly as base holds its
+        // f32 one, so its DERIVED Candle floors are the same arithmetic over the same inputs.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
             .iter()
-            .find(|model| model["id"] == "qwen_image_2_1")
-            .expect("qwen_image_2_1 is in the shipped catalog")
-            .clone());
+            .copied()
+        {
+            let entry = obj(manifest["models"]
+                .as_array()
+                .expect("models array")
+                .iter()
+                .find(|model| model["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is in the shipped catalog"))
+                .clone());
 
-        // Each installable tier resolves its OWN derived floor, with no headroom added on top —
-        // these are already-padded floors, and padding them again is the double-charge that makes
-        // a per-tier floor read as a measured peak. The rule is recomputed from the derived
-        // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
-        // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
-        // rather than restated.
-        for (tier, peak_gib) in [
-            ("bf16", 28.61 + 6.92),
-            ("q8", 16.33 + 6.92),
-            ("q4", 9.78 + 6.92),
-        ] {
-            let floor = (peak_gib * 1.25_f64).ceil();
-            assert_eq!(
-                predicted_peak_gb(&entry, tier),
-                Some(floor),
-                "{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
-            );
-        }
-        // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
-        // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
-        // under-prediction admits a load that OOMs.
-        assert_eq!(
-            predicted_peak_gb(&entry, NVFP4_TIER),
-            predicted_peak_gb(&entry, "bf16")
-        );
-        assert!(
-            entry["candle"].get("vramGbByTier").is_none(),
-            "these floors are DERIVED from parameter counts, not measured — a vramGbByTier row \
-             here would be an unmeasured claim wearing an evidence flag"
-        );
-
-        // The armed consequence, as the decision the gate actually returns, against realistic
-        // (total, free) GiB reports.
-        for (card, total_gb, free_gb, bf16, q8, q4) in [
-            ("24 GB card", 23.99, 22.5, false, false, true),
-            ("RTX 5090", 31.84, 30.5, false, true, true),
-            ("A100-40GB", 39.5, 38.5, false, true, true),
-            ("48 GB card", 47.99, 46.5, true, true, true),
-            ("H100-80GB", 79.2, 78.0, true, true, true),
-        ] {
-            let budget = VramBudget { total_gb, free_gb };
-            for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
+            // Each installable tier resolves its OWN derived floor, with no headroom added on top —
+            // these are already-padded floors, and padding them again is the double-charge that makes
+            // a per-tier floor read as a measured peak. The rule is recomputed from the derived
+            // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
+            // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
+            // rather than restated.
+            for (tier, peak_gib) in [
+                ("bf16", 28.61 + 6.92),
+                ("q8", 16.33 + 6.92),
+                ("q4", 9.78 + 6.92),
+            ] {
+                let floor = (peak_gib * 1.25_f64).ceil();
                 assert_eq!(
-                    matches!(
-                        fit_decision(predicted_peak_gb(&entry, tier), Some(budget)),
-                        FitDecision::Fits
-                    ),
-                    admitted,
-                    "{card} ({free_gb} GiB free) must {} the {tier} install",
-                    if admitted {
-                        "be admitted for"
-                    } else {
-                        "be refused"
-                    }
+                    predicted_peak_gb(&entry, tier),
+                    Some(floor),
+                    "{id}/{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
                 );
+            }
+            // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
+            // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
+            // under-prediction admits a load that OOMs.
+            assert_eq!(
+                predicted_peak_gb(&entry, NVFP4_TIER),
+                predicted_peak_gb(&entry, "bf16")
+            );
+            assert!(
+                entry["candle"].get("vramGbByTier").is_none(),
+                "these floors are DERIVED from parameter counts, not measured — a vramGbByTier row \
+                 here would be an unmeasured claim wearing an evidence flag"
+            );
+
+            // The armed consequence, as the decision the gate actually returns, against realistic
+            // (total, free) GiB reports.
+            for (card, total_gb, free_gb, bf16, q8, q4) in [
+                ("24 GB card", 23.99, 22.5, false, false, true),
+                ("RTX 5090", 31.84, 30.5, false, true, true),
+                ("A100-40GB", 39.5, 38.5, false, true, true),
+                ("48 GB card", 47.99, 46.5, true, true, true),
+                ("H100-80GB", 79.2, 78.0, true, true, true),
+            ] {
+                let budget = VramBudget { total_gb, free_gb };
+                for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
+                    assert_eq!(
+                        matches!(
+                            fit_decision(predicted_peak_gb(&entry, tier), Some(budget)),
+                            FitDecision::Fits
+                        ),
+                        admitted,
+                        "{card} ({free_gb} GiB free) must {} the {tier} install",
+                        if admitted {
+                            "be admitted for"
+                        } else {
+                            "be refused"
+                        }
+                    );
+                }
             }
         }
     }
@@ -7070,6 +7106,50 @@ mod tests {
             fit_decision(predicted_peak_gb(&small, "q4"), Some(capped)),
             FitDecision::Fits
         );
+    }
+
+    #[test]
+    fn minimax_h3_sparse_cold_admission_does_not_borrow_dense_peak() {
+        let manifest = obj(
+            json!({"candle":{"measured":true,"vramMeasuredPixels":1_032_192,
+            "vramGbByTier":{"q4":40.068}}}),
+        );
+        let req = gen_core::GenerationRequest {
+            width: 576,
+            height: 320,
+            frames: Some(124),
+            veda: Some(gen_core::VedaRequest {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bound =
+            gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+                .unwrap()
+                .unwrap();
+        let budget = Some(VramBudget {
+            free_gb: 42.068,
+            total_gb: 96.,
+        });
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", budget).is_none());
+        assert!(
+            minimax_h3_fit_error_with_sparse(&manifest, "q4", 0, "0", budget, Some(&bound))
+                .is_some()
+        );
+        let needed = 42.068 + bound.total_bytes as f64 / BYTES_PER_GIB;
+        assert!(minimax_h3_fit_error_with_sparse(
+            &manifest,
+            "q4",
+            0,
+            "0",
+            Some(VramBudget {
+                free_gb: needed,
+                total_gb: 96.
+            }),
+            Some(&bound)
+        )
+        .is_none());
     }
 
     #[test]

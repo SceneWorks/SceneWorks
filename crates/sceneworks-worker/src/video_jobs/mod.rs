@@ -188,6 +188,8 @@ struct DecodedVideo {
     /// do not expose partial-install reports.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     adapter_apply_reports: Vec<gen_core::AdapterApplyReport>,
+    /// Post-generation provider observations; never reconstructed from request controls.
+    veda_execution: Option<Value>,
 }
 
 /// One RGB8 frame, row-major, `pixels.len() == width * height * 3` (the engine's
@@ -547,6 +549,9 @@ fn resolve_candle_video_route(
 /// but only covers what IT enqueues, not a job replayed from a pre-sc-12297 row or produced by any
 /// future non-HTTP path.
 fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
+    request
+        .h3_veda_settings()
+        .map_err(WorkerError::InvalidPayload)?;
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
             "Missing payload.projectId".to_owned(),
@@ -1187,6 +1192,7 @@ pub(crate) async fn run_video_generate_job(
     // video job funnels through — whatever lane, engine or route produced `decoded` — so measuring
     // once here is what makes "the sidecar can lie about clip length" structurally impossible rather
     // than merely fixed for today's models. `video_asset_fact` cannot be called without it.
+    let raw_settings = record_veda_outcome(raw_settings, decoded.veda_execution.as_ref());
     let clip = EncodedClip::measure(&decoded);
     let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
     // sc-15956: the sanitized workflow, written beside the clip as an `ffmetadata` document for
@@ -1449,6 +1455,7 @@ fn generate_stub_video(request: &VideoRequest, seed: i64) -> DecodedVideo {
         fps,
         audio,
         adapter_apply_reports: Vec::new(),
+        veda_execution: None,
     }
 }
 
@@ -1899,6 +1906,17 @@ impl EncodedClip {
             other => other,
         }
     }
+}
+
+/// Replace rather than merge any request-carried observation: only this generation is authority.
+fn record_veda_outcome(mut raw_settings: Value, outcome: Option<&Value>) -> Value {
+    if let Some(raw) = raw_settings.as_object_mut() {
+        raw.remove("vedaExecution");
+        if let Some(outcome) = outcome {
+            raw.insert("vedaExecution".into(), outcome.clone());
+        }
+    }
+    raw_settings
 }
 
 /// The flat per-asset fact the Rust API turns into an indexed video asset (every key

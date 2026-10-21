@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-17",
+  "smolvm_version": "1.30.1",
+  "host": "Windows; Linux runtime tested under Ubuntu 24.04 WSL2 with KVM",
+  "windows_alpine": {
+    "result": "failed",
+    "error": "agent did not become ready within 31 seconds: no boot progress for 30 seconds"
+  },
+  "linux_alpine": {
+    "result": "passed",
+    "uname": "Linux vm-21f81dc8 6.18.55 #1 SMP PREEMPT_DYNAMIC Mon Jun 1 16:28:39 CEST 2026 x86_64 Linux"
+  },
+  "linux_ubuntu_appimage": {
+    "result": "CUDA_ERROR_NO_DEVICE",
+    "note": "No CUDA remoting or physical GPU passthrough was enabled, so this is a negative-control smoke only."
+  },
+  "bazzite": {
+    "reported_image": "ghcr.io/ublue-os/bazzite-dx-nvidia-gnome:testing",
+    "reported_image_lookup": "HTTP 404",
+    "tested_image": "ghcr.io/ublue-os/bazzite-dx-nvidia-gnome@sha256:bbd8ba49ce2598de2811ba8e661c78ace07cfe08d6fc1e7e476ddaa82761897c",
+    "tested_tag": "stable",
+    "compressed_bytes": 6650266136,
+    "layers": 128,
+    "first_command": "/bin/sh -c 'cat /etc/os-release; uname -a; /app/usr/bin/sceneworks-api'",
+    "first_result": "Starting ephemeral machine (vm-88152b56)...\nPulling image ghcr.io/ublue-os/bazzite-dx-nvidia-gnome@sha256:bbd8ba49ce2598de2811ba8e661c78ace07cfe08d6fc1e7e476ddaa82761897c...\rPulling image ghcr.io/ublue-os/bazzite-dx-nvidia-gnome@sha256:bbd8ba49ce2598de2811ba8e661c78ace07cfe08d6fc1e7e476ddaa82761897c... done.                              \nexecutable file `/bin/sh` not found in $PATH: No such file or directory\n",
+    "second_command": "/usr/bin/bash -c '/usr/bin/cat /usr/lib/os-release; /usr/bin/uname -a; /app/usr/bin/sceneworks-api'",
+    "second_result": "Image pull completed. exec: No such file or directory",
+    "conclusion": "Image preparation completed, but neither shell invocation started. No Bazzite SceneWorks test passed or reached CUDA. The missing path/interpreter cause was not established."
+  },
+  "cleanup": "No machines listed after the ephemeral runs."
+}

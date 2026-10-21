@@ -23,6 +23,17 @@ async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
+const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
+function workflowExpression(block, field = "if") {
+  const expression = block.match(new RegExp(`^ +${field}: \\$\\{\\{ (.+) \\}\\}$`, "m"))?.[1];
+  assert.ok(expression, `workflow must retain an evaluable ${field}`);
+  return expression;
+}
+function evaluateWorkflow(expression, event, inputs = {}, steps = {}) {
+  const github = { event_name: event, repository: "SceneWorks/SceneWorks", event: { pull_request: { head: { repo: { full_name: "SceneWorks/SceneWorks" } } } } };
+  return Function("github", "inputs", "steps", "always", `return (${expression});`)(github, inputs, steps, () => true);
+}
+
 function workflowJob(workflow, name) {
   const marker = `  ${name}:\n`;
   const at = workflow.indexOf(marker);
@@ -812,10 +823,19 @@ test("persistent Qwen cache binding preserves existing snapshots and rejects unr
     await bindQwenPersistentCache({ ...env, ANCHORS_INPUT: "qwen_image_2_1:q4:mlx,qwen_image_2_1:bf16:mlx" });
     assert.equal(await readFile(path.join(snapshot, "preserve"), "utf8"), "immutable fixture");
     assert.equal(await readFile(githubEnv, "utf8"), `HF_CACHE_INPUT=${root}\nHF_CACHE_INPUT=${root}\n`);
+    // sc-25907: the distilled Turbo id shares the hub, alone or beside base, with its own anchors.
+    for (const accepted of [
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1_turbo:q8:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1 qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1:q4:mlx,qwen_image_2_1_turbo:bf16:mlx" },
+    ]) assert.equal(await bindQwenPersistentCache({ ...env, ...accepted }), root);
     for (const invalid of [
       { BACKEND: "candle" }, { MODELS_INPUT: "" }, { MODELS_INPUT: "qwen_image_2_1 flux" },
       { HF_CACHE_INPUT: "/Volumes/Models/huggingface/hub" }, { ANCHORS_INPUT: "flux:q4:mlx" },
       { ANCHORS_INPUT: "qwen_image_2_1:q4:candle" }, { HOME: "relative" },
+      // An anchor of a Qwen id the walk did not select is out of scope, in both directions.
+      { ANCHORS_INPUT: "qwen_image_2_1_turbo:q4:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1:q4:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1_turbo:q4:candle" },
     ]) await assert.rejects(() => bindQwenPersistentCache({ ...env, ...invalid }));
     const linkedHome = path.join(home, "linked-home");
     await mkdir(linkedHome);
@@ -1153,10 +1173,10 @@ test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU
   const worker = jobBlock(candle, candle.indexOf("  candle-worker:\n"));
   const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
   assert.match(worker, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
-  const route = worker.match(/^ {6}CUDA_VISIBLE_DEVICES: \$\{\{ github\.event_name == 'workflow_dispatch' && '([01])' \|\| '([01])' \}\}$/m);
-  assert.ok(route, "ordinary worker must make the event-specific device choice explicit");
+  const route = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
   for (const [event, expected] of [["pull_request", "1"], ["push", "1"], ["workflow_dispatch", "0"]]) {
-    assert.equal(event === "workflow_dispatch" ? route[1] : route[2], expected, event);
+    assert.equal(evaluateWorkflow(route, event), expected, event);
+    assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
   assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
@@ -1191,7 +1211,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda \}\}$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only \}\}$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
@@ -1202,7 +1222,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.doesNotMatch(jobCode, /HF_HUB_CACHE: /);
   // The ordinary lane stands down for this dispatch: it would share the measured GPU.
   const candleWorker = jobBlock(workflow, workflow.indexOf("  candle-worker:\n"));
-  assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda\)/m);
+  assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only\)/m);
   const ordinaryDispatchGuard = stepBody(candleWorker, "Refuse combined manual measurement profiles");
   assert.match(ordinaryDispatchGuard, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
   assert.match(ordinaryDispatchGuard, /RUN_YUE2_TERMINAL_CUDA: \$\{\{ inputs\.run_yue2_terminal_cuda \}\}/);
@@ -1655,7 +1675,7 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
   // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
   // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
-  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle$/m);
+  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
   assert.doesNotMatch(
     workflow,
     /cargo test -p sceneworks-memory-adapter --features candle --bin/,
@@ -2575,16 +2595,14 @@ test("both stage-1 lanes verify native capability content last among coverage, r
     const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
     const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
     for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
-      // The Candle lane publishes its fresh dump ONLY when verification failed, so the upload is
-      // diagnostic evidence for a red run rather than a per-PR measurement publication.
+      // Ordinary runs publish a failed comparison's diagnostics. The explicit CPU facts-only
+      // dispatch also retains a successful dump; neither case adds runtime work after verification.
       const candleFailureArtifact =
         path === ".github/workflows/windows-candle.yml" &&
         block.startsWith(
           "name: Upload fresh Candle capability facts after a verification failure",
         ) &&
-        /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
-          block,
-        );
+        block.includes(`if: \u0024{{ ${CANDLE_FACTS_UPLOAD_IF} }}`);
       if (candleFailureArtifact) continue;
       if (/^name: Upload fresh MLX capability facts/m.test(block)) {
         assert.match(block, /if: \$\{\{ always\(\) \}\}/);
@@ -2693,8 +2711,8 @@ test("both stage-1 lanes verify native capability content last among coverage, r
 //   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
 //     enumerated two-file spelling that silently produced an unusable artifact.
 //
-// The `if:` expression is deliberately spelled in both places: up there it is the condition under which
-// the carve-out is legitimate, here it is the failure-only guarantee itself.
+// The exact condition is shared with the carve-out; the facts-only truth table below additionally
+// proves that ordinary successful PR/push runs do not publish anything.
 test("Windows preserves fresh capability facts when content verification fails", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const verifyAt = workflow.indexOf(
@@ -2706,10 +2724,7 @@ test("Windows preserves fresh capability facts when content verification fails",
   assert.ok(verifyAt > 0 && uploadAt > verifyAt);
   const tail = workflow.slice(verifyAt, uploadAt + 1000);
   assert.match(tail, /id: verify_candle_capabilities/);
-  assert.match(
-    tail,
-    /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
-  );
+  assert.ok(tail.includes(`if: \u0024{{ ${CANDLE_FACTS_UPLOAD_IF} }}`));
   // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
   assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
@@ -2721,7 +2736,89 @@ test("Windows preserves fresh capability facts when content verification fails",
   // the artifact name the repair instructions actually tell you to download.
   assert.match(tail, /name: backend-capability-facts-candle/);
   assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
-  assert.match(tail, /if-no-files-found: warn/);
+  const missing = workflowExpression(tail, "if-no-files-found");
+  assert.equal(evaluateWorkflow(missing, "pull_request"), "warn");
+  assert.equal(evaluateWorkflow(missing, "workflow_dispatch", { capability_facts_only: true }), "error");
+});
+
+test("Windows facts-only capture hides CUDA and compiles both runtime test suites without execution", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.equal(dispatchInputs(workflow).defaults.capability_facts_only, "false");
+  assert.match(workflow, /capability_facts_only:\n[\s\S]*?type: boolean\n        default: false/);
+  const worker = workflowJob(workflow, "candle-worker");
+  const visible = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
+  assert.equal(evaluateWorkflow(visible, "workflow_dispatch", { capability_facts_only: true }), "-1");
+  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(visible, event, { capability_facts_only: true }), "1");
+  const profile = workflowExpression(worker, "CAPABILITY_FACTS_ONLY");
+  assert.equal(evaluateWorkflow(profile, "workflow_dispatch", { capability_facts_only: true }), true);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) assert.equal(Boolean(evaluateWorkflow(profile, event)), false);
+  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(profile, event, { capability_facts_only: true }), false);
+  for (const [name, command] of [
+    ["Test the candle GPU worker (backend-candle)", "cargo test -p sceneworks-worker --features backend-candle"],
+    ["Check and test the candle memory adapter (lib + memory-candle-adapter)", "cargo test -p sceneworks-memory-adapter --features candle"],
+  ]) {
+    const step = workflowStep(worker, name);
+    assert.ok(step.includes('set "capability_facts_test_args="'));
+    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          ${command} %capability_facts_test_args%`));
+    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("cargo test ")).map(line => line.trim()), [`${command} %capability_facts_test_args%`]);
+  }
+  assert.match(workflowStep(worker, "Check the candle sidecar builds (rust-api, backend-candle)"), /cargo check -p sceneworks-rust-api --features backend-candle/);
+  assert.match(workflowStep(worker, "Clippy (candle worker)"), /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
+  for (const name of ["Fetch the pinned inference release", "Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)", "Verify capabilities.candle.json content against a fresh dump"]) {
+    assert.equal(evaluateWorkflow(workflowExpression(workflowStep(worker, name)), "workflow_dispatch", { capability_facts_only: true }), true, name);
+  }
+});
+
+test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const worker = workflowJob(workflow, "candle-worker");
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"];
+  const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
+  const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
+  assert.match(refusal, /-contains 'true'/);
+  assert.match(refusal, /throw 'capability_facts_only cannot share a dispatch/);
+  for (const flag of flags) {
+    assert.ok(validation.includes(`${flag.toUpperCase()}: \u0024{{ inputs.${flag} }}`), flag);
+    assert.ok(refusal.includes(`$env:${flag.toUpperCase()}`), flag);
+  }
+  const mixed = { capability_facts_only: true, ...Object.fromEntries(flags.map(flag => [flag, true])) };
+  // Even a conflicting YuE2 flag reaches the fatal validator, while its separate GPU job cannot run.
+  assert.equal(evaluateWorkflow(workflowExpression(worker), "workflow_dispatch", mixed), true);
+  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "imported-nvfp4-worker-smoke"]) {
+    assert.equal(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", mixed), false, name);
+  }
+  const terminal = worker.split(/\n {6}- /).filter(block => /if: .*always\(\).*inputs\.run_epic_20738_terminal_cuda/.test(block));
+  assert.equal(terminal.length, 10, "every existing terminal always step must remain covered");
+  const successfulPrerequisites = Object.fromEntries(["node", "npm", "tests", "validation", "prefix", "python", "inference"].map(name => [`terminal_${name}`, { outcome: "success" }]));
+  for (const block of terminal) {
+    const expression = workflowExpression(block);
+    assert.equal(evaluateWorkflow(expression, "workflow_dispatch", mixed, successfulPrerequisites), false, block.split("\n")[0]);
+    assert.equal(evaluateWorkflow(expression, "workflow_dispatch", { ...mixed, capability_facts_only: false }, successfulPrerequisites), true);
+  }
+});
+
+test("Windows facts-only capture publishes real native dumps on success or mismatch without swallowing strict comparisons", async () => {
+  const worker = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
+  const verify = workflowStep(worker, "Verify capabilities.candle.json content against a fresh dump");
+  assert.match(verify, /cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle -- "%scratch%" \|\| exit \/b 1/);
+  assert.doesNotMatch(verify, /continue-on-error/);
+  assert.equal((verify.match(/node scripts\\compare-engine-capability-facts\.mjs/g) ?? []).length, 3);
+  assert.match(verify, /:capabilities_mismatch[\s\S]*?exit \/b 1/);
+  assert.match(verify, /:audio_mismatch[\s\S]*?exit \/b 1/);
+  assert.match(verify, /:runtime_mismatch[\s\S]*?exit \/b 1/);
+  const upload = workflowStep(worker, "Upload fresh Candle capability facts after a verification failure");
+  const condition = workflowExpression(upload);
+  assert.equal(condition, CANDLE_FACTS_UPLOAD_IF);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    for (const facts of [false, true]) {
+      for (const outcome of ["success", "failure", "skipped", "cancelled"]) {
+        const expected = outcome === "failure" || (event === "workflow_dispatch" && facts && outcome === "success");
+        assert.equal(evaluateWorkflow(condition, event, { capability_facts_only: facts }, { verify_candle_capabilities: { outcome } }), expected);
+      }
+    }
+  }
+  assert.match(upload, /name: backend-capability-facts-candle/);
+  assert.match(upload, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {
@@ -3740,7 +3837,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
   );
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 6\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 7\] = \[([\s\S]*?)\n\];/.exec(adapter);
   assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
   const consts = new Map(
     [...adapter.matchAll(/\bconst ([A-Z0-9_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
@@ -3749,8 +3846,8 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
   assert.deepEqual(
     members.map((member) => member.providerId),
-    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1"],
-    "the six turnkey members, in table order",
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1", "qwen_image_2_1_turbo"],
+    "the seven turnkey members, in table order",
   );
   for (const member of members) {
     const entry = manifest.models.find((model) => model.id === member.providerId);
@@ -3768,7 +3865,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     );
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
-  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true"]);
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true", "true"]);
 
   // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
   // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
@@ -3778,7 +3875,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
   // where it runs on the host that writes the arm and the mutation is killable before a push.
   const foldArm =
-    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
       .exec(adapter);
   assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
   assert.match(
@@ -3789,7 +3886,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
   assert.match(
     adapter,
-    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*None,\s*\) => spec,/,
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*None,\s*\) => spec,/,
     "the dense turnkey tier must bind no quant",
   );
   // The spec builder must be the pure function the Rust test can call — if the fold moves back

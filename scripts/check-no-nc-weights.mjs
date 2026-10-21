@@ -9,8 +9,7 @@
 // the moment we hand someone a copy of the weights — e.g. Anima (CircleStone Labs
 // Non-Commercial License v1.2, epic 10512), FLUX.1 [dev] / FLUX.2 (FLUX
 // Non-Commercial License), Ideogram 4 (Ideogram Non-Commercial Model Agreement),
-// Krea 2 (Krea Community License), and NVIDIA SANA (NVIDIA Open Model License /
-// NSCL). A "Derivative" under these licenses includes any converted or quantized
+// Krea 2 (Krea Community License), and NVIDIA PiD (NVIDIA License / NSCL). A "Derivative" under these licenses includes any converted or quantized
 // checkpoint and any LoRA/fine-tune.
 //
 // SceneWorks' posture side-steps all of the redistribution obligations by NEVER

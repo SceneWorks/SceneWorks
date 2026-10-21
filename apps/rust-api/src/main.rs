@@ -1,4 +1,11 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // A multi-rank Iris training job (sc-25689) re-enters this same binary once per rank (the MLX
+    // worker IS this binary); a rank process trains its rank and exits before anything else — the
+    // GPU check, the worker loop or the API — starts. Checked first: rank processes inherit the
+    // worker's environment, including SCENEWORKS_WORKER_ONLY.
+    if let Some(code) = sceneworks_worker::iris_rank_entry() {
+        std::process::exit(code);
+    }
     // The desktop app launches this same binary a second time as a standalone
     // GPU worker — the Apple-Silicon MLX worker (sc-3289) — by setting
     // SCENEWORKS_WORKER_ONLY=1. The binary already links the mlx-gen engine, so

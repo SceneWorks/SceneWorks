@@ -49,6 +49,10 @@ fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
         JobType::TrainingCaption => &[Repository("modelNameOrPath")],
         JobType::DatasetAnalysis => &[CatalogId("embedder")],
         JobType::LoraTrain | JobType::ControlTraining => &[CatalogId("baseModel")],
+        // A trained Iris depth / restoration model (`irisModel`, sc-25687 / sc-25688) is the model
+        // the job runs: its own catalog entry is the carrier (it carries its engine's depth
+        // admission declaration), in place of the release task entry (S6).
+        JobType::ImageDepth | JobType::ImageUpscale => &[CatalogId("irisModel")],
         _ => &[CatalogId("model"), CatalogId("modelId")],
     }
 }
@@ -58,12 +62,54 @@ fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
 /// manifest entries; adding a model or utility changes manifest data, not this seam.
 fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
     let payload_flag = |key: &str| payload.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // A trained Iris task model never loads the release task export, so the release entry is never
+    // attached for it — a disconnected library holding the release copy must not refuse a run that
+    // never reads it (S6). The trained entry itself rides via `payload_reference_spec`.
+    let trained_iris_model = |object: &JsonObject, release: &str| {
+        object
+            .get(sceneworks_core::image_restoration::IRIS_MODEL_KEY)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|model| !model.is_empty() && model != release)
+    };
     match job_type {
+        JobType::ImageDepth
+            if trained_iris_model(payload, sceneworks_core::depth_map::DEPTH_MODEL_ID) =>
+        {
+            Vec::new()
+        }
+        JobType::ImageUpscale
+            if payload
+                .get("engine")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::image_restoration::is_iris_engine)
+                && trained_iris_model(
+                    payload,
+                    sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+                ) =>
+        {
+            Vec::new()
+        }
+        JobType::ImageGenerate | JobType::ImageEdit
+            if payload
+                .get("upscale")
+                .and_then(Value::as_object)
+                .is_some_and(|upscale| {
+                    trained_iris_model(
+                        upscale,
+                        sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
+                    )
+                }) =>
+        {
+            Vec::new()
+        }
         JobType::ImageVqa | JobType::ImageInterleave => vec!["sensenova_u1_8b"],
         JobType::PersonDetect => vec!["person_detector"],
         JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
         JobType::PoseDetect => vec!["dwpose_pose_detector"],
         JobType::ImageSegment | JobType::DatasetSubjectMask => vec!["sam3_person_segment"],
+        // sc-25682: the Iris depth task export — its own resource closure, no text encoder.
+        JobType::ImageDepth => vec![sceneworks_core::depth_map::DEPTH_MODEL_ID],
         // sc-2124: a training run whose images still lack subject masks generates them with SAM3
         // before it trains (the route's `subjectMaskPrepass`).
         JobType::LoraTrain if payload.contains_key("subjectMaskPrepass") => {
@@ -79,15 +125,35 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
         }
         JobType::VideoUpscale => vec!["seedvr2_upscaler"],
         JobType::ImageUpscale => {
-            let seedvr2 = payload
+            let engine = payload
                 .get("engine")
                 .and_then(Value::as_str)
-                .is_some_and(|engine| engine.eq_ignore_ascii_case("seedvr2"));
-            vec![if seedvr2 {
+                .unwrap_or_default();
+            vec![if engine.eq_ignore_ascii_case("seedvr2") {
                 "seedvr2_upscaler"
+            } else if sceneworks_core::image_restoration::is_iris_engine(engine) {
+                // Iris restoration runs from its OWN task entry (sc-25683): the `upscaler/` export
+                // alone — never the generation backbone or its text encoder.
+                sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID
             } else {
                 "real_esrgan"
             }]
+        }
+        // The Image Studio inline post-processing pass with the Iris engine carries the restoration
+        // task as well as the generation model (sc-25683).
+        JobType::ImageGenerate | JobType::ImageEdit
+            if payload
+                .get("upscale")
+                .and_then(Value::as_object)
+                .is_some_and(|upscale| {
+                    upscale.get("enabled").and_then(Value::as_bool) == Some(true)
+                        && upscale
+                            .get("engine")
+                            .and_then(Value::as_str)
+                            .is_some_and(sceneworks_core::image_restoration::is_iris_engine)
+                }) =>
+        {
+            vec![sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID]
         }
         JobType::DatasetUpscale => vec!["real_esrgan"],
         JobType::PromptRefine

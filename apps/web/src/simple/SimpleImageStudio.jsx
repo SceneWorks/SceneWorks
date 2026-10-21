@@ -32,9 +32,10 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
+import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
-  QWEN_IMAGE_2_1_MODEL_ID,
+  qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
@@ -72,6 +73,9 @@ const TIER_SCREEN = "image";
 export function SimpleImageStudio() {
   const {
     imageModels = [],
+    // The whole catalog (sc-25908): the Qwen rewriters are `type: "utility"` entries, which
+    // `imageModels` (generation pickers only) never contains.
+    models: catalogModels = [],
     macCapabilities,
     createImageJob,
     rememberLocalGenerationJob,
@@ -272,6 +276,9 @@ export function SimpleImageStudio() {
   // controls. Simple hid them from every model; that was a surface decision, not a capability one.
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // sc-25679: the negative prompt is the CFG unconditional for a model declaring
+  // `image.negativePromptRequiresGuidance` (Iris-3B), whose engine refuses one at guidance 1.0.
+  const negativePromptCfgOff = negativePromptInertAtGuidance(selectedModel, guidance);
 
   // The model's own free-size envelope, shared with the full studio so the two shells cannot
   // disagree about what is legal. For a model that declares nothing this is the blanket
@@ -285,6 +292,7 @@ export function SimpleImageStudio() {
     heightOverride: nativeControls ? heightOverride : "",
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
+  const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
@@ -303,12 +311,12 @@ export function SimpleImageStudio() {
     [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
   );
   const qwenRewriteModel = useMemo(() => {
-    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
+    if (!qwenRewriterAppliesTo(selectedModel)) return null;
     const id = qwenRewriteReferenceIds.length
       ? QWEN_REWRITE_I2I_MODEL_ID
       : QWEN_REWRITE_T2I_MODEL_ID;
-    return imageModels.find((entry) => entry.id === id) ?? null;
-  }, [imageModels, selectedModel?.id, qwenRewriteReferenceIds.length]);
+    return catalogModels.find((entry) => entry.id === id) ?? null;
+  }, [catalogModels, selectedModel, qwenRewriteReferenceIds.length]);
   const qwenRewriteAvailable =
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&
@@ -405,7 +413,8 @@ export function SimpleImageStudio() {
         // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
         steps: nativeControls ? steps : "",
         seed: nativeControls ? seed : "",
-        negativePrompt: nativeControls && supportsNegativePrompt ? negativePrompt : "",
+        negativePrompt:
+          nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
         guidance: nativeControls && supportsGuidance ? guidance : "",
         width: dimensionEval.width,
         height: dimensionEval.height,
@@ -610,6 +619,12 @@ export function SimpleImageStudio() {
             title="Size & aspect"
             value={resolutionText}
           />
+          {/* sc-25681: the same informational patch-grid hint Image Studio shows — never a limit. */}
+          {patchGridNotice ? (
+            <span className="field-hint patch-grid-hint" role="note">
+              {patchGridNotice}
+            </span>
+          ) : null}
         </div>
         <Chips label="Variations" onChange={setVariations} options={variationOptions} value={variations} />
         {/* sc-24113 — native transparency. Simple exposes the model, so it exposes the toggle; it
@@ -724,7 +739,7 @@ export function SimpleImageStudio() {
               id="su-image-steps"
               // The MODEL's floor, not a hardcoded 1 — the enqueue gate refuses below it.
               min={String(minStepsForModel(selectedModel))}
-              max="80"
+              max={String(maxStepsForModel(selectedModel))}
               onChange={(event) => setSteps(event.target.value)}
               placeholder={String(selectedModel?.defaults?.steps ?? "")}
               type="number"
@@ -763,11 +778,23 @@ export function SimpleImageStudio() {
               <label htmlFor="su-image-negative">Negative prompt</label>
               <textarea
                 className="su-textarea"
+                disabled={negativePromptCfgOff}
                 id="su-image-negative"
                 onChange={(event) => setNegativePrompt(event.target.value)}
-                placeholder="What must NOT appear"
+                placeholder={
+                  negativePromptCfgOff
+                    ? "Applies only with guidance above 1.0 for this model"
+                    : "What must NOT appear"
+                }
                 value={negativePrompt}
               />
+              {negativePromptCfgOff ? (
+                // The same visible reason Image Studio gives: a disabled box holding text the user
+                // typed is otherwise a silent drop.
+                <span className="field-hint">
+                  The negative prompt only applies with guidance above 1.0 for this model.
+                </span>
+              ) : null}
             </div>
           ) : null}
           <div className="su-field su-free-size">

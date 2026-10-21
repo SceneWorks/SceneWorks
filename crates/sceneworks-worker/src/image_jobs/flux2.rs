@@ -855,6 +855,7 @@ async fn generate_flux2_edit_stream(
         (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
     );
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         conditioning_windows: None,
         width,
         height,
@@ -876,6 +877,8 @@ async fn generate_flux2_edit_stream(
         reference_count: provider_reference_count,
         use_pid,
         has_phases: false,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         engine_id,
@@ -1432,6 +1435,7 @@ async fn generate_flux2_dev_control_stream(
         None => memory_plan,
     };
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         conditioning_windows: None,
         width,
         height,
@@ -1453,6 +1457,8 @@ async fn generate_flux2_dev_control_stream(
         reference_count: 1,
         use_pid: false,
         has_phases: false,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
@@ -1728,6 +1734,7 @@ mod flux2_dev_admission_tests {
             context,
             decode_quality_decisions: Vec::new(),
             process_limit_bytes: None,
+            prefix_kv_cache: None,
         }
     }
 

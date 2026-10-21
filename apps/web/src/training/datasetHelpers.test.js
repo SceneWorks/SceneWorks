@@ -91,6 +91,38 @@ it("preserves prepared bundle extras and stable item ids across dataset saves", 
   });
 });
 
+// sc-25685: per-item named captions. A saved item keeps its stored map; a fresh import carries the
+// map parsed from its `.json` sidecar.
+it("keeps a saved item's named captions and attaches an imported item's", () => {
+  const activeDataset = {
+    id: "ds1",
+    items: [{ id: "item_1", assetId: "asset-a", caption: { text: "one" }, captions: { short: "one" } }],
+  };
+  const payload = datasetPayload({
+    activeDataset,
+    assetsById: new Map([
+      ["asset-a", { id: "asset-a", displayName: "a" }],
+      ["asset-b", { id: "asset-b", displayName: "b", datasetOnly: true, file: { path: "p/b.png" } }],
+    ]),
+    namedCaptionsById: { "asset-b": { tags: "x, y" } },
+    name: "Named",
+    selectedAssetIds: ["asset-a", "asset-b"],
+  });
+  expect(payload.items[0].captions).toEqual({ short: "one" });
+  expect(payload.items[1].captions).toEqual({ tags: "x, y" });
+});
+
+it("adds no captions key to an item without named captions", () => {
+  const payload = datasetPayload({
+    activeDataset: null,
+    assetsById: new Map([["asset-a", { id: "asset-a", displayName: "a" }]]),
+    namedCaptionsById: { "asset-a": {} },
+    name: "Plain",
+    selectedAssetIds: ["asset-a"],
+  });
+  expect(payload.items[0]).not.toHaveProperty("captions");
+});
+
 describe("selectionAfterDuplicateRemoval (sc-6539 one-tap dedupe mapping)", () => {
   // Mix of catalog-backed items (selection key = assetId) and a dataset-owned item (no assetId, so the
   // key is the synthesized `dataset-item:<dsid>:<itemid>` — the case most at risk of a mapping miss).

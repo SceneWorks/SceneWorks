@@ -628,6 +628,41 @@ pub(crate) fn manifest_measured_pixels(manifest: &JsonObject<String, Value>) -> 
         .unwrap_or(MANIFEST_ROW_DEFAULT_MEASURED_PIXELS)
 }
 
+/// The geometry the derivation law prices for one request (sc-25690).
+///
+/// Normally the request's own. An entry that DECLARES its per-megapixel activation term
+/// (`candle.imageActivationGbPerMegapixel` — Iris-3B) has every image of a native prompt batch and
+/// every megapixel beyond the ONE image at 1024² its floors carry charged by
+/// `lane_controls::declared_activation_overlay_bytes`, which reaches every candidate here as
+/// `runtime_overlay_bytes`. The law scales an anchor's activation residue by the request's batch
+/// and area too, so pricing such an entry at the request's own geometry would charge the same
+/// activations twice: once declared, once derived. For a declaring entry the law therefore prices
+/// one image at no more than the floors' area, and the declared term carries the rest.
+///
+/// The admitted `MemoryGeometry` the provider's request scope receives is NOT this value — it
+/// stays the request's own, because the scope bounds the images a request may render by `batch`.
+fn law_geometry(manifest: &JsonObject<String, Value>, geometry: MemoryGeometry) -> MemoryGeometry {
+    if crate::image_jobs::declared_activation_gb_per_megapixel(manifest).is_none() {
+        return geometry;
+    }
+    let floor_pixels = crate::image_jobs::DECLARED_ACTIVATION_FLOOR_PIXELS;
+    let pixels = u64::from(geometry.width) * u64::from(geometry.height);
+    let (width, height) = if pixels > floor_pixels {
+        let edge = u32::try_from(floor_pixels.isqrt())
+            .unwrap_or(u32::MAX)
+            .max(1);
+        (edge, edge)
+    } else {
+        (geometry.width, geometry.height)
+    };
+    MemoryGeometry {
+        width,
+        height,
+        batch: 1,
+        ..geometry
+    }
+}
+
 fn scale_ideogram_hires_envelope(
     engine_id: &str,
     mode: &MemoryMode,
@@ -666,6 +701,10 @@ pub(crate) struct CandleMemoryEvaluation {
     /// The selector's own admission figures, so telemetry agrees with the selector by
     /// construction rather than by re-derivation.
     pub admitted: AdmittedBudget,
+    /// What the admission decided about the provider's prefix KV cache (epic 25899): `None` for
+    /// every provider that prices none. A `Cached` plan is already written onto [`Self::memory`]
+    /// and counted in `context.predicted_peak_bytes` / [`Self::predicted_peak_gb`].
+    pub prefix_kv_cache: Option<crate::execution_planner::PrefixKvCachePlan>,
 }
 
 /// Stable telemetry spelling of a rung, matching the `image_memory_strategy_selected` event the
@@ -740,6 +779,10 @@ impl CandleMemoryEvaluation {
             "availableGb": self.admitted.available_gb,
             "reserveGb": self.admitted.reserve_gb,
             "evidenceRevision": self.context.evidence_revision.clone(),
+            "prefixKvCache": self.prefix_kv_cache.map(|plan| serde_json::json!({
+                "selected": plan.mode.label(),
+                "pricedBytes": plan.priced_bytes,
+            })),
         })
     }
 }
@@ -1394,8 +1437,11 @@ fn synthesize_estimate_floors(
     // currency are the only guards left, and a cell with no anchor row falls through to
     // `floor_anchor` below -- the contract-only per-rung ladder (sc-22664), never a bare
     // manifest scalar repeated across every rung.
+    // The geometry the LAW prices — the request's own, except where the manifest's declared
+    // activation term already charges the batch and the area (see `law_geometry`).
+    let law = law_geometry(manifest, geometry);
     let anchor = candle_image_anchor(
-        anchors, engine_id, model_id, contract, tier_key, mode, overlay, geometry,
+        anchors, engine_id, model_id, contract, tier_key, mode, overlay, law,
     );
     let components = crate::video_admission::anchor_component_bytes(contract.asset_facts);
     // The contract-only basis for a staged composition with no anchor: the staged row treated as
@@ -1436,9 +1482,9 @@ fn synthesize_estimate_floors(
         // Every rung is priced from THIS, never from the staged rung's number (sc-22664).
         let regime = request_regime(&engaged, &parameters);
         let request = |regime: RequestRegime| ImageDeriveRequest {
-            width: geometry.width,
-            height: geometry.height,
-            batch: geometry.batch.max(1),
+            width: law.width,
+            height: law.height,
+            batch: law.batch.max(1),
             conditioning_tokens: None,
             regime,
         };
@@ -1840,6 +1886,56 @@ fn memory_for_selection(
     })
 }
 
+/// [`evaluate_shared_image`] with the provider's prefix-KV-cache surcharge priced in (epic 25899):
+/// `prefix_kv_cache_surcharge` is `execution_planner::prefix_kv_cache_surcharge_bytes` for the
+/// request, and it is added rung-for-rung (`execution_planner::plan_prefix_kv_cache`): the shed
+/// ladder picks the rung exactly as before, and the cache is taken only when that rung also fits it.
+/// `None` is exactly [`evaluate_shared_image`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_image_priced(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_dispatch(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        prefix_kv_cache_surcharge,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_shared_image(
     engine_id: &'static str,
@@ -1860,6 +1956,51 @@ pub(crate) fn evaluate_shared_image(
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_dispatch(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shared_image_dispatch(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let (contract_override, provider_overlay_override, provider_mode_override) =
         if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Eligible {
@@ -1923,7 +2064,7 @@ pub(crate) fn evaluate_shared_image(
         .then(|| sdxl_provider_overlay(spec))
         .flatten();
     let provider_overlay = exact_sdxl_overlay.as_deref().or(provider_overlay);
-    evaluate_shared_image_inner(
+    evaluate_shared_image_inner_priced(
         engine_id,
         model_id,
         spec,
@@ -1947,6 +2088,7 @@ pub(crate) fn evaluate_shared_image(
         contract_override,
         None,
         None,
+        prefix_kv_cache_surcharge,
     )
 }
 
@@ -2131,6 +2273,61 @@ fn evaluate_shared_image_inner(
     contract_override: Option<gen_core::MemoryProviderContract>,
     request_evidence_revision_override: Option<&'static str>,
     ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_inner_priced(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        provider_overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        worker_multipass,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        provider_mode_override,
+        contract_override,
+        request_evidence_revision_override,
+        ladder_anchors_override,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shared_image_inner_priced(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    provider_overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    worker_multipass: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    provider_mode_override: Option<&str>,
+    contract_override: Option<gen_core::MemoryProviderContract>,
+    request_evidence_revision_override: Option<&'static str>,
+    ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
+    prefix_kv_cache_surcharge: Option<u64>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
@@ -2470,13 +2667,78 @@ fn evaluate_shared_image_inner(
             || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
     };
     let reserve_charge = crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&pad_carrying);
-    let selected = crate::memory_strategy::select_strategy_charging(
-        request_scope,
-        &contract,
-        selector_budget,
-        &candidates,
-        reserve_charge,
+    // Epic 25899: the provider's prefix KV cache, added rung-for-rung. The ladder runs first at the
+    // shed demand — exactly the pre-cache admission, which picks the rung — and the cache is taken
+    // only if that SAME rung (`only_rung`) also fits with the surcharge on its peak, under the same
+    // budget and pad rule. The cache never moves a request to another rung. `None` runs the ladder
+    // once, unchanged.
+    let run_ladder = |extra_bytes: u64, only_rung: Option<MemorySelection>| -> Selection {
+        let on_rung =
+            |candidate: &&Candidate<'_>| only_rung.is_none_or(|rung| candidate.selection == rung);
+        if extra_bytes == 0 && only_rung.is_none() {
+            return crate::memory_strategy::select_strategy_charging(
+                request_scope,
+                &contract,
+                selector_budget,
+                &candidates,
+                reserve_charge,
+            );
+        }
+        let kept = candidates.iter().filter(on_rung).collect::<Vec<_>>();
+        let surcharged = kept
+            .iter()
+            .map(|candidate| {
+                let mut evidence = candidate.evidence.clone();
+                evidence.predicted_peak_bytes =
+                    evidence.predicted_peak_bytes.saturating_add(extra_bytes);
+                evidence
+            })
+            .collect::<Vec<_>>();
+        let surcharged_candidates = kept
+            .iter()
+            .zip(&surcharged)
+            .map(|(candidate, evidence)| Candidate {
+                evidence,
+                ..**candidate
+            })
+            .collect::<Vec<_>>();
+        // The pad rule follows each candidate from the original list: the resident live estimate
+        // and every estimate floor carry their pad.
+        let carries_pad = kept
+            .iter()
+            .map(|candidate| pad_carrying(candidate))
+            .collect::<Vec<_>>();
+        let surcharged_pad_carrying = |candidate: &Candidate<'_>| {
+            surcharged
+                .iter()
+                .position(|evidence| std::ptr::eq(candidate.evidence, evidence))
+                .is_some_and(|index| carries_pad[index])
+        };
+        crate::memory_strategy::select_strategy_charging(
+            request_scope,
+            &contract,
+            selector_budget,
+            &surcharged_candidates,
+            crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&surcharged_pad_carrying),
+        )
+    };
+    let (selected, prefix_kv_cache) = crate::execution_planner::plan_prefix_kv_cache(
+        prefix_kv_cache_surcharge,
+        run_ladder(0, None),
+        |selection| matches!(selection, Selection::Selected { .. }),
+        |shed, priced_bytes| {
+            let Selection::Selected {
+                selection: rung, ..
+            } = shed
+            else {
+                return None;
+            };
+            let cached = run_ladder(priced_bytes, Some(*rung));
+            matches!(&cached, Selection::Selected { selection, .. } if selection == rung)
+                .then_some(cached)
+        },
     );
+    let prefix_kv_cache_extra = prefix_kv_cache.map_or(0, |plan| plan.admitted_surcharge_bytes());
     let Selection::Selected {
         selection,
         needed_gb,
@@ -2553,7 +2815,11 @@ fn evaluate_shared_image_inner(
             },
         }
     };
-    let selected_context = context_for(selection, selected_evidence, estimate_scoped);
+    let mut selected_context = context_for(selection, selected_evidence, estimate_scoped);
+    // The demand the admission approved: a cached selection was graded at shed + surcharge.
+    selected_context.predicted_peak_bytes = selected_context
+        .predicted_peak_bytes
+        .saturating_add(prefix_kv_cache_extra);
 
     // A loaded Sequential cache entry is a tighter peak shape than a new Resident request. Keep an
     // exact, independently selected staged sibling so the cache callback can honor that already
@@ -2599,9 +2865,18 @@ fn evaluate_shared_image_inner(
     } else {
         None
     };
+    let mut memory = memory_for_selection(&contract, selection);
+    if let Some(plan) = prefix_kv_cache.filter(|plan| plan.mode.is_cached()) {
+        // A Resident selection has no block; an admitted cached selection needs one to live in.
+        plan.write_onto(memory.get_or_insert_with(GenerationMemory::default));
+    }
     Ok(Some(CandleMemoryEvaluation {
-        memory: memory_for_selection(&contract, selection),
-        predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
+        memory,
+        prefix_kv_cache,
+        predicted_peak_gb: selected_evidence
+            .predicted_peak_bytes
+            .saturating_add(prefix_kv_cache_extra) as f64
+            / BYTES_PER_GIB,
         context: selected_context,
         warm_staged,
         basis: selected_estimate.map_or(
@@ -3811,6 +4086,158 @@ mod tests {
             assert!(candle["vramGbByTier"]["q4"] != candle["vramGbByTier"]["q8"]);
             assert!(candle["vramGbByTier"]["q8"] != candle["vramGbByTier"]["bf16"]);
         }
+    }
+
+    /// Epic 25899, through the Candle priced ladder (`evaluate_shared_image_inner_priced`): the
+    /// prefix KV cache is added rung-for-rung and never refuses an admissible request.
+    ///
+    /// The receipt-priced Chroma ladder (a 25 GiB resident receipt above an 18 GiB staged floor,
+    /// both pad-carrying) is admitted twice at every budget on a scan — once with no cache (`None`,
+    /// today's admission) and once with a 2 GiB surcharge — so each budget is graded against its own
+    /// shed twin:
+    ///
+    /// * at EVERY admitted budget the priced admission runs the shed twin's rung;
+    /// * (b) that rung also fits cached → `Cached` written onto the memory block (a Resident
+    ///   selection, which has no block, gets one), the context's peak and `predicted_peak_gb` the
+    ///   shed peak PLUS the surcharge, and the same unreserved pool (the pad rule follows the
+    ///   candidate into the surcharged pass);
+    /// * (a) it fits only shed → `Prefill` on it, identical to the no-cache admission — including
+    ///   on Resident at budgets where staged + cache fits (every budget at or above the lowest one
+    ///   the scan admitted `Cached` on staged);
+    /// * (c) fits neither → refused with the no-cache admission's own error.
+    ///
+    /// *Mutations that red this:* letting the cached pass pick any rung (the (a) budgets then run
+    /// staged `Cached`); skipping the cached attempt (no `Cached` band); charging the reserve to the
+    /// surcharged pad-carrying candidates (the pool assertion); dropping the surcharge from the
+    /// context or `predicted_peak_gb`; dropping `write_onto` on a Resident selection.
+    #[test]
+    fn candle_prefix_kv_cache_keeps_the_shed_rung_and_never_refuses_an_admissible_request() {
+        let identity = format!("{CHROMA_ADAPTER_OVERLAY_PREFIX}{}", "a".repeat(64));
+        let contract = chroma_probe_contract(Some(&identity), gib(2), gib(3));
+        let manifest = chroma_structural_manifest();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-chroma-q4")))
+            .with_resolved_route("chroma1_base");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let surcharge = gib(2);
+        let evaluate = |free_gb: f64, surcharge: Option<u64>| {
+            let budget = Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            });
+            evaluate_shared_image_inner_priced(
+                "chroma1_base",
+                "chroma1_base",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                Some("lora"),
+                Some("lora"),
+                geometry,
+                false,
+                true,
+                false,
+                false,
+                budget,
+                reserve_for(budget),
+                crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
+                gib(80),
+                MemoryCacheState::Cold,
+                None,
+                Some(contract.clone()),
+                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                None,
+                surcharge,
+            )
+        };
+        let mut lowest_staged_cached = f64::INFINITY;
+        let mut resident_prefill = Vec::new();
+        let (mut cached, mut refused) = (0, 0);
+        for step in 0..=400u32 {
+            let free_gb = 40.0 - f64::from(step) * 0.1;
+            match (evaluate(free_gb, None), evaluate(free_gb, Some(surcharge))) {
+                (Err(shed), Err(priced)) => {
+                    assert_eq!(priced.to_string(), shed.to_string(), "(c) at {free_gb}");
+                    refused += 1;
+                }
+                (Ok(None), Ok(None)) => refused += 1,
+                (Ok(Some(shed)), Ok(Some(priced))) => {
+                    assert_eq!(shed.prefix_kv_cache, None, "no surcharge, no plan");
+                    assert_eq!(
+                        priced.context.selection, shed.context.selection,
+                        "the cache never changes which rung a request runs on (at {free_gb})"
+                    );
+                    let plan = priced
+                        .prefix_kv_cache
+                        .expect("a priced request records its plan");
+                    assert_eq!(plan.priced_bytes, surcharge);
+                    let strategy = shed.context.selection.strategy;
+                    match plan.mode {
+                        gen_core::PrefixKvCacheMode::Cached => {
+                            assert_eq!(
+                                priced.memory.and_then(|memory| memory.prefix_kv_cache),
+                                Some(gen_core::PrefixKvCacheMode::Cached),
+                                "(b) the cached selection rides the memory block ({strategy:?})"
+                            );
+                            assert_eq!(
+                                priced.context.predicted_peak_bytes,
+                                shed.context.predicted_peak_bytes + surcharge,
+                                "(b) the context states the cached demand the admission approved"
+                            );
+                            assert!(
+                                (priced.predicted_peak_gb
+                                    - (shed.predicted_peak_gb + surcharge as f64 / BYTES_PER_GIB))
+                                    .abs()
+                                    < 1e-9,
+                                "(b) predicted_peak_gb carries the surcharge"
+                            );
+                            assert_eq!(
+                                priced.admitted.available_gb, shed.admitted.available_gb,
+                                "(b) a pad-carrying candidate stays on the unreserved pool when surcharged"
+                            );
+                            assert!(priced.admitted.needed_gb > shed.admitted.needed_gb);
+                            if strategy == MemoryStrategy::StagedResidency {
+                                lowest_staged_cached = lowest_staged_cached.min(free_gb);
+                            }
+                            cached += 1;
+                        }
+                        gen_core::PrefixKvCacheMode::Prefill => {
+                            assert_eq!(priced.memory, shed.memory, "prefill writes nothing");
+                            assert_eq!(priced.context, shed.context, "the no-cache admission");
+                            assert_eq!(priced.predicted_peak_gb, shed.predicted_peak_gb);
+                            assert_eq!(priced.admitted, shed.admitted);
+                            if strategy == MemoryStrategy::Resident {
+                                resident_prefill.push(free_gb);
+                            }
+                        }
+                    }
+                }
+                (shed, priced) => panic!(
+                    "pricing the cache changed admissibility at {free_gb}: shed admitted={}, \
+                     priced admitted={}",
+                    matches!(shed, Ok(Some(_))),
+                    matches!(priced, Ok(Some(_)))
+                ),
+            }
+        }
+        assert!(
+            cached > 0 && refused > 0,
+            "cached={cached} refused={refused}"
+        );
+        assert!(
+            resident_prefill
+                .iter()
+                .any(|free_gb| *free_gb >= lowest_staged_cached),
+            "(a) the scan must hold a budget where Resident runs Prefill although staged + cache \
+             fits: resident prefill at {resident_prefill:?}, lowest staged cached {lowest_staged_cached}"
+        );
     }
 
     #[test]

@@ -63,6 +63,7 @@ export function videoGenerateValidation({
   // package set. The studio derives the actionable reason from the exact active lane and passes it
   // here so the visible summary and Generate gate remain one authority.
   executionTierBlockMessage = null,
+  vedaBlockMessage = null,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -129,6 +130,9 @@ export function videoGenerateValidation({
         "An audio reference can't be the only reference — add a reference image or video clip. Audio conditions the soundtrack, not the picture.",
       ),
     );
+  }
+  if (vedaBlockMessage) {
+    issues.push(issue.error(null, vedaBlockMessage));
   }
   if (executionTierBlockMessage) {
     issues.push(issue.error(null, executionTierBlockMessage));

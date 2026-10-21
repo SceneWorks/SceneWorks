@@ -427,6 +427,31 @@ pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Genera
     media().load(id, spec)
 }
 
+/// Load a non-prompt image→image [`gen_core::Transform`] (restoration / upscaling) by id from the
+/// media registry — the Iris-3B restorer `iris_3b_restore` (sc-25683). A build that links no native
+/// bundle has an empty registry, so this is a typed "no transform registered" error there.
+pub(crate) fn load_transform(
+    id: &str,
+    spec: &LoadSpec,
+) -> gen_core::Result<Box<dyn gen_core::Transform>> {
+    media().load_transform(id, spec)
+}
+
+/// The registered descriptor of a media transform, if this build links one.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+pub(crate) fn transform_descriptor(id: &str) -> Option<gen_core::TransformDescriptor> {
+    media()
+        .transforms()
+        .map(|registration| (registration.descriptor)())
+        .find(|descriptor| descriptor.id == id)
+}
+
 /// Resolve one validated imported source shape and operation to the ordinary provider descriptor
 /// that will load it. Missing is an explicit unsupported answer; callers must not union sibling
 /// routes by family.

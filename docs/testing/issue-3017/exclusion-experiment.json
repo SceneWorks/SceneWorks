@@ -1,0 +1,49 @@
+{
+  "source": "SceneWorks_0.9.0_amd64.AppImage",
+  "candidate": "SceneWorks_0.9.0_without-host-nvidia.AppImage",
+  "candidate_sha256": "cc249c25c7c32f76d2f331d50def8679850497e0263a75cebc138dfd37ee0420",
+  "candidate_size": 932862456,
+  "excluded": [
+    "usr/lib/libcuda.so.1"
+  ],
+  "runtime_bytes_preserved": 944632,
+  "command": [
+    "/home/sceneworks/sc3017/repack-tool/squashfs-root/usr/bin/appimagetool",
+    "--no-appstream",
+    "--runtime-file",
+    "/home/sceneworks/sc3017/exclusion-experiment/original-runtime",
+    "--exclude-file",
+    "/home/sceneworks/sc3017/exclusion-experiment/excluded-driver-libraries.txt",
+    "--mksquashfs-opt=-processors",
+    "--mksquashfs-opt=4",
+    "/home/sceneworks/sc3017/v090/squashfs-root",
+    "/home/sceneworks/sc3017/exclusion-experiment/SceneWorks_0.9.0_without-host-nvidia.AppImage"
+  ],
+  "original_regression_check": {
+    "exit_code": 1,
+    "report": {
+      "passed": false,
+      "forbidden": [
+        "usr/lib/libcuda.so.1"
+      ]
+    }
+  },
+  "candidate_regression_check": {
+    "exit_code": 0,
+    "report": {
+      "passed": true,
+      "forbidden": []
+    }
+  },
+  "content_comparison": {
+    "removed": [
+      "usr/lib/libcuda.so.1"
+    ],
+    "added": [],
+    "changed": [],
+    "unchanged_entries": 720
+  },
+  "candidate_gpu_report": "excluded-appimage-gpu.json",
+  "candidate_gpu_check_exit_code": 0,
+  "injected_803_detected": true
+}

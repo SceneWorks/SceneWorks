@@ -1,0 +1,253 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "speridlabs/iris-3b",
+        "resolvedRevision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "iris-3b-restore-mlx-derived-2026-10-12-v1",
+      "capturedAt": "2026-10-13T17:08:19Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:iris-3b-restore-resident",
+        "blockers": [
+          "the pinned Iris-3B MLX crate exposes no calibration fault-injection site (generation opens a memory-strategy request scope; the depth and restoration requests carry no memory block and open none), so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 6016735248
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 6016735248
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 7855937624
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 6083844112
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 12385288626
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 7855937624
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 6083844112
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 157118752
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 7855937624
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 6083844112
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 91
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 2048
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 1536
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "iris-3b-restore-mlx-bf16-2048x1536-seed25690-tiled1",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "27.0.1",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9b73dd1f3832bdbd693c",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "speridlabs/iris-3b@7445443349bc9abe3c96f01ff793e2098ca012b3:upscaler",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4c73e20f9f881d26d02f",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 6016735248,
+          "allocatorBytes": 6016735248,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 6083844112,
+          "allocatorBytes": 6083844112,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 7855937624,
+          "allocatorBytes": 12385288626,
+          "reclaimableBytes": 4529351002
+        },
+        "overall": {
+          "activeBytes": 7855937624,
+          "allocatorBytes": 12385288626,
+          "reclaimableBytes": 4529351002
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 6375342080,
+        "decode": 6442450944,
+        "denoise": 13019119616,
+        "overall": 13019119616
+      },
+      "quality": {
+        "contract": "identical artifact, request, geometry, tier, and loaded model; cold measured run versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "2b8a6589c66be2b057997f95f10a17d1c36ba3793472f19c25a695c82e1515f4",
+          "dirty": false,
+          "revision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:22bd108093645275193ce81810f49499ed74daecdf32af1dfe8eb6d274a9290c",
+          "revision": "823456f42e6b9eeda8a3784b8666acaa9fd6d644"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 13019119616,
+          "name": "exact_fit",
+          "predictedBytes": 13019119616,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned Iris-3B MLX crate exposes no calibration fault-injection site (generation opens a memory-strategy request scope; the depth and restoration requests carry no memory block and open none), so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned Iris-3B MLX crate exposes no calibration fault-injection site (generation opens a memory-strategy request scope; the depth and restoration requests carry no memory block and open none), so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned Iris-3B MLX crate exposes no calibration fault-injection site (generation opens a memory-strategy request scope; the depth and restoration requests carry no memory block and open none), so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the iris_3b_restore resident path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1536,
+          "width": 2048
+        },
+        "mode": "restoration",
+        "modelId": "iris_3b_restore",
+        "overlay": "none",
+        "provider": "iris_3b_restore",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

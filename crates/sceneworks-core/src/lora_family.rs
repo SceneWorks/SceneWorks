@@ -2493,11 +2493,22 @@ pub struct AdapterFileMetadata {
     /// LoRA/LoKr alpha. `None` when the file does not declare one — **not** silently equal to
     /// `rank`, which is only the *loader's* last-resort scaling fallback, never a recorded fact.
     pub alpha: Option<f64>,
+    /// The Iris TASK the adapter was trained for (`irisTask` stamp: `generation` / `depth` /
+    /// `restoration`, sc-25681). The three Iris task backbones share one architecture, so this
+    /// stamp is the only witness of which task an adapter belongs to.
+    pub iris_task: Option<String>,
+    /// The base model id an Iris adapter's `baseModel` stamp names. Read ONLY alongside an
+    /// `irisTask` stamp, so no other family's import is described differently than before.
+    pub iris_base_model: Option<String>,
 }
 
 impl AdapterFileMetadata {
     pub fn is_empty(&self) -> bool {
-        self.network_type.is_none() && self.rank.is_none() && self.alpha.is_none()
+        self.network_type.is_none()
+            && self.rank.is_none()
+            && self.alpha.is_none()
+            && self.iris_task.is_none()
+            && self.iris_base_model.is_none()
     }
 }
 
@@ -2553,6 +2564,18 @@ pub fn apply_adapter_metadata_to_manifest_entry(
     }
     if let Some(alpha) = metadata.alpha {
         entry.entry("alpha").or_insert_with(|| json!(alpha));
+    }
+    // The Iris task identity (sc-25681): what Image Studio's picker and the API's compatibility
+    // gate match against a model's `loraCompatibility.irisTask`.
+    if let Some(task) = &metadata.iris_task {
+        entry
+            .entry("irisTask")
+            .or_insert_with(|| Value::String(task.clone()));
+    }
+    if let Some(base_model) = &metadata.iris_base_model {
+        entry
+            .entry("baseModel")
+            .or_insert_with(|| Value::String(base_model.clone()));
     }
 }
 
@@ -2639,11 +2662,108 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     let alpha = lookup(&["alpha", "ss_network_alpha", "lora_alpha"])
         .as_ref()
         .and_then(number_from_metadata);
+    let stamp = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let iris_task = stamp(IRIS_ADAPTER_TASK_KEY);
+    let iris_base_model = iris_task.as_ref().and_then(|_| stamp("baseModel"));
     AdapterFileMetadata {
         network_type,
         rank,
         alpha,
+        iris_task,
+        iris_base_model,
     }
+}
+
+/// Adapter `__metadata__` key naming the Iris task an adapter was trained for (gen-core's
+/// `iris::ADAPTER_TASK_KEY`; the engine requires it, sc-25681).
+pub const IRIS_ADAPTER_TASK_KEY: &str = "irisTask";
+/// The Iris family token (gen-core's `iris::FAMILY`).
+pub const IRIS_FAMILY: &str = "iris";
+
+/// The Iris task a model's catalog row accepts adapters for (`loraCompatibility.irisTask`), or
+/// `None` for every non-Iris model.
+pub fn model_iris_task(model: &Value) -> Option<&str> {
+    model
+        .get("loraCompatibility")
+        .and_then(|compat| compat.get(IRIS_ADAPTER_TASK_KEY))
+        .and_then(Value::as_str)
+}
+
+/// Refuse an adapter that is not an Iris adapter for `model`'s task, or `None` when compatible /
+/// when `model` declares no Iris task. Mirrors the engine's `iris::check_adapter_identity`, so a
+/// mismatch is a typed 400 at enqueue rather than a load failure:
+///
+/// * the catalog entry must record the adapter's `irisTask` (written at import from the file's
+///   stamp) and it must equal the model's task — an UNSTAMPED adapter is refused, because the task
+///   backbones share one architecture and an unstamped file cannot be matched to a task;
+/// * a recorded `baseModel` must name `model_id`;
+/// * when the file's header is readable, its own `family` / `irisTask` / `baseModel` stamps are
+///   checked the same way (the catalog entry is not trusted alone).
+pub fn iris_adapter_refusal(
+    model: &Value,
+    model_id: &str,
+    lora_id: &str,
+    lora: &Value,
+    header: Option<&Value>,
+) -> Option<String> {
+    let task = model_iris_task(model)?;
+    let unstamped = || {
+        format!(
+            "LoRA {lora_id} carries no Iris task stamp, so it cannot be matched to {model_id}'s {task} backbone (the Iris task backbones share one architecture). Re-stamp the file with `family=iris` and `irisTask={task}` metadata and re-import it."
+        )
+    };
+    match lora.get(IRIS_ADAPTER_TASK_KEY).and_then(Value::as_str) {
+        Some(recorded) if recorded == task => {}
+        Some(other) => {
+            return Some(format!(
+                "LoRA {lora_id} was trained for the Iris {other} task, not {model_id}'s {task} task"
+            ))
+        }
+        None => return Some(unstamped()),
+    }
+    if let Some(base) = lora_base_model(lora) {
+        if base != model_id {
+            return Some(format!(
+                "LoRA {lora_id} was trained on base model {base}, not {model_id}"
+            ));
+        }
+    }
+    if let Some(metadata) = header.and_then(|header| header.get("__metadata__")) {
+        let read = |key: &str| metadata.get(key).and_then(Value::as_str).map(str::trim);
+        match read("family") {
+            Some(IRIS_FAMILY) => {}
+            Some(other) => {
+                return Some(format!(
+                    "LoRA {lora_id}'s file is stamped for the {other} family, not {IRIS_FAMILY}"
+                ))
+            }
+            None => return Some(unstamped()),
+        }
+        match read(IRIS_ADAPTER_TASK_KEY) {
+            Some(file_task) if file_task == task => {}
+            Some(other) => {
+                return Some(format!(
+                    "LoRA {lora_id}'s file is stamped for the Iris {other} task, not {model_id}'s {task} task"
+                ))
+            }
+            None => return Some(unstamped()),
+        }
+        if let Some(base) = read("baseModel") {
+            if base != model_id {
+                return Some(format!(
+                    "LoRA {lora_id}'s file is stamped for base model {base}, not {model_id}"
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// A safetensors `__metadata__` value as a number: the map is string-valued by spec (our trainers
@@ -4767,6 +4887,7 @@ mod tests {
                 network_type: Some("lokr".to_owned()),
                 rank: Some(64),
                 alpha: Some(128.0),
+                ..Default::default()
             },
         );
         assert_eq!(
@@ -5841,6 +5962,118 @@ mod tests {
         assert!(
             reconcile_detected_family(Some("flux2-klein".to_owned()), Some("flux".to_owned()))
                 .is_err()
+        );
+    }
+
+    fn iris_header(metadata: Value) -> Value {
+        json!({
+            "__metadata__": metadata,
+            "blocks.0.attn.qkv.lora_down.weight": { "dtype": "F32", "shape": [1], "data_offsets": [0, 4] }
+        })
+    }
+
+    /// sc-25681: an Iris adapter's task stamp (and its base-model stamp, read only alongside it)
+    /// is recorded on the imported entry; the family stamp is detected as `iris`; nothing changes
+    /// for an adapter without an Iris task stamp.
+    #[test]
+    fn iris_task_and_base_model_stamps_are_recorded_at_import() {
+        let header = iris_header(json!({
+            "family": "iris", "irisTask": "generation", "baseModel": "iris_3b", "networkType": "lokr"
+        }));
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("iris"));
+        let metadata = read_adapter_metadata(&header);
+        assert_eq!(metadata.iris_task.as_deref(), Some("generation"));
+        assert_eq!(metadata.iris_base_model.as_deref(), Some("iris_3b"));
+        let mut entry = Map::new();
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(entry["irisTask"], "generation");
+        assert_eq!(entry["baseModel"], "iris_3b");
+        assert_eq!(entry["networkType"], "lokr");
+
+        // A non-Iris adapter's `baseModel` stamp is NOT newly recorded (no other family changes).
+        let other = read_adapter_metadata(&iris_header(json!({ "baseModel": "krea_2_raw" })));
+        assert_eq!(other.iris_base_model, None);
+        let mut entry = Map::new();
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &other);
+        assert!(entry.is_empty(), "{entry:?}");
+    }
+
+    /// sc-25681: the Iris adapter gate, table-driven over the catalog entry and the file header.
+    ///
+    /// *Mutation that reds this:* accept a missing `irisTask` on the entry.
+    #[test]
+    fn iris_adapter_refusal_requires_the_models_task_stamp() {
+        let model = json!({ "id": "iris_3b", "loraCompatibility": { "families": ["iris"], "irisTask": "generation" } });
+        let stamped = json!({ "family": "iris", "irisTask": "generation", "baseModel": "iris_3b" });
+        let good_header = iris_header(stamped.clone());
+        let cases: Vec<(Value, Option<Value>, Option<&str>)> = vec![
+            (
+                json!({ "irisTask": "generation", "baseModel": "iris_3b" }),
+                Some(good_header.clone()),
+                None,
+            ),
+            (json!({ "irisTask": "generation" }), None, None),
+            (
+                json!({}),
+                Some(good_header.clone()),
+                Some("carries no Iris task stamp"),
+            ),
+            (
+                json!({ "irisTask": "depth" }),
+                None,
+                Some("Iris depth task"),
+            ),
+            (
+                json!({ "irisTask": "generation", "baseModel": "iris_3b_depth" }),
+                None,
+                Some("base model iris_3b_depth"),
+            ),
+            (
+                json!({ "irisTask": "generation" }),
+                Some(iris_header(json!({ "family": "flux" }))),
+                Some("flux family"),
+            ),
+            (
+                json!({ "irisTask": "generation" }),
+                Some(iris_header(json!({ "family": "iris" }))),
+                Some("carries no Iris task stamp"),
+            ),
+            (
+                json!({ "irisTask": "generation" }),
+                Some(iris_header(
+                    json!({ "family": "iris", "irisTask": "restoration" }),
+                )),
+                Some("Iris restoration task"),
+            ),
+            (
+                json!({ "irisTask": "generation" }),
+                Some(iris_header(
+                    json!({ "family": "iris", "irisTask": "generation", "baseModel": "x" }),
+                )),
+                Some("base model x"),
+            ),
+            (
+                json!({ "irisTask": "generation" }),
+                Some(iris_header(json!({}))),
+                Some("carries no Iris task stamp"),
+            ),
+        ];
+        for (lora, header, want) in cases {
+            let got = iris_adapter_refusal(&model, "iris_3b", "a", &lora, header.as_ref());
+            match want {
+                None => assert_eq!(got, None, "{lora} {header:?}"),
+                Some(fragment) => assert!(
+                    got.as_deref()
+                        .is_some_and(|message| message.contains(fragment)),
+                    "{lora} {header:?}: {got:?}"
+                ),
+            }
+        }
+        // A model with no Iris task is never gated here.
+        let plain = json!({ "id": "sdxl", "loraCompatibility": { "families": ["sdxl"] } });
+        assert_eq!(
+            iris_adapter_refusal(&plain, "sdxl", "a", &json!({}), None),
+            None
         );
     }
 

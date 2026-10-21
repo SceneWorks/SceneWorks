@@ -68,6 +68,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
             "crates/sceneworks-worker/src/image_jobs/krea_imported.rs",
             "crates/sceneworks-worker/src/image_jobs/mage_finetuned.rs",
+            "crates/sceneworks-worker/src/image_jobs/moss.rs",
             "crates/sceneworks-worker/src/image_jobs/pid.rs",
             "crates/sceneworks-worker/src/image_jobs/pulid.rs",
             "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
@@ -180,6 +181,33 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
     },
+    // sc-25682: the Iris-3B depth task export (`depth/` of the pinned repo), resolved cache-only.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/depth_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    // sc-25687 / sc-25688: Iris depth / restoration TRAINING resolves its task export (`depth/`,
+    // `upscaler/`), the generation backbone + text encoder of a parent start, and the three pinned
+    // training-only restoration resources, all cache-only from their pinned snapshots.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_task_training.rs"],
+        categories: &[Category::Image, Category::Primary, Category::OptionalComponent],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    // sc-25689: Iris generation training stages its pinned TRAINING-only REPA teacher
+    // (`facebook/dinov2-base`) cache-only from the pinned snapshot, after a size + sha256 check.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_curricula.rs"],
+        categories: &[Category::Image, Category::OptionalComponent],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/person_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::OptionalComponent],
@@ -197,6 +225,15 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/voice_register.rs"],
         categories: &[Category::Audio, Category::CoRequisite],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::PinnedComponent,
+        },
+    },
+    // sc-25683: the Iris-3B restoration task resolves its own `upscaler/` export from the pinned
+    // `iris_3b_restore` snapshot (cache-only), like the other upscaler weights.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/iris_restore.rs"],
+        categories: &[Category::Image, Category::OptionalComponent],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::PinnedComponent,
         },
@@ -488,6 +525,9 @@ mod tests {
         "crates/sceneworks-worker/src/bernini_tier_build.rs",
         "crates/sceneworks-worker/src/footprint_measure.rs",
         "crates/sceneworks-worker/src/imported_nvfp4_gpu_smoke.rs",
+        "crates/sceneworks-worker/src/iris_gpu_smoke.rs",
+        "crates/sceneworks-worker/src/iris_training_gpu_smoke.rs",
+        "crates/sceneworks-worker/src/krea_imported_bare_keys_mlx_smoke.rs",
         "crates/sceneworks-worker/src/ladder_e2e_sc18101.rs",
         "crates/sceneworks-worker/src/mage_flow_q8_mlx_smoke.rs",
         "crates/sceneworks-worker/src/pid_tier_mlx_smoke.rs",

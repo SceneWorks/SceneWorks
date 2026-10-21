@@ -302,6 +302,7 @@ pub(crate) fn oom_remediation_hint(job_type: Option<&JobType>) -> &'static str {
             | JobType::ImageUpscale
             | JobType::ImageDetail
             | JobType::ImageSegment
+            | JobType::ImageDepth
             | JobType::ImageVqa
             | JobType::ImageInterleave,
         ) => ", likely out-of-memory — reduce the image count or resolution",
@@ -520,6 +521,12 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // dispatched separately; this oracle intentionally describes only the Mac path.
         JobType::ImageSegment => Ok(()),
 
+        // Iris-3B monocular depth (sc-25682): the `iris_3b_depth` task export runs in-process on
+        // the macOS Rust worker (`depth_jobs::run_image_depth_job`, native MLX) and on the Candle
+        // worker off-Mac. Its availability is the worker's `image_depth` advertisement plus the
+        // installed task export, so it queues by capability rather than enforce-failing here.
+        JobType::ImageDepth => Ok(()),
+
         // Pure audio synthesis (SceneWorks Audio Studio, epic 13400 / sc-13404): Kokoro TTS runs
         // in-process on the runtime's candle audio lane (`catalog().audio()`, shipped default-on in
         // `runtime-macos`) — audio is candle-native on every platform, so it is not a native-flow
@@ -692,6 +699,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::PoseDetect
         | JobType::KpsExtract
         | JobType::ImageSegment
+        // sc-25682: Iris depth on the Candle lane routes by the `image_depth` capability.
+        | JobType::ImageDepth
         | JobType::LoraTrain
         // epic 10159: control_training routes by capability (only a candle worker with the
         // krea_control trainer advertises it); candle-eligible ones already early-returned Ok via
@@ -984,6 +993,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::IrisSurface => UnsupportedReason::new(
+            Some(model),
+            "Iris-3B request outside plain text-to-image",
+            &format!(
+                "Iris-3B serves text-to-image only — no source/reference/mask, controls, poses, \
+                 quant tier (advanced.mlxQuantize / advanced.quantTier) or hires fix, on either \
+                 backend (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
+                 refused rather than rendered with the carrier silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit as plain text_to_image without it and the same prompt routes."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-25680"),
+        ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
             if matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
@@ -1102,7 +1127,7 @@ pub(crate) fn classify_image_gap(payload: &Map<String, Value>) -> UnsupportedRea
         //
         // An over-cap or empty conditioning set never reaches here: the API refuses it at enqueue
         // with a message that names the cap.
-        "qwen_image_2_1" => UnsupportedReason::new(
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => UnsupportedReason::new(
             Some(model),
             "pose / strict-control conditioning",
             "Qwen Image 2.1 takes up to 10 ordered reference images, but no pose or ControlNet input — it has no strict-control tier. To constrain an edit, draw the marking into the reference image itself, or attach a mask as another reference and name it in the prompt (\"use the second image as a mask\").",

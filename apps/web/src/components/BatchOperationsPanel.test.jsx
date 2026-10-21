@@ -35,6 +35,7 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
 
   const mount = (props) =>
@@ -62,6 +63,7 @@ describe("BatchOperationsPanel (sc-6112)", () => {
       "Upscale",
       "Detail enhance",
       "AI edit",
+      "Depth map",
     ]);
     // Default op is upscale → an Engine + Factor select.
     expect(document.body.querySelector(".batch-ops-params").textContent).toContain("Engine");
@@ -76,6 +78,59 @@ describe("BatchOperationsPanel (sc-6112)", () => {
     const [op, params] = onRun.mock.calls[0];
     expect(op).toBe("upscale");
     expect(params).toMatchObject({ engine: "real-esrgan", factor: 4 });
+  });
+
+  it("runs Iris restoration with its own controls, gated on the planner preview of the selection (sc-25683)", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        items: [
+          { assetId: "a", plan: { summary: "4×: 512x384 → 2048x1536 (processed at 2048x1536 in 6 tiles)" }, error: null },
+          { assetId: "b", plan: { summary: "budgeted: 683x512 input → 2732x2048 (4× of the budgeted input; source 4032x3024, processed at 2736x2048 in 15 tiles)" }, error: null },
+        ],
+      }),
+    });
+    const onRun = vi.fn();
+    await mount({
+      onRun,
+      projectId: "p1",
+      token: "t",
+      upscaleEngines: [...upscaleEngines, { key: "iris", label: "Iris restore", factors: [4], restoration: true }],
+    });
+    const engineSelect = document.body.querySelector(".batch-ops-params select");
+    await act(async () => {
+      engineSelect.value = "iris";
+      engineSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    // No factor select for a restoration engine; Run waits for the plan.
+    expect(document.body.querySelector(".batch-ops-params").textContent).not.toContain("Factor");
+    expect(runButton().disabled).toBe(true);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toEqual({ projectId: "p1", assetIds: ["a", "b"], scale: 4, inputSizing: "budgeted", colorFix: true });
+    expect(document.body.querySelector(".iris-restore-preview").textContent).toContain("budgeted: 683x512 input → 2732x2048");
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenCalledWith("upscale", {
+      engine: "iris",
+      restore: { scale: 4, inputSizing: "budgeted", colorFix: true },
+    });
+  });
+
+  it("blocks an Iris batch when any selected image's plan is refused", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ items: [{ assetId: "a", plan: null, error: "over the 8192px-per-side limit" }] }),
+    });
+    await mount({
+      projectId: "p1",
+      upscaleEngines: [{ key: "iris", label: "Iris restore", factors: [4], restoration: true }],
+    });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 260)));
+    expect(runButton().disabled).toBe(true);
+    expect(document.body.textContent).toContain("Cannot restore: over the 8192px-per-side limit");
   });
 
   it("requires a prompt for the edit op, then passes the prompt + model", async () => {
@@ -123,4 +178,88 @@ describe("BatchOperationsPanel (sc-6112)", () => {
       "Failed: Models service rejected the request",
     );
   });
+
+  it("offers depth with an explicit capped/native choice and states why it cannot run (sc-25682)", async () => {
+    const onRun = vi.fn();
+    await mount({ onRun, depthAvailability: { available: false, reason: "Install Iris 3B Depth in Models to estimate depth." } });
+    await act(async () => tab("Depth map").click());
+    expect(document.body.textContent).toContain("Install Iris 3B Depth in Models to estimate depth.");
+    expect(runButton().disabled).toBe(true);
+
+    await mount({ onRun, depthAvailability: { available: true, reason: null } });
+    const maxSide = document.body.querySelector('input[aria-label="Depth max side"]');
+    expect(maxSide.value).toBe("1024");
+    await act(async () => setValue(maxSide, "40"));
+    expect(document.body.textContent).toMatch(/between 64 and 8192/);
+    expect(runButton().disabled).toBe(true);
+    await act(async () => setValue(maxSide, "2048"));
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "capped", maxSide: 2048 } });
+
+    const native = [...document.body.querySelectorAll('input[type="radio"]')].find((input) =>
+      input.parentElement.textContent.startsWith("Native"),
+    );
+    await act(async () => native.click());
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "native" } });
+  });
+
+  // S3: a trained depth model runs without the release install — Run follows the SELECTED model.
+  it("gates depth Run on the selected model, so a trained depth model needs no release install", async () => {
+    const onRun = vi.fn();
+    const depthAvailabilityFor = (irisModel) =>
+      irisModel === "my_depth"
+        ? { available: true, reason: null }
+        : { available: false, reason: "Install Iris 3B Depth in Models to estimate depth." };
+    await mount({
+      onRun,
+      initialOp: "depth",
+      depthAvailability: { available: true, reason: null },
+      depthAvailabilityFor,
+      defaultDepthModel: "my_depth",
+    });
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", {
+      resolution: { mode: "capped", maxSide: 1024 },
+      irisModel: "my_depth",
+    });
+
+    // A fresh panel (the picker's state starts from `defaultDepthModel`).
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await mount({
+      onRun,
+      initialOp: "depth",
+      depthAvailability: { available: true, reason: null },
+      depthAvailabilityFor,
+      defaultDepthModel: "",
+    });
+    expect(document.body.textContent).toContain("Install Iris 3B Depth in Models to estimate depth.");
+    expect(runButton().disabled).toBe(true);
+  });
+
+  // Round 2 (4): the host re-derives `defaultDepthModel` from the live catalog; the untouched picker
+  // follows it.
+  it("follows a default depth model that arrives after mount", async () => {
+    const onRun = vi.fn();
+    const depthAvailabilityFor = (irisModel) =>
+      irisModel === "my_depth"
+        ? { available: true, reason: null }
+        : { available: false, reason: "Install Iris 3B Depth in Models to estimate depth." };
+    const props = { onRun, initialOp: "depth", depthAvailability: { available: true, reason: null }, depthAvailabilityFor };
+    await mount({ ...props, defaultDepthModel: "" });
+    expect(runButton().disabled).toBe(true);
+    await mount({ ...props, defaultDepthModel: "my_depth" });
+    expect(runButton().disabled).toBe(false);
+    await act(async () => runButton().click());
+    expect(onRun).toHaveBeenLastCalledWith("depth", { resolution: { mode: "capped", maxSide: 1024 }, irisModel: "my_depth" });
+  });
+
+  it("opens directly on the depth op for a single-asset action", async () => {
+    await mount({ initialOp: "depth", depthAvailability: { available: true, reason: null } });
+    expect(tab("Depth map").getAttribute("aria-pressed")).toBe("true");
+  });
 });
+

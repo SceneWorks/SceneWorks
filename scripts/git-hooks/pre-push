@@ -13,15 +13,42 @@
 # matrix is deliberately absent: its revision records are epic-end measurement provenance, not a
 # per-pin freshness gate. The tier check gets its own trigger because a manifest-only push must not
 # drag in the two multi-minute Docker builds, which really are Rust-only.
+#
+# Preflight gate: a push that starts a CI run — to main or codex/**, or to a branch with an open
+# PR — must carry a passing `npm run preflight` stamp for the pushed commit (see
+# scripts/preflight.mjs). A stamped push skips the neither/candle builds below: preflight ran them.
+# Pushing a branch with no PR starts no CI and is not gated.
 set -eu
 
 zero="0000000000000000000000000000000000000000"
 rust_changed=0
 tier_integrity_changed=0
+all_stamped=1
+unstamped=""
 
 # stdin: "<local ref> <local sha> <remote ref> <remote sha>" per ref being pushed.
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+while read -r _local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue # branch deletion — nothing to lint.
+
+  if node scripts/preflight.mjs --verify "$local_sha" >/dev/null 2>&1; then
+    :
+  else
+    all_stamped=0
+    case "$remote_ref" in
+      refs/heads/*)
+        branch="${remote_ref#refs/heads/}"
+        case "$branch" in
+          main | codex/*) starts_ci=1 ;;
+          *)
+            # An unknown answer (gh missing or offline) counts as an open PR.
+            open_prs="$(gh pr list --head "$branch" --state open --json number --jq length 2>/dev/null || echo 1)"
+            [ "$open_prs" = "0" ] && starts_ci=0 || starts_ci=1
+            ;;
+        esac
+        [ "$starts_ci" = "1" ] && unstamped="$unstamped $branch@$(git rev-parse --short "$local_sha")"
+        ;;
+    esac
+  fi
 
   if [ "$remote_sha" = "$zero" ]; then
     # New remote branch: diff from the parent of the oldest not-yet-pushed commit.
@@ -52,6 +79,16 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
 done
 
+if [ -n "$unstamped" ]; then
+  echo "Push blocked: these pushes start CI but have no passing preflight:$unstamped"
+  echo "Commit everything, then run:"
+  echo "  npm run preflight -- --base <PR target, e.g. origin/feature/sc-NNNN or origin/main>"
+  echo "(bypass with 'git push --no-verify' only for a push that must not wait, e.g. a CI-only fix)"
+  exit 1
+fi
+
+[ "$all_stamped" = "1" ] && exit 0
+
 # Git exports GIT_DIR (and friends) into hooks. Inherited by cargo, they misdirect dependency build
 # scripts that shell out to git from inside cargo's own checkouts, so drop them now that the hook's
 # own git calls are done; anything below rediscovers this repo from the cwd.
@@ -74,7 +111,9 @@ fi
 
 [ "$rust_changed" = "0" ] && exit 0
 
-if [ "${SKIP_NEITHER_CHECK:-0}" != "1" ]; then
+# On macOS the neither build runs in a Linux Docker container; the dev Mac does not run containers,
+# so CI's parity lane owns it there.
+if [ "$(uname -s)" != "Darwin" ] && [ "${SKIP_NEITHER_CHECK:-0}" != "1" ]; then
   echo "Running the 'neither' build (Linux, no backend-candle) for pushed Rust changes..."
   echo "(skip with SKIP_NEITHER_CHECK=1 or 'git push --no-verify')"
 

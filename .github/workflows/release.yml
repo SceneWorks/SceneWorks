@@ -493,6 +493,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            squashfs-tools \
             wget
 
       - name: Fetch the pinned inference release
@@ -530,6 +531,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm --prefix apps/desktop run build -- --bundles appimage,deb --config updater.release.conf.json
+
+      - name: Reject host NVIDIA drivers in finished AppImages
+        run: |
+          for appimage in "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage; do
+            npm --prefix apps/desktop run check:linux-drivers -- --appimage "$appimage"
+          done
 
       - name: Guard against NC model weights in the desktop bundle (sc-10526, sc-10551)
         run: node scripts/check-no-nc-weights.mjs --dir target/release/bundle --scan-archives --skip-uninspectable

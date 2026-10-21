@@ -92,6 +92,7 @@ conditional/partial.
 | `image_upscale` | ⚠️ MLX / candle Real-ESRGAN or SeedVR2; AuraSR dropped | `run_utility_job` → `run_image_upscale_job`; `upscale_job_is_mlx_eligible`; `upscale_job_is_candle_eligible` |
 | `image_detail` | ✅ MLX + Candle, SDXL/RealVisXL detail models only | `run_utility_job` → `run_image_detail_job`; native route predicates; GPU capabilities |
 | `image_segment` | ✅ MLX + Candle SAM3 box segmentation | `run_utility_job` → `run_image_segment_job`; native route predicates; GPU capabilities |
+| `image_depth` | ✅ MLX + Candle Iris-3B depth (raw `.npy` + preview asset) | `run_utility_job` → `depth_jobs::run_image_depth_job`; GPU capabilities |
 | `video_upscale` | ⚠️ MLX on Mac / candle off-Mac, SeedVR2 only | `run_utility_job` → `run_video_upscale_job`; `video_upscale_job_is_mlx_eligible`; `video_upscale_job_is_candle_eligible` |
 | `frame_extract` | ✅ CPU utility (FFmpeg) | `run_utility_job` → `run_frame_extract_job`; `cpu_gpu` |
 | `timeline_export` | ✅ CPU utility (FFmpeg MP4) | `run_utility_job` → `run_timeline_export_job`; `cpu_gpu` |

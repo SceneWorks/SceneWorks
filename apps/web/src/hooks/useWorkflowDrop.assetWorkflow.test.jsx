@@ -139,6 +139,53 @@ describe("useWorkflowDrop — the imported-asset offer", () => {
     expect(inspectWorkflowFile).not.toHaveBeenCalled();
   });
 
+  it("routes a video asset workflow to Video Studio with the full authored Veda request", async () => {
+    const veda = {
+      enabled: true,
+      generated: "90.5%",
+      reference: "12",
+      fullAttentionLayers: Array.from({ length: 50 }, (_, index) => index).join(","),
+      fullAttentionSteps: Array.from({ length: 200 }, (_, index) => index).join(","),
+    };
+    const body = workflowBody({
+      model: { ...RESOLVED_MODEL, slug: "minimax_h3", catalogId: "minimax_h3" },
+    });
+    body.workflow.sceneworksWorkflow = "video";
+    body.workflow.mode = "text_to_video";
+    body.workflow.durationSeconds = 6.5;
+    body.workflow.fps = 24;
+    body.workflow.quality = "best";
+    body.workflow.advanced = {
+      veda,
+      vedaExecution: { effective: "dense", fallbackReason: "observed only" },
+    };
+    fetchAssetWorkflow.mockResolvedValue(body);
+    const launchRecipe = vi.fn().mockResolvedValue({ ok: true });
+    await renderPanel({ launchRecipe });
+    await act(async () => hook.offerAssetWorkflow({
+      id: "video_asset_1",
+      type: "video",
+      extra: { importedWorkflow: { sceneworksWorkflow: "video" } },
+    }));
+
+    const vedaRow = [...document.querySelectorAll(".workflow-drop-settings li")].find((node) =>
+      node.textContent.startsWith("Veda"),
+    );
+    expect(vedaRow.classList.contains("not-restored")).toBe(false);
+    await act(async () => hook.useWorkflow());
+
+    expect(launchRecipe).toHaveBeenCalledTimes(1);
+    expect(launchRecipe.mock.calls[0][0]).toMatchObject({
+      view: "Video",
+      recipe: {
+        mode: "text_to_video",
+        normalizedSettings: { count: 1, width: 1024, height: 1024 },
+        rawAdapterSettings: { veda },
+      },
+    });
+    expect(launchRecipe.mock.calls[0][0].recipe.rawAdapterSettings).not.toHaveProperty("vedaExecution");
+  });
+
   it("names a failure instead of staying silent, unlike the drop path", async () => {
     // A drop that fails invisibly is the correct fallback — nothing was asked for. This button was
     // rendered BECAUSE the record carries an envelope, so silence would be a control that did

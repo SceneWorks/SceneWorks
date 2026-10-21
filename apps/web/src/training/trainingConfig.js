@@ -13,6 +13,30 @@ import {
   numberFromDraft,
   numericDraft,
 } from "./drafts.js";
+import {
+  irisDraftFromDefaults,
+  irisOptionsSnapshot,
+  irisRequestKeys,
+  irisUpstreamPromptsOn,
+  irisObjective,
+  irisValidation,
+} from "./irisOptions.js";
+import {
+  IRIS_TASK_BAG_KEYS,
+  IRIS_TASK_SPECS,
+  irisDepthResolution,
+  irisTaskBagOf,
+  irisTaskOptionsSnapshot,
+  irisTaskRequestKeys,
+  irisTaskValidation,
+  microStepMultiple,
+} from "./irisTaskOptions.js";
+
+// Advanced keys a depth / restoration run refuses when present (previews are dataset items, no
+// prompt or sampler; the depth run is a full fine-tune).
+const IRIS_TASK_UNREAD_KEYS = [
+  "samplePrompts", "sampleSteps", "sampleGuidanceScale", "sampleCount", "timestepType", "timestepBias", "loraTargetModules",
+];
 
 export const defaultGpuOptions = ["auto"];
 export const defaultOptimizerOptions = ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"];
@@ -596,8 +620,38 @@ export function optimizerLabel(value) {
 // plans Anima/Mage rejected only after model load. A recognized target default/current value remains
 // selected because it is already in the owning target's exact set—unsupported stale values are not
 // smuggled back into the menu.
+//
+// A target that advertises `limits.timestepTypes` (Iris, sc-25685) gets exactly that list.
 export function timestepTypeOptionsForTarget(target) {
+  const advertised = choiceOptionsForTarget(target, "timestepTypes", null);
+  if (advertised) return advertised;
   return target?.kernel === "sd3_lora" ? sd3TimestepTypeOptions : timestepTypeOptions;
+}
+
+// A choice list the target advertises in `limits[key]` (timestepTypes / timestepBiases /
+// lossTypes / lrSchedulers / mixedPrecisions — the generic `validate_advertised_advanced_choices`
+// set), or `fallback` when it advertises none, so a target without the key keeps today's menu.
+export function choiceOptionsForTarget(target, key, fallback) {
+  const advertised = target?.limits?.[key];
+  return Array.isArray(advertised) && advertised.length ? advertised : fallback;
+}
+
+// The training lanes a target's gradient checkpointing is limited to
+// (`limits.gradientCheckpointingLanes`, Iris depth / restoration: the lanes whose task trainer
+// implements activation checkpointing), or null when the target does not limit it by lane.
+export function gradientCheckpointingLanes(target) {
+  const lanes = target?.limits?.gradientCheckpointingLanes;
+  return Array.isArray(lanes) ? lanes : null;
+}
+
+// `limits.gradientCheckpointing: false` — the target's trainer does not implement it at all (Iris
+// generation). `limits.gradientCheckpointingLanes` — it is implemented on those lanes only:
+// unsupported on a KNOWN lane outside the list. An unknown lane keeps the control; the worker
+// refuses it typed before load on a lane that lacks it.
+export function gradientCheckpointingUnsupported(target, lane) {
+  if (target?.limits?.gradientCheckpointing === false) return true;
+  const lanes = gradientCheckpointingLanes(target);
+  return Boolean(lanes) && Boolean(lane) && !lanes.includes(lane);
 }
 
 export function networkTypeLabel(value) {
@@ -687,9 +741,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   const outputLabel = outputKindLabel(target, advanced.networkType);
   const ltxWorkflow = asText(advanced.ltxWorkflow || "t2v_lora");
   const ltxPlan = ltx25WorkflowPlan(ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
+  const objective = irisObjective(target);
+  const taskBag = IRIS_TASK_BAG_KEYS[objective];
   return {
     outputName: previousDraft.outputName ?? (dataset?.name ? `${dataset.name} ${outputLabel}` : ""),
-    triggerWord: triggerPhrase || asText(defaults.triggerWord),
+    // Depth / restoration take no prompt, so no trigger word.
+    triggerWord: taskBag ? "" : triggerPhrase || asText(defaults.triggerWord),
     outputScope: asText(advanced.outputScope),
     qualityPreset: asText(advanced.qualityPreset),
     requestedGpu: gpuOptions.includes(requestedGpu) ? requestedGpu : firstGpu,
@@ -734,7 +791,7 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lossType: asText(advanced.lossType || "mse"),
     trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
     trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
-    gradientCheckpointing: advanced.gradientCheckpointing !== false,
+    gradientCheckpointing: !gradientCheckpointingUnsupported(target) && advanced.gradientCheckpointing !== false,
     resolution: numericDraft(defaults.resolution),
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
@@ -763,6 +820,27 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
           ltxVideo: ltxPlan.video,
           ltxAudio: ltxPlan.audio,
           ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
+        }
+      : {}),
+    // The Iris engine options bag (sc-25685) plus the previous-run pickers. Seeded from the
+    // preset's bag when it has one, else the target's.
+    ...(objective === "generation"
+      ? {
+          iris: irisDraftFromDefaults(advanced.iris ?? target?.defaults?.advanced?.iris),
+          resumeFromJobId: "",
+          loadFromJobId: "",
+        }
+      : {}),
+    // Depth / restoration (sc-25687 / sc-25688): the objective's options bag plus the run's start.
+    ...(taskBag
+      ? {
+          irisTask: irisDraftFromDefaults(
+            irisTaskBagOf(objective, advanced) ?? irisTaskBagOf(objective, target?.defaults?.advanced),
+            IRIS_TASK_SPECS[objective],
+          ),
+          depthInit: asText(advanced.depthInit || "export"),
+          resumeFromJobId: "",
+          loadFromJobId: "",
         }
       : {}),
   };
@@ -928,7 +1006,9 @@ export function configValidation(
   if (!configDraft.outputName?.trim()) {
     issues.push(issue.requirement("outputName", `Name the ${outputKindLabel(selectedTarget, configDraft.networkType)} output`));
   }
-  if (!configDraft.triggerWord?.trim()) {
+  const objective = irisObjective(selectedTarget);
+  const irisTask = Boolean(IRIS_TASK_BAG_KEYS[objective]);
+  if (!irisTask && !configDraft.triggerWord?.trim()) {
     issues.push(issue.requirement("triggerWord", "Add a trigger phrase"));
   }
   // The field name is the draft key, so `invalidProps` can outline the very input the
@@ -1045,6 +1125,37 @@ export function configValidation(
       ),
     );
   }
+  // Micro-step fields (Iris, sc-25685): the trainer lands checkpoints, previews and the warmup on
+  // optimizer-step boundaries, so each must be a whole number of accumulation windows. The API
+  // refuses the same request with a typed `NotMultipleOf` 400.
+  // A restoration step is a generator window plus a critic window: multiples of 2 × accumulation.
+  const microStepFields = selectedTarget?.limits?.microStepFields;
+  const accumulation = numberFromDraft(configDraft.gradientAccumulation);
+  const multiple = Number.isInteger(accumulation) ? microStepMultiple(selectedTarget, accumulation) : 0;
+  if (Array.isArray(microStepFields) && multiple > 1) {
+    const unit = multiple === accumulation
+      ? `the gradient accumulation (${accumulation})`
+      : `2 × the gradient accumulation (${multiple}) — one step is a generator window plus a critic window`;
+    for (const field of microStepFields) {
+      const value = numberFromDraft(configDraft[field]);
+      if (value !== null && value % multiple !== 0) {
+        issues.push(issue.error(field, `${microStepFieldLabels[field] ?? optionLabel(field)} must be a multiple of ${unit}`));
+      }
+    }
+  }
+  const sampleCountRange = selectedTarget?.limits?.sampleCount;
+  if (Array.isArray(sampleCountRange) && sampleCountRange.length === 2) {
+    const sampleCount = numberFromDraft(configDraft.sampleCount);
+    const [min, max] = sampleCountRange.map(Number);
+    if (sampleCount !== null && (!Number.isInteger(sampleCount) || sampleCount < min || sampleCount > max)) {
+      issues.push(issue.error("sampleCount", `Sample count must be a whole number between ${min} and ${max}`));
+    }
+  }
+  if (objective === "generation") {
+    issues.push(...irisValidation(configDraft));
+  } else if (irisTask) {
+    issues.push(...irisTaskValidation(objective, configDraft));
+  }
   // The de-distill training adapter (sc-25213) resolves from the installed library only — a missing
   // one is refused at submit by the API and by the worker, so it gates Start like the preprocessor
   // models above; the panel renders the download offer.
@@ -1098,6 +1209,13 @@ export function configValidation(
   return issues;
 }
 
+const microStepFieldLabels = {
+  steps: "Steps",
+  saveEvery: "Checkpoint cadence",
+  sampleEvery: "Sample cadence",
+  lrWarmupSteps: "LR warmup steps",
+};
+
 export function samplePromptsFromTrigger(triggerWord) {
   const trigger = String(triggerWord ?? "").trim() || "the trained subject";
   return [
@@ -1137,7 +1255,7 @@ export function promptListToLines(list) {
   return (Array.isArray(list) ? list : []).join("\n");
 }
 
-export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true }) {
+export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun = true, trainingLane = null }) {
   const defaults = selectedTarget?.defaults ?? {};
   const networkType = asText(configDraft.networkType).trim() || "lora";
   const isFullFinetune = isFullFinetuneNetworkType(networkType);
@@ -1149,7 +1267,14 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
   // backends cap this pool at sampleCount (one preview per prompt), so the pool can hold
   // more prompts than render.
   const editedPrompts = promptLinesToList(configDraft.samplePrompts);
-  const samplePrompts = editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
+  const objective = irisObjective(selectedTarget);
+  const iris = objective === "generation";
+  const taskBag = IRIS_TASK_BAG_KEYS[objective];
+  // Iris' upstream validation prompts REPLACE the pool: the trainer renders its seven built-in
+  // prompts and refuses a request that also carries user prompts.
+  const samplePrompts = iris && irisUpstreamPromptsOn(configDraft)
+    ? []
+    : editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const ltxWorkflow = asText(configDraft.ltxWorkflow).trim();
   const ltxPlan = selectedTarget?.baseModel === "ltx_2_5"
     ? ltx25WorkflowPlan(ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
@@ -1195,8 +1320,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     trainingAdapterVersion: asText(configDraft.trainingAdapterVersion).trim(),
     // Platform-effective target metadata carries any backend-specific full-tune requirement. MLX
     // has no override and keeps the submitted draft; Candle Mage advertises f32/no-checkpointing.
-    gradientCheckpointing:
-      fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
+    gradientCheckpointing: gradientCheckpointingUnsupported(selectedTarget, trainingLane)
+      ? false
+      : fullFinetuneConfig?.gradientCheckpointing ?? Boolean(configDraft.gradientCheckpointing),
     mixedPrecision: fullFinetuneConfig?.mixedPrecision ?? asText(configDraft.precision).trim(),
     sampleEvery: numberFromDraft(configDraft.sampleEvery),
     sampleSteps: numberFromDraft(configDraft.sampleSteps),
@@ -1216,7 +1342,21 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation),
         }
       : {}),
+    // Always the compacted draft bag (never the target's raw default bag spread above), so a
+    // key the run does not use is absent rather than defaulted in.
+    ...(iris ? { iris: irisOptionsSnapshot(configDraft), ...irisRequestKeys(configDraft) } : {}),
+    ...(taskBag
+      ? {
+          [taskBag]: irisTaskOptionsSnapshot(objective, configDraft),
+          ...irisTaskRequestKeys(objective, configDraft),
+          // A depth run is always a full fine-tune.
+          ...(objective === "depth" ? { networkType: "full" } : {}),
+        }
+      : {}),
   });
+  if (taskBag) {
+    for (const key of IRIS_TASK_UNREAD_KEYS) Reflect.deleteProperty(advanced, key);
+  }
   return {
     targetId: selectedTarget.id,
     datasetId: activeDataset.id,
@@ -1235,11 +1375,11 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       steps: numberFromDraft(configDraft.steps),
       batchSize: numberFromDraft(configDraft.batchSize),
       gradientAccumulation: numberFromDraft(configDraft.gradientAccumulation),
-      resolution: numberFromDraft(configDraft.resolution),
+      resolution: objective === "depth" ? irisDepthResolution(configDraft) : numberFromDraft(configDraft.resolution),
       saveEvery: numberFromDraft(configDraft.saveEvery),
       seed: numberFromDraft(configDraft.seed),
       optimizer: asText(configDraft.optimizer).trim(),
-      triggerWord: asText(configDraft.triggerWord).trim(),
+      triggerWord: taskBag ? "" : asText(configDraft.triggerWord).trim(),
       advanced,
     },
   };

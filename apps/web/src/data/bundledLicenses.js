@@ -97,7 +97,8 @@ import lensMIT from "../../../desktop/licenses/lens/MIT.txt?url&no-inline";
 import qwenImageApache20 from "../../../desktop/licenses/qwen-image/Apache-2.0.txt?url&no-inline";
 import qwenImage21ResearchLicense from "../../../desktop/licenses/qwen-image-2-1/Qwen-RESEARCH-LICENSE-AGREEMENT.txt?url&no-inline";
 import realvisxlCreativeMLOpenRAILM from "../../../desktop/licenses/realvisxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
-import sanaNVIDIAOpenModelLicense from "../../../desktop/licenses/sana/NVIDIA-Open-Model-License.txt?url&no-inline";
+import sanaApacheLicense from "../../../desktop/licenses/sana/Apache-2.0.txt?url&no-inline";
+import sanaGemma from "../../../desktop/licenses/sana/Gemma-Terms.txt?url&no-inline";
 import sd35StabilityAICommunityLicense from "../../../desktop/licenses/sd3.5/Stability-AI-Community-License.txt?url&no-inline";
 import sdxlCreativeMLOpenRAILM from "../../../desktop/licenses/sdxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
 import sensenovaU1Apache20 from "../../../desktop/licenses/sensenova-u1/Apache-2.0.txt?url&no-inline";
@@ -139,6 +140,12 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
+import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
+import irisRepaTeacherApache20 from "../../../desktop/licenses/iris-repa-teacher/Apache-2.0.txt?url&no-inline";
+// Iris restoration TRAINING-only resources (sc-25688): VGG16 / LPIPS / OpenCLIP critic trunk.
+import irisRestoreTrainingTorchvisionBsd3 from "../../../desktop/licenses/iris-restore-training/torchvision-BSD-3-Clause.txt?url&no-inline";
+import irisRestoreTrainingLpipsBsd2 from "../../../desktop/licenses/iris-restore-training/LPIPS-BSD-2-Clause.txt?url&no-inline";
+import irisRestoreTrainingOpenClipMit from "../../../desktop/licenses/iris-restore-training/OpenCLIP-MIT.txt?url&no-inline";
 import cmudictBsd2Clause from "../../../desktop/licenses/cmudict/BSD-2-Clause.txt?url&no-inline";
 // Upstream CONTENT (not an algorithm port) reproduced in the native captioners: the JoyCaption
 // prompt taxonomy. This is fpgaminer/joycaption's own LICENSE file, kept verbatim because it
@@ -172,10 +179,20 @@ import yue2SourceNotices from "../../../desktop/licenses/yue2-source/THIRD_PARTY
 import yue2SourceSnakeBetaMit from "../../../desktop/licenses/yue2-source/SnakeBeta-NVIDIA-MIT.txt?url&no-inline";
 import yue2SourceStableAudioToolsMit from "../../../desktop/licenses/yue2-source/stable-audio-tools-MIT.txt?url&no-inline";
 
+// MOSS official Apache snapshots and optional DMD's published model-card declaration.
+import mossImageBaseApache from "../../../desktop/licenses/moss-image-base/Apache-2.0.txt?url&no-inline";
+import mossImageSftApache from "../../../desktop/licenses/moss-image-sft/Apache-2.0.txt?url&no-inline";
+import mossImageProvenance from "../../../desktop/licenses/moss-image-base/PROVENANCE.txt?url&no-inline";
+import mossImageDmdDeclaration from "../../../desktop/licenses/moss-image-sft-8-steps-dmd/DMD-LICENSE-DECLARATION.txt?url&no-inline";
+
 // Maps each manifest document key to its bundled text asset URL. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
 // their keys here. Vite emits these with the app instead of embedding the full corpus in JavaScript.
 const DOCUMENT_URL = {
+  "moss-image-base-apache": mossImageBaseApache,
+  "moss-image-sft-apache": mossImageSftApache,
+  "moss-image-provenance": mossImageProvenance,
+  "moss-image-dmd-declaration": mossImageDmdDeclaration,
   "ffmpeg-notice": ffmpegNotice,
   "ffmpeg-gpl": ffmpegGpl,
   "onnxruntime-notice": onnxruntimeNotice,
@@ -229,7 +246,8 @@ const DOCUMENT_URL = {
   "qwen-image-apache": qwenImageApache20,
   "qwen-image-2-1-research": qwenImage21ResearchLicense,
   "realvisxl-creativeml-open-rail-m": realvisxlCreativeMLOpenRAILM,
-  "sana-nvidia-open-model-license": sanaNVIDIAOpenModelLicense,
+  "sana-apache-2.0": sanaApacheLicense,
+  "sana-gemma": sanaGemma,
   "sd3.5-stability-ai-community-license": sd35StabilityAICommunityLicense,
   "sdxl-creativeml-open-rail-m": sdxlCreativeMLOpenRAILM,
   "sensenova-u1-apache": sensenovaU1Apache20,
@@ -256,6 +274,11 @@ const DOCUMENT_URL = {
   "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
+  "iris-3b-apache": iris3bApache20,
+  "iris-repa-teacher-apache": irisRepaTeacherApache20,
+  "iris-restore-training-torchvision-bsd-3-clause": irisRestoreTrainingTorchvisionBsd3,
+  "iris-restore-training-lpips-bsd-2-clause": irisRestoreTrainingLpipsBsd2,
+  "iris-restore-training-open-clip-mit": irisRestoreTrainingOpenClipMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,
   "joycaption-source-apache": joycaptionApache20,
   "ai-toolkit-perceptual-source-mit": aiToolkitPerceptualSourceMit,

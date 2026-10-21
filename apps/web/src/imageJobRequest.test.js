@@ -130,6 +130,31 @@ describe("buildImageJobRequest", () => {
     expect(buildImageJobRequest(img2imgPidState()).hiresFix).toBeUndefined();
   });
 
+  it("sends the Iris post-processing pass by scale / input sizing / colour fix — never a factor (sc-25683)", () => {
+    const iris = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        upscaleEnabled: true,
+        upscaleEngine: "iris",
+        upscaleFactor: 2,
+        upscaleRestore: { scale: 1.5, inputSizing: "original", colorFix: false },
+      }),
+    );
+    expect(iris.upscale).toEqual({ enabled: true, engine: "iris", scale: 1.5, inputSizing: "original", colorFix: false });
+    const esrgan = buildImageJobRequest(
+      img2imgPidState({
+        img2imgReferenceAssetId: "",
+        usePid: false,
+        upscaleEnabled: true,
+        upscaleEngine: "real-esrgan",
+        upscaleFactor: 4,
+        upscaleRestore: { scale: 1.5 },
+      }),
+    );
+    expect(esrgan.upscale).toEqual({ enabled: true, factor: 4, engine: "real-esrgan" });
+  });
+
   it("keeps Mage Edit's required source separate from its ordered optional references", () => {
     const request = buildImageJobRequest(
       img2imgPidState({

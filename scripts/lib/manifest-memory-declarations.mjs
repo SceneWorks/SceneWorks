@@ -289,12 +289,20 @@ export function contractIsLoraOnly(model, backend, baseProvider) {
  * marker at all the universe collapsed to the `default` pseudo-tier. The converter's packed tier set
  * is not derivable from the entry, so it is recorded here, keyed `modelId:backend`, and shared by the
  * matrix generator so the two universes cannot drift apart.
+ *
+ * Iris-3B is the same shape without a converter (sc-25690): one dense upstream snapshot with no
+ * `variant`, no `quantize` marker and no per-tier `vramGbByTier`, loaded at bf16 on both lanes (its
+ * engine contracts and its calibration plan rows name `bf16`). Left on the `default` pseudo-tier,
+ * the first measured `iris_3b:bf16:mlx` capture was refused at ingest as a corpus that reaches no
+ * catalog cell (campaign run 38398326210).
  */
 export const CONVERTER_TIER_OVERRIDES = new Map([
   ["anima_base:mlx", ["bf16", "q4", "q8"]],
   ["anima_aesthetic:mlx", ["bf16", "q4", "q8"]],
   ["anima_turbo:mlx", ["bf16", "q4", "q8"]],
   ["flux2_klein_9b_true_v2:mlx", ["bf16"]],
+  ["iris_3b:mlx", ["bf16"]],
+  ["iris_3b:candle", ["bf16"]],
 ]);
 
 /**

@@ -1,0 +1,36 @@
+name: H3 owned CPU cache preparation
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build ordinary managed downloader or prepare its private cache. No generation.
+        type: choice
+        options: [build, prepare]
+        required: true
+      sceneworks_sha:
+        description: Exact workflow/helper source commit.
+        type: string
+        required: true
+      run_dir:
+        description: External task-owned same-APFS-volume directory; never the shared HF cache.
+        type: string
+        required: true
+      shared_cache_root:
+        description: Narrow source-declared existing cache root, read-only.
+        type: string
+        required: false
+        default: /Volumes/Models/huggingface
+      binary_attestation_path:
+        description: Existing host-local cpu-download-build.json produced by build mode.
+        type: string
+        required: false
+permissions:
+  contents: read
+# Default-main registration only. The full frozen CPU source replaces this body later.
+jobs:
+  registration_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Register the exact CPU cache workflow dispatch inputs
+        run: echo "Registration metadata only; no cache preparation executed."

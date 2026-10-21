@@ -1,5 +1,6 @@
 import React from "react";
 import { API_BASE_URL, withMediaTicket } from "../api.js";
+import { isDepthAsset } from "../depthJobs.js";
 
 // Ticket-free URL builder; internal so every exported producer appends the media
 // ticket (sc-8810) exactly once, and posterUrl can swap the file extension before
@@ -64,7 +65,27 @@ export function isVectorAsset(asset) {
 }
 
 export function vectorPreviewUrl(asset) {
-  if (!isVectorAsset(asset) || !asset?.projectId || !asset?.preview?.path) return "";
+  if (!isVectorAsset(asset)) return "";
+  return storedPreviewUrl(asset);
+}
+
+// A depth map (Iris-3B, sc-25682): its `file` is the raw float32 `.npy` (never paintable); every
+// visual surface paints the separately stored derived PNG `preview` instead. Download hands back the
+// raw map through assetUrl().
+export { isDepthAsset };
+
+export function depthPreviewUrl(asset) {
+  if (!isDepthAsset(asset)) return "";
+  return storedPreviewUrl(asset);
+}
+
+// Assets whose stored file is not browser-paintable and which carry their own PNG `preview`.
+function isPreviewBackedAsset(asset) {
+  return isVectorAsset(asset) || isDepthAsset(asset);
+}
+
+function storedPreviewUrl(asset) {
+  if (!asset?.projectId || !asset?.preview?.path) return "";
   const path = asset.preview.path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
   return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${asset.projectId}/files/${path}`);
 }
@@ -165,6 +186,7 @@ export function posterUrl(asset) {
 
 export function thumbnailUrl(asset) {
   if (isVectorAsset(asset)) return vectorPreviewUrl(asset);
+  if (isDepthAsset(asset)) return depthPreviewUrl(asset);
   const source = assetCanRenderAsVideo(asset) ? barePosterUrl(asset) : bareAssetUrl(asset);
   return withThumbnailRequest(source);
 }
@@ -226,7 +248,7 @@ export function AssetThumbnail({ asset, className = "" }) {
   if (assetCanRenderAsVideo(asset)) {
     return <VideoPoster asset={asset} className={className} />;
   }
-  if (assetCanRenderAsImage(asset)) {
+  if (assetCanRenderAsImage(asset) || isDepthAsset(asset)) {
     return <ImageThumb src={src} className={className} />;
   }
   return <span className={className}>{asset.type ?? "asset"}</span>;
@@ -272,11 +294,11 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
   if (!asset) {
     return null;
   }
-  const src = isVectorAsset(asset) ? vectorPreviewUrl(asset) : assetUrl(asset);
+  const src = isPreviewBackedAsset(asset) ? storedPreviewUrl(asset) : assetUrl(asset);
   if (!src) {
     return <span className={className}>{asset.type ?? "asset"}</span>;
   }
-  if (isVectorAsset(asset)) {
+  if (isPreviewBackedAsset(asset)) {
     return <ImageThumb src={src} className={className} />;
   }
   if (assetCanRenderAsVideo(asset)) {

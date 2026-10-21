@@ -69,6 +69,7 @@ export const SOURCE_EXTENSIONS = new Set([
   ".sh",
   ".sha256",
   ".snap",
+  ".spdx",
   ".sql",
   ".svelte",
   ".svg",
@@ -85,6 +86,7 @@ export const SOURCE_EXTENSIONS = new Set([
 ]);
 
 export const SOURCE_BASENAMES = new Set([
+  ".appimageignore",
   ".dockerignore",
   ".env",
   ".gitattributes",
@@ -95,6 +97,8 @@ export const SOURCE_BASENAMES = new Set([
   "Dockerfile",
   "Justfile",
   "LICENSE",
+  "LICENSE_APACHE-2.0",
+  "LICENSE_MIT",
   "Makefile",
   "pre-commit",
   "pre-push",

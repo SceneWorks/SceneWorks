@@ -27,7 +27,7 @@
 // mapping (it badges the Stability AI Community License as "Commercial OK").
 //
 // The badge is a NAVIGATION aid, not legal advice: several "Commercial OK" licences
-// (Stability Community, Krea 2 Community, LTX-2 Community, NVIDIA Open Model) carry
+// (Stability Community, Krea 2 Community, LTX-2 Community) carry
 // revenue thresholds or other conditions. The row keeps the full licence NAME next to the
 // badge, and the full text stays one tap away in the advanced Licenses screen.
 

@@ -1,0 +1,43 @@
+name: H3 Veda Mac2 native MLX fixtures
+
+on:
+  workflow_dispatch:
+    inputs:
+      sceneworks_sha:
+        description: "Exact SceneWorks commit containing this guarded workflow."
+        required: true
+        type: string
+      inference_sha:
+        description: "Exact frozen inference commit for the five MLX fixtures."
+        required: true
+        type: string
+      expected_runner:
+        description: "Exact Mac2 runner name (nax-macos-2)."
+        required: true
+        type: string
+      physical_gpu_id:
+        description: "Mac2 platform UUID from verified inventory; must differ from Mac1."
+        required: true
+        type: string
+      metal_device_name:
+        description: "Exact Metal device name from verified Mac2 inventory."
+        required: true
+        type: string
+      run_dir:
+        description: "Unique absolute external evidence directory on Mac2."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Default-main registration only; the source-owned feature workflow runs the guarded fixtures.
+jobs:
+  registration_only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Confirm default-branch registration only
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          echo "H3 Veda Mac2 fixture workflow registered; this run is not device acceptance."

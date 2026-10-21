@@ -1769,6 +1769,7 @@ fn checkpoint_plan_raw_settings(
 #[cfg(target_os = "macos")]
 fn checkpoint_plan_memory_inputs(request: &ImageRequest, engine_id: &str, spec: &gen_core::LoadSpec) -> crate::mlx_fit_gate::MlxRequestInputs {
     crate::mlx_fit_gate::MlxRequestInputs {
+        native_batch: 1,
         width: request.width,
         height: request.height,
         count: request.count,
@@ -1783,6 +1784,8 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest, engine_id: &str, spec: 
             engine_id, spec, &request.prompt,
             &request.negative_prompt,
         )),
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 

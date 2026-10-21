@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, totalmem } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -1321,9 +1321,16 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     assert.deepEqual(plan.anchors[key].strategy, { rung: "resident", engagedRungs: ["resident"] }, key);
     assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
   }
-  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest exemption.
+  // …and no other candle row overrides on contract grounds today: SenseNova's six ride the manifest
+  // exemption, and so do the two Iris-3B task routes (sc-25690: depth and restoration load no text
+  // encoder, so their manifest candle blocks declare staged residency structurally not applicable).
   const residentCandle = Object.keys(plan.anchors).filter((key) => key.endsWith(":candle") && plan.anchors[key].strategy?.rung === "resident").sort();
-  assert.deepEqual(residentCandle.filter((key) => !key.startsWith("sensenova_u1_8b")), [
+  const ridesManifestExemption = (key) =>
+    key.startsWith("sensenova_u1_8b") || key.startsWith("iris_3b_depth:") || key.startsWith("iris_3b_restore:");
+  for (const key of ["iris_3b_depth:bf16:candle", "iris_3b_restore:bf16:candle"]) {
+    assert.deepEqual(planAnchor(plan, key).strategy, { rung: "resident", engagedRungs: ["resident"], parameters: {} }, key);
+  }
+  assert.deepEqual(residentCandle.filter((key) => !ridesManifestExemption(key)), [
     "bernini:bf16:candle", "bernini:q4:candle", "bernini:q8:candle",
     "bernini_image:bf16:candle", "bernini_image:q4:candle", "bernini_image:q8:candle",
     "ltx_2_3:q4:candle", "ltx_2_3:q8:candle",
@@ -3276,4 +3283,38 @@ test("a single-render physical A/V session carries selected_av alone; the audio 
     () => validatePhysicalMlxAvContentsAgainstRecord(record, new Map([["reference_av", content]]), record.id),
     /must carry the selected_av render/,
   );
+});
+
+
+test("a failing guarded capture completes the guard's handshake and exits with its own status", { skip: process.platform !== "darwin" && "the footprint guard is Darwin-only" }, async () => {
+  // sc-26246: under `--require-completion-handshake` a root that exits without completing is a hard
+  // stop. The capture's FAILURE path must complete too, so a refusal surfaces as the capture's own
+  // exit status rather than as a guard stop that hides it.
+  const root = await mkdtemp(path.join(tmpdir(), "harness-completion-"));
+  const events = path.join(root, "events.jsonl");
+  const output = path.join(root, "captures", "anchor.json");
+  const watchdog = fileURLToPath(new URL("./memory-calibration-watchdog.py", import.meta.url));
+  const harness = fileURLToPath(new URL("./memory-calibration-harness.mjs", import.meta.url));
+  let status = 0;
+  let stderr = "";
+  try {
+    await execFileAsync("/usr/bin/python3", [
+      watchdog, "--max-footprint-bytes", String(64 * 1024 ** 3),
+      "--host-memory-bytes", String(totalmem()), "--min-memory-free-bytes", "1",
+      "--max-runtime-seconds", "120", "--sample-interval", "0.2", "--telemetry-timeout", "10",
+      "--term-grace", "1", "--event-file", events, "--require-completion-handshake",
+      "--", process.execPath, harness, "capture", "--anchor", "no_such_model:q4:mlx",
+      "--provider-command", "[]", "--sceneworks-repo", root, "--inference-repo", root,
+      "--output", output,
+    ], { timeout: 120_000 });
+  } catch (error) {
+    status = error.code;
+    stderr = String(error.stderr);
+  }
+  const log = (await readFile(events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(log.find((event) => event.event === "hard_stop"), undefined, JSON.stringify(log.at(-1)));
+  assert.ok(log.some((event) => event.event === "child_completed"), "the capture completed the handshake");
+  assert.equal(status, 1, stderr);
+  assert.match(stderr, /memory-strategy calibration:/);
+  assert.deepEqual(await readdir(path.dirname(output)), [], "the private completion evidence is removed");
 });

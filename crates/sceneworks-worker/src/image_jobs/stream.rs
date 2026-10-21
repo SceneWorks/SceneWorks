@@ -41,7 +41,24 @@ enum GenEvent {
         not(all(not(target_os = "macos"), feature = "backend-candle")),
         allow(dead_code)
     )]
-    CheckpointWeightFacts { facts: Value },
+    CheckpointWeightFacts {
+        facts: Value,
+    },
+    /// Per-image provenance facts of image `index` (sc-25681): the engine's non-fatal warnings and
+    /// the applied adapter stack (`lane_controls::image_facts`). Sent before that image's
+    /// [`GenEvent::Image`] on the same channel; the consumer merges the block into that image's
+    /// `rawAdapterSettings`. Lanes with nothing to report never produce it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        )),
+        allow(dead_code)
+    )]
+    ImageFacts {
+        index: usize,
+        facts: JsonObject,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -103,6 +120,19 @@ impl PromptEnhancementEventSink {
                 report,
             });
         })
+    }
+}
+
+impl PromptEnhancementEventSink {
+    /// Report image `index`'s provenance facts (sc-25681) on the same per-item channel the
+    /// prompt-enhancement report rides. Load-bearing like that report, so it blocks rather than
+    /// dropping under channel pressure; it is sent before the image itself, so the consumer holds
+    /// it when the image is written.
+    fn send_image_facts(&self, facts: JsonObject) {
+        let _ = self.tx.blocking_send(GenEvent::ImageFacts {
+            index: self.index,
+            facts,
+        });
     }
 }
 
@@ -324,6 +354,51 @@ where
     Ok(())
 }
 
+/// Drive ONE engine call that renders a whole native prompt batch (sc-25681): its progress rides
+/// image 0's channel, then each returned image `k` (engine order — prompt-minor) is published as
+/// image `k` on seed `seed + k`, the seed the engine drew its noise from, after its provenance
+/// `facts`. A cancel or an engine failure inside the call returns before any image is sent, so a
+/// partial batch is never published; a count that is not `expected` is a typed engine failure.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+fn drive_native_prompt_batch<F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    seed: i64,
+    expected: usize,
+    generate: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce(
+        gen_core::PreviewSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
+{
+    let _cache_release = RequestCacheRelease;
+    let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
+    let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
+    if images.len() != expected {
+        return Err(WorkerError::Engine(format!(
+            "the prompt batch returned {} images, expected {expected}",
+            images.len()
+        )));
+    }
+    for (index, (width, height, pixels)) in images.into_iter().enumerate() {
+        if let Some(facts) = facts.clone() {
+            let _ = tx.blocking_send(GenEvent::ImageFacts { index, facts });
+        }
+        let image = (seed.wrapping_add(index as i64), width, height, pixels);
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry
 /// forward across a `drive_gen_items` loop (sc-5567). `clear_cache()` returns only the
 /// retained-for-reuse buffers to the OS — live arrays (the cached model weights) are not
@@ -455,9 +530,8 @@ where
               cancel| {
             // `start_cached_gen_stream` exposes only the generator, so this route has no
             // request-scoped memory block a policy switch could act through. Decline truthfully.
-            warm_policy.decline(
-                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
-            );
+            warm_policy
+                .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
             drive(generator, tx, cancel)
         },
     )
@@ -580,6 +654,92 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state_using(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        crate::inference_runtime::load,
+        drive,
+    )
+}
+
+/// [`start_cached_gen_stream_with_request_state`] with the generator loader supplied by the caller
+/// — the `_using` loader-injection seam (`generator_cache::with_cached_generator_for_request_using`)
+/// lifted to the image stream, so a test can drive a whole image job arm (`generate_stream_using`)
+/// against a stub `Generator` with no tensor backend or weights. Production passes
+/// `crate::inference_runtime::load` through the plain name.
+fn start_cached_gen_stream_with_request_state_using<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
+    start_cached_gen_stream_with_request_state_using_owned(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        load_generator,
+        move |generator, state, policy, warm, external, _owned, tx, cancel| {
+            drive(generator, state, policy, warm, external, tx, cancel)
+        },
+    )
+}
+
+fn start_cached_gen_stream_with_request_state_using_owned<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
@@ -590,16 +750,17 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request(
+        crate::generator_cache::with_cached_generator_for_request_using(
             engine_id,
             spec,
             load_error_context,
+            load_generator,
             move |generator,
                   cache_state,
                   loaded_policy,
                   warm_policy,
                   external_committed_bytes,
-                  _provider_resident_bytes| {
+                  provider_resident_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -612,6 +773,7 @@ where
                     loaded_policy,
                     warm_policy,
                     external_committed_bytes,
+                    provider_resident_bytes,
                     tx,
                     blocking_cancel,
                 )
@@ -643,7 +805,10 @@ pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Op
             // Turn that into an actionable pre-flight message naming the tier, directing the user to
             // Model Manager or to pick an installed tier, instead of a raw "No such file or directory".
             if !resolved_tier_is_complete(request, &dir) {
-                let tier = dir.file_name().and_then(|s| s.to_str()).unwrap_or("selected");
+                let tier = dir
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("selected");
                 return Some(format!(
                     "{}: the '{tier}' quant tier isn't fully installed on this machine (some weight \
                      files are missing). Re-download or repair it in Model Manager, or pick a tier \

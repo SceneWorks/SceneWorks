@@ -172,8 +172,21 @@ fn builtin_targets_gate_network_types() {
             // list only because the target never advertised `lokr` — shipped but unreachable.
             // Base only: `mage_flow_edit_base_lora` is no longer offered (sc-15277 — no edit
             // trainer exists, so it could only ever claim-then-fail; restoring it is sc-15320).
-            "mage_flow_base_lora"
+            "mage_flow_base_lora",
+            // Iris-3B generation (sc-25685/sc-25686): both native trainers report `supports_lokr`
+            // and write the LyCORIS layout the Iris adapter loader reads.
+            "iris_3b_generation"
         ]
+    );
+    // The Iris restoration target (sc-25688) produces a restoration MODEL (`base_checkpoint`) in
+    // every arm, its LoRA / LoKr arm merged at export, so it is outside the LoRA-output set above.
+    let restore = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "iris_3b_restore")
+        .expect("the Iris restoration target");
+    assert!(
+        advertises(restore, "full") && advertises(restore, "lora") && advertises(restore, "lokr")
     );
 }
 
@@ -748,8 +761,16 @@ fn only_mage_flow_targets_advertise_the_full_finetune_network_type() {
         .collect();
     assert_eq!(
         full_targets,
-        vec!["mage_flow_base_lora"],
-        "only the Mage-Flow Base target may advertise the full base fine-tune network type"
+        vec![
+            "mage_flow_base_lora",
+            "iris_3b_generation",
+            // Iris depth (sc-25687) is a full fine-tune only; restoration (sc-25688) defaults to the
+            // paper's full fine-tune. Both native trainers report `supports_full_finetune`.
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ],
+        "only the Mage-Flow Base and Iris-3B targets may advertise the full fine-tune network type \
+         (both native trainers report `supports_full_finetune`)"
     );
 }
 
@@ -2009,11 +2030,22 @@ fn build_plan_for_target(
 ) -> Result<TrainingPlan, TrainingPlanError> {
     // An instruction-edit target (sc-24161) only accepts edit-pair datasets, so its numeric
     // boundaries are probed against one; every other target keeps the captioned fixture.
-    let dataset = if sceneworks_core::training::training_target_max_reference_images(target) > 0 {
+    let mut dataset = if sceneworks_core::training::training_target_max_reference_images(target) > 0
+    {
         edit_dataset(&[1])
     } else {
         dataset_fixture()
     };
+    // An Iris depth target trains aligned examples: every item carries its depth target
+    // (sc-25687). Other targets read the fixture unchanged.
+    if target.base_model == "iris_3b_depth" {
+        for item in &mut dataset.items {
+            item.extra.insert(
+                "irisDepth".to_owned(),
+                json!({ "path": format!("sidecars/{}.depth.npy", item.id) }),
+            );
+        }
+    }
     build_training_plan(BuildTrainingPlan {
         job_id: "job_target_limit",
         target,
@@ -2036,6 +2068,11 @@ fn set_training_numeric_field(config: &mut TrainingConfig, field: &str, value: u
         "steps" => config.steps = value,
         "batchSize" => config.batch_size = value,
         "resolutions" => config.resolution = value,
+        "sampleCount" => {
+            config
+                .advanced
+                .insert("sampleCount".to_owned(), serde_json::json!(value));
+        }
         other => panic!("missing test mutation for advertised numeric limit {other}"),
     }
 }
@@ -2066,7 +2103,7 @@ fn trainer_capability_numeric_boundaries_are_typed_and_preserved() {
             assert!(
                 matches!(
                     field.as_str(),
-                    "rank" | "alpha" | "steps" | "batchSize" | "resolutions"
+                    "rank" | "alpha" | "steps" | "batchSize" | "resolutions" | "sampleCount"
                 ),
                 "{}/{} is advertised but has no shared request-field validator",
                 target.id,
@@ -2079,6 +2116,13 @@ fn trainer_capability_numeric_boundaries_are_typed_and_preserved() {
             for boundary in boundary_values {
                 let boundary = u32::try_from(boundary).expect("builtin bound fits u32");
                 let mut config = target.defaults.clone();
+                if field == "steps" && target.limits.contains_key("microStepFields") {
+                    // Micro-step targets (Iris) count steps in accumulation windows; a 1-step
+                    // boundary is a whole window only at accumulation 1.
+                    config.gradient_accumulation = 1;
+                    config.save_every = 0;
+                    config.advanced.insert("sampleEvery".to_owned(), json!(0));
+                }
                 set_training_numeric_field(&mut config, field, boundary);
                 let plan = build_plan_for_target(target, config.clone()).unwrap_or_else(|error| {
                     panic!(
@@ -2992,6 +3036,15 @@ fn adapter_noise_is_gated_on_the_target_flags() {
         .targets
         .iter()
         .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
+        .filter(|target| {
+            // The Iris-3B trainers declare no epic 2123 technique, so they advertise neither flag.
+            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+            if iris {
+                assert!(!target_supports_weight_noise(target), "{}", target.id);
+                assert!(!target_supports_gradient_noise(target), "{}", target.id);
+            }
+            !iris
+        })
         .collect();
     assert!(!lora_targets.is_empty());
     for target in &lora_targets {
@@ -3058,7 +3111,16 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
         .filter(|target| !target_supports_resolution_buckets(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+    // The Iris-3B trainers declare no epic 2123 technique (they bucket by their own shape_policy).
+    assert_eq!(
+        withheld,
+        [
+            "ltx_2_5_video_lora",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
 
     let buckets = |target: &sceneworks_core::training::TrainingTarget| {
         let allowed = target.limits["resolutions"]
@@ -3124,7 +3186,16 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control"]);
+    // The Iris-3B trainers declare no epic 2123 technique.
+    assert_eq!(
+        unsupported,
+        [
+            "krea_2_control",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
 
     for target in &registry.targets {
         with_weight(target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
@@ -3167,7 +3238,17 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         .filter(|target| !target_supports_subject_mask_loss(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    // The Iris-3B trainers declare no epic 2123 technique.
+    assert_eq!(
+        unsupported,
+        [
+            "krea_2_control",
+            "ltx_2_5_video_lora",
+            "iris_3b_generation",
+            "iris_3b_depth",
+            "iris_3b_restore"
+        ]
+    );
     for target in &registry.targets {
         with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
         match (
@@ -3706,7 +3787,17 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .filter(|target| !supports(target))
             .map(|target| target.id.as_str())
             .collect();
-        assert_eq!(unsupported, ["krea_2_control"], "{key}");
+        // The Iris-3B trainers declare no epic 2123 technique.
+        assert_eq!(
+            unsupported,
+            [
+                "krea_2_control",
+                "iris_3b_generation",
+                "iris_3b_depth",
+                "iris_3b_restore"
+            ],
+            "{key}"
+        );
         for target in &registry.targets {
             assert_eq!(
                 supports(target),

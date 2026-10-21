@@ -152,7 +152,13 @@ if (process.argv.length === 1) {
   return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript };
 }
 
-async function runProductServiceCli(fixture, command, port, timeout = 8_000) {
+// Hang backstops only: nothing asserts on them. A real `start` hashes the fixture weights and boots
+// two services, and under the full parallel `npm run check` it measured past the old 8 s backstop,
+// which killed it before it could write the very failure report a test reads.
+const PRODUCT_SERVICE_CLI_BACKSTOP_MS = 60_000;
+const PRODUCT_SERVICE_TEST_BACKSTOP_MS = 180_000;
+
+async function runProductServiceCli(fixture, command, port, timeout = PRODUCT_SERVICE_CLI_BACKSTOP_MS) {
   const args = command === "start"
     ? [fixture.serviceScript, "start", fixture.root, fixture.output, pin, `http://127.0.0.1:${port}`, fixture.weightsRoot, fixture.tuple]
     : command === "reload-worker" ? [fixture.serviceScript, command, fixture.root, fixture.output]
@@ -404,7 +410,7 @@ test("product service streams copied closure identity and preserves portable ord
   await assert.rejects(() => closureTreeHash(destination), /weights closure copy contains symlink/);
 });
 
-test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: 30_000, skip: !productServiceSupported }, async () => {
+test("product service start CLI exits while durable-log services remain alive and can later be stopped", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -453,7 +459,7 @@ test("product service start CLI exits while durable-log services remain alive an
   }
 });
 
-test("product service stop requires an exact active sentinel before signaling", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+test("product service stop requires an exact active sentinel before signaling", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -492,7 +498,7 @@ test("product service stop requires an exact active sentinel before signaling", 
   }
 });
 
-test("product service rejects a pre-existing healthy listener before provenance", { timeout: 15_000, skip: !productServiceSupported }, async () => {
+test("product service rejects a pre-existing healthy listener before provenance", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), listener = createServer((_request, response) => response.end(JSON.stringify({ status: "ok", readiness: { status: "ready" } })));
   try {
     await new Promise((resolve, reject) => { listener.once("error", reject); listener.listen(0, "127.0.0.1", resolve); });
@@ -541,7 +547,7 @@ test("product service relocation requires the exact adopted offline path", async
   );
 });
 
-test("a rejected product relocation terminates both services and records the failure", { timeout: 15_000, skip: !productServiceSupported }, async () => {
+test("a rejected product relocation terminates both services and records the failure", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture({ tamperRelocation: true }), port = await availableLoopbackPort();
   try {
     await assert.rejects(() => runProductServiceCli(fixture, "start", port), /returned an inexact binding/);
@@ -557,7 +563,7 @@ test("a rejected product relocation terminates both services and records the fai
   }
 });
 
-test("product service records setup and log-open failures before removing child-free state", { timeout: 20_000, skip: !productServiceSupported }, async () => {
+test("product service records setup and log-open failures before removing child-free state", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   for (const failure of ["setup", "hf-hash", "open"]) {
     const fixture = await productServiceFixture(), port = await availableLoopbackPort();
     try {
@@ -578,7 +584,7 @@ test("product service records setup and log-open failures before removing child-
   }
 });
 
-test("failed termination records diagnostics and retains authenticated state for safe retry", { timeout: 20_000, skip: !productServiceSupported }, async () => {
+test("failed termination records diagnostics and retains authenticated state for safe retry", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -719,7 +725,7 @@ test("readiness binds all 120 source assets and every suite identity to the pinn
   await rm(root, { recursive: true, force: true });
 });
 
-test("owned headless worker unload/reload preserves API and projects, proves exit and fresh registration", { timeout: 30_000, skip: !productServiceSupported }, async () => {
+test("owned headless worker unload/reload preserves API and projects, proves exit and fresh registration", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -757,7 +763,7 @@ test("owned headless worker unload/reload preserves API and projects, proves exi
   } finally { await forceFixtureCleanup(fixture, record); }
 });
 
-test("owned unload refuses fake termination and mutated lineage before signaling", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+test("owned unload refuses fake termination and mutated lineage before signaling", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -775,7 +781,7 @@ test("owned unload refuses fake termination and mutated lineage before signaling
   } finally { await forceFixtureCleanup(fixture, record); }
 });
 
-test("owned reload rejects changed binary and preserves an unloaded API for final cleanup", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+test("owned reload rejects changed binary and preserves an unloaded API for final cleanup", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {
@@ -794,7 +800,7 @@ test("owned reload rejects changed binary and preserves an unloaded API for fina
   } finally { await forceFixtureCleanup(fixture, record); }
 });
 
-test("failed headless reload retains lifecycle evidence and final stop cleans current ownership", { timeout: 25_000, skip: !productServiceSupported }, async () => {
+test("failed headless reload retains lifecycle evidence and final stop cleans current ownership", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
   const fixture = await productServiceFixture(), port = await availableLoopbackPort();
   let record;
   try {

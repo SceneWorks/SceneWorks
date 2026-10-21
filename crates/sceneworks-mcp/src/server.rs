@@ -220,6 +220,47 @@ pub struct GenerateImageArgs {
         description = "Include SceneWorks workflow metadata in returned images. Default false: MCP outputs often travel to model-provider infrastructure, so workflow metadata is stripped unless explicitly requested."
     )]
     pub include_workflow: Option<bool>,
+    // sc-25681: the per-model sampling controls, carried in `advanced` — the only keys the API
+    // and worker read them from. Each is validated at enqueue against the model's catalog row (a
+    // control the model does not declare is refused by name, never dropped), so the descriptions
+    // say where to find what a model offers rather than restating a menu.
+    #[schemars(description = "Denoise steps. Omit for the model's own default.")]
+    pub steps: Option<u32>,
+    #[schemars(
+        description = "Classifier-free guidance scale. Omit for the model's default. 1.0 turns guidance off, so a model that binds its negative prompt / guidance interval to guidance refuses those at 1.0."
+    )]
+    pub guidance_scale: Option<f64>,
+    #[schemars(
+        description = "Sampler / solver name from the model's samplers menu (list_models). Iris-3B: \"dpmpp_2m\" (DPM-Solver++ order 2, default) or \"euler\" (order 1). Omit for the model default."
+    )]
+    pub sampler: Option<String>,
+    #[schemars(
+        description = "Schedule (timestep) shift, > 0, for a model with a shift axis (Iris-3B's default is its checkpoint's 4.0). Omit for the model default."
+    )]
+    pub scheduler_shift: Option<f64>,
+    #[schemars(
+        description = "Guidance interval [start, end] with 0 <= start < end <= 1 (model time: 1 = noise, 0 = clean): classifier-free guidance runs only inside it. Only for a model that offers one (Iris-3B); refused at guidance 1.0."
+    )]
+    pub cfg_interval: Option<[f64; 2]>,
+    #[schemars(
+        description = "What to do with a prompt longer than the text encoder's caption budget: \"warn\" (truncate and report a caption_truncated warning on the job and image), \"error\" (refuse the render) or \"silent\" (truncate quietly). Only for a model that offers it (Iris-3B); omit for the checkpoint's own policy."
+    )]
+    pub caption_overflow: Option<String>,
+    #[schemars(
+        description = "A native prompt batch: 2+ prompts rendered together in ONE pass, prompts × count <= the model's imageControls.maxPromptBatchImages (Iris-3B: 8). `prompt` must equal prompts[0]. Output order depends on the model: Iris-3B is round-robin, image k renders prompts[k % len]; MOSS-Image is prompt-major, image k renders prompts[k / count] using integer division. Both use seed + k. Only for a model declaring maxPromptBatchImages; omit otherwise."
+    )]
+    pub prompts: Option<Vec<String>>,
+    #[schemars(
+        description = "MOSS-Image controls, passed as advanced.mossImage. Canonical keys: acceleration (off default, unmerged_bf16, full_fp32; SFT only), max_sequence_length (1–4096), uncond_skip_layers (null author default [22], [] disables), training_shift, slg {layers,scale,start,stop}. DMD steps select prefix 1–8 (default 8); omit guidance/negative/sampler/scheduler/shift/SLG when accelerated. Text-to-image only; tag and JSON prompts are preserved."
+    )]
+    #[schemars(schema_with = "moss_image_options_schema")]
+    pub moss_image: Option<Value>,
+}
+
+fn moss_image_options_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    sceneworks_core::moss_image::options_schema()
+        .try_into()
+        .expect("MOSS options schema object")
 }
 
 /// Arguments for `submit_video_job`, mapped onto the API's `VideoJobRequest`
@@ -327,6 +368,118 @@ pub struct SubmitVideoJobArgs {
     pub replacement_mode: Option<String>,
 }
 
+/// Arguments for `estimate_depth` (Iris-3B monocular depth, sc-25682): the typed
+/// `POST /api/v1/image/depth/jobs` request.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EstimateDepthArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(description = "The image asset to estimate depth from. It is not modified.")]
+    pub source_asset_id: String,
+    #[schemars(
+        description = "\"capped\" (default) downscales the model input so its long side is at most maxSide; \"native\" runs at the source resolution (much more memory on a large photo; refused if it does not fit)."
+    )]
+    pub resolution_mode: Option<String>,
+    #[schemars(description = "Max side in pixels for \"capped\" (64-8192, default 1024).")]
+    pub max_side: Option<u32>,
+    #[schemars(
+        description = "A trained Iris depth model to run instead of the release \"Iris 3B Depth\": the id of a list_models entry whose trainedCheckpoint.task is \"depth\". Omit for the release model."
+    )]
+    pub iris_model: Option<String>,
+}
+
+/// Arguments for `restore_image` (Iris-3B restoration, sc-25683): an `image_upscale` job on the
+/// `iris` engine, through the generic `POST /api/v1/jobs` route the Image Editor and Library use.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreImageArgs {
+    #[schemars(description = "Project id (from list_projects).")]
+    pub project_id: String,
+    #[schemars(
+        description = "The image asset to restore. It is not modified; the result is a new linked asset."
+    )]
+    pub source_asset_id: String,
+    #[schemars(
+        description = "Output scale, any positive factor (default 4; 1 = restore without enlarging). The output is floor(input x scale) per side of the PROCESSED input (see inputSizing)."
+    )]
+    pub scale: Option<f64>,
+    #[schemars(
+        description = "\"budgeted\" (default) first downscales a large source into the model's trained input budget (short side 512, long side 1024) — the result is then `scale`x of that budgeted input, NOT of the original; \"original\" processes the source at its own size (slower, more memory; refused rather than budgeted when it does not fit)."
+    )]
+    pub input_sizing: Option<String>,
+    #[schemars(description = "Colour correction against the input (default true).")]
+    pub color_fix: Option<bool>,
+    #[schemars(
+        description = "A trained Iris restoration model to run instead of the release \"Iris 3B Restoration\": the id of a list_models entry whose trainedCheckpoint.task is \"restoration\". Omit for the release model."
+    )]
+    pub iris_model: Option<String>,
+}
+
+/// The `POST /api/v1/jobs` body for [`RestoreImageArgs`]. Only provided controls are sent, so the
+/// API's own defaults (4x, budgeted, colour fix on) stay authoritative.
+pub(crate) fn restore_job_body(args: &RestoreImageArgs) -> Result<Value, String> {
+    let mut payload = Map::new();
+    payload.insert("projectId".to_owned(), json!(args.project_id));
+    payload.insert("sourceAssetId".to_owned(), json!(args.source_asset_id));
+    payload.insert("engine".to_owned(), json!("iris"));
+    if let Some(scale) = args.scale {
+        if !(scale.is_finite() && scale > 0.0) {
+            return Err("scale must be a positive number".to_owned());
+        }
+        payload.insert("scale".to_owned(), json!(scale));
+    }
+    if let Some(sizing) = args.input_sizing.as_deref() {
+        if !matches!(sizing, "budgeted" | "original") {
+            return Err(format!(
+                "inputSizing must be \"budgeted\" or \"original\", not {sizing:?}"
+            ));
+        }
+        payload.insert("inputSizing".to_owned(), json!(sizing));
+    }
+    if let Some(color_fix) = args.color_fix {
+        payload.insert("colorFix".to_owned(), json!(color_fix));
+    }
+    if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
+        payload.insert("irisModel".to_owned(), json!(model));
+    }
+    Ok(json!({
+        "type": "image_upscale",
+        "projectId": args.project_id,
+        // The generic jobs route requires it; "auto" is the scheduler's own choice, as the
+        // typed image/video/depth routes default it.
+        "requestedGpu": "auto",
+        "payload": payload,
+    }))
+}
+
+/// The `POST /api/v1/image/depth/jobs` body for [`EstimateDepthArgs`].
+pub(crate) fn depth_job_body(args: &EstimateDepthArgs) -> Result<Value, String> {
+    let resolution = match args.resolution_mode.as_deref().unwrap_or("capped") {
+        "native" => {
+            if args.max_side.is_some() {
+                return Err("maxSide applies only to resolutionMode \"capped\"".to_owned());
+            }
+            json!({ "mode": "native" })
+        }
+        "capped" => json!({ "mode": "capped", "maxSide": args.max_side.unwrap_or(1024) }),
+        other => {
+            return Err(format!(
+                "resolutionMode must be \"capped\" or \"native\", not {other:?}"
+            ))
+        }
+    };
+    let mut body = json!({
+        "projectId": args.project_id,
+        "sourceAssetId": args.source_asset_id,
+        "resolution": resolution,
+    });
+    if let Some(model) = args.iris_model.as_deref().filter(|model| !model.is_empty()) {
+        body["irisModel"] = json!(model);
+    }
+    Ok(body)
+}
+
 /// Arguments for the generic job-polling tools (`get_job_status` /
 /// `get_job_result`) — they work for any job type (video AND image).
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -366,7 +519,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, the sampler menu (samplers) and image sampling-control declarations (imageControls: supportsSchedulerShift / supportsCfgInterval / captionOverflowPolicies / negativePromptRequiresGuidance / maxPromptBatchImages; MOSS Base/SFT accepts mossImage with acceleration default off; only SFT offers unmerged_bf16/full_fp32 acceleration; see generate_image schema), minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, any licence-required attribution string, and for a trained model its trainedCheckpoint {task, engineModel, baseModel} (task \"generation\" → use the id as generate_image's model; \"depth\" / \"restoration\" → estimate_depth's / restore_image's irisModel). An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -378,7 +531,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState. Optionally filter by model family and/or project."
+        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState, and for an Iris adapter its irisTask / baseModel / networkType (an Iris image job accepts only generation adapters trained on its engine — a trained full Iris checkpoint runs on iris_3b, so iris_3b adapters apply to it). Optionally filter by model family and/or project."
     )]
     async fn list_loras(
         &self,
@@ -629,6 +782,72 @@ impl SceneWorksMcp {
                 json!(
                     "Video jobs run for minutes. Poll get_job_status with this jobId; \
                      once status is \"completed\", call get_job_result for download links."
+                ),
+            );
+        }
+        json_result(snapshot)
+    }
+
+    #[tool(
+        description = "Estimate monocular depth (Iris-3B) for an existing image asset WITHOUT waiting. The result is a new depth asset: the raw float32 HxW relative log depth map (.npy, row-major <f4, affine-invariant: roughly -1 near to +1 far, NOT metric, not clamped) at the image's EXIF-corrected size, plus a separate colorized PNG preview, linked to the source image (which is not modified). Runs the release \"Iris 3B Depth\" model (which must be installed) or, with irisModel, an installed trained depth model (list_models entries with trainedCheckpoint.task \"depth\"; it needs no release install); a request too large for the GPU memory budget is refused, never downscaled. Returns the job id; poll get_job_status, then get_job_result for the .npy and preview links."
+    )]
+    async fn estimate_depth(
+        &self,
+        Parameters(args): Parameters<EstimateDepthArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let body =
+            depth_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .post_json("/api/v1/image/depth/jobs", &body)
+            .await
+            .map_err(api_error)?;
+        if job.get("id").and_then(Value::as_str).is_none() {
+            return Err(ErrorData::internal_error(
+                "depth job submission returned no job id",
+                None,
+            ));
+        }
+        let mut snapshot = compact_job_status(&job);
+        if let Some(out) = snapshot.as_object_mut() {
+            out.insert(
+                "next".to_owned(),
+                json!(
+                    "Poll get_job_status with this jobId; once status is \"completed\", call \
+                     get_job_result for the raw .npy and its preview."
+                ),
+            );
+        }
+        json_result(snapshot)
+    }
+
+    #[tool(
+        description = "Restore / upscale an existing image asset with Iris-3B WITHOUT waiting. Default 4x with the input budgeted (a large source is first downscaled to the model's 512/1024 input budget, so the result is 4x of THAT, not of the original — the result asset records the actual processing and output size); scale may be any positive factor (1 = restore only), inputSizing \"original\" processes the source at its own size, colorFix toggles colour correction, irisModel picks an installed trained restoration model (list_models entries with trainedCheckpoint.task \"restoration\"). Requires \"Iris 3B Restoration\" installed (or the trained model); a request that does not fit memory or the output bounds is refused, never silently rescaled. The source is not modified; the result is a new linked asset. Returns the job id; poll get_job_status, then get_job_result."
+    )]
+    async fn restore_image(
+        &self,
+        Parameters(args): Parameters<RestoreImageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let body =
+            restore_job_body(&args).map_err(|message| ErrorData::invalid_params(message, None))?;
+        let job = self
+            .api
+            .post_json("/api/v1/jobs", &body)
+            .await
+            .map_err(api_error)?;
+        if job.get("id").and_then(Value::as_str).is_none() {
+            return Err(ErrorData::internal_error(
+                "restoration job submission returned no job id",
+                None,
+            ));
+        }
+        let mut snapshot = compact_job_status(&job);
+        if let Some(out) = snapshot.as_object_mut() {
+            out.insert(
+                "next".to_owned(),
+                json!(
+                    "Poll get_job_status with this jobId; once status is \"completed\", call \
+                     get_job_result for the restored image."
                 ),
             );
         }
@@ -938,14 +1157,45 @@ impl SceneWorksMcp {
                 link = link.with_mime_type(mime);
             }
             blocks.push(ContentBlock::resource_link(link));
-            summary_assets.push(json!({
+            // An asset whose stored file is not a picture (a depth map's raw .npy, a vector's
+            // SVG) carries a separately stored PNG preview; link it too (sc-25682).
+            let preview_url = asset
+                .pointer("/preview/path")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty() && !path.starts_with('/') && !path.contains(".."))
+                .map(|preview_path| {
+                    let relative = format!(
+                        "/api/v1/projects/{project_id}/files/{}?ticket={ticket}",
+                        encode_media_path(preview_path)
+                    );
+                    let url = format!("{link_base}{relative}");
+                    let name = preview_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(preview_path)
+                        .to_owned();
+                    blocks.push(ContentBlock::resource_link(
+                        Resource::new(&url, name)
+                            .with_description(format!(
+                                "Preview of SceneWorks asset {} from job {job_id}",
+                                asset.get("id").and_then(Value::as_str).unwrap_or("?")
+                            ))
+                            .with_mime_type("image/png"),
+                    ));
+                    url
+                });
+            let mut summary = json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),
                 "type": asset.get("type").cloned().unwrap_or(Value::Null),
                 "mimeType": mime_type,
                 "url": url,
                 "relativeUrl": relative_url,
                 "workflowPolicy": asset_workflow_policy,
-            }));
+            });
+            if let (Some(object), Some(preview_url)) = (summary.as_object_mut(), preview_url) {
+                object.insert("previewUrl".to_owned(), Value::String(preview_url));
+            }
+            summary_assets.push(summary);
         }
         blocks.push(ContentBlock::json(json!({
             "jobId": job_id,
@@ -1102,11 +1352,36 @@ pub(crate) fn image_job_body(args: &GenerateImageArgs) -> Result<Value, String> 
             args.reference_asset_ids.as_ref().map(|v| json!(v)),
         ),
         ("maskAssetId", args.mask_asset_id.as_ref().map(|v| json!(v))),
+        (
+            "prompts",
+            args.prompts
+                .as_ref()
+                .filter(|prompts| !prompts.is_empty())
+                .map(|v| json!(v)),
+        ),
     ];
     for (key, value) in optional {
         if let Some(value) = value {
             body.insert(key.to_owned(), value);
         }
+    }
+    let advanced: Map<String, Value> = [
+        ("mossImage", args.moss_image.clone()),
+        ("steps", args.steps.map(|v| json!(v))),
+        ("guidanceScale", args.guidance_scale.map(|v| json!(v))),
+        ("sampler", args.sampler.as_ref().map(|v| json!(v))),
+        ("schedulerShift", args.scheduler_shift.map(|v| json!(v))),
+        ("cfgInterval", args.cfg_interval.map(|v| json!(v))),
+        (
+            "captionOverflow",
+            args.caption_overflow.as_ref().map(|v| json!(v)),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+    .collect();
+    if !advanced.is_empty() {
+        body.insert("advanced".to_owned(), Value::Object(advanced));
     }
     Ok(Value::Object(body))
 }
@@ -1733,10 +2008,15 @@ pub(crate) fn compact_models(models: &Value) -> Value {
         // every video model took a continuous duration range. MiniMax-H3 is not that shape: its
         // fourteen `17n + 5` rungs are the only renderable lengths, its fps is a one-entry menu,
         // and its step floor is 2 — so an agent that could not see them would guess "6 seconds,
-        // 25 fps" and get a 400 for every call. Sampler/scheduler menus and the download/footprint
-        // blocks stay on the full API response; these are the request-shaping keys.
+        // 25 fps" and get a 400 for every call. The download/footprint blocks stay on the full API
+        // response; these are the request-shaping keys. The sampler menu and the image control
+        // declarations joined them with sc-25681, when `generate_image` gained `sampler` /
+        // `schedulerShift` / `cfgInterval` / `captionOverflow`: an off-menu value is a 400, so the
+        // menu is request-shaping too.
         for (key, pointer) in [
             ("resolutions", "/limits/resolutions"),
+            ("samplers", "/limits/samplers"),
+            ("imageControls", "/image"),
             ("durations", "/limits/durations"),
             ("fps", "/limits/fps"),
             ("minSteps", "/limits/hardMinSteps"),
@@ -1752,6 +2032,13 @@ pub(crate) fn compact_models(models: &Value) -> Value {
                 out.insert(key.to_owned(), value.clone());
             }
         }
+        if model
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+        {
+            out.insert("mossImageControls".to_owned(), json!({"defaultAcceleration":"off","accelerationAvailable":model["id"] == "moss_image_sft","optionsSchema":sceneworks_core::moss_image::options_schema(),"conditionalPurposes":model.get("conditionalPurposes")}));
+        }
         // Licence-required UI attribution (sc-17227 §IV.2 / sc-17161). An MCP client renders the
         // model it used in ITS OWN interface, so the string has to travel with the catalog entry
         // rather than living only on SceneWorks' own screens.
@@ -1763,6 +2050,18 @@ pub(crate) fn compact_models(models: &Value) -> Value {
         // soundscape is invented rather than absent — and an agent has no other way to find out.
         if let Some(guide) = model.pointer("/ui/promptGuide") {
             out.insert("promptGuide".to_owned(), guide.clone());
+        }
+        // A trained model's task identity (Iris full-model / depth / restoration exports): which
+        // tool it serves (generate_image's `model`, estimate_depth's / restore_image's `irisModel`)
+        // and the engine it runs on (whose LoRAs it accepts).
+        if let Some(block) = model.get("trainedCheckpoint").and_then(Value::as_object) {
+            let mut trained = Map::new();
+            for key in ["task", "engineModel", "baseModel"] {
+                if let Some(value) = block.get(key) {
+                    trained.insert(key.to_owned(), value.clone());
+                }
+            }
+            out.insert("trainedCheckpoint".to_owned(), Value::Object(trained));
         }
         // Which LoRA families this model accepts — pairs with list_loras.
         if let Some(families) = model.pointer("/loraCompatibility/families") {
@@ -1794,6 +2093,12 @@ pub(crate) fn compact_loras(loras: &Value) -> Value {
                 // because the numbers differ per adapter and no naming convention carries the shift.
                 "role",
                 "sampling",
+                // An Iris adapter's identity (sc-25681): the task it was trained for and the base it
+                // was trained on. The image-job gate refuses an adapter of another task or base, and
+                // family alone cannot tell Iris generation / depth / restoration adapters apart.
+                "irisTask",
+                "baseModel",
+                "networkType",
             ],
             &mut out,
         );
@@ -1821,6 +2126,21 @@ mod tests {
         assert_eq!(
             compact_projects(&full),
             json!([{ "id": "p1", "name": "My Film", "createdAt": "2026-07-07T00:00:00Z" }])
+        );
+    }
+
+    #[test]
+    fn compact_models_carries_a_trained_models_task_identity() {
+        let full = json!([{
+            "id": "my_depth_run", "name": "My depth", "type": "image",
+            "trainedCheckpoint": {
+                "engineModel": "iris_3b_depth", "family": "iris", "task": "depth",
+                "baseModel": "iris_3b_depth", "layout": "iris_depth_export"
+            }
+        }]);
+        assert_eq!(
+            compact_models(&full)[0]["trainedCheckpoint"],
+            json!({ "task": "depth", "engineModel": "iris_3b_depth", "baseModel": "iris_3b_depth" })
         );
     }
 
@@ -1857,6 +2177,7 @@ mod tests {
                 "gated": false,
                 "defaults": { "resolution": "1024x1024", "steps": 8, "guidanceScale": 0, "count": 4 },
                 "resolutions": ["768x768", "1024x1024"],
+                "samplers": ["default", "euler"],
                 "loraFamilies": ["z-image"]
             }])
         );
@@ -1896,6 +2217,22 @@ mod tests {
                 "requiresLicenseAcknowledgment": true
             }])
         );
+    }
+
+    /// S4: an Iris adapter's task and base survive the compaction, so an agent can pick an adapter
+    /// the image-job gate accepts for the model it renders with.
+    #[test]
+    fn compact_loras_keeps_an_iris_adapters_task_identity() {
+        let full = json!([{
+            "id": "lora_iris", "name": "Iris Style", "family": "iris",
+            "irisTask": "generation", "baseModel": "iris_3b", "networkType": "lokr",
+            "source": { "provider": "training", "path": "loras/lora_iris" }
+        }]);
+        let compact = compact_loras(&full);
+        assert_eq!(compact[0]["irisTask"], "generation");
+        assert_eq!(compact[0]["baseModel"], "iris_3b");
+        assert_eq!(compact[0]["networkType"], "lokr");
+        assert!(compact[0].get("source").is_none());
     }
 
     #[test]
@@ -1981,6 +2318,67 @@ mod tests {
     // generate_image (sc-10234): args → ImageJobRequest mapping.
     // -----------------------------------------------------------------------
 
+    #[test]
+    fn prompt_batch_schema_describes_each_models_output_order() {
+        let schema = serde_json::to_value(schemars::schema_for!(GenerateImageArgs)).unwrap();
+        let description = schema["properties"]["prompts"]["description"]
+            .as_str()
+            .expect("published prompts description");
+        assert!(description.contains("Iris-3B is round-robin"));
+        assert!(description.contains("prompts[k % len]"));
+        assert!(description.contains("MOSS-Image is prompt-major"));
+        assert!(description.contains("prompts[k / count] using integer division"));
+        assert!(description.contains("Both use seed + k"));
+    }
+
+    #[test]
+    fn moss_image_options_reach_advanced_losslessly() {
+        for mode in ["off", "unmerged_bf16", "full_fp32"] {
+            let options = json!({"acceleration": mode, "max_sequence_length": 1024, "uncond_skip_layers": []});
+            let args = args_from(
+                json!({"projectId":"p","prompt":"日本語 <tag> {\"items\":[]}","model":"moss_image_sft","mossImage":options}),
+            );
+            let body = image_job_body(&args).unwrap();
+            assert_eq!(body["advanced"]["mossImage"], options);
+            assert_eq!(body["prompt"], args.prompt);
+        }
+    }
+
+    #[test]
+    fn bare_moss_mcp_modes_do_not_inject_ordinary_defaults_and_reject_explicit_conflicts() {
+        for mode in ["unmerged_bf16", "full_fp32"] {
+            let args = args_from(
+                json!({"projectId":"p","prompt":"日本語 <tag>","model":"moss_image_sft","mossImage":{"acceleration":mode}}),
+            );
+            let body = image_job_body(&args).unwrap();
+            let native = sceneworks_core::moss_image::native_request(
+                body.as_object().unwrap(),
+                &Default::default(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(native.steps.is_none());
+            assert!(native.guidance.is_none());
+            assert!(native.scheduler_shift.is_none());
+            assert!(native.negative_prompt.as_deref().is_none_or(str::is_empty));
+            assert_eq!(
+                native.moss_image.unwrap().acceleration,
+                sceneworks_core::moss_image::options(body["advanced"].as_object().unwrap())
+                    .unwrap()
+                    .acceleration
+            );
+            for (key, value) in [("guidanceScale", json!(3)), ("schedulerShift", json!(5))] {
+                let mut conflict = body.clone();
+                conflict["advanced"][key] = value;
+                assert!(sceneworks_core::moss_image::native_request(
+                    conflict.as_object().unwrap(),
+                    &Default::default()
+                )
+                .is_err());
+            }
+        }
+    }
+
     fn args_from(value: Value) -> GenerateImageArgs {
         serde_json::from_value(value).expect("args deserialize")
     }
@@ -2026,6 +2424,68 @@ mod tests {
                 "maskAssetId": "asset_mask"
             })
         );
+    }
+
+    /// sc-25681: the sampling controls ride `advanced` (the only keys the API reads them from),
+    /// verbatim, and a call that names none sends no `advanced` block at all.
+    #[test]
+    fn image_job_body_maps_the_sampling_controls_into_advanced() {
+        let args = args_from(json!({
+            "projectId": "p1",
+            "prompt": "a lighthouse",
+            "model": "iris_3b",
+            "steps": 30,
+            "guidanceScale": 4.5,
+            "sampler": "euler",
+            "schedulerShift": 2.5,
+            "cfgInterval": [0.1, 0.9],
+            "captionOverflow": "error"
+        }));
+        let body = image_job_body(&args).expect("body builds");
+        assert_eq!(
+            body["advanced"],
+            json!({
+                "steps": 30,
+                "guidanceScale": 4.5,
+                "sampler": "euler",
+                "schedulerShift": 2.5,
+                "cfgInterval": [0.1, 0.9],
+                "captionOverflow": "error"
+            })
+        );
+        let bare = image_job_body(&args_from(json!({ "projectId": "p1", "prompt": "x" })))
+            .expect("body builds");
+        assert!(bare.get("advanced").is_none(), "{bare}");
+        assert!(bare.get("prompts").is_none(), "{bare}");
+    }
+
+    /// sc-25681: a native prompt batch rides the top-level `prompts` list the API reads, verbatim.
+    #[test]
+    fn image_job_body_forwards_a_native_prompt_batch() {
+        let body = image_job_body(&args_from(json!({
+            "projectId": "p1",
+            "prompt": "a cat",
+            "prompts": ["a cat", "a dog"],
+            "model": "iris_3b",
+            "count": 2
+        })))
+        .expect("body builds");
+        assert_eq!(body["prompts"], json!(["a cat", "a dog"]));
+        assert_eq!(body["prompt"], "a cat");
+    }
+
+    /// The Iris row's request-shaping surface reaches `list_models`.
+    #[test]
+    fn compact_models_carries_the_sampler_menu_and_image_controls() {
+        let models = json!([{
+            "id": "iris_3b",
+            "type": "image",
+            "limits": { "samplers": ["dpmpp_2m", "euler"] },
+            "image": { "supportsCfgInterval": true, "captionOverflowPolicies": ["warn", "error", "silent"] }
+        }]);
+        let entry = &compact_models(&models)[0];
+        assert_eq!(entry["samplers"], json!(["dpmpp_2m", "euler"]));
+        assert_eq!(entry["imageControls"]["supportsCfgInterval"], true);
     }
 
     #[test]
@@ -2446,14 +2906,22 @@ mod tests {
         // Still compact: the verbose blocks stay on the full API response.
         assert!(entry.get("downloads").is_none(), "{entry}");
         assert!(entry.get("limits").is_none(), "{entry}");
-        assert!(entry.get("samplers").is_none(), "{entry}");
+        assert_eq!(entry["samplers"], json!(["default"]), "{entry}");
 
         // A model that declares none of it gains no keys — this is per-model, not a shape change.
         let bare =
             json!([{ "id": "svd", "type": "video", "limits": { "resolutions": ["1024x576"] } }]);
         let entry = &compact_models(&bare)[0];
         assert_eq!(entry["resolutions"], json!(["1024x576"]));
-        for key in ["durations", "fps", "minSteps", "attribution", "promptGuide"] {
+        for key in [
+            "durations",
+            "fps",
+            "minSteps",
+            "attribution",
+            "promptGuide",
+            "samplers",
+            "imageControls",
+        ] {
             assert!(
                 entry.get(key).is_none(),
                 "{key} must not be invented: {entry}"

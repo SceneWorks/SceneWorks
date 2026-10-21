@@ -8,6 +8,7 @@ const initialSettings = {
   sourcePath: "",
   urlColumn: "URL",
   captionColumn: "TEXT",
+  captionFieldColumns: "",
   maxItems: 1000,
   minEdge: 512,
   concurrency: 16,
@@ -56,6 +57,16 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
     event.preventDefault();
     if (!settings.sourcePath.trim() || running) return;
     setSubmitError("");
+    // sc-25685: each named column becomes a named caption field on the item (Iris
+    // `caption_field(s)`). Omitted when empty so a plain import's request is unchanged.
+    const captionFieldColumns = Array.from(
+      new Set(
+        settings.captionFieldColumns
+          .split(",")
+          .map((column) => column.trim())
+          .filter(Boolean),
+      ),
+    );
     try {
       await onRun({
         sourcePath: settings.sourcePath.trim(),
@@ -72,6 +83,7 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
           .split(",")
           .map((term) => term.trim())
           .filter(Boolean),
+        ...(captionFieldColumns.length ? { captionFieldColumns } : {}),
       });
     } catch (error) {
       setSubmitError(errorMessage(error, "Could not start the Parquet import."));
@@ -132,6 +144,18 @@ export function DatasetParquetImportDialog({ running = false, onClose, onRun }) 
             />
           </label>
         </div>
+        <label>
+          Extra caption columns
+          <input
+            onChange={(event) => update("captionFieldColumns", event.target.value)}
+            placeholder="short_caption, tags"
+            value={settings.captionFieldColumns}
+          />
+        </label>
+        <small className="dataset-parquet-hint">
+          Optional, comma-separated. Each column is kept as a named caption field on the item, which Iris
+          training can select from.
+        </small>
         <label>
           Caption category preset (heuristic)
           <select

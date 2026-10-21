@@ -202,7 +202,7 @@ export function CharacterStudio() {
   // jobAction may be missing in test contexts that wrap CharacterStudio with a
   // stub provider; guard so the buttons just no-op there.
   const onCancelCharacterJob = jobAction ? (job) => jobAction(job, "cancel") : undefined;
-  const onRetryCharacterJob = jobAction ? (job) => jobAction(job, "retry") : undefined;
+  const onRetryCharacterJob = jobAction ? (job, payload) => jobAction(job, "retry", { body: payload ?? {} }) : undefined;
   const onDuplicateCharacterJob = jobAction ? (job) => jobAction(job, "duplicate") : undefined;
   const onOpenCharacterJobQueue = setActiveView ? () => setActiveView("Queue") : undefined;
   const onSendImage = sendCharacterToImage;

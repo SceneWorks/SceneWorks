@@ -187,6 +187,70 @@ describe("DatasetEditorPanel delete affordance", () => {
   });
 });
 
+// sc-25685: an item's named caption fields are visible (read-only) on its caption card, and the
+// add dialog accepts `.json` caption sidecars.
+describe("DatasetEditorPanel named caption fields", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  function withMembers(namedCaptionsById = {}) {
+    const activeDataset = {
+      id: "ds-1",
+      name: "Kelsie",
+      version: 1,
+      items: [
+        { id: "item_1", assetId: "asset-a", caption: { text: "a" }, captions: { short: "a", tags: "x" } },
+        { id: "item_2", assetId: "asset-b", caption: { text: "b" } },
+      ],
+    };
+    const { props } = makeSessions({ activeDataset });
+    const members = [
+      { id: "asset-a", type: "image", displayName: "a.png", file: { path: "a.png" } },
+      { id: "asset-b", type: "image", displayName: "b.png", file: { path: "b.png" } },
+    ];
+    props.datasetSession.memberAssets = members;
+    props.datasetSession.health = { itemCount: 2, missingCaptions: 0, duplicateFilenames: 0, valid: true };
+    props.captionSession.selectedAssetIds = ["asset-a", "asset-b"];
+    props.captionSession.namedCaptionsById = namedCaptionsById;
+    props.config.imageAssets = members;
+    return props;
+  }
+
+  const namedHints = () =>
+    [...container.querySelectorAll(".training-caption-named-fields")].map((node) => node.textContent);
+
+  it("lists a saved item's named caption fields", async () => {
+    await act(async () => root.render(<DatasetEditorPanel {...withMembers()} />));
+    expect(namedHints()).toEqual(["+2 caption fields: short, tags"]);
+  });
+
+  it("lists a freshly imported item's named caption fields", async () => {
+    await act(async () => root.render(<DatasetEditorPanel {...withMembers({ "asset-b": { long: "b long" } })} />));
+    expect(namedHints()).toEqual(["+2 caption fields: short, tags", "+1 caption field: long"]);
+  });
+
+  it("accepts .json caption sidecars in the add dialog", async () => {
+    const props = withMembers();
+    props.captionSession.addDialogOpen = true;
+    await act(async () => root.render(<DatasetEditorPanel {...props} />));
+    const input = [...document.body.querySelectorAll('input[type="file"]')].find((node) => node.getAttribute("accept")?.includes("image/*"));
+    expect(input.getAttribute("accept")).toContain(".json");
+    expect(input.getAttribute("accept")).toContain(".txt");
+  });
+});
+
 // sc-2126: subject masks — coverage, the generate action, per-image overlay, the empty-mask flag, and
 // the replacement upload (with its field error surfaced on the owning card).
 describe("DatasetEditorPanel subject masks", () => {

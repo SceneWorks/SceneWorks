@@ -286,7 +286,9 @@ test("a wall-time ceiling fails closed and removes the owned group", async () =>
   const stopped = result.events.find((event) =>
     event.event === "hard_stop" && event.reason.includes("runtime_at_or_above_0.2s"));
   assert.ok(stopped);
-  assert.ok(stopped.at - started.at < 1, "the uncapped two-second sample sleep won");
+  // The uncapped sleep cannot return in under its two real seconds, so "< 2" is the exact
+  // discriminator. A tighter bound measured the runner's scheduler, not the cap.
+  assert.ok(stopped.at - started.at < 2, "the uncapped two-second sample sleep won");
   result.pids.forEach(assertGone);
 });
 
@@ -1231,6 +1233,7 @@ group.leader = stale
 group.anchors = (stale,)
 group.retained = {stale}
 class Finished:
+    returncode = 0
     def wait(self, timeout=None): return 0
 group.child = Finished()
 module.group_identities = lambda pgid: (_ for _ in ()).throw(AssertionError("blind PGID census"))
@@ -1773,6 +1776,32 @@ def footprint_outcome(n, state):
   assert.match(result.faults[1].reason, /^TimeoutExpired:.*footprint/);
 });
 
+test("a census outage during termination still removes the whole owned group, anchor included", async () => {
+  // The hard stop runs under the same load that slows `/bin/ps`. `terminate` used to open with a
+  // census, so one timed-out `ps` raised out of it before any SIGKILL: the guarded tree kept
+  // running and the TERM-immune `--anchor`, which nothing else ever kills, was orphaned for good.
+  const files = await fixture();
+  const result = await runWithScriptedCensus(files, "census-outage-during-terminate", String.raw`
+real_terminate = module.OwnedGroup.terminate
+def terminate(self, grace):
+    state["terminating"] = True
+    return real_terminate(self, grace)
+module.OwnedGroup.terminate = terminate
+def census_outcome(n, state):
+    if state.get("terminating") and state["censusFaults"] < 3:
+        state["censusFaults"] += 1
+        raise census_timeout()
+`);
+  assert.equal(result.status, 97);
+  assert.equal(result.stopped.reason, "runtime_at_or_above_0.3s");
+  assert.equal(result.events.at(-1).event, "terminated");
+  const identities = result.stopped.processIdentities.map((item) => item.pid);
+  assert.ok(identities.length >= 3, "the stop recorded the sentinel, the anchor and the tree");
+  identities.forEach(assertGone);
+  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+  pids.forEach(assertGone);
+});
+
 test("a successful census that lacks the root stops at once, after tolerated census faults", async () => {
   // Root-loss detection must survive the tolerance: a census that FAILS is unknown, but the first
   // SUCCESSFUL one that no longer enumerates the group ends the guard immediately with the child's
@@ -1895,6 +1924,22 @@ print("census budget is the telemetry budget")
   assert.match(probe.stdout, /census budget is the telemetry budget/);
 });
 
+test("under the test clock a real census waits past a loaded host, while the policy budget is unchanged", async () => {
+  // Scripted faults raise directly; a REAL `/bin/ps` that a busy runner slowed past a sub-second
+  // `--telemetry-timeout` must not become an extra, unscripted telemetry fault.
+  const probe = await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+module.set_census_timeout(0.2)
+assert module.CENSUS_TIMEOUT_SECONDS == 0.2, module.CENSUS_TIMEOUT_SECONDS
+assert module.census_budget(None) >= 10.0, module.census_budget(None)
+assert module.SystemClock().probe_wait(0.2) == 0.2
+print("probe wait floored")
+`], { env: withVirtualClock() });
+  assert.match(probe.stdout, /probe wait floored/);
+});
+
 test("a guard run adopts its --telemetry-timeout as the census budget", async () => {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
@@ -1970,6 +2015,7 @@ while True:
     line = f.readline().decode().strip()
     if line == f"BYE {nonce}": break
     assert line == f"PING {nonce}"
+    if scenario == "final_fault_once": open(marker, "w").write("pinged after DONE")
 if scenario == "ack_exit_race":
     while not os.path.exists(marker): time.sleep(0.001)
 sock.close()
@@ -2004,6 +2050,9 @@ class Sampler:
             return parse_processes(pids, {"processes": [{"pid": p, "phys_footprint": 1} for p in pids if p != state["root"]]}, required)
         if state["requested"] and not state["completed"]:
             if scenario == "final_fault": raise TimeoutError("scripted final probe failed")
+            if scenario == "final_fault_once" and not state.get("faulted"):
+                state["faulted"] = True
+                raise TimeoutError("scripted transient final probe failure")
             if scenario == "final_high": return 100
             if scenario == "final_exit":
                 root = m.process_identity(required[0])
@@ -2034,6 +2083,7 @@ m.DarwinHostPressureSampler = HostSampler
 sys.argv = ["watchdog", "--require-completion-handshake", "--max-footprint-bytes", "100",
     "--host-memory-bytes", "1000", "--min-memory-free-bytes", "10",
     "--max-runtime-seconds", "10", "--sample-interval", "0.02", "--telemetry-timeout", "1",
+    "--telemetry-fault-window", ${JSON.stringify(TEST_TELEMETRY_FAULT_WINDOW)},
     "--child-attestation-timeout", "5", "--term-grace", "0.1",
     "--event-file", ${JSON.stringify(files.events)}, "--", sys.executable,
     ${JSON.stringify(client)}, scenario, str(marker), ${JSON.stringify(String(exitStatus))}]
@@ -2051,7 +2101,8 @@ raise SystemExit(m.guard(m.parse_args()))
   try { await execFileAsync("python3", [launcher], { timeout: 60_000, env: withVirtualClock() }); }
   catch (error) { status = error.code; }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  return { status, events };
+  const marker = await readFile(files.pids, "utf8").catch(() => "");
+  return { status, events, marker };
 }
 
 for (const status of [0, 1, 7]) {
@@ -2085,6 +2136,39 @@ for (const scenario of ["descendant_clean", "descendant_high"]) {
     assert.ok(events.some((event) => event.event === "descendant_sampled"));
   });
 }
+
+test("a whole-number float in an event hashes the bytes the JavaScript chain validator re-derives", async () => {
+  // sc-26257: the first tolerated fault carries faultElapsedSeconds 0.0; Python wrote and hashed
+  // "0.0", JSON.stringify re-derives "0", and the chain read as mutated.
+  const files = await fixture();
+  await execFileAsync("python3", ["-c", String.raw`
+import importlib.util, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+chain = module.EventChain(Path(${JSON.stringify(files.events)}))
+chain.emit({"event": "telemetry_fault", "faultElapsedSeconds": 0.0, "nested": {"x": [1.0, 0.5]}})
+chain.emit({"event": "sample", "physicalFootprintBytes": 1})
+`]);
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  validateWatchdogEventChain(events);
+  assert.equal(events[0].nested.x[1], 0.5, "fractional values are untouched");
+});
+
+test("a transient final-sample fault is retried and the measured release keeps the root's status", async () => {
+  // sc-26257: one slow probe at the final pre-release sample used to be an immediate
+  // completion_telemetry_lost stop. The root is still blocked on BYE, so the next tick retries it.
+  const { status, events, marker } = await completionRun("final_fault_once", 7);
+  assert.equal(status, 7, JSON.stringify(events));
+  // The retried tick keeps the client's idle timeout fed rather than going silent until release.
+  assert.equal(marker, "pinged after DONE");
+  const fault = events.findIndex((event) => event.event === "telemetry_fault" && event.phase === "completion");
+  const sampled = events.findIndex((event) => event.phase === "completion_before_release");
+  const completed = events.findIndex((event) => event.event === "child_completed");
+  assert.ok(fault >= 0 && fault < sampled && sampled < completed, JSON.stringify(events));
+  assert.ok(!events.some((event) => event.event === "hard_stop"));
+  validateWatchdogEventChain(events);
+});
 
 test("acknowledged root exit between census and footprint preserves actual status", async () => {
   const { status, events } = await completionRun("ack_exit_race", 7);

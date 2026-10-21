@@ -1354,6 +1354,9 @@ impl ComfyuiWanExperts {
 ))]
 pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
+    /// H3 optional predictor is resolved offline only for an explicitly enabled request.
+    pub(super) veda: Option<gen_core::VedaRequest>,
+    pub(super) veda_predictor: Option<WeightsSource>,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
     /// Explicit fitted-memory pipeline axes. `None` is not inferred from execution knobs and
@@ -1485,6 +1488,8 @@ impl Default for VideoGenInput {
             memory: None,
             memory_context: None,
             engine_id: "",
+            veda: None,
+            veda_predictor: None,
             model_dir: PathBuf::new(),
             quant: None,
             memory_transformer_variant: None,
@@ -1603,6 +1608,12 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     .into_iter()
     .flatten()
     .collect::<BTreeMap<_, _>>();
+    if input.veda.as_ref().is_some_and(|request| request.enabled) {
+        if let Some(source) = &input.veda_predictor {
+            spec.components
+                .insert("veda_predictor".into(), source.clone());
+        }
+    }
     // LTX-2.5's split checkpoints can stage the Gemma encoder and DiT sequentially on every load.
     // Adapter-free loads also satisfy the providers' exact rung-4 prerequisite: their 48-block
     // transformer source can be reopened under the shared deferred-materialization contract.
@@ -2183,6 +2194,7 @@ pub(super) fn run_loaded_video_generation(
 ) -> WorkerResult<DecodedVideo> {
     let memory_context = input.memory_context;
     let mut req = GenerationRequest {
+        veda: input.veda,
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
@@ -2247,6 +2259,10 @@ pub(super) fn run_loaded_video_generation(
                 channels: track.channels,
             }),
             adapter_apply_reports: generator.adapter_apply_reports(),
+            veda_execution: generator
+                .veda_execution_report()
+                .filter(|report| report.requested)
+                .map(|report| report.outcome_json()),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
         // unreachable on this path — no video request sets `output_channels` — but the match
@@ -2626,6 +2642,15 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
     }
 }
 
+/// Copy only provider observations from this successful generation into the persisted metrics.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn record_video_veda_metrics(metrics: &mut GenerationMetrics, outcome: Option<&Value>) {
+    metrics.veda_execution = outcome.cloned();
+}
+
 /// Fold the effective video settings + model + observed step count into the
 /// phase-timing metrics block for a finished video job (epic 10402, sc-10418). A
 /// video job produces one output (sc-10426). Sampler/scheduler fall back to
@@ -2729,6 +2754,16 @@ pub(super) async fn generate_video_using(
         + Send
         + 'static,
 ) -> WorkerResult<DecodedVideo> {
+    if input.veda.as_ref().is_some_and(|veda| veda.enabled) {
+        let component_settings = settings.clone();
+        // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
+        // records its repair/install dense-fallback reason when the enabled request runs.
+        input.veda_predictor = tokio::task::spawn_blocking(move || {
+            super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
+        })
+        .await
+        .map_err(|error| WorkerError::Engine(error.to_string()))?;
+    }
     // Per-generation sampler / scheduler axis for video (epic 7114 P5, sc-7127). The handlers leave
     // `input.sampler`/`scheduler` `None`; read them from the caller's already-parsed `advanced` block
     // here — the single funnel every Wan / LTX / SVD path passes through — and N3-guard each against
@@ -2848,6 +2883,8 @@ pub(super) async fn generate_video_using(
             input.frames,
             input.decode_chunk_size,
         );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let host_probe_runtime = tokio::runtime::Handle::current();
         tokio::spawn(async move {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
@@ -2887,6 +2924,18 @@ pub(super) async fn generate_video_using(
                     &admission_mode,
                     generator.memory_strategy_contract(),
                 )?;
+                let sparse_bound = generator
+                    .veda_workspace_bound(gen_core::veda::workspace::Request {
+                        veda: input.veda.as_ref(),
+                        width: input.width,
+                        height: input.height,
+                        frames: input.frames,
+                        count: 1,
+                        prompt: &input.prompt,
+                        conditioning: &input.conditioning,
+                        reference_image_short_edge: input.reference_image_short_edge,
+                    })
+                    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
@@ -2909,20 +2958,20 @@ pub(super) async fn generate_video_using(
                 };
                 // Evidence is the preflight: an unsupported request stays direct generation without
                 // attempting a platform memory probe that could fail independently of admission.
-                let admission_runtime =
-                    if crate::video_admission::packaged_video_evidence_covers_request(
+                let admission_runtime = if sparse_bound.is_some()
+                    || crate::video_admission::packaged_video_evidence_covers_request(
                         generator,
                         &admission_inputs,
                     ) {
-                        crate::video_admission::live_video_runtime_state(
-                            engine_id,
-                            cache_state,
-                            load_policy,
-                            provider_resident_bytes,
-                        )?
-                    } else {
-                        None
-                    };
+                    crate::video_admission::live_video_runtime_state(
+                        engine_id,
+                        cache_state,
+                        load_policy,
+                        provider_resident_bytes,
+                    )?
+                } else {
+                    None
+                };
                 let admission_headroom_bytes = match admission_runtime {
                     Some(runtime) => spec_headroom_bytes
                         .checked_sub(runtime.budget.reserved_headroom_bytes)
@@ -2939,8 +2988,21 @@ pub(super) async fn generate_video_using(
                 };
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
-                let outcome =
-                    crate::video_admission::admit_video_generation(generator, admission_inputs);
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                if let Some(bound) = &sparse_bound {
+                    crate::video_admission::admit_veda_host_workspace(
+                        bound,
+                        host_probe_runtime.block_on(crate::yue2_admission::host_available_bytes()),
+                    )?;
+                }
+                // Sparse requests take the dense ladder's strategy, graded with the sparse
+                // workspace bound on top (sc-25777).
+                let outcome = crate::video_admission::admit_video_generation_with_veda(
+                    generator,
+                    admission_inputs,
+                    sparse_bound.as_ref(),
+                    spec_headroom_bytes,
+                )?;
                 apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
@@ -3252,7 +3314,10 @@ pub(super) async fn generate_video_using(
         .get("model")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
-    let metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
+    let mut metrics = build_video_metrics(timing, &video_settings, model, video_effective_steps);
+    if let Ok(decoded) = &result {
+        record_video_veda_metrics(&mut metrics, decoded.veda_execution.as_ref());
+    }
     crate::job_metrics::post_generation_metrics(api, &job.id, &metrics).await;
     result
 }

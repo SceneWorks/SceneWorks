@@ -3,7 +3,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
 import { candleTrainingKernelBlocked } from "../candleGating.js";
-import { API_BASE_URL, isAbortError } from "../api.js";
+import { API_BASE_URL, checkIrisDataset, irisItemSidecar, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -78,6 +78,17 @@ import {
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
+import {
+  irisCaptionFieldOptions,
+  irisObjective,
+  irisPreviousRuns,
+  trainingLaneFromCapabilities,
+} from "../training/irisOptions.js";
+import { irisTrainingResourceIds } from "../training/irisTaskOptions.js";
+import { useIrisDataWalk } from "../training/useIrisDataWalk.js";
+import { useIrisMetrics, useIrisPlanCheck, useIrisStagePresets } from "../training/useIrisCurricula.js";
+import { IrisRunMetrics } from "./training/IrisCurriculaOptions.jsx";
+import { collectCaptionSidecars, isJsonCaptionSidecar } from "../training/captionSidecars.js";
 import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 
 // Re-exported for callers/tests that import the pure config builders from the
@@ -280,7 +291,12 @@ export function trainingSampleGroups(job, projectId) {
     .filter((group) => group.assets.length);
 }
 
-function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
+// A live Iris run's holdout validation (sc-25689), re-read while it trains.
+function LiveIrisMetrics({ job, token }) {
+  return <IrisRunMetrics metrics={useIrisMetrics(job.id, token, { live: true })} />;
+}
+
+function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview, token }) {
   if (!jobs.length) {
     return null;
   }
@@ -300,15 +316,17 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
           // through the whole run rather than just the clicked group.
           const sampleScope = sampleGroups.flatMap((group) => group.assets);
           return (
-            <WorkerProgressCard
-              key={job.id}
-              job={job}
-              thumbnailsVariant="image-grid"
-              thumbnailGroups={sampleGroups}
-              expectedThumbnailCount={4}
-              onCancel={onCancel}
-              onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
-            />
+            <React.Fragment key={job.id}>
+              <WorkerProgressCard
+                job={job}
+                thumbnailsVariant="image-grid"
+                thumbnailGroups={sampleGroups}
+                expectedThumbnailCount={4}
+                onCancel={onCancel}
+                onThumbnailClick={onPreview ? (asset) => onPreview(asset, sampleScope) : undefined}
+              />
+              {job.payload?.plan?.target?.kernel === "iris_train" ? <LiveIrisMetrics job={job} token={token} /> : null}
+            </React.Fragment>
           );
         })}
       </div>
@@ -354,6 +372,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLibraryMode = mode === "datasets";
   const {
     activeProject,
+    token,
     authenticated = true,
     assets = [],
     attachCharacterLora,
@@ -480,6 +499,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
   // save. Replaces the old importedCaptions + rename-caption draft split.
   const [captionDraftById, setCaptionDraftById] = useState({});
+  // Per-item named captions (`{ field: text }`) parsed from freshly imported `.json` sidecars,
+  // keyed by selection id and threaded into the save payload (sc-25685). Saved items carry theirs
+  // on the item itself.
+  const [namedCaptionsById, setNamedCaptionsById] = useState({});
+  // sc-25689: per-item holdout overrides (`{ [selectionId]: boolean }`) until the dataset is saved.
+  const [holdoutById, setHoldoutById] = useState({});
   // Instruction-edit pairs (sc-24161): each item's ORDERED reference images, keyed by item
   // selection id -> [reference selection id, ...]. Seeded from the saved dataset like captions and
   // threaded into the save payload; the item image is the edit target and its caption the
@@ -602,7 +627,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
       captionsDirty ||
-      referencesDirty);
+      referencesDirty ||
+      Object.keys(holdoutById).length > 0);
   // Refresh awaits the catalog request. Read the current draft state after that
   // await so a rename begun while refresh is in flight is never overwritten by
   // the freshly loaded dataset object.
@@ -885,6 +911,72 @@ export function TrainingStudio({ mode = "training" } = {}) {
     ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
+
+  // Iris-3B (sc-25685): the previous runs a new run can resume / start from, the dataset's caption
+  // field names, the active lane for the declared memory floor, and the data-walk preflight.
+  const irisObjectiveSelected = irisObjective(selectedTarget);
+  const irisSelected = irisObjectiveSelected === "generation";
+  const irisDataWalk = useIrisDataWalk({
+    enabled: irisSelected,
+    targetId: selectedTarget?.id,
+    items: activeDataset?.items?.length ?? 0,
+    batchSize: Number(configDraft.batchSize),
+    token,
+  });
+  // sc-25689: the official stage presets, the pre-launch plan check of the config as it would be
+  // submitted, and the parent run's holdout validation.
+  const irisPresets = useIrisStagePresets(irisSelected, token);
+  const irisPlanConfig = useMemo(() => {
+    if (!irisSelected || !activeDataset || !selectedTarget) return null;
+    try {
+      return trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config;
+    } catch {
+      return null;
+    }
+  }, [irisSelected, activeDataset, configDraft, selectedPreset, selectedTarget, macCapabilities]);
+  const irisPlanCheck = useIrisPlanCheck({ enabled: irisSelected, targetId: selectedTarget?.id, config: irisPlanConfig, token });
+  const irisResumeMetrics = useIrisMetrics(irisSelected ? configDraft.resumeFromJobId : "", token);
+  const irisContext = useMemo(() => {
+    if (irisSelected) {
+      return {
+        previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id }),
+        fullRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, fullOnly: true }),
+        captionFieldOptions: irisCaptionFieldOptions(activeDataset),
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+        dataWalk: irisDataWalk,
+        presets: irisPresets,
+        planCheck: irisPlanCheck,
+        resumeMetrics: irisResumeMetrics,
+        applyPreset: (preset) =>
+          preset &&
+          setConfigDraft((current) =>
+            configDraftFromTarget(selectedTarget, activeDataset, gpuOptions, current.triggerWord ?? "", preset, current),
+          ),
+      };
+    }
+    // Depth / restoration (sc-25687 / sc-25688): previous runs of the same task, the restoration
+    // training-only resources still to install, and the pre-launch dataset check of THIS config.
+    if (!irisObjectiveSelected) return {};
+    return {
+      previousRuns: irisPreviousRuns(jobs, { projectId: activeProject?.id, baseModel: selectedTarget.baseModel }),
+      trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      missingResources: missingRequiredModels(models, irisTrainingResourceIds(selectedTarget)),
+      checkDataset: () =>
+        checkIrisDataset(
+          {
+            projectId: activeProject?.id,
+            datasetId: activeDataset?.id,
+            targetId: selectedTarget.id,
+            config: trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, trainingLane: trainingLaneFromCapabilities(macCapabilities) }).config,
+          },
+          { token },
+        ),
+    };
+  }, [
+    irisSelected, irisObjectiveSelected, jobs, activeProject?.id, activeDataset, macCapabilities, irisDataWalk,
+    models, selectedTarget, selectedPreset, configDraft, token,
+    irisPresets, irisPlanCheck, irisResumeMetrics, gpuOptions,
+  ]);
 
   // The dataset's character kind (person/style/object) — refines the readiness kind
   // and thus the blur floor. "" when the dataset isn't tied to a character.
@@ -1774,19 +1866,23 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setDatasetMessage("");
     try {
       const imageFiles = files.filter(isImageUpload);
-      const captionFiles = files.filter((file) => !isImageUpload(file) && isCaptionUpload(file));
+      const captionFiles = files.filter(
+        (file) => !isImageUpload(file) && (isCaptionUpload(file) || isJsonCaptionSidecar(file)),
+      );
 
-      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`).
-      const captionByStem = new Map();
+      // Pair each caption with an image by filename stem (`Mira_01.txt` → `Mira_01.png`). A
+      // `<stem>.json` sidecar (sc-25685) carries named caption fields, and its `caption`/`text`
+      // fills the caption when the stem has no `.txt`.
+      const sidecarEntries = [];
       for (const file of captionFiles) {
-        const text = (await file.text()).trim();
-        if (text) {
-          captionByStem.set(uploadFileStem(file.name), text);
-        }
+        const jsonByTypeOnly = isJsonCaptionSidecar(file) && uploadFileExtension(file.name) !== "json";
+        sidecarEntries.push({ name: jsonByTypeOnly ? `${file.name}.json` : file.name, text: await file.text() });
       }
+      const { byStem: sidecarByStem, ignored: ignoredSidecars } = collectCaptionSidecars(sidecarEntries);
 
       const imported = [];
       const captionsByAssetId = {};
+      const namedCaptionsByAssetId = {};
       for (const file of imageFiles) {
         const asset = await uploadDatasetItem(file);
         if (asset?.id) {
@@ -1796,9 +1892,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
           const datasetAsset = { ...asset, datasetOnly: true };
           imported.push(datasetAsset.id);
           setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-          const caption = captionByStem.get(uploadFileStem(file.name));
-          if (caption) {
-            captionsByAssetId[asset.id] = { source: "imported", text: caption };
+          const sidecar = sidecarByStem.get(uploadFileStem(file.name));
+          if (sidecar?.text) {
+            captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
+          }
+          if (sidecar?.captions && Object.keys(sidecar.captions).length) {
+            namedCaptionsByAssetId[asset.id] = sidecar.captions;
           }
         }
       }
@@ -1808,15 +1907,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
         if (Object.keys(captionsByAssetId).length) {
           setCaptionDraftById((current) => ({ ...current, ...captionsByAssetId }));
         }
+        if (Object.keys(namedCaptionsByAssetId).length) {
+          setNamedCaptionsById((current) => ({ ...current, ...namedCaptionsByAssetId }));
+        }
         const imageStems = new Set(imageFiles.map((file) => uploadFileStem(file.name)));
-        const unmatchedCaptions = captionFiles.filter((file) => !imageStems.has(uploadFileStem(file.name))).length;
+        const ignoredNames = new Set(ignoredSidecars);
+        const unmatchedCaptions = captionFiles.filter(
+          (file) => !imageStems.has(uploadFileStem(file.name)) && !ignoredNames.has(uploadFileBaseName(file.name)),
+        ).length;
         const matchedCaptions = Object.keys(captionsByAssetId).length;
+        const matchedNamed = Object.keys(namedCaptionsByAssetId).length;
         const captionNote = matchedCaptions ? ` with ${matchedCaptions} caption${matchedCaptions === 1 ? "" : "s"}` : "";
+        const namedNote = matchedNamed
+          ? ` ${matchedNamed} image${matchedNamed === 1 ? "" : "s"} got named caption fields.`
+          : "";
         const unmatchedNote = unmatchedCaptions
           ? ` ${unmatchedCaptions} caption file${unmatchedCaptions === 1 ? "" : "s"} had no matching image.`
           : "";
+        const ignoredNote = ignoredSidecars.length
+          ? ` Ignored ${ignoredSidecars.length} caption .json file${ignoredSidecars.length === 1 ? "" : "s"} that ${ignoredSidecars.length === 1 ? "is" : "are"} not an object of text fields: ${ignoredSidecars.join(", ")}.`
+          : "";
         setDatasetMessage(
-          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${unmatchedNote}`,
+          `Imported ${imported.length} image${imported.length === 1 ? "" : "s"}${captionNote}. Save the dataset to keep them.${namedNote}${unmatchedNote}${ignoredNote}`,
         );
       } else {
         setDatasetError("No images were imported.");
@@ -1859,6 +1971,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
+      namedCaptionsById,
+      holdoutById,
       referenceDraftById: baseReferenceDraftById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
@@ -1870,6 +1984,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setActiveDataset(dataset);
       setDraftName(dataset.name ?? draftName.trim());
       setUploadedDatasetAssets([]);
+      setNamedCaptionsById({});
+      setHoldoutById({});
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
       setAssociatedCharacterId(dataset.characterId ?? "");
       setSelectedDatasetId(dataset.id ?? "");
@@ -1914,6 +2030,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
       setDatasetError(error.message);
       throw error;
     }
+  }
+
+  // Iris depth / restoration sidecars (sc-25687 / sc-25688): attach (file) or remove (null) one
+  // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
+  async function irisSidecar(item, kind, file, fields) {
+    const dataset = await irisItemSidecar(
+      { projectId: activeProject?.id, datasetId: activeDataset?.id, itemId: item.id, kind, file, fields },
+      { token },
+    );
+    setActiveDataset(dataset);
+    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+    return dataset;
   }
 
   async function importParquetDataset(settings) {
@@ -2223,7 +2351,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
       // The dry-run mode selector is gone (sc-10492); the studio only ever queues a
       // real training job. The API still accepts dryRun, so send it explicitly.
       const dryRun = false;
-      const snapshot = trainingConfigSnapshot({ activeDataset, configDraft, selectedPreset, selectedTarget, dryRun });
+      const snapshot = trainingConfigSnapshot({
+        activeDataset,
+        configDraft,
+        selectedPreset,
+        selectedTarget,
+        dryRun,
+        trainingLane: trainingLaneFromCapabilities(macCapabilities),
+      });
       const job = await createTrainingJob({
         targetId: snapshot.targetId,
         datasetId: snapshot.datasetId,
@@ -2340,7 +2475,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   addItemReferences, importItemReferences, editPairsMode, setEditPairsMode,
                 }}
                 captionSession={{
-                  captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
+                  captionDraftById, namedCaptionsById, holdoutById,
+                  onToggleHoldout: irisSelected ? (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })) : undefined, onPreview, updateCaption, captioning, addDialogOpen,
                   selectedAssetIds, addAssets, handleImport, captionDialog,
                   updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption,
                   displayedCaptionPrompt, captionSettings, captionModelMissing,
@@ -2353,6 +2489,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
                   importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                  onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
                 }}
                 maskSession={{
                   projectId: activeProject?.id,
@@ -2426,12 +2563,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
+                  irisContext={irisContext}
                   subjectMaskReport={subjectMasks}
                   onGenerateSubjectMasks={generateSubjectMasks}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}
                   projectId={activeProject?.id}
+                  token={token}
                   onCancel={jobAction ? (job) => jobAction(job, "cancel") : undefined}
                   onPreview={setPreviewAsset}
                 />

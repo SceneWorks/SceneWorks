@@ -229,6 +229,11 @@ pub(crate) fn with_candle_capabilities(
                     WorkerCapability::ImageSegment,
                 ],
             );
+            // Iris-3B monocular depth (sc-25682): `runtime-cuda` links `candle-gen-iris`, whose
+            // depth task `depth_jobs::run_image_depth_job` loads from the installed `depth/` export.
+            // A job-type capability (the depth task is not a registry modality), advertised
+            // explicitly like smart-select.
+            extend_capabilities_unique(&mut gpu.capabilities, [WorkerCapability::ImageDepth]);
             // DWPose whole-body pose detection (sc-5496, epic 5482): the off-Mac sibling of the macOS
             // `ort`/CoreML path (sc-3487) — the same RTMW detector via `pose_jobs::run_pose_detect_job`
             // with the CUDA execution provider, serving `pose_detect` for the Pose Library "create from
@@ -1101,6 +1106,10 @@ pub(crate) fn mlx_gpu(settings: &Settings) -> DiscoveredGpu {
         // backend: a box prompt → a binary inpaint mask asset. The off-Mac Candle worker advertises
         // the sibling box-PVS handler explicitly in `with_candle_capabilities`.
         WorkerCapability::ImageSegment,
+        // Iris-3B monocular depth (sc-25682): the native-MLX `mlx-gen-iris` depth task, served
+        // in-process by `depth_jobs::run_image_depth_job` from the installed `depth/` export. The
+        // off-Mac Candle worker advertises the sibling handler in `with_candle_capabilities`.
+        WorkerCapability::ImageDepth,
         // SeedVR2 video upscaling (epic 4811, sc-4816): native-MLX one-step super-resolution
         // (`mlx-gen-seedvr2`), served in-process by `video_jobs::run_video_upscale_job` —
         // SceneWorks' first video upscaler. Decodes the source clip, runs the temporal-chunked

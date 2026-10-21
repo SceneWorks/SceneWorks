@@ -118,6 +118,14 @@ describe("macGating helpers", () => {
     expect(macUpscaleEngineBlocked(linux, "seedvr2")).toBe(false);
   });
 
+  it("offers Iris restoration wherever the capability confirms a native lane (sc-25683)", () => {
+    expect(macUpscaleEngineBlocked(DEFAULT_MAC_CAPABILITIES, "iris")).toBe(true);
+    const windows = { ...DEFAULT_MAC_CAPABILITIES, platform: "windows", features: { imageUpscaleIris: { supported: true } } };
+    expect(macUpscaleEngineBlocked(windows, "iris")).toBe(false);
+    const none = { ...DEFAULT_MAC_CAPABILITIES, features: { imageUpscaleIris: { supported: false } } };
+    expect(macUpscaleEngineBlocked(none, "iris")).toBe(true);
+  });
+
   it("blocks a training kernel without a native Rust trainer", () => {
     expect(macTrainingKernelBlocked(gating, "kolors_lora")).toBe(true);
     expect(macTrainingKernelBlocked(gating, "z_image_lora")).toBe(false);

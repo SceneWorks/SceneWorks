@@ -664,7 +664,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
 
 export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ panelKey, scope }) {
   renderObserverForTests?.();
-  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, clearMask, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSource, maskSubTool, onTransformSlider, ratioKey, refineMask, requestSmartSelectDownload, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
+  const { COLOR_ADJUSTMENTS, CROP_RATIOS, CurveEditor, IrisRestoreControls, StudioUpdateBadge, StudioUpdateNotice, UPSCALE_ENGINE_DESC, irisPlanStatus, irisRestore, setIrisPlanStatus, setIrisRestore, token, upscaleEngineIsRestoration, activeGradeIsIdentity, activeLayerOf, actualSize, aiOp, applyColorGrade, applyCrop, applyMaskCutout, availableUpscaleEngines, cancelCrop, channelStroke, chooseRatio, clearMask, colorAdjust, colorChannel, colorKeyGlobal, colorKeySeed, colorKeySoftness, colorKeyTolerance, colorMode, createModelDownloadJob, cropRect, curves, cutoutKeepSelected, detailCnScale, detailModel, detailModels, detailStrength, endTransformGesture, fitToView, flipActiveLayer, histogramRef, identityTransform, layerCount, levels, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSource, maskSubTool, onTransformSlider, ratioKey, refineMask, requestSmartSelectDownload, requestTileControlNetDownload, resetActiveColorMode, resetActiveLayerTransform, resetAdjust, rotated, runDetail, runUpscale, selectedDetailModel, setActiveTransform, setAdjustValue, setColorChannel, setColorKeyGlobal, setColorKeySeed, setColorKeySoftness, setColorKeyTolerance, setColorMode, setCropDim, setCurves, setCutoutKeepSelected, setDetailCnScale, setDetailModel, setDetailStrength, setLevelsValue, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setStraighten, setTool, setUpscaleEngine, setUpscaleFactor, setUpscaleSoftness, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, straighten, tileControlNet, tileControlNetDownloadRequested, tileControlNetReady, toggleRotate, updateOptionLabel, upscaleEngine, upscaleEngineHasSoftness, upscaleFactor, upscaleFactorsForEngine, upscaleSoftness, working } = scope;
   const renderPanel = (key) => {
     switch (key) {
       case "move":
@@ -905,6 +905,22 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 ))}
               </div>
             </div>
+            {upscaleEngineIsRestoration(upscaleEngine) ? (
+              <div className="ie-section">
+                <div className="ie-sec-title">Restoration</div>
+                {/* Iris (sc-25683): the processing + output size come from the engine planner, so a
+                    budget-downscaled source is labelled as such before anything is submitted. */}
+                <IrisRestoreControls
+                  disabled={!!aiOp}
+                  idPrefix="ie-iris"
+                  onChange={setIrisRestore}
+                  onStatus={setIrisPlanStatus}
+                  planBody={working ? { width: working.width, height: working.height } : null}
+                  token={token}
+                  value={irisRestore}
+                />
+              </div>
+            ) : (
             <div className="ie-section">
               <div className="ie-sec-title">Scale factor</div>
               <div className="ie-seg wrap two">
@@ -945,9 +961,16 @@ export const ImageEditorToolPanel = React.memo(function ImageEditorToolPanel({ p
                 </span>
               </div>
             </div>
+            )}
             <div className="ie-section">
-              <button className="ie-btn block primary" disabled={!!aiOp} onClick={runUpscale} type="button">
-                Upscale image
+              <button
+                className="ie-btn block primary"
+                disabled={!!aiOp || (upscaleEngineIsRestoration(upscaleEngine) && !irisPlanStatus.ready)}
+                onClick={runUpscale}
+                title={upscaleEngineIsRestoration(upscaleEngine) && irisPlanStatus.error ? irisPlanStatus.error : undefined}
+                type="button"
+              >
+                {upscaleEngineIsRestoration(upscaleEngine) ? "Restore image" : "Upscale image"}
               </button>
               <button className="ie-btn block" onClick={() => setTool("move")} type="button">
                 Cancel

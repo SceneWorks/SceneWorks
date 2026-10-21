@@ -1081,6 +1081,15 @@ pub(crate) fn expected_backend_local_trainer_id(
         ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
             ("mage_flow_base", "mage_flow_base")
         }
+        // Iris-3B generation (sc-25685/sc-25686): both backends register one trainer under the
+        // generation install's id.
+        ("iris_3b_generation", "iris_3b", "iris_train") => ("iris_3b", "iris_3b"),
+        // Iris-3B depth (sc-25687) / restoration (sc-25688): one trainer per task install, same id
+        // on both backends.
+        ("iris_3b_depth", "iris_3b_depth", "iris_train") => ("iris_3b_depth", "iris_3b_depth"),
+        ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
+            ("iris_3b_restore", "iris_3b_restore")
+        }
         ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
         | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
             ("qwen_image_2_1", "qwen_image_2_1")
@@ -2623,6 +2632,12 @@ fn utility_model_cells(
             JobType::ImageUpscale,
             json!({ "engine": "seedvr2", "sourceAssetId": "probe" }),
         )),
+        // Iris-3B restoration (sc-25683): its own task entry, served as the `iris` upscale engine.
+        "iris_3b_restore" => Some((
+            "engine:iris",
+            JobType::ImageUpscale,
+            json!({ "engine": "iris", "sourceAssetId": "probe" }),
+        )),
         "aura_sr_v2" => Some((
             "engine:aura-sr",
             JobType::ImageUpscale,
@@ -2632,6 +2647,12 @@ fn utility_model_cells(
             "smart_segment",
             JobType::ImageSegment,
             json!({ "sourceAssetId": "probe", "box": [0, 0, 1, 1] }),
+        )),
+        // sc-25682: the Iris-3B depth task export, probed with its production request shape.
+        "iris_3b_depth" => Some((
+            "image_depth",
+            JobType::ImageDepth,
+            json!({ "sourceAssetId": "probe", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         )),
         "sam2_person_segment" => Some((
             "person_segment",
@@ -3230,6 +3251,13 @@ fn gpu_job_rows(
             JobType::ImageSegment,
             "sam3_person_segment",
             json!({ "sourceAssetId": "probe", "box": [0, 0, 1, 1] }),
+        ),
+        (
+            "image_depth",
+            "utility",
+            JobType::ImageDepth,
+            "iris_3b_depth",
+            json!({ "sourceAssetId": "probe", "resolution": { "mode": "capped", "maxSide": 1024 } }),
         ),
         (
             "video_upscale",

@@ -259,6 +259,7 @@ fn production_spec(engine: &str, tier_dir: &std::path::Path, tier: &str) -> Load
 
 pub(crate) fn inputs(width: u32, height: u32) -> MlxRequestInputs {
     MlxRequestInputs {
+        native_batch: 1,
         width,
         height,
         count: 1,
@@ -270,6 +271,8 @@ pub(crate) fn inputs(width: u32, height: u32) -> MlxRequestInputs {
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 

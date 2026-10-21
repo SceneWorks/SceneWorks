@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import {
@@ -406,12 +406,24 @@ export function preserveFailureReceiptSuppression(primary, receiptError) {
   return error;
 }
 
-function killProcessGroup(child, signalName) {
+// Darwin answers EPERM, not ESRCH, when every member left in a group is a zombie awaiting its
+// reaper — routine once the root has exited and launchd has not yet collected an orphaned child.
+function groupHasOnlyZombies(pgid) {
+  const census = spawnSync("/bin/ps", ["-axo", "pgid=,stat="], { encoding: "utf8" });
+  if (census.status !== 0) return false;
+  return census.stdout.split("\n").map((line) => line.trim().split(/\s+/))
+    .filter(([group]) => Number(group) === pgid)
+    .every(([, state]) => state.startsWith("Z"));
+}
+
+export function killProcessGroup(child, signalName) {
   if (child.pid === undefined) return;
   try {
     process.kill(-child.pid, signalName);
   } catch (error) {
-    if (error.code !== "ESRCH") throw error;
+    if (error.code === "ESRCH") return;
+    if (error.code === "EPERM" && groupHasOnlyZombies(child.pid)) return;
+    throw error;
   }
 }
 
