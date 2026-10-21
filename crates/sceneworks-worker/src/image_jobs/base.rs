@@ -1959,9 +1959,12 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
 /// output is no longer what the engine accepts — truncated, edited, or written by an older build.
 /// For a converter with an engine-owned pin contract
 /// ([`sceneworks_core::converted_artifacts::CONTRACT_CONVERTERS`], e.g. `supra2_img`) the engine's
-/// own check runs here, including the SHA-256 of every converted file (once per process per
-/// unchanged artifact), so a damaged bundle is refused before any load with a message naming the
-/// remedy instead of the engine's raw refusal. Every other converter passes untouched.
+/// own CHEAP check runs here (manifest, pin contract, file sizes, and a verification failure a
+/// previous failed load recorded), so a damaged bundle is refused before any load with a message
+/// naming the remedy instead of the engine's raw refusal. Same-size corruption is caught by the
+/// engine's own load-time digests and explained by [`crate::converted_install::explain_failed_load`]
+/// — never by hashing here, so a healthy install is hashed once per load. Every other converter
+/// passes untouched.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn converted_artifact_preflight(
     request: &ImageRequest,
@@ -1978,23 +1981,22 @@ fn converted_artifact_preflight(
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    let Some(problem) =
-        sceneworks_core::converted_artifacts::verified_converted_artifact_problem(converter, dir)
-    else {
+    let Some(problem) = sceneworks_core::converted_artifacts::converted_artifact_problem(
+        converter,
+        dir,
+        sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+    ) else {
         return Ok(());
     };
-    let name = request
-        .model_manifest_entry
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(request.model.as_str());
-    Err(WorkerError::InvalidPayload(format!(
-        "{name}'s converted model files are damaged or incomplete, so it cannot load. Open the \
-         Model Manager and run Convert again to rebuild them from the downloaded checkpoint; if \
-         the conversion then fails, delete {name} and download it again. Detail: {problem}"
-    )))
+    Err(WorkerError::InvalidPayload(
+        crate::converted_install::converted_files_message(
+            crate::converted_install::model_display_name(
+                &request.model_manifest_entry,
+                &request.model,
+            ),
+            &problem,
+        ),
+    ))
 }
 
 /// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],

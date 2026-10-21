@@ -12280,6 +12280,98 @@ mod variant_install_tests {
         assert_eq!(converted_artifact_dir(&escaping, data_dir), None);
     }
 
+    /// sc-24216 review: the converted-dir reclaim applies to EVERY `requiresConversion` entry, not
+    /// only Supra2. An Anima-shaped converted root (marker + one subdir per quant tier) is removed
+    /// whole and the catalog drops back to not-installed.
+    #[tokio::test]
+    async fn whole_model_delete_reclaims_an_anima_shaped_converted_root() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        // An Anima-shaped convert-at-install entry: the converted root holds the marker plus one
+        // subdir per quant tier, and the source repo is the shared `circlestone-labs/Anima`.
+        let model = json!({
+            "id": "anima_base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima"
+            },
+            "downloads": [
+                { "provider": "huggingface", "repo": "circlestone-labs/Anima", "default": true,
+                  "files": ["split_files/diffusion_models/anima-base.safetensors"] }
+            ]
+        });
+        seed_cache(
+            data_dir,
+            "circlestone-labs/Anima",
+            &["split_files/diffusion_models/anima-base.safetensors"],
+        );
+        let converted = data_dir.join("models").join("mlx").join("anima_base");
+        for tier in ["bf16", "q8", "q4"] {
+            let dm = converted.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dm).unwrap();
+            std::fs::write(dm.join("dit.safetensors"), b"weights").unwrap();
+        }
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "installed");
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "anima_base",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("delete succeeds");
+        assert!(
+            !converted.exists(),
+            "every tier and the marker are reclaimed"
+        );
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_source");
+    }
+
+    /// sc-24216 review: a SAME-SIZE corruption passes the catalog's cheap check, so the card read
+    /// "Converted" (Convert disabled) while every job was refused. Once a failed load's full
+    /// verification records the fault (what the worker's `explain_failed_load` does), the catalog
+    /// reports `needs_conversion` + `mlxConversionProblem`, which enables "Convert again".
+    #[test]
+    fn a_recorded_digest_failure_flips_a_same_size_corrupt_bundle_to_needs_conversion() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = supra2_convert_entry();
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        let bundle = data_dir.join("models").join("mlx").join("supra2_img");
+        sceneworks_core::converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle)
+            .unwrap();
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(
+            status.conversion_state, "converted",
+            "sizes alone cannot see it — the gap the record closes"
+        );
+
+        let problem = sceneworks_core::converted_artifacts::converted_artifact_problem(
+            "supra2_img",
+            &bundle,
+            sceneworks_core::converted_artifacts::ArtifactCheck::Digests,
+        )
+        .expect("the digests catch the corruption");
+        sceneworks_core::converted_artifacts::record_verification_failure(&bundle, &problem)
+            .unwrap();
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_conversion");
+        assert!(status.converted_path.is_none());
+        assert_eq!(status.conversion_problem.as_deref(), Some(problem.as_str()));
+    }
+
     /// sc-24216, end to end through the whole-model delete's removal: the converted bundle and the
     /// source checkpoint go, the installed co-requisites (shareable with other models) stay, and
     /// the catalog no longer reads the model as converted.

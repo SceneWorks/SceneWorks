@@ -7,27 +7,39 @@
 //! and the only symptom is the engine's raw load refusal naming internal paths.
 //!
 //! This module asks the ENGINE's own contract — never a SceneWorks re-implementation — whether the
-//! artifact in `dir` would load, so the catalog can report it as needing conversion (with the
-//! reason) and the worker can refuse with an actionable message before any load. Converters with no
-//! declared contract report no problem: their behaviour is unchanged.
+//! artifact in `dir` would load. Converters with no declared contract report no problem: their
+//! behaviour is unchanged.
 //!
-//! - `supra2_img` → [`gen_core::supra2::read_pinned_bundle`]: schema, provider id, published
-//!   geometry, pinned source identity, pinned component revisions, stored conditioning, and the
-//!   size (always) and SHA-256 ([`ArtifactCheck::Digests`]) of every converted file.
+//! Two depths, split by cost:
+//!
+//! - [`converted_artifact_problem`] is the CHEAP check (manifest, pin contract, file sizes, plus a
+//!   recorded verification failure — see below). The catalog runs it on every scan and the worker
+//!   runs it before every load.
+//! - [`diagnose_install`] is the FULL check (SHA-256 of every converted file and of every pinned
+//!   co-requisite file). It runs only after a load has already FAILED, to turn the engine's raw
+//!   error into an actionable one. The engine's own load re-hashes the bundle, so a healthy install
+//!   is hashed exactly once per load and never by SceneWorks.
+//!
+//! A same-size corruption passes the cheap check and is only caught by the engine's load-time
+//! digests. When [`diagnose_install`] confirms it, [`record_verification_failure`] writes
+//! [`VERIFICATION_FAILED_MARKER`] into the bundle directory; the cheap check reports that recorded
+//! reason from then on, so the catalog flips the model to `needs_conversion` and the Model Manager
+//! offers "Convert again". A re-convert replaces the whole directory, which clears the marker.
+//!
+//! - `supra2_img` → [`gen_core::supra2::read_pinned_bundle`] for the bundle, and the pinned
+//!   [`gen_core::supra2::FLAN_T5_BASE`] / [`gen_core::supra2::SD_VAE`] snapshots (exact files,
+//!   sizes, SHA-256, and their `config.json` geometry) for the co-requisites.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
 
-/// How much of the converted artifact is re-read.
+/// How much of the converted artifact is re-read by [`converted_artifact_problem`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArtifactCheck {
-    /// Manifest + pin contract + file sizes: metadata reads only, cheap enough for every catalog
-    /// scan.
+    /// Manifest + pin contract + file sizes (+ a recorded verification failure): metadata reads
+    /// only, cheap enough for every catalog scan and every load.
     Sizes,
     /// [`ArtifactCheck::Sizes`] plus the SHA-256 of every converted file — catches same-size
-    /// corruption. Use [`verified_converted_artifact_problem`] to pay it once per artifact state.
+    /// corruption. Hashes ~400 MB for Supra2; never run it on a hot path.
     Digests,
 }
 
@@ -35,13 +47,25 @@ pub enum ArtifactCheck {
 /// reports no problem.
 pub const CONTRACT_CONVERTERS: &[&str] = &["supra2_img"];
 
+/// Written into a converted directory when a full verification after a failed load found the
+/// converted files themselves damaged. Its content is the engine's reason. Re-converting replaces
+/// the directory and so removes it.
+pub const VERIFICATION_FAILED_MARKER: &str = ".sceneworks-verification-failed";
+
 /// The engine's reason the converted artifact in `dir` (written by `converter`) would be refused at
-/// load, or `None` when it would load (or the converter declares no contract).
+/// load, or `None` when it would load (or the converter declares no contract). A recorded
+/// verification failure ([`VERIFICATION_FAILED_MARKER`]) is reported at either depth.
 pub fn converted_artifact_problem(
     converter: &str,
     dir: &Path,
     check: ArtifactCheck,
 ) -> Option<String> {
+    if !CONTRACT_CONVERTERS.contains(&converter) {
+        return None;
+    }
+    if let Some(recorded) = recorded_verification_failure(dir) {
+        return Some(recorded);
+    }
     match converter {
         "supra2_img" => {
             let check = match check {
@@ -56,55 +80,153 @@ pub fn converted_artifact_problem(
     }
 }
 
-/// [`converted_artifact_problem`] at [`ArtifactCheck::Digests`], hashed at most once per process
-/// for an unchanged artifact. The memo key is the directory plus the (name, length, mtime) of every
-/// top-level file, so a re-convert, a truncation or an in-place edit re-verifies; only a PASS is
-/// remembered, so a broken artifact is reported every time it is asked about.
-pub fn verified_converted_artifact_problem(converter: &str, dir: &Path) -> Option<String> {
-    if !CONTRACT_CONVERTERS.contains(&converter) {
-        return None;
-    }
-    static VERIFIED: OnceLock<Mutex<HashSet<ArtifactStamp>>> = OnceLock::new();
-    let key = (dir.to_path_buf(), file_stamps(dir));
-    let verified = VERIFIED.get_or_init(Mutex::default);
-    if verified
-        .lock()
-        .map(|set| set.contains(&key))
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    let problem = converted_artifact_problem(converter, dir, ArtifactCheck::Digests);
-    if problem.is_none() {
-        if let Ok(mut set) = verified.lock() {
-            set.insert(key);
-        }
-    }
-    problem
+/// The reason recorded by [`record_verification_failure`], if any.
+pub fn recorded_verification_failure(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(VERIFICATION_FAILED_MARKER)).ok()?;
+    let text = text.trim();
+    Some(if text.is_empty() {
+        "the converted files failed verification".to_owned()
+    } else {
+        text.to_owned()
+    })
 }
 
-type FileStamp = (String, u64, Option<SystemTime>);
-/// One artifact state: its directory plus the stamps of every top-level file.
-type ArtifactStamp = (PathBuf, Vec<FileStamp>);
+/// Record that the converted files in `dir` failed full verification, so the cheap check (and
+/// with it the catalog) reports it until the model is converted again.
+pub fn record_verification_failure(dir: &Path, problem: &str) -> std::io::Result<()> {
+    std::fs::write(dir.join(VERIFICATION_FAILED_MARKER), problem)
+}
 
-fn file_stamps(dir: &Path) -> Vec<FileStamp> {
-    let mut stamps: Vec<FileStamp> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let metadata = entry.metadata().ok()?;
-            metadata.is_file().then(|| {
+/// What a full verification found wrong with an installed convert-at-install model.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallFault {
+    /// The converted files themselves (the bundle). Remedy: convert again.
+    Converted { problem: String },
+    /// A pinned co-requisite snapshot. Remedy: re-download that component.
+    Component {
+        /// The engine's component key (`text_encoder`, `vae`).
+        component: &'static str,
+        /// Human label ("Flan-T5-Base text encoder").
+        label: &'static str,
+        repo: &'static str,
+        revision: &'static str,
+        /// The resolved snapshot directory, when one is installed.
+        snapshot: Option<PathBuf>,
+        problem: String,
+    },
+}
+
+/// Full verification of an installed model after a FAILED load (see the module docs): every pinned
+/// co-requisite (resolved through `snapshot(repo, revision)`) and then the converted bundle, each
+/// against its exact files, sizes and SHA-256. The first fault found is returned; `None` means the
+/// installed files are intact and the failure has another cause. Blocking and expensive (hashes
+/// every file) — call it off the async runtime, and only on a failure path.
+pub fn diagnose_install(
+    converter: &str,
+    dir: &Path,
+    snapshot: impl Fn(&str, &str) -> Option<PathBuf>,
+) -> Option<InstallFault> {
+    match converter {
+        "supra2_img" => {
+            use gen_core::supra2::{FLAN_T5_BASE, SD_VAE};
+            let components = [
                 (
-                    entry.file_name().to_string_lossy().into_owned(),
-                    metadata.len(),
-                    metadata.modified().ok(),
-                )
-            })
+                    gen_core::supra2::TEXT_ENCODER_COMPONENT,
+                    "Flan-T5-Base text encoder",
+                    FLAN_T5_BASE,
+                ),
+                (
+                    gen_core::supra2::VAE_COMPONENT,
+                    "SD VAE ft-MSE decoder",
+                    SD_VAE,
+                ),
+            ];
+            for (component, label, pin) in components {
+                let fault = |snapshot: Option<PathBuf>, problem: String| InstallFault::Component {
+                    component,
+                    label,
+                    repo: pin.repo,
+                    revision: pin.revision,
+                    snapshot,
+                    problem,
+                };
+                let Some(snapshot_dir) = snapshot(pin.repo, pin.revision) else {
+                    return Some(fault(None, "not installed".to_owned()));
+                };
+                let checked = pin.verify(&snapshot_dir).and_then(|()| {
+                    if component == gen_core::supra2::VAE_COMPONENT {
+                        gen_core::supra2::check_vae_config(&snapshot_dir)
+                    } else {
+                        gen_core::supra2::check_t5_config(
+                            &snapshot_dir,
+                            &gen_core::supra2::Supra2Config::published(),
+                        )
+                    }
+                });
+                if let Err(error) = checked {
+                    return Some(fault(Some(snapshot_dir), error.to_string()));
+                }
+            }
+            converted_artifact_problem(converter, dir, ArtifactCheck::Digests)
+                .map(|problem| InstallFault::Converted { problem })
+        }
+        _ => None,
+    }
+}
+
+/// Test support (used by the API and worker tests too): write a Supra2 bundle that satisfies the
+/// pin contract at [`ArtifactCheck::Sizes`] — the pinned manifest and both converted files at
+/// their exact pinned sizes (sparse, all zeros) — but whose CONTENT is wrong, i.e. a same-size
+/// corruption that only a digest check catches. Also writes the catalog's install marker.
+#[doc(hidden)]
+pub fn write_same_size_corrupt_supra2_bundle(dir: &Path) -> std::io::Result<()> {
+    use gen_core::supra2::*;
+    std::fs::create_dir_all(dir)?;
+    let file = |pin: PinnedFile| BundleFile {
+        file: pin.path.to_owned(),
+        bytes: pin.bytes,
+        sha256: pin.sha256.to_owned(),
+    };
+    let source = SUPRA2_SOURCE.files[0];
+    let config = Supra2Config::published();
+    let manifest = BundleManifest {
+        schema: BUNDLE_SCHEMA.to_owned(),
+        provider_id: PROVIDER_ID.to_owned(),
+        source: BundleSource {
+            repo: Some(SUPRA2_SOURCE.repo.to_owned()),
+            revision: Some(SUPRA2_SOURCE.revision.to_owned()),
+            file: source.path.to_owned(),
+            bytes: source.bytes,
+            sha256: source.sha256.to_owned(),
+            weights_key: "ema".to_owned(),
+        },
+        config,
+        vae_scale: VAE_SCALE,
+        denoiser: file(PINNED_DENOISER),
+        denoiser_tensors: config.expected_tensors().len(),
+        conditioning: Some(file(PINNED_CONDITIONING)),
+        components: [
+            (TEXT_ENCODER_COMPONENT, FLAN_T5_BASE),
+            (VAE_COMPONENT, SD_VAE),
+        ]
+        .into_iter()
+        .map(|(component, pin)| BundleComponent {
+            component: component.to_owned(),
+            repo: pin.repo.to_owned(),
+            revision: pin.revision.to_owned(),
+            license: pin.license.to_owned(),
+            download_bytes: pin.download_bytes(),
         })
-        .collect();
-    stamps.sort();
-    stamps
+        .collect(),
+    };
+    for pin in [PINNED_DENOISER, PINNED_CONDITIONING] {
+        std::fs::File::create(dir.join(pin.path))?.set_len(pin.bytes)?;
+    }
+    std::fs::write(
+        dir.join(BUNDLE_MANIFEST),
+        serde_json::to_vec_pretty(&manifest).map_err(std::io::Error::other)?,
+    )?;
+    std::fs::write(dir.join("model_index.json"), b"{}")
 }
 
 #[cfg(test)]
@@ -114,6 +236,8 @@ mod tests {
     #[test]
     fn a_converter_without_a_contract_reports_no_problem() {
         let tmp = tempfile::tempdir().unwrap();
+        // Even a stray marker is ignored for a converter with no contract.
+        record_verification_failure(tmp.path(), "stray").unwrap();
         for check in [ArtifactCheck::Sizes, ArtifactCheck::Digests] {
             assert_eq!(
                 converted_artifact_problem("anima_quant", tmp.path(), check),
@@ -121,13 +245,13 @@ mod tests {
             );
         }
         assert_eq!(
-            verified_converted_artifact_problem("flux2_klein_diffusers", tmp.path()),
+            diagnose_install("flux2_klein_diffusers", tmp.path(), |_, _| None),
             None
         );
     }
 
     /// A marker-only directory (what an interrupted or pre-contract convert leaves) is refused with
-    /// the engine's own reason, at both depths, and is never memoized as verified.
+    /// the engine's own reason, at both depths.
     #[test]
     fn a_supra2_dir_without_its_bundle_is_refused_with_the_engine_reason() {
         let tmp = tempfile::tempdir().unwrap();
@@ -140,8 +264,6 @@ mod tests {
                 "{problem}"
             );
         }
-        assert!(verified_converted_artifact_problem("supra2_img", tmp.path()).is_some());
-        assert!(verified_converted_artifact_problem("supra2_img", tmp.path()).is_some());
     }
 
     /// A bundle manifest that parses but does not hold the pinned conversion is refused.
@@ -156,5 +278,78 @@ mod tests {
         let problem =
             converted_artifact_problem("supra2_img", tmp.path(), ArtifactCheck::Sizes).unwrap();
         assert!(problem.contains("supra2"), "{problem}");
+    }
+
+    /// Same-size corruption passes the cheap check, is caught by the digests, and once recorded
+    /// the cheap check reports it too.
+    #[test]
+    fn same_size_corruption_is_caught_by_digests_and_then_by_the_recorded_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_same_size_corrupt_supra2_bundle(tmp.path()).unwrap();
+        assert_eq!(
+            converted_artifact_problem("supra2_img", tmp.path(), ArtifactCheck::Sizes),
+            None,
+            "sizes alone cannot see a same-size corruption"
+        );
+        let problem = converted_artifact_problem("supra2_img", tmp.path(), ArtifactCheck::Digests)
+            .expect("the digests catch it");
+        assert!(problem.contains("does not match its manifest"), "{problem}");
+        record_verification_failure(tmp.path(), &problem).unwrap();
+        assert_eq!(
+            converted_artifact_problem("supra2_img", tmp.path(), ArtifactCheck::Sizes),
+            Some(problem)
+        );
+    }
+
+    /// The full diagnosis names a missing, then a damaged, co-requisite before the bundle.
+    #[test]
+    fn diagnosis_names_the_faulty_component_before_the_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        write_same_size_corrupt_supra2_bundle(&bundle).unwrap();
+        let t5 = tmp.path().join("t5");
+        let vae = tmp.path().join("vae");
+        let resolve = |t5_present: bool, vae_present: bool| {
+            let (t5, vae) = (t5.clone(), vae.clone());
+            move |repo: &str, _: &str| match repo {
+                "google/flan-t5-base" if t5_present => Some(t5.clone()),
+                "stabilityai/sd-vae-ft-mse" if vae_present => Some(vae.clone()),
+                _ => None,
+            }
+        };
+        match diagnose_install("supra2_img", &bundle, resolve(false, false)) {
+            Some(InstallFault::Component {
+                component,
+                snapshot: None,
+                problem,
+                ..
+            }) => {
+                assert_eq!(component, "text_encoder");
+                assert_eq!(problem, "not installed");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A truncated (wrong-size) text encoder weights file.
+        std::fs::create_dir_all(&t5).unwrap();
+        for name in ["config.json", "model.safetensors", "tokenizer.json"] {
+            std::fs::write(t5.join(name), b"x").unwrap();
+        }
+        match diagnose_install("supra2_img", &bundle, resolve(true, true)) {
+            Some(InstallFault::Component {
+                component,
+                label,
+                snapshot: Some(dir),
+                problem,
+                ..
+            }) => {
+                assert_eq!(
+                    (component, label),
+                    ("text_encoder", "Flan-T5-Base text encoder")
+                );
+                assert_eq!(dir, t5);
+                assert!(problem.contains("bytes"), "{problem}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
