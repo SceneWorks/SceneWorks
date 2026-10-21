@@ -48,6 +48,10 @@ test("closed committed inventory executes all 74 cases across seven exact tests"
     assert.ok(worker || !workerSeen, "core cases must precede worker cases");
   }
   for (const id of ["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted", "SW-thin-blank-sampler", "SW-validate-modules-array", "SW-validate-modules-members", "SW-validate-decomp-integer", "SW-validate-decomp-positive", "SW-validate-decomp-overflow", "SW-validate-valid-decomp"]) assert.ok(spec.cases.some(item => item.id === id), id);
+  // This mutation must compile before the protocol assertion can kill it. LoadSpec's field is
+  // Option<WeightsSource>, not Option<PathBuf>; a bare string's .into() is not a valid source.
+  assert.equal(spec.cases.find(item => item.id === "SW-load-text-encoder").patches[0].new,
+    'spec.text_encoder = Some(gen_core::WeightsSource::Dir(std::path::PathBuf::from("wrong")));');
   assert.equal(Object.hasOwn(spec, "carried"), false);
   assert.equal(spec.registry_sha256, digest(readFileSync(path.join(ROOT, REGISTRY_PATH))));
   for (const item of spec.cases) {
