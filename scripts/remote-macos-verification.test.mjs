@@ -358,6 +358,38 @@ function fixtureNode(root, name) {
   catch (error) { if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error; copyFileSync(process.execPath, executable); }
   return executable;
 }
+test("manual verifier overrides only host build strip and binds both profiles in the cache recipe", () => {
+  const original = { PATH: "/host/bin", SDKROOT: "/host/sdk", TMPDIR: "/host/tmp", CARGO_TARGET_DIR: "/dedicated/target", CARGO_INCREMENTAL: "1", CARGO_BUILD_TARGET: "foreign", CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: "foreign-runner" };
+  const env = policy.remoteBuildEnv(original);
+  const expected = {
+    CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none",
+    CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0",
+    CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu",
+  };
+  for (const [key, value] of Object.entries(expected)) assert.equal(env[key], value, key);
+  assert.deepEqual(Object.keys(env).filter(key => key.endsWith("_STRIP")).sort(), ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP", "CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP"]);
+  for (const key of ["SDKROOT", "TMPDIR", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL"]) assert.equal(env[key], original[key]);
+  assert.equal(original.CARGO_BUILD_TARGET, "foreign"); assert.equal(env.CARGO_BUILD_TARGET, undefined); assert.equal(env.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER, undefined);
+  assert.equal(CACHE_FLAGS.build_override_strip, "none"); assert.equal(CACHE_FLAGS.test_build_override_strip, "none");
+  for (const key of ["build_override_strip", "test_build_override_strip"]) {
+    const stale = cacheContext(); delete stale.build_flags[key];
+    const { context_sha256, ...data } = stale; stale.context_sha256 = sha256(JSON.stringify(data));
+    assert.throws(() => validateCacheContext(stale), /build flags/);
+  }
+  const controller = readFileSync(modulePath, "utf8");
+  assert.match(controller, /const runEnv = remoteBuildEnv\(env\);/);
+  assert.ok(controller.indexOf("const runEnv = remoteBuildEnv(env);") < controller.indexOf('if (request.profile === "facts-and-projections")'));
+  assert.equal(controller.split("remoteBuildEnv(env)").length - 1, 2); // definition + single common profile entry
+  // No global Cargo/toolchain/workflow profile edits: only the controller constructs this override.
+  assert.doesNotMatch(workflow, /BUILD_OVERRIDE_STRIP|CARGO_PROFILE_(?:DEV|TEST)_STRIP/);
+});
+test("original proc macro invocation distinguishes rebuilt no-strip from stale or stripped evidence", () => {
+  const command = "   Running `rustc --crate-name bytemuck_derive src/lib.rs --crate-type proc-macro -C prefer-dynamic";
+  const clean = policy.invocationEvidence(command + " --out-dir /target/debug/deps`", () => true).join("\n");
+  assert.match(clean, /original proc-macro invocation: bytemuck_derive; strip=absent/); assert.doesNotMatch(clean, /NOT REBUILT/);
+  for (const flag of ["-C strip=debuginfo", "-Cstrip=symbols"]) assert.match(policy.invocationEvidence(command + " " + flag + "`", () => true).join("\n"), /strip=(?:debuginfo|symbols)/);
+  assert.match(policy.invocationEvidence("Fresh bytemuck_derive v1", () => true).join("\n"), /NOT REBUILT.*no strip hypothesis verdict/);
+});
 test("failed native build records fixed read-only toolchain diagnostics without changing the verdict", () => {
   const calls = [];
   const text = policy.buildDiagnostics(ROOT, { SDKROOT: "/sdk", CARGO_TARGET_DIR: "/target" }, (cmd, args) => { calls.push([cmd, ...args].join(" ")); return { status: 0, stdout: `${cmd} ok`, stderr: "" }; });
@@ -441,6 +473,10 @@ test("synthetic NAX-class CPU fixture drains safely on a budget violation and ca
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   const cases = [
+    ["RV-host-strip-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", ', ''],
+    ["RV-host-strip-test", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", ', ''],
+    ["RV-host-strip-cache-dev", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", ' build_override_strip: "none", ', ''],
+    ["RV-host-strip-cache-test", "manual verifier overrides only host build strip and binds both profiles in the cache recipe", 'test_build_override_strip: "none", ', ''],
     ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, CACHE_FLAGS)', 'true'],
     ["RV-cache-exclusion", "dedicated target cache lease prevents overlap and never steals or releases another owner", 'mkdirSync(lease);', 'mkdirSync(lease, { recursive: true });'],
     ["RV-consumer-proof", "consumer evidence rejects survivor", 'validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);', 'void spec;'],

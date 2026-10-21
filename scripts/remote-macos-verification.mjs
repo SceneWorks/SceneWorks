@@ -18,7 +18,7 @@ export const WORKFLOW = ".github/workflows/macos-mlx.yml";
 export const CONTROLLER = "scripts/remote-macos-verification.mjs";
 export const JOB = "manual-verification";
 export const PROFILES = ["facts-and-projections", "consumer-assertions", "canonical-preflight"];
-export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
+export const CACHE_FLAGS = Object.freeze({ deployment_target: "26.2", debug: "0", test_debug: "0", build_override_debug: "0", test_build_override_debug: "0", build_override_strip: "none", test_build_override_strip: "none", jobs: "2", cmake_jobs: "2", test_threads: "1", rustc_wrapper: "", cross_target: "x86_64-unknown-linux-gnu" });
 export const OUTPUTS = [
   "config/engine-capabilities/capabilities.mlx.json",
   "config/engine-capabilities/audio/capabilities.candle.json",
@@ -375,6 +375,15 @@ export function invocationEvidence(log, exists = existsSync) {
   const invocations = plain.split("\n").filter(line => (line.includes("Running `") || line.includes("process didn't exit successfully: `")) && line.includes("--crate-name"));
   const lines = [`original verbose cargo log: ${invocations.length} rustc invocation line(s); showing last ${Math.min(3, invocations.length)}`];
   for (const line of invocations.slice(-3)) lines.push(line.length > 3000 ? `${line.slice(0, 3000)} …[truncated ${line.length - 3000} chars]` : line);
+  // Cargo fingerprints strip settings for host units. An actual invocation (not a Fresh line)
+  // is required as evidence that the changed build-override recipe rebuilt the derive macro.
+  const macros = invocations.filter(line => /--crate-type[ =]proc-macro(?:\s|$)/.test(line));
+  for (const line of macros.filter((line, index) => index >= macros.length - 12 || /--crate-name bytemuck_derive(?:\s|$)/.test(line))) {
+    const crate = /--crate-name (\S+)/.exec(line)?.[1];
+    const strip = [...line.matchAll(/(?:-C\s+|-C)strip=(\S+)/g)].map(match => match[1]);
+    lines.push(`original proc-macro invocation: ${crate}; strip=${strip.length ? strip.join(",") : "absent"}`);
+  }
+  if (!macros.some(line => /--crate-name bytemuck_derive(?:\s|$)/.test(line))) lines.push("bytemuck_derive proc-macro invocation: NOT REBUILT in captured original log (no strip hypothesis verdict)");
   const failing = [...invocations].reverse().find(line => /--crate-name bytemuck(\s|$)/.test(line));
   const extern = failing && /--extern bytemuck_derive=(\S+?)`?(\s|$)/.exec(failing);
   lines.push(!failing ? "bytemuck invocation: not found in original log"
@@ -429,6 +438,19 @@ export async function executeRemote(root, output, env = process.env) {
   return receipt;
 }
 
+// The verifier's build recipe. HYPOTHESIS TEST (run 39553468673): proc macros built with Cargo's
+// implicit `-C strip=debuginfo` (debug=0) may be unreadable to rustc 1.97.1 on Xcode 27.
+// NOT CONFIRMED. Cargo at c980f486 (Rust 1.97.1) documents BUILD_OVERRIDE_STRIP=none and
+// hashes Profile.strip into both fingerprints and unit metadata; old stripped units cannot be reused.
+// Disable strip ONLY for build-override units (build scripts, proc macros and their dependencies); the
+// regular dev/test units keep Cargo's defaults. Recorded in CACHE_FLAGS so the receipt binds it.
+export function remoteBuildEnv(env) {
+  const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
+  delete runEnv.CARGO_BUILD_TARGET;
+  delete runEnv.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER;
+  return runEnv;
+}
+
 function validateControllerCheckout(root) {
   const controlRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   for (const file of CONTROL_FILES) requireFact(readFileSync(path.join(root, file)).equals(readFileSync(path.join(controlRoot, file))), `dispatcher and candidate implementation differ: ${file}`);
@@ -442,9 +464,7 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
   const identity = dispatchIdentity(env);
   requireFact(!existsSync(output), "output directory must be new"); mkdirSync(output, { recursive: true });
   const receipt = { schema_version: 1, status: "running", ...context, ...identity, repository: REPOSITORY, job: JOB, runner_name: env.RUNNER_NAME, machine, clean_before: true, files: {} };
-  const runEnv = { ...env, PATH: `${path.join(os.homedir(), ".cargo", "bin")}${path.delimiter}${env.PATH ?? ""}`, CI: "true", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", CARGO_NET_OFFLINE: "false", CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu" };
-  delete runEnv.CARGO_BUILD_TARGET;
-  delete runEnv.CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER;
+  const runEnv = remoteBuildEnv(env);
   if (request.profile === "facts-and-projections") {
     // Keep committed Windows provenance as declared; never restamp it or add a pin-currency gate.
     // Changed Candle semantics still require genuine producer facts before the final matrix can pass.
