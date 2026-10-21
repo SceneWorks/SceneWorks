@@ -73,6 +73,7 @@ export const initialExclusions = Object.freeze({
   "Setup Wizard": ["/src/screens/SetupWizard.jsx"],
   "Batch operations": ["/src/components/BatchOperationsPanel.jsx"],
   "Workflow replay offer": ["/src/components/WorkflowDropPanel.jsx"],
+  "Offline model catalog": ["/src/modelCatalog.js", "/src/data/previewSupport.json"],
 });
 
 function normalize(value) {
@@ -241,24 +242,30 @@ export function buildBundleReport(bundle, budgets) {
     { route: null, rawBytes: 0, gzipBytes: 0, brotliBytes: 0, chunks: [] },
   );
 
-  violations.push(...budgetViolations("Initial JavaScript", initial, budgets.initial));
+  // Every gated budget must be present; a missing one fails closed with a named violation.
   // `total` is telemetry only (see the policy note at the top of this file).
-  if (!budgets.lazyChunk) {
-    violations.push("bundle-budgets.json is missing the lazyChunk budget");
-  } else {
+  for (const name of ["initial", "lazyChunk", "largestRoute"]) {
+    if (!budgets[name]) violations.push(`bundle-budgets.json is missing the ${name} budget`);
+  }
+  if (budgets.initial) {
+    violations.push(...budgetViolations("Initial JavaScript", initial, budgets.initial));
+  }
+  if (budgets.lazyChunk) {
     for (const [fileName, values] of Object.entries(lazyChunks)) {
       violations.push(
         ...budgetViolations(`Lazy chunk (${fileName})`, values, budgets.lazyChunk),
       );
     }
   }
-  violations.push(
-    ...budgetViolations(
-      `Largest route (${largestRoute.route ?? "none"})`,
-      largestRoute,
-      budgets.largestRoute,
-    ),
-  );
+  if (budgets.largestRoute) {
+    violations.push(
+      ...budgetViolations(
+        `Largest route (${largestRoute.route ?? "none"})`,
+        largestRoute,
+        budgets.largestRoute,
+      ),
+    );
+  }
 
   return {
     schemaVersion: 2,
