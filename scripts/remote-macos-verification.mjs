@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { selectSteps } from "./preflight.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { loadRegistry, validateAssertionReceipt, REGISTRY_PATH } from "./moss-consumer-assertions.mjs";
+import { identityDigest, readToolchainIdentity, validateToolchainIdentity, verifyToolchainFiles } from "./canonical-cross-toolchain.mjs";
 export const ASSERTION_DRIVER = "scripts/moss-consumer-assertions.mjs";
 
 export const REPOSITORY = "SceneWorks/SceneWorks";
@@ -29,7 +30,8 @@ export const OUTPUTS = [
   "docs/generated/memory-matrix.json",
   "docs/generated/memory-matrix.md",
 ];
-const CONTROL_FILES = [WORKFLOW, CONTROLLER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH];
+export const CROSS_TOOLCHAIN_HELPER = "scripts/canonical-cross-toolchain.mjs";
+export const CONTROL_FILES = Object.freeze([WORKFLOW, CONTROLLER, CROSS_TOOLCHAIN_HELPER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]);
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const MAX_ARCHIVE = 128 * 1024 * 1024;
@@ -169,6 +171,10 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
   requireFact(receipt.run_id === runId && receipt.run_attempt === attempt && receipt.job === JOB && receipt.runner_name === "nax-macos-2", "receipt execution identity mismatch");
   validateMachine(receipt.machine, context.profile);
   validateCacheContext(receipt.cache_context, context.profile);
+  if (context.profile === "canonical-preflight") {
+    validateToolchainIdentity(receipt.cross_toolchain);
+    requireFact(receipt.cache_context.cross_toolchain_sha256 === identityDigest(receipt.cross_toolchain), "canonical compiler identity differs from cache context");
+  } else requireFact(!Object.hasOwn(receipt, "cross_toolchain"), "compiler identity cannot satisfy a different profile");
   requireFact(receipt.cache_context.sdk === receipt.machine.sdk && receipt.cache_context.cargo_config_sha256 === context.cargo_config_sha256, "cache SDK/config differs from observed source");
   const run = await api.json(`repos/${REPOSITORY}/actions/runs/${runId}/attempts/${attempt}`);
   requireFact(run.id === runId && run.run_attempt === attempt && run.event === "workflow_dispatch" && run.status === "completed" && run.conclusion === "success", "actual run did not complete successfully");
@@ -191,7 +197,9 @@ export async function authenticateReceipt({ receipt, files, context, api, runId,
   const owned = jobs.jobs.filter(job => job.name === JOB);
   requireFact(owned.length === 1 && owned[0].run_id === runId && owned[0].run_attempt === attempt && owned[0].head_sha === run.head_sha && owned[0].conclusion === "success", "actual verification job mismatch");
   requireFact(owned[0].runner_name === "nax-macos-2" && ["self-hosted", "macOS", "ARM64", "rw-llm"].every(label => owned[0].labels?.includes(label)), "actual secondary runner mismatch");
-  for (const name of ["Run exact remote verification", "Upload remote verification artifact"]) requireFact(owned[0].steps?.some(step => step.name === name && step.conclusion === "success"), `required actual step missing: ${name}`);
+  const requiredSteps = ["Run exact remote verification", "Upload remote verification artifact"];
+  if (context.profile === "canonical-preflight") requiredSteps.push("Prepare real canonical cross toolchain", "Require real canonical cross checks");
+  for (const name of requiredSteps) requireFact(owned[0].steps?.some(step => step.name === name && step.conclusion === "success"), `required actual step missing: ${name}`);
   requireFact(jobs.jobs.every(job => job.name === JOB || job.conclusion === "skipped"), "legacy jobs unexpectedly ran for manual verification");
   const artifact = await api.json(`repos/${REPOSITORY}/actions/artifacts/${artifactId}`);
   requireFact(/^sha256:[0-9a-f]{64}$/.test(archiveDigest ?? "") && artifact.digest === archiveDigest, "authenticated artifact archive changed");
@@ -428,6 +436,7 @@ export function validateCacheContext(context, profile = "canonical-preflight") {
   requireFact(context?.serialized === true && context.released === true && context.runner_name === "nax-macos-2", "target cache was not exclusively owned and released");
   requireFact(context.toolchain === "1.97.1" && context.host === "aarch64-apple-darwin" && HASH.test(context.rustc_sha256 ?? "") && HASH.test(context.cargo_config_sha256 ?? "") && HASH.test(context.target_directory_sha256 ?? "") && /^\d+\.\d+(?:\.\d+)?$/.test(context.sdk ?? ""), "compiler/cache context mismatch");
   requireFact(equal(context.build_flags, cacheFlags(profile)), "inconsistent cache build flags");
+  requireFact(profile === "canonical-preflight" ? HASH.test(context.cross_toolchain_sha256 ?? "") : !Object.hasOwn(context, "cross_toolchain_sha256"), "cross compiler cache identity/profile mismatch");
   const { context_sha256, ...body } = context;
   requireFact(HASH.test(context_sha256 ?? "") && sha256(JSON.stringify(body)) === context_sha256, "cache context fingerprint mismatch");
 }
@@ -441,10 +450,12 @@ export async function executeRemote(root, output, env = process.env) {
   requireFact(!env.RUSTFLAGS && !env.CARGO_ENCODED_RUSTFLAGS, "nonstandard compiler flags require a separate validated cache context");
   const rustc = command(root, [path.join(os.homedir(), ".cargo/bin/rustup"), "run", "1.97.1", "rustc", "-vV"]);
   requireFact(/^release: 1\.97\.1$/m.test(rustc) && /^host: aarch64-apple-darwin$/m.test(rustc), "native pinned compiler required");
-  const cache = { serialized: true, released: true, runner_name: env.RUNNER_NAME, toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: machine.sdk, target_directory_sha256: sha256(target), rustc_sha256: sha256(rustc), cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))), build_flags: cacheFlags(request.profile) };
+  const crossToolchain = request.profile === "canonical-preflight" ? readToolchainIdentity(env) : null;
+  if (crossToolchain) await verifyToolchainFiles(crossToolchain);
+  const cache = { serialized: true, released: true, runner_name: env.RUNNER_NAME, toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: machine.sdk, target_directory_sha256: sha256(target), rustc_sha256: sha256(rustc), cargo_config_sha256: sha256(readFileSync(path.join(root, ".cargo/config.toml"))), build_flags: cacheFlags(request.profile), ...(crossToolchain ? { cross_toolchain_sha256: identityDigest(crossToolchain) } : {}) };
   const lease = acquireTargetLease(target, { ...identity, runner_name: env.RUNNER_NAME, source_sha: request.source_sha });
   let receipt;
-  try { receipt = await executeRemoteWithinLease(root, output, env); }
+  try { receipt = await executeRemoteWithinLease(root, output, env, crossToolchain); }
   finally { lease.release(); }
   receipt.cache_context = { ...cache, context_sha256: sha256(JSON.stringify(cache)) };
   validateCacheContext(receipt.cache_context, request.profile);
@@ -471,7 +482,7 @@ function validateControllerCheckout(root) {
   for (const file of CONTROL_FILES) requireFact(readFileSync(path.join(root, file)).equals(readFileSync(path.join(controlRoot, file))), `dispatcher and candidate implementation differ: ${file}`);
 }
 
-async function executeRemoteWithinLease(root, output, env = process.env) {
+async function executeRemoteWithinLease(root, output, env = process.env, crossToolchain = null) {
   validateControllerCheckout(root);
   const request = requestFromEnvironment(env);
   const machine = validateMachine(machineFromHost(env), request.profile);
@@ -525,7 +536,10 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
     // Cross-compilation must really run, not take check-candle-build's developer allow-skip path.
     const targets = command(root, ["rustup", "target", "list", "--installed"]);
     requireFact(targets.split("\n").includes("x86_64-unknown-linux-gnu"), "Linux cross target missing");
-    command(root, ["x86_64-unknown-linux-gnu-gcc", "--version"]);
+    requireFact(crossToolchain, "canonical cross toolchain bootstrap evidence missing");
+    await verifyToolchainFiles(crossToolchain);
+    command(root, [crossToolchain.tools.cc.path, "--version"]);
+    receipt.cross_toolchain = crossToolchain;
     const controller = fileURLToPath(import.meta.url);
     requireFact(!/\s/.test(controller) && !/\s/.test(process.execPath), "Cargo runner paths must not contain whitespace");
     const common = path.resolve(root, git(root, "rev-parse", "--git-common-dir"));
@@ -535,6 +549,7 @@ async function executeRemoteWithinLease(root, output, env = process.env) {
     Object.assign(runEnv, { CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER: `${process.execPath} ${controller} unit-runner`, REMOTE_MACOS_UNIT_LEDGER: ledger, REMOTE_MACOS_ALLOW_NAX_UNIT: "true" });
     receipt.command = ["npm", "run", "preflight", "--", "--base", `origin/${request.base_ref}`];
     await runLogged(root, receipt.command, path.join(output, "preflight.log"), runEnv);
+    await verifyToolchainFiles(crossToolchain);
     requireFact(clean(root) && git(root, "rev-parse", "HEAD") === request.source_sha, "canonical command left dirty or changed source");
     const stamp = readFileSync(path.join(common, "sceneworks-preflight", request.source_sha));
     validateStamp(stamp.toString(), context); validateUnits(JSON.parse(readFileSync(ledger)));

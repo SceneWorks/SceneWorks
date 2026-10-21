@@ -1070,11 +1070,19 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy,rustfmt
+      - name: Prepare real canonical cross toolchain
+        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
+        timeout-minutes: 6
+        run: node "$GITHUB_WORKSPACE/control/scripts/canonical-cross-toolchain.mjs"
       - name: Require real canonical cross checks
         if: ${{ inputs.verification_profile == 'canonical-preflight' }}
         run: |
-          # Fail before Cargo, rather than accepting check-candle-build's developer allow-skip.
-          command -v x86_64-unknown-linux-gnu-gcc
+          # A real ARM64-hosted GNU cross compiler, already C/C++ link-smoked, is required.
+          # Accept its real long/short prefix via job-scoped target variables, never a dummy shim.
+          test -x "$CC_x86_64_unknown_linux_gnu"
+          test -x "$CXX_x86_64_unknown_linux_gnu"
+          "$CC_x86_64_unknown_linux_gnu" --version
+          "$CC_x86_64_unknown_linux_gnu" -dumpmachine | grep -Ex 'x86_64(-unknown)?-linux-gnu'
           rustup target add x86_64-unknown-linux-gnu
       - name: Fetch exact prebuilt MLX or build its exact source
         working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
