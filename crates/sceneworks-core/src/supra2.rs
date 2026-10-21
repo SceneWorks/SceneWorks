@@ -76,10 +76,10 @@ const UNSUPPORTED_CARRIERS: &[&str] = &[
     "loras",
     "prompts",
     // A character identity (the studio sends these on `character_image`; the MCP image tool
-    // forwards `characterId` with any mode) and the edit lane's fit mode.
+    // forwards `characterId` with any mode). `fitMode` is NOT here: the API stamps its default on
+    // every image job, and it only shapes an edit source, which text-to-image has none of.
     "characterId",
     "characterLookId",
-    "fitMode",
 ];
 
 /// A value that asks for something: not `null`, `""`, `[]`, `{}` or `false`.
@@ -555,7 +555,6 @@ mod tests {
             (json!({ "advanced": { "angleSet": true } }), "angleSet"),
             (json!({ "characterId": "c1" }), "characterId"),
             (json!({ "characterLookId": "l1" }), "characterLookId"),
-            (json!({ "fitMode": "pad" }), "fitMode"),
             (json!({ "advanced": "x" }), "advanced must be an object"),
         ] {
             let error = validate(payload.clone()).expect_err(&payload.to_string());
