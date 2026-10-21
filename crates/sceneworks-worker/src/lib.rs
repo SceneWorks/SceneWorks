@@ -2996,8 +2996,8 @@ mod cpu_preparation_startup_tests {
     use super::*;
     #[test]
     fn cpu_preparation_startup_never_initializes_gpu_and_wrong_selection_refuses_first() {
-        let mut settings =
-            Settings::for_test(std::env::temp_dir().join("cpu-preparation-pure-settings"));
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temporary.path().to_path_buf());
         settings.gpu_id = "cpu".to_owned();
         for scope in [
             UtilityJobScope::All,
