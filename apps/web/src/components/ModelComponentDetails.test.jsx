@@ -69,7 +69,7 @@ describe("ModelComponentDetails", () => {
   it("states the supported limits: native resolution, images per job and the prompt limit", async () => {
     expect(modelLimitLines(supra2)).toEqual([
       "Native resolution: 256×256",
-      "Images per job: 1, 2, 4",
+      "Images per job: 1, 2, 4, 8",
       "Prompt: up to 128 tokens (longer prompts are truncated and flagged on the result)",
     ]);
     await render(supra2, null);

@@ -4997,7 +4997,14 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
-        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
+        // A declared `limits.hardMaxSteps` (sc-24215) replaces the historical ceiling; the
+        // model's own boundary refuses a request above it before this point.
+        .map(|steps| {
+            let ceiling =
+                sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
+                    .unwrap_or_else(|| max_requested_steps(model.default_steps()));
+            (steps as u32).clamp(1, ceiling)
+        })
         .unwrap_or(model.default_steps())
 }
 
@@ -5008,7 +5015,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn max_requested_steps(default_steps: u32) -> u32 {
-    default_steps.max(80)
+    default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -5461,6 +5468,14 @@ fn mlx_raw_settings(
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
+    // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
+    raw.remove(sceneworks_core::supra2::MODEL_REVISIONS_KEY);
+    if sceneworks_core::supra2::is_supra2(&request.model) {
+        raw.insert(
+            sceneworks_core::supra2::MODEL_REVISIONS_KEY.to_owned(),
+            sceneworks_core::supra2::pinned_revisions(&request.model_manifest_entry),
+        );
+    }
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -7822,8 +7837,12 @@ fn render_on_surface(
         surface.multi_reference_alpha,
         edit_mask,
     );
-    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
+    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it); a
+    // native count batch (sc-24215, one prompt) is that `prompt` with `count` images.
     let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) if batch.prompts.len() == 1 => {
+            (batch.prompts[0].clone(), Vec::new(), batch.count)
+        }
         Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
         None => (prompt.to_owned(), Vec::new(), 1),
     };
@@ -15010,7 +15029,11 @@ async fn consume_gen_events_with_disclosure(
     let total_u32 = total as u32;
     // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
     // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
-    let one_pass = !plan.request.prompts.is_empty();
+    // So is a native count batch (sc-24215, `image.nativeCountBatch`): one call over `count` images.
+    let one_pass = !plan.request.prompts.is_empty()
+        || sceneworks_core::image_sampling_controls::native_count_batch(
+            &plan.request.model_manifest_entry,
+        );
     let (step_slices, step_label) = if one_pass {
         (1, format!("Batch of {total}"))
     } else {

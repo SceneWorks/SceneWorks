@@ -1133,4 +1133,696 @@ mod tests {
             eprintln!("RESULT status=pass model=supra2_img backend=candle lifecycle=cancel,recover,unload,reload");
         }
     }
+
+    /// sc-24215: the published controls and the multi-image batch on the linked lane, driven
+    /// through the production pieces every generic-lane render shares (native-batch resolution,
+    /// `render_on_surface`, `drive_native_prompt_batch`, `mlx_raw_settings`, `consume_gen_events`)
+    /// against a probe engine — no weights. The pre-load admission/load path is the real-weight
+    /// tests' job; these pin what reaches the engine and what every asset records.
+    mod controls_and_batch {
+        use super::super::super as lane;
+        use super::*;
+        use crate::api_client::ApiClient;
+        use gen_core::{CancelFlag, GenerationOutput, GenerationRequest, Generator, Progress};
+        use sceneworks_core::contracts::JobSnapshot;
+        use sceneworks_core::image_request::ImageRequest;
+        use std::sync::{Arc, Mutex};
+
+        /// Every request field the published interface maps onto.
+        #[derive(Clone, Debug, PartialEq)]
+        struct Seen {
+            prompt: String,
+            prompt_batch: Vec<String>,
+            negative_prompt: Option<String>,
+            width: u32,
+            height: u32,
+            count: u32,
+            seed: Option<u64>,
+            steps: Option<u32>,
+            guidance: Option<f32>,
+        }
+
+        struct Supra2Probe {
+            descriptor: gen_core::ModelDescriptor,
+            /// Stop the way the engine does when its request cancel flag is set.
+            canceled: bool,
+            seen: Arc<Mutex<Vec<Seen>>>,
+        }
+
+        impl Generator for Supra2Probe {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor {
+                &self.descriptor
+            }
+
+            fn validate(&self, _req: &GenerationRequest) -> gen_core::Result<()> {
+                Ok(())
+            }
+
+            /// Like the engine: progress per step and `count` images back from the one call
+            /// (image `k`'s pixels are all `k`).
+            fn generate(
+                &self,
+                req: &GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<GenerationOutput> {
+                self.seen.lock().unwrap().push(Seen {
+                    prompt: req.prompt.clone(),
+                    prompt_batch: req.prompt_batch.clone(),
+                    negative_prompt: req.negative_prompt.clone(),
+                    width: req.width,
+                    height: req.height,
+                    count: req.count,
+                    seed: req.seed,
+                    steps: req.steps,
+                    guidance: req.guidance,
+                });
+                on_progress(Progress::Step {
+                    current: 1,
+                    total: req.steps.unwrap_or(1),
+                });
+                if self.canceled {
+                    return Err(gen_core::Error::Canceled);
+                }
+                Ok(GenerationOutput::Images(
+                    (0..req.count)
+                        .map(|k| gen_core::Image {
+                            width: req.width,
+                            height: req.height,
+                            pixels: vec![k as u8; (req.width * req.height * 3) as usize],
+                        })
+                        .collect(),
+                ))
+            }
+
+            /// The engine's primary path: the output plus its over-long-prompt warning.
+            fn generate_with_report(
+                &self,
+                req: &GenerationRequest,
+                on_progress: &mut dyn FnMut(Progress),
+            ) -> gen_core::Result<gen_core::GenerationReport> {
+                let mut report =
+                    gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
+                report
+                    .warnings
+                    .extend(gen_core::supra2::prompt_truncated_warning(
+                        140,
+                        gen_core::supra2::MAX_PROMPT_TOKENS as usize,
+                    ));
+                Ok(report)
+            }
+        }
+
+        fn request(extra: Value) -> ImageRequest {
+            let mut payload = json!({
+                "projectId": "project-supra2",
+                "model": "supra2_img",
+                "mode": "text_to_image",
+                "prompt": "a red fox sitting in fresh snow",
+                "width": 256,
+                "height": 256,
+                "count": 1,
+                "modelManifestEntry": Value::Object(shipped_supra2_entry()),
+            });
+            for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+                payload[key] = value;
+            }
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        }
+
+        fn model() -> crate::engines::ResolvedModel {
+            crate::engines::mlx_model("supra2_img").expect("supra2_img is linked")
+        }
+
+        /// The generic lane's producer for one native count batch: resolve the batch against the
+        /// linked descriptor, then the one engine call through `render_on_surface`, published by
+        /// `drive_native_prompt_batch` (exactly the lane's batch branch, minus admission).
+        fn produce(
+            request: &ImageRequest,
+            canceled: bool,
+            seen: Arc<Mutex<Vec<Seen>>>,
+            tx: tokio::sync::mpsc::Sender<lane::GenEvent>,
+        ) -> crate::error::WorkerResult<()> {
+            let model = model();
+            let batch = lane::lane_controls::resolve_native_prompt_batch(
+                request,
+                &model.descriptor.capabilities,
+                &[],
+            )?
+            .expect("image.nativeCountBatch ⇒ one native call");
+            let probe = Supra2Probe {
+                descriptor: model.descriptor.clone(),
+                canceled,
+                seen,
+            };
+            let seed = lane::resolve_seed(request, 0);
+            let steps = lane::resolve_steps(request, &model);
+            let guidance = lane::resolve_guidance(request, &model);
+            let enhance = lane::PromptEnhance::from_advanced(&request.advanced)?;
+            let cancel = CancelFlag::new();
+            lane::drive_native_prompt_batch(
+                tx,
+                seed,
+                batch.images() as usize,
+                |preview, on_progress| {
+                    let warnings = std::cell::RefCell::new(Vec::new());
+                    let images = lane::render_on_surface(
+                        &probe,
+                        "",
+                        request.width,
+                        request.height,
+                        seed,
+                        steps,
+                        guidance,
+                        None,
+                        None,
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                        None,
+                        &enhance,
+                        gen_core::PromptEnhancementSink::default(),
+                        preview,
+                        &lane::LaneRgbaSurface {
+                            warnings: Some(&warnings),
+                            prompt_batch: Some(&batch),
+                            ..Default::default()
+                        },
+                        &cancel,
+                        on_progress,
+                    )?;
+                    let facts = lane::lane_controls::image_facts(&warnings.take(), &[], &[], None);
+                    Ok((images, facts))
+                },
+            )
+        }
+
+        /// A count-3 job is ONE engine call carrying the prompt (no prompt batch), the base seed,
+        /// the steps, the guidance and `count: 3`, published by the production consumer as three
+        /// assets on seeds 40, 41, 42 — the seeds the engine drew image k's noise from
+        /// (`image_seed(seed, k)`) — each recording its prompt, seed, steps, guidance, the pinned
+        /// component revisions and the truncation warning, with progress naming the batch.
+        ///
+        /// *Mutations that red this:* drop `image.nativeCountBatch` handling (no batch resolves);
+        /// send the one-prompt batch as `prompt_batch`; publish image k on the base seed; drop
+        /// `modelRevisions` from `mlx_raw_settings`.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_count_n_job_is_one_engine_call_published_as_one_asset_per_image() {
+            let dir = tempfile::tempdir().unwrap();
+            let project_path = dir.path().join("project");
+            std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+            let request = request(json!({
+                "seed": 40, "count": 3, "advanced": { "steps": 12, "guidanceScale": 4.5 }
+            }));
+            let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
+            let steps = lane::resolve_steps(&request, &model());
+            let raw_settings = lane::mlx_raw_settings(
+                &request,
+                "SupraLabs/Supra2-IMG",
+                steps,
+                None,
+                lane::resolve_guidance(&request, &model()),
+            );
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, rx) = tokio::sync::mpsc::channel::<lane::GenEvent>(64);
+            let producer_request = request.clone();
+            let producer_seen = Arc::clone(&seen);
+            let blocking = tokio::task::spawn_blocking(move || {
+                produce(&producer_request, false, producer_seen, tx)
+            });
+            let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+            let mut settings = crate::tests::test_settings(base_url.clone(), None);
+            settings.api_url = base_url;
+            let api = ApiClient::new(&settings);
+            let job: JobSnapshot =
+                serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
+                    .unwrap();
+            let mut asset_writes = Vec::new();
+            lane::consume_gen_events(
+                &api,
+                &settings,
+                &job,
+                &plan,
+                &project_path,
+                "mlx",
+                "mlx_supra2",
+                &raw_settings,
+                3,
+                rx,
+                CancelFlag::new(),
+                blocking,
+                &mut asset_writes,
+            )
+            .await
+            .expect("the batch completes");
+
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Seen {
+                    prompt: "a red fox sitting in fresh snow".to_owned(),
+                    prompt_batch: Vec::new(),
+                    negative_prompt: None,
+                    width: 256,
+                    height: 256,
+                    count: 3,
+                    seed: Some(40),
+                    steps: Some(12),
+                    guidance: Some(4.5),
+                }],
+                "one native call with every published control"
+            );
+            let published: Vec<(Value, Value)> = asset_writes
+                .iter()
+                .map(|asset| (asset["seed"].clone(), asset["index"].clone()))
+                .collect();
+            assert_eq!(
+                published,
+                vec![
+                    (json!(40), json!(0)),
+                    (json!(41), json!(1)),
+                    (json!(42), json!(2))
+                ]
+            );
+            let entry = shipped_supra2_entry();
+            for asset in &asset_writes {
+                assert_eq!(asset["prompt"], "a red fox sitting in fresh snow");
+                let settings = &asset["rawAdapterSettings"];
+                assert_eq!(settings["numInferenceSteps"], 12, "{settings}");
+                assert_eq!(settings["guidanceScale"], 4.5, "{settings}");
+                assert_eq!(
+                    settings[sceneworks_core::supra2::MODEL_REVISIONS_KEY],
+                    sceneworks_core::supra2::pinned_revisions(&entry),
+                    "{settings}"
+                );
+                assert_eq!(
+                    settings[sceneworks_core::supra2::MODEL_REVISIONS_KEY]
+                        .as_array()
+                        .map(Vec::len),
+                    Some(3),
+                    "denoiser + text encoder + VAE: {settings}"
+                );
+                assert_eq!(
+                    settings["generationWarnings"][0]["code"],
+                    gen_core::supra2::PROMPT_TRUNCATED_WARNING,
+                    "{settings}"
+                );
+            }
+            let posts = posts.lock().unwrap().clone();
+            assert!(
+                posts.iter().any(|post| post["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("Batch of 3 — step 1/12")),
+                "progress names the batch: {posts:#?}"
+            );
+        }
+
+        /// A seeded single image is the same engine request as image k of a batch on seed − k:
+        /// the seed + k contract means a count-1 job on seed 41 reproduces image 1 of the seed-40
+        /// batch.
+        #[test]
+        fn a_single_image_on_seed_k_is_the_batchs_image_k_request() {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            produce(
+                &request(json!({ "seed": 41, "count": 1 })),
+                false,
+                Arc::clone(&seen),
+                tx,
+            )
+            .expect("renders");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1);
+            assert_eq!((seen[0].seed, seen[0].count), (Some(41), 1));
+            assert_eq!(gen_core::supra2::image_seed(40, 1), 41);
+            let mut seeds = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let lane::GenEvent::Image { seed, .. } = event {
+                    seeds.push(seed);
+                }
+            }
+            assert_eq!(seeds, vec![41]);
+        }
+
+        /// The default API path: no `seed`, a `seeds` batch. The one engine call draws image k's
+        /// noise from `seeds[0] + k`, so the published (recorded) seeds are exactly those, never the
+        /// unused `seeds[1..]`.
+        #[test]
+        fn an_unseeded_batch_publishes_the_seeds_the_engine_used() {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            produce(
+                &request(json!({ "count": 3, "seeds": [9000, 17, 4242] })),
+                false,
+                Arc::clone(&seen),
+                tx,
+            )
+            .expect("renders");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(
+                (seen.len(), seen[0].seed, seen[0].count),
+                (1, Some(9000), 3)
+            );
+            let mut published = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let lane::GenEvent::Image { index, seed, .. } = event {
+                    published.push((index, seed));
+                }
+            }
+            assert_eq!(published, vec![(0, 9000), (1, 9001), (2, 9002)]);
+        }
+
+        /// A cancel inside the one call publishes NOTHING.
+        #[test]
+        fn a_cancelled_batch_publishes_no_image() {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            let outcome = produce(
+                &request(json!({ "seed": 40, "count": 4 })),
+                true,
+                Arc::clone(&seen),
+                tx,
+            );
+            assert!(outcome.is_err());
+            assert_eq!(seen.lock().unwrap().len(), 1);
+            while let Ok(event) = rx.try_recv() {
+                assert!(
+                    !matches!(event, lane::GenEvent::Image { .. }),
+                    "a canceled batch publishes no image"
+                );
+            }
+        }
+
+        /// The declared step ceiling: a request AT `limits.hardMaxSteps` reaches the engine with
+        /// exactly that count (the generic 80-step clamp does not apply to Supra2).
+        #[test]
+        fn a_request_at_the_declared_step_ceiling_runs_exactly_that_count() {
+            let ceiling = sceneworks_core::video_request::hard_max_steps(&shipped_supra2_entry())
+                .expect("supra2_img declares limits.hardMaxSteps");
+            let request = request(json!({ "seed": 1, "advanced": { "steps": ceiling } }));
+            assert_eq!(lane::resolve_steps(&request, &model()), ceiling);
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, _rx) = tokio::sync::mpsc::channel(64);
+            produce(&request, false, Arc::clone(&seen), tx).expect("renders");
+            assert_eq!(seen.lock().unwrap()[0].steps, Some(ceiling));
+        }
+
+        /// ...and one above it is refused by the boundary `run_image_generate_job` applies before
+        /// load, while every OTHER shipped image model declares no ceiling and so keeps the lane's
+        /// historical clamp unchanged.
+        #[test]
+        fn above_the_ceiling_is_refused_and_other_models_keep_their_clamp() {
+            let entry = shipped_supra2_entry();
+            let ceiling = sceneworks_core::video_request::hard_max_steps(&entry).unwrap();
+            let payload = |steps: u32| {
+                json!({ "model": "supra2_img", "prompt": "a fox", "advanced": { "steps": steps } })
+                    .as_object()
+                    .cloned()
+                    .unwrap()
+            };
+            assert!(sceneworks_core::supra2::validate_request(&payload(ceiling), &entry).is_ok());
+            let error = sceneworks_core::supra2::validate_request(&payload(ceiling + 1), &entry)
+                .expect_err("above the declared ceiling");
+            assert!(error.contains(&ceiling.to_string()), "{error}");
+
+            let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .unwrap()
+                .1;
+            let manifest: Value =
+                serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
+            for model in manifest["models"].as_array().unwrap() {
+                if model["id"] == "supra2_img" || model["type"] != "image" {
+                    continue;
+                }
+                assert_eq!(
+                    sceneworks_core::video_request::hard_max_steps(model.as_object().unwrap()),
+                    None,
+                    "{} must keep the generic clamp",
+                    model["id"]
+                );
+            }
+            assert_eq!(lane::max_requested_steps(50), 80);
+        }
+
+        // -----------------------------------------------------------------------------------
+        // Through the PRODUCTION arm with admission satisfied: a weightless but priceable
+        // install (every pinned file at its exact pinned size, safetensors headers the memory
+        // contract can read, configs the provider checks), so `generate_*_stream_using` runs its
+        // real pre-load provider contract + admission and only the engine is a probe.
+        // -----------------------------------------------------------------------------------
+
+        /// Write exactly `bytes`: `json` padded with spaces, else a one-tensor (`tensor`, U8)
+        /// safetensors whose single tensor fills the file, else zeros. `set_len` keeps the pinned
+        /// multi-hundred-MB sizes sparse.
+        fn write_sized(path: &Path, bytes: u64, json: Option<&Value>, tensor: &str) {
+            use std::io::Write;
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut file = std::fs::File::create(path).unwrap();
+            if let Some(json) = json {
+                let mut text = json.to_string();
+                assert!(
+                    text.len() as u64 <= bytes,
+                    "{} does not fit",
+                    path.display()
+                );
+                text.push_str(&" ".repeat((bytes - text.len() as u64) as usize));
+                file.write_all(text.as_bytes()).unwrap();
+                return;
+            }
+            if path.extension().is_some_and(|ext| ext == "safetensors") {
+                const HEADER: u64 = 256;
+                let data = bytes - 8 - HEADER;
+                let mut entry = serde_json::Map::new();
+                entry.insert(
+                    tensor.to_owned(),
+                    json!({ "dtype": "U8", "shape": [data], "data_offsets": [0, data] }),
+                );
+                let mut header = Value::Object(entry).to_string();
+                header.push_str(&" ".repeat(HEADER as usize - header.len()));
+                file.write_all(&HEADER.to_le_bytes()).unwrap();
+                file.write_all(header.as_bytes()).unwrap();
+            }
+            file.set_len(bytes).unwrap();
+        }
+
+        /// Stage one pinned component's snapshot (cache-only, at its exact revision) with every
+        /// pinned file at its pinned size.
+        fn stage_component(
+            data: &Path,
+            pin: gen_core::supra2::ComponentPin,
+            config: &Value,
+            tensor: &str,
+        ) {
+            let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data, pin.repo)
+                .unwrap()
+                .join("snapshots")
+                .join(pin.revision);
+            for file in pin.files {
+                let json = (file.path == "config.json").then_some(config);
+                write_sized(&snapshot.join(file.path), file.bytes, json, tensor);
+            }
+        }
+
+        /// The converted bundle the pin contract accepts at `BundleCheck::SizesOnly` (the
+        /// admission depth): the manifest `convert_pinned_checkpoint` writes for the pinned
+        /// checkpoint, and both converted files at their pinned sizes.
+        fn stage_priceable_install(data: &Path) -> PathBuf {
+            use gen_core::supra2::{
+                BundleComponent, BundleFile, BundleManifest, BundleSource, Supra2Config,
+                FLAN_T5_BASE, PINNED_CONDITIONING, PINNED_DENOISER, SD_VAE, SUPRA2_SOURCE,
+            };
+            let cfg = Supra2Config::published();
+            stage_component(
+                data,
+                FLAN_T5_BASE,
+                &json!({
+                    "d_model": cfg.ctx_dim,
+                    "num_layers": gen_core::supra2::T5_LAYERS,
+                    "num_heads": gen_core::supra2::T5_HEADS,
+                    "d_kv": gen_core::supra2::T5_D_KV,
+                    "relative_attention_num_buckets": 32,
+                    "relative_attention_max_distance": 128,
+                    "feed_forward_proj": "gated-gelu"
+                }),
+                "encoder.embed",
+            );
+            stage_component(
+                data,
+                SD_VAE,
+                &json!({
+                    "latent_channels": cfg.latent_channels,
+                    "layers_per_block": gen_core::supra2::VAE_LAYERS_PER_BLOCK,
+                    "norm_num_groups": gen_core::supra2::VAE_NORM_GROUPS,
+                    "block_out_channels": gen_core::supra2::VAE_BLOCK_OUT_CHANNELS
+                }),
+                "decoder.weights",
+            );
+            let bundle = data.join("models/mlx/supra2_img");
+            let file = |pin: gen_core::supra2::PinnedFile| BundleFile {
+                file: pin.path.to_owned(),
+                bytes: pin.bytes,
+                sha256: pin.sha256.to_owned(),
+            };
+            let source = SUPRA2_SOURCE.files[0];
+            let component = |id: &str, pin: gen_core::supra2::ComponentPin| BundleComponent {
+                component: id.to_owned(),
+                repo: pin.repo.to_owned(),
+                revision: pin.revision.to_owned(),
+                license: pin.license.to_owned(),
+                download_bytes: pin.download_bytes(),
+            };
+            let manifest = BundleManifest {
+                schema: gen_core::supra2::BUNDLE_SCHEMA.to_owned(),
+                provider_id: gen_core::supra2::PROVIDER_ID.to_owned(),
+                source: BundleSource {
+                    repo: Some(SUPRA2_SOURCE.repo.to_owned()),
+                    revision: Some(SUPRA2_SOURCE.revision.to_owned()),
+                    file: source.path.to_owned(),
+                    bytes: source.bytes,
+                    sha256: source.sha256.to_owned(),
+                    weights_key: "ema".to_owned(),
+                },
+                config: cfg,
+                vae_scale: gen_core::supra2::VAE_SCALE,
+                denoiser: file(PINNED_DENOISER),
+                denoiser_tensors: cfg.expected_tensors().len(),
+                conditioning: Some(file(PINNED_CONDITIONING)),
+                components: vec![
+                    component(gen_core::supra2::TEXT_ENCODER_COMPONENT, FLAN_T5_BASE),
+                    component(gen_core::supra2::VAE_COMPONENT, SD_VAE),
+                ],
+            };
+            std::fs::create_dir_all(&bundle).unwrap();
+            std::fs::write(
+                bundle.join(gen_core::supra2::BUNDLE_MANIFEST),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            write_sized(
+                &bundle.join(PINNED_DENOISER.path),
+                PINNED_DENOISER.bytes,
+                None,
+                "dit",
+            );
+            write_sized(
+                &bundle.join(PINNED_CONDITIONING.path),
+                PINNED_CONDITIONING.bytes,
+                None,
+                "uncond_text",
+            );
+            bundle
+        }
+
+        /// The full production arm (`generate_stream_using` on macOS,
+        /// `generate_candle_stream_using` off-Mac) on the priceable install: the real provider
+        /// memory contract prices it, admission passes, the probe engine is called ONCE with
+        /// `count: 3`, and three assets are published on seeds 40, 41, 42.
+        ///
+        /// *Mutation that reds this:* drop the native-count branch in `resolve_native_prompt_batch`
+        /// (three engine calls of count 1).
+        #[test]
+        fn the_production_arm_renders_a_count_n_job_in_one_native_call() {
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", ""),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+                #[cfg(target_os = "macos")]
+                (crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "64"),
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                (crate::vram_gate::CUDA_VRAM_CAP_ENV, "64"),
+            ]);
+            let data = tempfile::tempdir().unwrap();
+            let project = tempfile::tempdir().unwrap();
+            let bundle = stage_priceable_install(data.path());
+            let mut entry = shipped_supra2_entry();
+            entry.insert("modelPath".to_owned(), json!(bundle));
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (outcome, posts, asset_writes) = runtime.block_on(async {
+                let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+                let mut settings = settings_at(data.path());
+                settings.api_url = base_url;
+                settings.heartbeat_seconds = 5;
+                let api = ApiClient::new(&settings);
+                let job: JobSnapshot =
+                    serde_json::from_value(crate::tests::job_snapshot_json("job-supra2", false))
+                        .unwrap();
+                let payload = json!({
+                    "projectId": "project-supra2",
+                    "model": "supra2_img",
+                    "mode": "text_to_image",
+                    "prompt": "a red fox sitting in fresh snow",
+                    "width": 256,
+                    "height": 256,
+                    "count": 3,
+                    "seed": 40,
+                    "advanced": { "steps": 12, "guidanceScale": 4.5 },
+                    "modelManifestEntry": Value::Object(entry),
+                });
+                let request = ImageRequest::from_payload(payload.as_object().unwrap());
+                let plan = lane::ImagePlan::with_count(&request, request.image_count(), None);
+                let loader_seen = Arc::clone(&seen);
+                let loader = move |_engine: &str, _spec: &gen_core::LoadSpec| {
+                    Ok(Box::new(Supra2Probe {
+                        descriptor: model().descriptor,
+                        canceled: false,
+                        seen: loader_seen,
+                    }) as Box<dyn Generator>)
+                };
+                let mut asset_writes = Vec::new();
+                #[cfg(target_os = "macos")]
+                let arm = lane::generate_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "mlx",
+                    &mut asset_writes,
+                    loader,
+                );
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let arm = lane::generate_candle_stream_using(
+                    &api,
+                    &settings,
+                    &job,
+                    &plan,
+                    project.path(),
+                    "cuda",
+                    &mut asset_writes,
+                    loader,
+                );
+                let outcome = tokio::time::timeout(std::time::Duration::from_secs(120), arm)
+                    .await
+                    .expect("the supra2 arm finished");
+                let posts = posts.lock().unwrap().clone();
+                (outcome, posts, asset_writes)
+            });
+            assert!(outcome.is_ok(), "{outcome:?}\n{posts:#?}");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "one engine call: {seen:#?}");
+            assert_eq!(
+                (seen[0].count, seen[0].seed, seen[0].steps, seen[0].guidance),
+                (3, Some(40), Some(12), Some(4.5))
+            );
+            assert!(seen[0].prompt_batch.is_empty());
+            let seeds: Vec<Value> = asset_writes
+                .iter()
+                .map(|asset| asset["seed"].clone())
+                .collect();
+            assert_eq!(seeds, vec![json!(40), json!(41), json!(42)]);
+        }
+    }
 }

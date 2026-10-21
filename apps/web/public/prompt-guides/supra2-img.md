@@ -23,8 +23,8 @@ After install, generation needs no network access.
 | Setting | Default | What it does |
 |---|---|---|
 | Steps | 50 | Euler steps over a uniform flow schedule. Fewer is faster but softer. |
-| Guidance (CFG) | 3.0 | How strictly the image follows the prompt. 1.0 turns guidance off. |
-| Seed | 0 | Fix it to reproduce an image. Variations use seed, seed+1, … |
+| Guidance (CFG) | 3.0 | How strictly the image follows the prompt. 1.0 or below turns guidance off. |
+| Seed | Random (the release's reference default is 0) | Set one to reproduce an image. Variations render together in one pass on seed, seed+1, …, so a single render on seed + *k* reproduces image *k* of a batch. |
 
 There is no negative prompt (guidance steers against the model's own stored unconditional
 embedding), no sampler or scheduler choice, no LoRAs and no quantization tiers.

@@ -63,6 +63,11 @@ const MIN_COUNT: u32 = 1;
 /// measured against.
 pub(crate) const MAX_COUNT: u32 = 8;
 
+/// The historical ceiling on `advanced.steps` the generic image lane forwards (raised to a model's
+/// own default where that is higher). The worker clamps above it; Image Studio's Steps input
+/// mirrors it (`BASE_MAX_STEPS`), and Supra2's request boundary refuses above it (sc-24215).
+pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
+
 /// The maximum number of strict poses one image-generation job may render.
 ///
 /// A pose set is not ordinary batch metadata: every entry becomes a separate generated image and
