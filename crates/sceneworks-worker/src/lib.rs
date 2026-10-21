@@ -1698,6 +1698,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
     // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
     generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
+    // sc-26610: keep proven weight-seal digests across worker restarts, so a restart does not
+    // re-hash every multi-GB weight file before its next load.
+    gen_core::ArtifactSeal::persist_proven_digests_in(
+        settings.data_dir.join("cache").join("seal-digests"),
+    );
     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
     // do no MLX work) don't clobber the file with zeros.

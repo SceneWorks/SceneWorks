@@ -4,12 +4,15 @@ import { buildBundleReport, routeFamilies } from "./vite-plugin-bundle-report.js
 
 const roomyBudgets = {
   initial: { rawBytes: 10000, gzipBytes: 10000, brotliBytes: 10000 },
-  total: { rawBytes: 10000, gzipBytes: 10000, brotliBytes: 10000 },
+  lazyChunk: { rawBytes: 10000, gzipBytes: 10000, brotliBytes: 10000 },
   largestRoute: { rawBytes: 10000, gzipBytes: 10000, brotliBytes: 10000 },
 };
 
-function chunk(fileName, { code = "export default 1;", imports = [], isEntry = false, modules = {} } = {}) {
-  return { type: "chunk", fileName, name: fileName, code, imports, isEntry, modules };
+function chunk(
+  fileName,
+  { code = "export default 1;", imports = [], isEntry = false, isDynamicEntry = false, modules = {} } = {},
+) {
+  return { type: "chunk", fileName, name: fileName, code, imports, isEntry, isDynamicEntry, modules };
 }
 
 function asset(fileName, source = "window.__THEME__ = true;") {
@@ -25,6 +28,7 @@ function completeRouteChunks() {
         chunk(fileName, {
           code: `export const route = ${JSON.stringify(route)};`,
           imports: ["assets/shared.js"],
+          isDynamicEntry: true,
           modules: { [`C:/repo/apps/web${moduleId}`]: {} },
         }),
       ];
@@ -94,5 +98,86 @@ describe("bundle report", () => {
       ),
     ).toBe(true);
     expect(report.violations.some((message) => message.includes("Initial JavaScript"))).toBe(true);
+  });
+
+  // sc-24217 policy: initial and each lazy chunk are gates; aggregate total is telemetry.
+  function entryWith(extra = {}) {
+    return {
+      "assets/index.js": chunk("assets/index.js", {
+        isEntry: true,
+        modules: { "C:/repo/apps/web/src/main.jsx": {} },
+      }),
+      "assets/shared.js": chunk("assets/shared.js"),
+      ...completeRouteChunks(),
+      ...extra,
+    };
+  }
+
+  it("reports total JavaScript as telemetry but never fails the build on it", () => {
+    const report = buildBundleReport(entryWith(), {
+      ...roomyBudgets,
+      total: { rawBytes: 1, gzipBytes: 1, brotliBytes: 1 },
+    });
+
+    expect(report.total.gzipBytes).toBeGreaterThan(1);
+    expect(report.total.chunks).toContain("assets/shared.js");
+    expect(report.violations).toEqual([]);
+  });
+
+  it("fails when one lazy chunk plus its non-initial static closure exceeds lazyChunk", () => {
+    const report = buildBundleReport(
+      entryWith({
+        "assets/heavy.js": chunk("assets/heavy.js", {
+          isDynamicEntry: true,
+          imports: ["assets/heavy-dep.js", "assets/index.js"],
+          code: "a".repeat(300),
+        }),
+        "assets/heavy-dep.js": chunk("assets/heavy-dep.js", { code: "b".repeat(300) }),
+      }),
+      { ...roomyBudgets, lazyChunk: { rawBytes: 500, gzipBytes: 10000, brotliBytes: 10000 } },
+    );
+
+    expect(report.lazyChunks["assets/heavy.js"]).toMatchObject({
+      chunks: ["assets/heavy-dep.js", "assets/heavy.js"],
+      rawBytes: 600,
+    });
+    expect(report.violations).toEqual([
+      "Lazy chunk (assets/heavy.js) rawBytes is 600 bytes (budget 500 bytes)",
+    ]);
+  });
+
+  it("does not count an initial chunk as a lazy chunk", () => {
+    const report = buildBundleReport(
+      entryWith({
+        "assets/index.js": chunk("assets/index.js", {
+          isEntry: true,
+          imports: ["assets/eager.js"],
+          modules: { "C:/repo/apps/web/src/main.jsx": {} },
+        }),
+        "assets/eager.js": chunk("assets/eager.js", { isDynamicEntry: true, code: "c".repeat(600) }),
+      }),
+      { ...roomyBudgets, lazyChunk: { rawBytes: 500, gzipBytes: 10000, brotliBytes: 10000 } },
+    );
+
+    expect(report.lazyChunks["assets/eager.js"]).toBeUndefined();
+    expect(report.violations).toEqual([]);
+  });
+
+  it("fails when the initial graph exceeds its budget", () => {
+    const report = buildBundleReport(entryWith(), {
+      ...roomyBudgets,
+      initial: { rawBytes: 10000, gzipBytes: 10000, brotliBytes: 1 },
+    });
+
+    expect(report.violations).toEqual([
+      expect.stringMatching(/^Initial JavaScript brotliBytes is \d+ bytes \(budget 1 bytes\)$/),
+    ]);
+  });
+
+  it("fails closed when the lazyChunk budget is missing", () => {
+    const { lazyChunk: _omitted, ...withoutLazy } = roomyBudgets;
+    const report = buildBundleReport(entryWith(), withoutLazy);
+
+    expect(report.violations).toEqual(["bundle-budgets.json is missing the lazyChunk budget"]);
   });
 });
