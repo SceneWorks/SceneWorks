@@ -87,8 +87,17 @@ initialization, and CPU job metrics skip GPU reset/read/total-memory hooks; CPU
 wall time remains available, GPU measurements are absent rather than fabricated.
 
 After a completed owned download, discovery requires the actual matching v2
-job/repo/revision receipt and the complete observed snapshot. It hashes all files,
-checks exact approved total bytes and authenticated config, and exclusively
+job/repo/revision receipt and the complete observed snapshot. The receipt is read
+from the native repository-keyed `data/models/<safe_download_dir(repo)>` directory
+(never a model-ID directory); the snapshot is the derived pinned
+`models--<safe_repo_dir_name(repo)>/snapshots/<revision>`, which must equal the
+completed job's reported HF-cache path, and the catalog may list it or its
+repository cache root only. Both slug ports are pinned by the shared
+`tests/fixtures/rust_migration_contracts/repo_slugs.json` contract. License
+evidence is a shipped `LICENSE*` file; only when none exists (the actual PUP
+repository) may the README card's top-level `license:` stand in, and only when it
+equals the source catalog license (recorded as `readme-card` with its digest).
+It hashes all files, checks exact approved total bytes and authenticated config, and exclusively
 exports `OBSERVED_NOT_GPU_APPROVED` inventories. No preinstalled derived package
 is required. These candidate observations are **not** the generation driver's
 `parent-approved-pinned-inventory`, do not publish base q4/q8 pins, and do not
