@@ -380,6 +380,11 @@ test("failed native build records fixed read-only toolchain diagnostics without 
   assert.match(policy.invocationEvidence("   Running `rustc --crate-name bytemuck -L x`").join("\n"), /NO --extern bytemuck_derive argument/);
   assert.match(policy.invocationEvidence("   Running `rustc --crate-name bytemuck " + "a".repeat(4000) + "`").join("\n"), /truncated/);
   assert.match(policy.invocationEvidence("nothing").join("\n"), /not found in original log/);
+  // Real CI shape (run 39553468673): coloured "Running" and Cargo's "Caused by" invocation line.
+  const coloured = "\x1b[1m\x1b[92m     Running\x1b[0m `/r/rustc --crate-name zerocopy_derive x`\n  process didn't exit successfully: `/r/rustc --crate-name bytemuck --edition=2018 --extern bytemuck_derive=/t/../d/libbytemuck_derive-8.dylib --cap-lints allow` (exit status: 1)";
+  const parsed = policy.invocationEvidence(coloured, () => true).join("\n");
+  assert.match(parsed, /2 rustc invocation line\(s\)/); assert.match(parsed, /bytemuck_derive=\/t\/\.\.\/d\/libbytemuck_derive-8\.dylib \(exists: true\)/);
+  assert.ok(dylibProbe.includes('otool -s __DATA .rustc') && dylibProbe.includes("rust_metadata exports"));
   // Exactly the original facts dump is verbose (not -vv, no second cargo execution).
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
   assert.equal(controller.split('"--verbose"').length - 1, 1); assert.doesNotMatch(controller, /"-vv"|"build", "-v"/);

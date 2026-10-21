@@ -352,6 +352,11 @@ export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, 
     // Where (if anywhere) rustc metadata landed: segment/section of the .rustc payload.
     '  otool -l "$f" 2>&1 | grep -B1 -A2 -E "sectname \\.rustc" | grep -E "sectname|segname|size" | head -n 4 || true',
     '  echo "rustc-metadata-sections: $(otool -l "$f" 2>/dev/null | grep -c "sectname .rustc")"',
+    // Header words of the metadata payload (expected "rust" magic + format version) and its size/offset,
+    // plus whether the exported rust_metadata_* symbol survived linking/strip. Read-only, 2 rows only.
+    '  otool -l "$f" 2>&1 | grep -A4 -E "sectname \\.rustc" | grep -E "^ *(size|offset)" | head -n 2',
+    '  otool -s __DATA .rustc "$f" 2>&1 | sed -n "3,4p"',
+    '  echo "rust_metadata exports: $(nm -gU "$f" 2>/dev/null | grep -c rust_metadata_)"',
     'done',
   ].join("\n"), "sh", deps]);
   probe("xcrun", ["--find", "ld-classic"]);
@@ -364,7 +369,10 @@ export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, 
 
 /** The last rustc invocations of the original verbose cargo run, plus the proc-macro extern. */
 export function invocationEvidence(log, exists = existsSync) {
-  const invocations = log.split("\n").filter(line => line.includes("Running `") && line.includes("--crate-name"));
+  // Cargo colours "Running" in CI logs; strip ANSI before matching. Cargo's own "Caused by:
+  // process didn't exit successfully: `rustc …`" line is also an invocation of the failed crate.
+  const plain = log.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+  const invocations = plain.split("\n").filter(line => (line.includes("Running `") || line.includes("process didn't exit successfully: `")) && line.includes("--crate-name"));
   const lines = [`original verbose cargo log: ${invocations.length} rustc invocation line(s); showing last ${Math.min(3, invocations.length)}`];
   for (const line of invocations.slice(-3)) lines.push(line.length > 3000 ? `${line.slice(0, 3000)} …[truncated ${line.length - 3000} chars]` : line);
   const failing = [...invocations].reverse().find(line => /--crate-name bytemuck(\s|$)/.test(line));
