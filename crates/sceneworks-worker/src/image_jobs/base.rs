@@ -7877,8 +7877,8 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: hires_fix_target_dimension(request.width, upscale_by),
-        height: hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
