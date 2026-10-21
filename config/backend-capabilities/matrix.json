@@ -5,7 +5,7 @@
     "modelCount": 139,
     "importedFamilyCount": 4,
     "cellCount": 1082,
-    "mlxOnlyCellCount": 48,
+    "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -20,12 +20,12 @@
     "descriptorCandleRuntime": "10b113d5a725f816c25ac46c11b281f58d70cb4b381b40466b4c38790d7b4121",
     "descriptorMlxFacts": "0874675b65582cb87eac40184249ac2ae6aecd2a0b66e90cb4f06721e410c8ac",
     "descriptorMlxRuntime": "df843ac9808c1b3cdbe9ca9f4db79be892da6a4d5bf5291edb246126c7548791",
-    "descriptorPreviewFacts": "83e6bd42e1b70815bce95a5142b797d6c152b48925e964f480607057c4ebee30",
+    "descriptorPreviewFacts": "cba6d3e9e9f4b9d5aa9935227ee32bdaad2745d0a1e8ee081574b39d31d6fc1d",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "dcfbb92b5d51346f9d0229497550d14d297bbd3afda04b898871704257f2f21f",
     "modelImportDefaults": "57da46d39740f65681568d298e1c5acbbc1cdfc43a4e79fe2c0c39f2b7196df2",
     "routerCandle": "c7d7f2061fa0d4c7a47e953d6cf28f7e4dee43c0440626fb4f6574c4c7312fa4",
-    "routerCatalog": "aa5231f5b4c90c6402e39b9ebbd15f0cd7df51c967a60a64e82471dbdf2c54a8",
+    "routerCatalog": "41c09deb2bdd4a3ffab8e794f703c29e09f0e3ec006c32e92e7dd4ed96e7a809",
     "routerGaps": "e553137bed2fb2880a66f8a9df72b326247708ab7e4d94776d4be68de8bdd6ad",
     "routerMlx": "dd533ef5670172cb32301307fd0b06d869ea54a2cef933e9f146348ebae50760",
     "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
@@ -4157,20 +4157,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4209,20 +4201,12 @@
         {
           "capability": "lora",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18477",
-            "url": "https://app.shortcut.com/trefry/story/18477"
-          }
+          "candle": true
         }
       ],
       "precisionTier": [
