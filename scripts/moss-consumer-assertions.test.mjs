@@ -38,9 +38,9 @@ function fixture() {
 }
 function restored(f) { return MUTABLE_FILES.every(file => readFileSync(path.join(f.root, file)).equals(f.original[file])); }
 
-test("closed committed inventory executes all 69 cases across seven exact tests", () => {
+test("closed committed inventory executes all 74 cases across seven exact tests", () => {
   const spec = loadRegistry(ROOT);
-  assert.equal(spec.cases.length, 69); assert.equal(Object.keys(TESTS).length, 7);
+  assert.equal(spec.cases.length, 74); assert.equal(Object.keys(TESTS).length, 7);
   let workerSeen = false;
   for (const item of spec.cases) {
     const worker = item.tests.some(key => TESTS[key][0] === "sceneworks-worker");
@@ -50,6 +50,14 @@ test("closed committed inventory executes all 69 cases across seven exact tests"
   for (const id of ["SW-Base-official-source", "SW-SFT-official-source", "SW-compute-demoted", "SW-thin-blank-sampler", "SW-validate-modules-array", "SW-validate-modules-members", "SW-validate-decomp-integer", "SW-validate-decomp-positive", "SW-validate-decomp-overflow", "SW-validate-valid-decomp"]) assert.ok(spec.cases.some(item => item.id === id), id);
   assert.equal(Object.hasOwn(spec, "carried"), false);
   assert.equal(spec.registry_sha256, digest(readFileSync(path.join(ROOT, REGISTRY_PATH))));
+  for (const item of spec.cases) {
+    const sources = new Map();
+    for (const patch of item.patches) {
+      const before = sources.get(patch.file) ?? readFileSync(path.join(ROOT, patch.file), "utf8");
+      sources.set(patch.file, patchText(before, patch));
+    }
+  }
+  for (const id of ["SW-generation-base-Candle-adapter", "SW-generation-sft-Candle-adapter", "SW-generation-conditioning-carrier-refusal", "SW-generation-quant-tier-refusal", "SW-generation-edit-mode-refusal"]) assert.ok(spec.cases.some(item => item.id === id), id);
 });
 test("byte patching handles Rust strings, raw strings, characters, nested comments and lifetimes", () => {
   const source = `fn sample<'a>() { let a = "}"; let b = r#"{ raw }"#; let c = '}'; /* outer { /* inner } */ } */ let value = 1; }`;

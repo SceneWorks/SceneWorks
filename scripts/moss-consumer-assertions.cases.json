@@ -221,6 +221,78 @@
       ]
     },
     {
+      "id": "SW-generation-base-Candle-adapter",
+      "tests": [
+        "catalog",
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "    ModelCaps::new(\"moss_image_base\", true, true, false, true, false),",
+          "new": "    ModelCaps::new(\"moss_image_base\", true, true, false, false, false),"
+        }
+      ]
+    },
+    {
+      "id": "SW-generation-sft-Candle-adapter",
+      "tests": [
+        "catalog",
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+          "op": "replace",
+          "old": "    ModelCaps::new(\"moss_image_sft\", true, true, false, true, false),",
+          "new": "    ModelCaps::new(\"moss_image_sft\", true, true, false, false, false),"
+        }
+      ]
+    },
+    {
+      "id": "SW-generation-conditioning-carrier-refusal",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "body",
+          "anchor": "fn candle_refuses_conditioning_carrier(",
+          "new": "let _ = (_model, payload); false"
+        }
+      ]
+    },
+    {
+      "id": "SW-generation-quant-tier-refusal",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "body",
+          "anchor": "fn candle_refuses_quant_tier(",
+          "new": "let _ = (model, payload); false"
+        }
+      ]
+    },
+    {
+      "id": "SW-generation-edit-mode-refusal",
+      "tests": [
+        "scheduler"
+      ],
+      "patches": [
+        {
+          "file": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+          "op": "body",
+          "anchor": "fn candle_refuses_edit_mode(",
+          "new": "let _ = (_model, payload); false"
+        }
+      ]
+    },
+    {
       "id": "SW-matrix-base",
       "tests": [
         "matrix"

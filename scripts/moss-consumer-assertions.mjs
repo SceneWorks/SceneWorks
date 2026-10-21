@@ -70,7 +70,7 @@ export function patchText(text, patch) {
 export function loadRegistry(root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")) {
   const bytes = readFileSync(path.join(root, REGISTRY_PATH));
   const spec = JSON.parse(bytes);
-  requireFact(spec.schema_version === 2 && Array.isArray(spec.cases) && spec.cases.length === 69 && !Object.hasOwn(spec, "carried"), "closed 69-case executed registry required");
+  requireFact(spec.schema_version === 2 && Array.isArray(spec.cases) && spec.cases.length === 74 && !Object.hasOwn(spec, "carried"), "closed 74-case executed registry required");
   const ids = new Set();
   for (const item of spec.cases) {
     requireFact(/^SW-[A-Za-z0-9-]+$/.test(item.id) && !ids.has(item.id), "duplicate/invalid case id"); ids.add(item.id);

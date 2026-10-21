@@ -1166,8 +1166,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
     // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
     // (`iris_mlx_eligible`).
-    ModelCaps::new("moss_image_base", true, true, false, false, false),
-    ModelCaps::new("moss_image_sft", true, true, false, false, false),
+    ModelCaps::new("moss_image_base", true, true, false, true, false),
+    ModelCaps::new("moss_image_sft", true, true, false, true, false),
     ModelCaps::new("iris_3b", true, true, false, true, false),
 ];
 
@@ -2612,6 +2612,8 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "moss_image_base",
+        "moss_image_sft",
         // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
         "iris_3b",
     ];
@@ -4288,6 +4290,74 @@ mod moss_native_training_routing_tests {
 
     #[test]
     fn moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic() {
+        let candle_worker: crate::contracts::WorkerSnapshot = serde_json::from_value(json!({
+            "id":"moss-candle", "gpuId":"0", "gpuName":null, "status":"idle",
+            "currentJobId":null, "capabilities":["image_generate", "candle"],
+            "loadedModels":[], "registeredAt":"", "lastSeenAt":""
+        }))
+        .unwrap();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let entry = builtin_image_models()
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base))
+                .unwrap()
+                .clone();
+            for method in ["lora", "lokr"] {
+                let mut generation = job(json!({}));
+                generation.job_type = JobType::ImageGenerate;
+                generation.payload = json!({
+                    "model":base, "mode":"text_to_image", "prompt":"a ceramic cup",
+                    "width":64, "height":64, "modelManifestEntry":entry,
+                    "loras":[{"id":"trained-moss", "networkType":method, "weight":0.65}],
+                    "advanced":{"mossImage":{"acceleration":"off"}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                let entry = generation.payload["modelManifestEntry"]
+                    .as_object()
+                    .unwrap();
+                assert!(
+                    crate::moss_image::native_request(&generation.payload, entry)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    candle::image_job_is_candle_eligible(&generation),
+                    "{base}/{method}"
+                );
+                assert!(crate::jobs_store::worker_supports_job(
+                    &candle_worker,
+                    &generation
+                ));
+                assert_eq!(generation.payload["loras"][0]["networkType"], method);
+                assert_eq!(generation.payload["loras"][0]["weight"], 0.65);
+                // Admission of custom adapters must not enable packed weights or conditioning.
+                for field in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+                    let mut invalid = generation.clone();
+                    invalid
+                        .payload
+                        .insert(field.into(), json!("unsupported-asset"));
+                    assert!(!candle::image_job_is_candle_eligible(&invalid));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &invalid
+                    ));
+                }
+                let mut edit = generation.clone();
+                edit.payload.insert("mode".into(), json!("edit_image"));
+                assert!(!candle::image_job_is_candle_eligible(&edit));
+                for bits in [4, 8] {
+                    let mut packed = generation.clone();
+                    packed.payload.get_mut("advanced").unwrap()["mlxQuantize"] = json!(bits);
+                    assert!(!candle::image_job_is_candle_eligible(&packed));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &packed
+                    ));
+                }
+            }
+        }
         let targets: Vec<_> = crate::training::builtin_training_targets()
             .targets
             .into_iter()
