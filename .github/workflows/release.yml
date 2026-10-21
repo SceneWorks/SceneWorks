@@ -89,7 +89,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
