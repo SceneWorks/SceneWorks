@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { cp, mkdir, open, readFile, readdir, realpath, stat, statfs, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hostname, userInfo } from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, utilityWorkerId, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText, assertClaimedWithin } from './flux3-image-klein-app-lifecycle.mjs';
 import { contained, fileHash, safeEnvironment } from './flux3-image-klein-terminal-session.mjs';
@@ -26,15 +27,33 @@ export function preparationPlan(request, sources) {
   assert(['candle', 'mlx'].includes(request.backend));
   assert(shaPattern.test(request.sourceSha) && shaPattern.test(request.inferenceMainSha));
   assert(Array.isArray(request.modelIds) && request.modelIds.length && new Set(request.modelIds).size === request.modelIds.length);
-  const models = [...sources.models, sources.upsampler];
-  const repositories = request.modelIds.map(modelId => {
+  const models = [...sources.models, sources.upsampler], repositories = [], visited = new Set(), visiting = new Set();
+  const platform = request.backend === 'candle' ? 'windows' : 'macos';
+  const applicable = d => !d.platforms || d.platforms.includes(platform);
+  const visit = modelId => {
     assert(Object.hasOwn(fixed, modelId), 'only fixed FLUX3 source repositories may be prepared');
-    const model = models.find(m => m.id === modelId), row = model?.downloads.find(d => !d.variant || d.variant === 'bf16');
-    assert(row && row.provider === 'huggingface');
-    assert.deepEqual([row.repo, row.revision], fixed[modelId]); assert.deepEqual(row.files, []);
-    assert(!row.localDerivation && Number.isSafeInteger(row.estimatedSizeBytes) && row.estimatedSizeBytes > 0);
-    return { modelId, repository: row.repo, resolvedRevision: row.revision, files: [], downloadBytes: row.estimatedSizeBytes, license: model.license ?? null, licenseUrl: model.licenseUrl ?? null, gated: model.gated === true, ...(row.variant ? { variant: row.variant } : {}) };
-  });
+    if (visited.has(modelId)) return;
+    assert(!visiting.has(modelId), 'cyclic preparation co-requisite closure'); visiting.add(modelId);
+    const model = models.find(m => m.id === modelId), row = model?.downloads.find(d => !d.coRequisite && applicable(d) && (!d.variant || d.variant === 'bf16'));
+    const validateRow = (d, target) => {
+      assert(d && d.provider === 'huggingface'); assert.deepEqual([d.repo, d.revision], fixed[target]); assert.deepEqual(d.files, []);
+      assert(!d.localDerivation && Number.isSafeInteger(d.estimatedSizeBytes) && d.estimatedSizeBytes > 0);
+    };
+    validateRow(row, modelId);
+    const dependencies = [];
+    // The ordinary API queues soft AND hard co-requisites before the primary.
+    // Resolve them from source, never ambient cache presence or caller labels.
+    for (const d of model.downloads.filter(d => d.coRequisite && applicable(d) && (!d.variant || d.variant === row.variant))) {
+      const dependency = Object.keys(fixed).find(key => fixed[key][0] === d.repo);
+      assert(dependency && !d.choiceGroup && !d.choiceOption, 'unapproved/ambiguous preparation co-requisite');
+      validateRow(d, dependency); visit(dependency);
+      const resolved = repositories.find(r => r.modelId === dependency); assert.equal(resolved.downloadBytes, d.estimatedSizeBytes);
+      dependencies.push(dependency, ...resolved.dependencies);
+    }
+    repositories.push({ modelId, repository: row.repo, resolvedRevision: row.revision, files: [], downloadBytes: row.estimatedSizeBytes, dependencies: [...new Set(dependencies)], license: model.license ?? null, licenseUrl: model.licenseUrl ?? null, gated: model.gated === true, ...(row.variant ? { variant: row.variant } : {}) });
+    visiting.delete(modelId); visited.add(modelId);
+  };
+  request.modelIds.forEach(visit);
   const value = { schemaVersion: 1, kind: 'flux3-cpu-preparation-plan', request: structuredClone(request), repositories, downloadBytes: repositories.reduce((n, r) => n + r.downloadBytes, 0), generationAttempts: 0, conversions: false, candidateAuthority: 'OBSERVED_NOT_GPU_APPROVED' };
   return { ...value, planSha256: hash(value) };
 }
@@ -80,23 +99,91 @@ export function assertPreparationWorkers(workers, workerId, { idle = false } = {
   assert(idle ? w.status === 'idle' : ['idle', 'busy'].includes(w.status), 'owned preparation worker not ready');
   return w;
 }
-export function preparationTransport(endpoint, repositories) {
-  const downloads = new Map(repositories.map(r => [`/api/v1/models/${id(r.modelId)}/download`, r])), jobs = new Set();
+export function preparationTransport(endpoint, repositories, { workerId, now = Date.now } = {}) {
+  const downloads = new Map(repositories.map(r => [`/api/v1/models/${id(r.modelId)}/download`, r])), jobs = new Map();
   return {
     async call(method, route, body) {
       const match = /^\/api\/v1\/jobs\/([a-zA-Z0-9_.-]+)(\/cancel)?$/.exec(route);
       const row = downloads.get(route);
       assert((method === 'GET' && body === undefined && ['/api/v1/health', '/api/v1/workers', '/api/v1/models'].includes(route)) || (match && jobs.has(match[1]) && ((method === 'GET' && !match[2] && body === undefined) || (method === 'POST' && match[2] && body === undefined))) || (method === 'POST' && row), 'CPU preparation transport refuses non-download/generation/training/conversion routes');
       if (row) assert.deepEqual(body, { licenseAcknowledged: true, ...(row.variant ? { variant: row.variant } : {}) });
+      const requestedAt = now();
       const result = await endpoint.call(method, route, body);
       if (method === 'POST' && row) {
         assert.equal(result.type, 'model_download'); assert.equal(result.payload?.modelId, row.modelId); assert.equal(result.payload?.repo, row.repository); assert.equal(result.payload?.revision, row.resolvedRevision); assert.deepEqual(result.payload?.files, []);
-        assert(!result.payload?.localDerivation && !result.payload?.conversion, 'preparation must never auto-convert'); jobs.add(id(result.id));
+        assert(!Object.hasOwn(result.payload, 'localDerivation') && !Object.hasOwn(result.payload, 'conversion'), 'preparation must never auto-convert'); jobs.set(id(result.id), { row, createdAt: result.createdAt, requestedAt });
       }
       return result;
     },
+    async dependencyFor(worker, primaryId, now) {
+      assert(workerId, 'owned worker identity required for a dependency lookup');
+      assertPreparationWorkers([worker], workerId);
+      const parent = jobs.get(primaryId); assert(parent && !parent.dependency, 'owned primary required');
+      assert.equal(worker.status, 'busy'); const dependencyId = id(worker.currentJobId); assert.notEqual(dependencyId, primaryId);
+      assert(Number.isFinite(Date.parse(parent.createdAt)), 'actual primary creation timestamp required');
+      // One read of THIS verified CPU worker's current job, never a raw queue
+      // listing or caller-selected job. Admit it only after the complete proof.
+      const job = await endpoint.call('GET', `/api/v1/jobs/${dependencyId}`);
+      assert.equal(job.id, dependencyId); assert.equal(job.type, 'model_download'); assert.equal(job.workerId, worker.id);
+      assert(Number.isFinite(job.progress) && job.progress >= 0 && job.progress <= 1, 'dependency progress counter invalid');
+      const row = repositories.find(r => parent.row.dependencies.includes(r.modelId) && r.repository === job.payload?.repo && r.resolvedRevision === job.payload?.revision);
+      assert(row, 'CPU worker dependency is outside the explicitly approved closure');
+      assert.equal(job.payload?.modelId, parent.row.modelId); assert.deepEqual(job.payload?.files, []);
+      assert(!Object.hasOwn(job.payload, 'localDerivation') && !Object.hasOwn(job.payload, 'conversion'), 'dependency must never auto-convert');
+      // The API creates dependencies BEFORE the returned primary, possibly on
+      // opposite sides of a second boundary. Bind to the observed POST start,
+      // allowing only the API timestamp's one-second serialization precision.
+      const created = Date.parse(job.createdAt); assert(created >= parent.requestedAt - 1000 && created <= Date.parse(parent.createdAt) && created <= now + 5000, 'dependency is not owned by this download request');
+      assert(!['failed', 'canceled', 'interrupted'].includes(job.status), 'owned dependency download failed');
+      jobs.set(dependencyId, { row, dependency: true, createdAt: job.createdAt }); return job;
+    },
     ownsJob: jobId => jobs.has(jobId),
   };
+}
+export const PREPARATION_PROGRESS_LEASE_MS = 60_000;
+export function advancePreparationClaimClock(state, primary, worker, dependency, now) {
+  assert(Number.isFinite(now) && now >= state.lastNow, 'monotonic preparation clock required');
+  let activeMs = 0, activeUntil = 0, activeId = null;
+  if (!primary.workerId && dependency) {
+    assert.equal(worker.status, 'busy'); assert.equal(worker.currentJobId, dependency.id);
+    assert.equal(dependency.workerId, worker.id); assert.equal(dependency.type, 'model_download');
+    assert(!['failed', 'canceled', 'interrupted'].includes(dependency.status), 'owned dependency download failed');
+    const progress = dependency.progress, heartbeat = Date.parse(dependency.lastHeartbeatAt);
+    const previous = state.dependencies.get(dependency.id);
+    if (!previous) state.dependencies.set(dependency.id, { progress: Number.isFinite(progress) ? progress : -Infinity, heartbeat: Number.isFinite(heartbeat) ? heartbeat : -Infinity, advancedAt: null });
+    else {
+      // Heartbeat-only keepalives cannot manufacture progress; changing a
+      // percentage without an advancing heartbeat cannot renew the lease either.
+      if (Number.isFinite(progress) && progress > previous.progress && Number.isFinite(heartbeat) && heartbeat > previous.heartbeat) {
+        previous.progress = progress; previous.heartbeat = heartbeat; previous.advancedAt = now;
+      }
+      const fresh = Number.isFinite(heartbeat) && now - heartbeat >= -5000 && now - heartbeat <= PREPARATION_PROGRESS_LEASE_MS;
+      if (['running', 'downloading'].includes(dependency.status) && fresh && previous.advancedAt !== null && now - previous.advancedAt <= PREPARATION_PROGRESS_LEASE_MS) {
+        activeId = dependency.id; activeUntil = previous.advancedAt + PREPARATION_PROGRESS_LEASE_MS;
+        // Never retroactively exempt an unobserved gap beyond the prior lease.
+        if (state.activeId === activeId) activeMs = Math.max(0, Math.min(now, state.activeUntil) - state.lastNow);
+      }
+    }
+  }
+  state.suspendedMs += activeMs;
+  state.lastNow = now; state.activeId = activeId; state.activeUntil = activeUntil;
+  assertClaimedWithin(primary, state.firstSeen + state.suspendedMs, now);
+}
+export async function waitPreparationDownload({ transport, accepted, workerId, timeoutSeconds, check, disk, now = Date.now, sleep }) {
+  const firstSeen = now(), end = firstSeen + timeoutSeconds * 1000;
+  const clock = { firstSeen, lastNow: firstSeen, suspendedMs: 0, activeId: null, activeUntil: 0, dependencies: new Map() };
+  while (now() < end) {
+    check(); await disk(); const job = await transport.call('GET', `/api/v1/jobs/${accepted.id}`);
+    assert.equal(job.id, accepted.id); assert.equal(job.type, 'model_download');
+    assert(!['failed', 'canceled', 'interrupted'].includes(job.status), 'owned preparation download did not complete');
+    const worker = assertPreparationWorkers(await transport.call('GET', '/api/v1/workers'), workerId);
+    if (job.workerId) assert.equal(job.workerId, worker.id);
+    if (job.status === 'completed') { assert.equal(job.workerId, worker.id); return job; }
+    const dependency = !job.workerId && worker.status === 'busy' && worker.currentJobId !== job.id ? await transport.dependencyFor(worker, job.id, now()) : null;
+    advancePreparationClaimClock(clock, job, worker, dependency, now());
+    await sleep(1000);
+  }
+  throw new Error('preparation download deadline exceeded');
 }
 async function insideDirectory(directory, root) {
   const value = await realpath(directory), relative = path.relative(await realpath(root), value);
@@ -126,35 +213,75 @@ export async function discoverPreparationInventory({ state, hfHome, row, job, au
   const licenseFile = files.find(f => /^LICENSE(?:\.md|\.txt)?$/i.test(f.path)); assert(licenseFile, 'actual upstream license file required');
   return { authority: 'OBSERVED_NOT_GPU_APPROVED', gpuExecutionApproved: false, modelId: row.modelId, repository: row.repository, resolvedRevision: row.resolvedRevision, root: snapshot, containmentRoot: await realpath(hfHome), totalBytes, files, jobId: job.id, workerId: job.workerId, receiptSha256: hash(markerBytes), receipt: { schemaVersion: receipt.schemaVersion, jobId: receipt.jobId, modelId: receipt.modelId, repo: receipt.repo, snapshotRevision: receipt.snapshotRevision, completedAt: receipt.completedAt, manifestFiles: receipt.manifestFiles, resolvedFiles: receipt.resolvedFiles }, authorization: { httpStatus: authorization.httpStatus, configSha256: authorization.configSha256 }, license: { path: licenseFile.path, sha256: licenseFile.sha256 } };
 }
+// Keep complete SANITIZED lines: first 64 KiB plus a rolling tail, <=2 MiB
+// total. Each pipe's incomplete raw line is separately bounded to 64 KiB;
+// oversized lines are discarded whole, never cut into a token or signed URL.
+export function boundedPreparationLog(secrets) {
+  const cap = 2 * 1024 ** 2, firstCap = 64 * 1024, lineCap = 64 * 1024;
+  const marker = '[older log lines omitted]\n', tailCap = cap - firstCap - Buffer.byteLength(marker);
+  const streams = new Map(), tail = []; let first = '', firstClosed = false, tailBytes = 0, offset = 0, omitted = false;
+  const retain = raw => {
+    let line = redactPreparation(raw, secrets), bytes = Buffer.byteLength(line);
+    if (bytes > tailCap) { line = '[oversized sanitized line omitted]\n'; bytes = Buffer.byteLength(line); }
+    if (!firstClosed && Buffer.byteLength(first) + bytes <= firstCap) { first += line; return; }
+    firstClosed = true; tail.push({ line, bytes }); tailBytes += bytes;
+    while (tailBytes > tailCap) { tailBytes -= tail[offset].bytes; tail[offset++] = null; omitted = true; }
+    if (offset > 1024 && offset * 2 > tail.length) { tail.splice(0, offset); offset = 0; }
+  };
+  const consume = (state, text) => {
+    let start = 0;
+    while (start < text.length) {
+      const newline = text.indexOf('\n', start), end = newline < 0 ? text.length : newline;
+      if (!state.discard) {
+        const part = text.slice(start, end);
+        if (Buffer.byteLength(state.pending) + Buffer.byteLength(part) > lineCap) {
+          state.pending = ''; state.discard = true; retain('[oversized log line omitted]\n');
+        } else state.pending += part;
+      }
+      if (newline < 0) break;
+      if (!state.discard) retain(state.pending + '\n');
+      state.pending = ''; state.discard = false; start = newline + 1;
+    }
+  };
+  const stateFor = key => {
+    if (!streams.has(key)) { assert(streams.size < 2, 'only owned stdout/stderr may be retained'); streams.set(key, { decoder: new StringDecoder('utf8'), pending: '', discard: false, ended: false }); }
+    return streams.get(key);
+  };
+  const end = key => { const state = stateFor(key); if (state.ended) return; consume(state, state.decoder.end()); if (state.pending && !state.discard) retain(state.pending + '\n'); state.pending = ''; state.ended = true; };
+  return {
+    push(key, bytes) { const state = stateFor(key); if (!state.ended) consume(state, state.decoder.write(bytes)); },
+    end,
+    finish() { for (const key of streams.keys()) end(key); },
+    text() { return first + (omitted ? marker : '') + tail.slice(offset).map(entry => entry.line).join(''); },
+  };
+}
 // Dedicated factory: deliberately not launchTerminalSession with weakened GPU/ledger checks.
 async function cpuSession(a, io, credential) {
   const identity = attemptIdentity(a.outputRoot), controller = new AbortController(), secrets = [credential];
   await mkdir(identity.state); await mkdir(path.join(identity.state, 'data/projects'), { recursive: true }); await mkdir(path.join(identity.state, 'credentials')); await cp(path.join(io.root, 'config'), path.join(identity.state, 'config'), { recursive: true });
-  const log = await open(path.join(a.outputRoot, `${identity.nonce}-cpu-api.log`), 'wx'); let logText = '', writes = Promise.resolve(), logError;
+  const log = await open(path.join(a.outputRoot, `${identity.nonce}-cpu-api.log`), 'wx'), retained = boundedPreparationLog(secrets); let writes = Promise.resolve(), logError;
   let child;
   try { child = io.spawn(a.binary, [], { cwd: io.root, env: preparationEnvironment(io.env, a, identity, credential), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); }
   catch { await log.close(); throw new Error('owned CPU API launch refused'); }
-  const done = new Promise(resolve => { child.once('exit', () => resolve()); child.once('error', () => { controller.abort(new Error('owned CPU API launch failed')); resolve(); }); });
-  const streams = new Map([[child.stdout, ''], [child.stderr, '']]);
-  for (const stream of streams.keys()) stream.on('data', bytes => {
-    if (controller.signal.aborted) return;
-    streams.set(stream, streams.get(stream) + bytes.toString());
-    logText = [...streams.values()].join('\n');
-    // Never truncate into a token/URL, or interleave stdout into a stderr secret.
-    if (Buffer.byteLength(logText) > 2 * 1024 ** 2) { logText = ''; streams.clear(); controller.abort(new Error('owned CPU log limit exceeded')); }
-  });
+  const done = new Promise(resolve => { child.once('close', resolve); child.once('error', () => controller.abort(new Error('owned CPU API launch failed'))); });
+  for (const stream of [child.stdout, child.stderr]) {
+    // Always drain both pipes, including shutdown output after cancellation.
+    // Retention volume cannot abort the session or backpressure its child.
+    stream.on('data', bytes => retained.push(stream, bytes));
+    stream.on('end', () => retained.end(stream));
+  }
   const deadline = setTimeout(() => controller.abort(new Error('preparation deadline exceeded')), a.timeoutSeconds * 1000);
   let endpoint;
   const close = async () => {
     clearTimeout(deadline); endpoint?.close(); controller.abort();
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); let timer; await Promise.race([done, new Promise(resolve => { timer = setTimeout(resolve, 20_000); })]); clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await done; } }
-    // Redact whole retained bounded text (including split tokens/URLs), not individual chunks.
-    writes = writes.then(() => log.write(redactPreparation(logText, secrets))); await writes.catch(() => { logError = true; }); await log.close(); if (logError) throw new Error('owned preparation log retention failed');
+    await done; retained.finish();
+    writes = writes.then(() => log.write(retained.text())); await writes.catch(() => { logError = true; }); await log.close(); if (logError) throw new Error('owned preparation log retention failed');
   };
   const check = () => { if (controller.signal.aborted) throw new Error('owned preparation session stopped'); assert(child.exitCode === null && child.signalCode === null, 'owned CPU API exited'); };
   const wait = async fn => { for (let n = 0; n < 360; n++) { check(); const value = await fn(); if (value) return value; await io.sleep(500); } throw new Error('owned CPU utility readiness timeout'); };
   try {
-    const url = await wait(() => boundApiUrl(logText)); endpoint = ownedApiController({ url, state: identity.state, api: child, controller, fetchImpl: io.fetch });
+    const url = await wait(() => boundApiUrl(retained.text())); endpoint = ownedApiController({ url, state: identity.state, api: child, controller, fetchImpl: io.fetch });
     await wait(() => endpoint.verify());
     await wait(async () => { const workers = await endpoint.call('GET', '/api/v1/workers'); if (!workers.length) return false; return assertPreparationWorkers(workers, identity.workerId, { idle: true }); });
     return { identity, endpoint, close, check };
@@ -162,7 +289,7 @@ async function cpuSession(a, io, credential) {
 }
 export async function runPreparation(a, plan, sources, dependencies = {}) {
   validatePreparationApproval(a, plan, sources); // ALL approvals before environment/credentials/spawn/network.
-  const io = { root: ROOT, env: process.env, platform: process.platform, account: () => userInfo().username, host: hostname, git: async (root, ...args) => (await exec('git', args, { cwd: root, timeout: 30_000 })).stdout.trim(), verifyBuild: verifyPreparationBuild, statfs, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, spawn, fetch, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...dependencies };
+  const io = { root: ROOT, env: process.env, platform: process.platform, account: () => userInfo().username, host: hostname, git: async (root, ...args) => (await exec('git', args, { cwd: root, timeout: 30_000 })).stdout.trim(), verifyBuild: verifyPreparationBuild, statfs, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, spawn, fetch, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...dependencies };
   assert.equal(io.env.CUDA_VISIBLE_DEVICES, '-1', 'CPU preparation requires explicit parent CUDA_VISIBLE_DEVICES=-1');
   assert.equal(a.runnerAccount, io.account()); assert.equal(a.runner, io.host().split('.')[0]);
   assert.equal(io.platform, a.backend === 'candle' ? 'win32' : 'darwin'); if (io.platform === 'darwin') assert.equal(a.runner, 'nax-macos-2');
@@ -177,7 +304,7 @@ export async function runPreparation(a, plan, sources, dependencies = {}) {
   try {
     if (plan.repositories.some(r => r.modelId !== 'flux3_image_klein_pup')) credential = await io.readCredential({ HF_HOME: a.hfHome, HOME: io.env.HOME });
     for (const row of plan.repositories) { const proof = await io.authorize(row.repository, row.resolvedRevision, credential, { fetchImpl: io.fetch, signal: AbortSignal.timeout(30_000) }); assert.equal(proof.httpStatus, 200); assert(digestPattern.test(proof.configSha256)); authorizations.push(proof); }
-    session = await cpuSession(a, io, credential); const transport = preparationTransport(session.endpoint, plan.repositories);
+    session = await cpuSession(a, io, credential); const transport = preparationTransport(session.endpoint, plan.repositories, { workerId: session.identity.workerId, now: io.now });
     for (const [index, row] of plan.repositories.entries()) {
       session.check(); await disk();
       let ready = false;
@@ -188,15 +315,9 @@ export async function runPreparation(a, plan, sources, dependencies = {}) {
       }
       assert(ready, 'owned CPU download worker did not return idle');
       const accepted = await transport.call('POST', `/api/v1/models/${row.modelId}/download`, { licenseAcknowledged: true, ...(row.variant ? { variant: row.variant } : {}) });
-      const firstSeen = Date.now(), end = firstSeen + a.timeoutSeconds * 1000; let finished;
+      let finished;
       try {
-        while (Date.now() < end) {
-          session.check(); await disk(); const job = await transport.call('GET', `/api/v1/jobs/${accepted.id}`); assert.equal(job.id, accepted.id); assert.equal(job.type, 'model_download'); assertClaimedWithin(job, firstSeen, Date.now());
-          const worker = assertPreparationWorkers(await transport.call('GET', '/api/v1/workers'), session.identity.workerId); if (job.workerId) assert.equal(job.workerId, worker.id);
-          if (job.status === 'completed') { assert.equal(job.workerId, worker.id); finished = job; break; }
-          assert(!['failed', 'canceled', 'interrupted'].includes(job.status), 'owned preparation download did not complete'); await io.sleep(1000);
-        }
-        assert(finished, 'preparation download deadline exceeded');
+        finished = await waitPreparationDownload({ transport, accepted, workerId: session.identity.workerId, timeoutSeconds: a.timeoutSeconds, check: session.check, disk, now: io.now, sleep: io.sleep });
       } catch { await transport.call('POST', `/api/v1/jobs/${accepted.id}/cancel`).catch(() => {}); throw new Error('owned preparation download failed'); }
       const installed = (await transport.call('GET', '/api/v1/models')).find(m => m.id === row.modelId);
       inventories.push(await discoverPreparationInventory({ state: session.identity.state, hfHome: a.hfHome, row, job: finished, authorization: authorizations[index], installed }));
