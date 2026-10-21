@@ -22,41 +22,45 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
           "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 250,
-          "sampleGuidanceScale": 1.0,
-          "sampleSteps": 8,
-          "timestepBias": "high_noise",
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 250,
+          "sampleSteps": 8,
+          "sampleGuidanceScale": 1.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -65,44 +69,40 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsTrainingAdapter": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEF1 tiny decoder"
+          "label": "TAEF1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an image LoRA for the Z-Image-Turbo base model.",
         "label": "Z-Image-Turbo LoRA",
+        "description": "Train an image LoRA for the Z-Image-Turbo base model.",
         "recommendedFor": [
           "character",
           "style"
@@ -130,45 +130,48 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleGuidanceScale": 7.0,
           "sampleSteps": 30,
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 7.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -177,42 +180,39 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESDXL tiny decoder"
+          "label": "TAESDXL tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
         "label": "Stable Diffusion XL LoRA",
+        "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
         "recommendedFor": [
           "character",
           "style"
@@ -240,45 +240,49 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleGuidanceScale": 7.0,
           "sampleSteps": 30,
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 7.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -287,43 +291,39 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1536
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESDXL tiny decoder"
+          "label": "TAESDXL tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
         "label": "Illustrious-XL v1.0 LoRA",
+        "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
         "recommendedFor": [
           "character",
           "style"
@@ -351,45 +351,48 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleGuidanceScale": 7.0,
           "sampleSteps": 30,
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 7.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -398,42 +401,39 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESDXL tiny decoder"
+          "label": "TAESDXL tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
         "label": "Illustrious-XL v2.0 LoRA",
+        "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
         "recommendedFor": [
           "character",
           "style"
@@ -461,45 +461,48 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleGuidanceScale": 7.0,
           "sampleSteps": 30,
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 7.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -508,42 +511,39 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESDXL tiny decoder"
+          "label": "TAESDXL tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
         "label": "Kolors LoRA",
+        "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
         "recommendedFor": [
           "character",
           "style"
@@ -571,48 +571,52 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "baseModelRepo": "SceneWorks/Lens",
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "img_qkv",
             "txt_qkv",
             "to_out.0",
             "to_add_out"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
+          "baseModelRepo": "SceneWorks/Lens",
           "sampleEvery": 500,
-          "sampleGuidanceScale": 5.0,
           "sampleSteps": 20,
-          "timestepBias": "high_noise",
-          "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 5.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1440
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -621,42 +625,38 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1440
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEF2 tiny decoder"
+          "label": "TAEF2 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
         "label": "Lens LoRA",
+        "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
         "recommendedFor": [
           "character",
           "style"
@@ -684,47 +684,51 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 500,
-          "sampleGuidanceScale": 3.5,
           "sampleSteps": 28,
-          "timestepBias": "high_noise",
-          "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 3.5,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -733,47 +737,43 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1536
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEW2.1 tiny decoder"
+          "label": "TAEW2.1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "label": "Krea 2 LoRA",
+        "description": "Train an image LoRA for Krea 2 (Qwen3-VL-4B text encoder + Qwen-Image VAE). Trains on the undistilled Krea 2 Raw base and applies to Krea 2 Turbo. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -798,27 +798,47 @@
         "optimizer": "adamw8bit",
         "advanced": {
           "controlType": "pose",
-          "gradientCheckpointing": true,
-          "lossType": "mse",
-          "lrScheduler": "constant",
           "mixedPrecision": "bf16",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 0,
-          "timestepBias": "high_noise",
+          "gradientCheckpointing": true,
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
         ],
         "controlTypes": [
           "pose"
@@ -828,39 +848,19 @@
           "linear",
           "cosine"
         ],
-        "optimizers": [
-          "adamw8bit",
-          "adamw",
-          "adam",
-          "prodigyopt",
-          "rose"
-        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
         "supportsResolutionBuckets": true
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train a pose-ControlNet branch for Krea 2. Renders a control condition (pose skeleton) per training image, trains a conditioning branch on the frozen Krea 2 Raw base, and applies it at Krea 2 Turbo inference. Windows/Linux NVIDIA (candle/CUDA) only.",
         "label": "Krea 2 ControlNet",
+        "description": "Train a pose-ControlNet branch for Krea 2. Renders a control condition (pose skeleton) per training image, trains a conditioning branch on the frozen Krea 2 Raw base, and applies it at Krea 2 Turbo inference. Windows/Linux NVIDIA (candle/CUDA) only.",
         "recommendedFor": [
           "pose"
         ],
+        "datasetModality": "image",
         "trainingMode": "control"
       }
     },
@@ -885,10 +885,15 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "native",
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "logit_normal",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
@@ -899,37 +904,36 @@
             "add_v_proj",
             "to_add_out"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 500,
-          "sampleGuidanceScale": 3.5,
           "sampleSteps": 28,
-          "timestepType": "logit_normal",
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 3.5,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "backend": "native"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -938,49 +942,45 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1536
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESD3 tiny decoder"
+          "label": "TAESD3 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "backend": "native",
-        "datasetModality": "image",
-        "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Runs on CUDA and Apple Silicon.",
         "label": "SD3.5 Large LoRA",
+        "description": "Train an image LoRA for Stable Diffusion 3.5 Large (triple text encoder CLIP-L + CLIP-G + T5-XXL, 16-channel VAE). Trains on the SD3.5 Large MMDiT and applies to SD3.5 Large and Large Turbo. Runs on CUDA and Apple Silicon.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "backend": "native",
+        "datasetModality": "image"
       }
     },
     {
@@ -1004,10 +1004,15 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
-          "backend": "native",
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "logit_normal",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
           "loraTargetModules": [
             "to_q",
             "to_k",
@@ -1018,37 +1023,36 @@
             "add_v_proj",
             "to_add_out"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 500,
-          "sampleGuidanceScale": 4.5,
           "sampleSteps": 40,
-          "timestepType": "logit_normal",
-          "weightDecay": 0.0001
+          "sampleGuidanceScale": 4.5,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "backend": "native"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1440
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1057,49 +1061,45 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1440
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAESD3 tiny decoder"
+          "label": "TAESD3 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "backend": "native",
-        "datasetModality": "image",
-        "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Runs on CUDA and Apple Silicon.",
         "label": "SD3.5 Medium LoRA",
+        "description": "Train an image LoRA for Stable Diffusion 3.5 Medium (MMDiT-X dual-attention; triple text encoder, 16-channel VAE). Trains on the SD3.5 Medium MMDiT-X and applies to SD3.5 Medium. Runs on CUDA and Apple Silicon.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "backend": "native",
+        "datasetModality": "image"
       }
     },
     {
@@ -1123,41 +1123,45 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": false,
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
           "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 0,
-          "sampleGuidanceScale": 4.5,
-          "sampleSteps": 10,
-          "timestepBias": "high_noise",
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 0,
+          "sampleSteps": 10,
+          "sampleGuidanceScale": 4.5,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1166,42 +1170,276 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsNormalLoss": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
+        "x0Decoder": {
+          "label": "TAEW2.1 tiny decoder",
+          "install": true
+        }
+      },
+      "ui": {
+        "label": "Anima LoRA",
+        "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "moss_image_base_lora",
+      "name": "MOSS-Image Base LoRA / LoKr",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "moss-image",
+      "baseModel": "moss_image_base",
+      "baseModelRepo": "OpenMOSS-Team/MOSS-Image-Base",
+      "kernel": "moss_image_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "moss_stage3_v1",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "weightDecay": 0.0,
+          "modelOptions": {
+            "vae_posterior": "posterior_mean_v1"
+          },
+          "sampleEvery": 0,
+          "sampleSteps": 50,
+          "sampleGuidanceScale": 3.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "limits": {
         "rank": [
-          4,
+          1,
           128
         ],
+        "alpha": [
+          1,
+          128
+        ],
+        "steps": [
+          1,
+          10000
+        ],
         "resolutions": [
+          256,
           512,
           768,
           1024
         ],
-        "steps": [
-          200,
-          6000
+        "batchSize": [
+          1,
+          4
         ],
-        "supportsBodyProportionLoss": true,
-        "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
-        "supportsSubjectMaskLoss": true,
-        "supportsVaeAnchorLoss": true,
+        "optimizers": [
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "timestepTypes": [
+          "moss_stage3_v1",
+          "sigmoid",
+          "linear",
+          "uniform",
+          "weighted"
+        ],
+        "timestepBiases": [
+          "balanced",
+          "high_noise",
+          "low_noise"
+        ],
+        "lossTypes": [
+          "mse",
+          "mae"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
         "supportsWeightNoise": true,
-        "x0Decoder": {
-          "install": true,
-          "label": "TAEW2.1 tiny decoder"
-        }
+        "supportsGradientNoise": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsResolutionBuckets": true
       },
       "ui": {
-        "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
-        "label": "Anima LoRA",
+        "label": "MOSS-Image Base LoRA / LoKr",
+        "datasetModality": "image",
+        "description": "Native MLX and CUDA transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "moss_image_sft_lora",
+      "name": "MOSS-Image SFT LoRA / LoKr",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "moss-image",
+      "baseModel": "moss_image_sft",
+      "baseModelRepo": "OpenMOSS-Team/MOSS-Image-SFT",
+      "kernel": "moss_image_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 1000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "mixedPrecision": "bf16",
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "moss_stage3_v1",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "weightDecay": 0.0,
+          "modelOptions": {
+            "vae_posterior": "posterior_mean_v1"
+          },
+          "sampleEvery": 0,
+          "sampleSteps": 50,
+          "sampleGuidanceScale": 3.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
+        }
+      },
+      "limits": {
+        "rank": [
+          1,
+          128
+        ],
+        "alpha": [
+          1,
+          128
+        ],
+        "steps": [
+          1,
+          10000
+        ],
+        "resolutions": [
+          256,
+          512,
+          768,
+          1024
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "optimizers": [
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "timestepTypes": [
+          "moss_stage3_v1",
+          "sigmoid",
+          "linear",
+          "uniform",
+          "weighted"
+        ],
+        "timestepBiases": [
+          "balanced",
+          "high_noise",
+          "low_noise"
+        ],
+        "lossTypes": [
+          "mse",
+          "mae"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsResolutionBuckets": true
+      },
+      "ui": {
+        "label": "MOSS-Image SFT LoRA / LoKr",
+        "datasetModality": "image",
+        "description": "Native MLX and CUDA transformer adapters for this exact MOSS checkpoint. Text encoder, VAE and base weights stay frozen. Published final-pretraining Stage3 sampler adapted for adapter training; deterministic posterior-mean VAE caching is a SceneWorks policy.",
         "recommendedFor": [
           "character",
           "style"
@@ -1229,41 +1467,45 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
           "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 500,
-          "sampleGuidanceScale": 1.0,
-          "sampleSteps": 40,
-          "timestepBias": "balanced",
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 500,
+          "sampleSteps": 40,
+          "sampleGuidanceScale": 1.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1272,50 +1514,46 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1536
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEQI2.1 tiny decoder"
+          "label": "TAEQI2.1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
         "label": "Qwen Image 2.1 LoRA",
-        "license": "Qwen RESEARCH LICENSE AGREEMENT",
-        "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
-        "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+        "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
         "recommendedFor": [
           "character",
           "style"
         ],
+        "datasetModality": "image",
+        "license": "Qwen RESEARCH LICENSE AGREEMENT",
+        "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+        "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
         "requiresLicenseAcknowledgment": true
       }
     },
@@ -1340,42 +1578,45 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
           "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 500,
-          "sampleGuidanceScale": 1.0,
-          "sampleSteps": 40,
-          "timestepBias": "balanced",
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 500,
+          "sampleSteps": 40,
+          "sampleGuidanceScale": 1.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "maxReferenceImages": 10,
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1384,51 +1625,48 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          768,
-          1024,
-          1536
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "maxReferenceImages": 10,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEQI2.1 tiny decoder"
+          "label": "TAEQI2.1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetKind": "editPairs",
-        "datasetModality": "image",
-        "description": "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier). Each dataset item is an edit pair: the item image is the edit target, its caption is the edit instruction, and it carries 1-10 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
         "label": "Qwen Image 2.1 Edit LoRA",
-        "license": "Qwen RESEARCH LICENSE AGREEMENT",
-        "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
-        "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+        "description": "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier). Each dataset item is an edit pair: the item image is the edit target, its caption is the edit instruction, and it carries 1-10 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
         "recommendedFor": [
           "edit"
         ],
-        "requiresLicenseAcknowledgment": true
+        "datasetModality": "image",
+        "license": "Qwen RESEARCH LICENSE AGREEMENT",
+        "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+        "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
+        "requiresLicenseAcknowledgment": true,
+        "datasetKind": "editPairs"
       }
     },
     {
@@ -1452,82 +1690,82 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
+          "networkType": "lora",
+          "lrScheduler": "constant",
+          "numFrames": 1,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "numFrames": 1,
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 250,
-          "sampleSteps": 20
+          "sampleSteps": 20,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
-        "batchSize": [
-          1,
-          2
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora"
-        ],
-        "outputScopes": [
-          "project",
-          "global"
-        ],
-        "rank": [
-          4,
-          128
+        "steps": [
+          200,
+          4000
         ],
         "resolutions": [
           512,
           768,
           1024
         ],
-        "steps": [
-          200,
-          4000
+        "batchSize": [
+          1,
+          2
         ],
+        "networkTypes": [
+          "lora"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
-        "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAELTX2.3 tiny decoder"
+          "label": "TAELTX2.3 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "label": "LTX-2.3 Video LoRA",
+        "description": "Train an LTX-2.3 video LoRA from still images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA).",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -1551,65 +1789,92 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "f32",
           "cacheLatents": true,
+          "networkType": "lora",
+          "lrScheduler": "constant",
+          "numFrames": 1,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lrScheduler": "constant",
+          "sampleEvery": 250,
+          "sampleSteps": 30,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "ltxWorkflow": "t2v_lora",
+          "ltxVideo": {
+            "isGenerated": true,
+            "conditions": []
+          },
           "ltxAudio": {
-            "conditions": [],
-            "isGenerated": true
+            "isGenerated": true,
+            "conditions": []
           },
           "ltxValidation": {
-            "audioCfgScale": 7.0,
-            "audioModalityGuidanceScale": 3.0,
-            "audioStgScale": 1.0,
-            "fps": 24,
-            "frames": 89,
-            "generateAudio": true,
-            "guidanceRescale": 0.7,
+            "width": 960,
             "height": 544,
+            "frames": 89,
+            "fps": 24,
             "steps": 30,
+            "videoCfgScale": 3.0,
+            "audioCfgScale": 7.0,
+            "videoStgScale": 1.0,
+            "audioStgScale": 1.0,
             "stgBlocks": [
               28
             ],
-            "videoCfgScale": 3.0,
+            "guidanceRescale": 0.7,
             "videoModalityGuidanceScale": 3.0,
-            "videoStgScale": 1.0,
-            "width": 960
-          },
-          "ltxVideo": {
-            "conditions": [],
-            "isGenerated": true
-          },
-          "ltxWorkflow": "t2v_lora",
-          "mixedPrecision": "f32",
-          "networkType": "lora",
-          "numFrames": 1,
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 250,
-          "sampleSteps": 30
+            "audioModalityGuidanceScale": 3.0,
+            "generateAudio": true
+          }
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          4000
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           2
+        ],
+        "networkTypes": [
+          "lora"
         ],
         "lrSchedulers": [
           "constant",
           "linear",
           "cosine"
         ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsNormalLoss": true,
+        "preparedBundleSchema": "ltx-prepared-v1",
         "ltxWorkflows": [
           "i2v_lora",
           "t2v_lora",
@@ -1627,49 +1892,22 @@
           "v2v_ic_lora",
           "a2a_ic_lora"
         ],
-        "networkTypes": [
-          "lora"
-        ],
-        "outputScopes": [
-          "project",
-          "global"
-        ],
-        "preparedBundleSchema": "ltx-prepared-v1",
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          4000
-        ],
-        "supportsBodyProportionLoss": true,
-        "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
-        "supportsNormalLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAELTX2.3 tiny decoder"
+          "label": "TAELTX2.3 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "video",
-        "description": "Train the full LTX-2.5 video/audio LoRA workflow surface from native preprocessed datasets. Apple Silicon uses MLX; Windows/Linux NVIDIA uses candle/CUDA.",
         "label": "LTX-2.5 Video LoRA",
+        "description": "Train the full LTX-2.5 video/audio LoRA workflow surface from native preprocessed datasets. Apple Silicon uses MLX; Windows/Linux NVIDIA uses candle/CUDA.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "video"
       }
     },
     {
@@ -1693,45 +1931,49 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "numFrames": 1,
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 0,
-          "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          4000
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
         "batchSize": [
           1,
           2
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1740,46 +1982,42 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768
-        ],
-        "steps": [
-          200,
-          4000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEW2.2 tiny decoder"
+          "label": "TAEW2.2 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon.",
         "label": "Wan2.2 Video LoRA",
+        "description": "Train a Wan2.2 video LoRA from still images (Wan2.2-TI2V-5B). Runs on CUDA and Apple Silicon.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -1803,46 +2041,49 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "numFrames": 1,
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 0,
-          "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          4000
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
         "batchSize": [
           1,
           2
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1851,46 +2092,43 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768
-        ],
-        "steps": [
-          200,
-          4000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEW2.1 tiny decoder"
+          "label": "TAEW2.1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "label": "Wan2.2 14B T2V Video LoRA",
+        "description": "Train a Wan2.2 14B (A14B MoE, text-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -1914,45 +2152,49 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
+          "networkType": "lora",
+          "timestepType": "sigmoid",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "numFrames": 1,
           "loraTargetModules": [
             "to_q",
             "to_k",
             "to_v",
             "to_out.0"
           ],
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "numFrames": 1,
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
           "sampleEvery": 0,
-          "timestepBias": "balanced",
-          "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          4000
+        ],
+        "resolutions": [
+          512,
+          768
+        ],
         "batchSize": [
           1,
           2
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora"
         ],
         "optimizers": [
           "adamw8bit",
@@ -1961,46 +2203,42 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768
-        ],
-        "steps": [
-          200,
-          4000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": true,
-          "label": "TAEW2.1 tiny decoder"
+          "label": "TAEW2.1 tiny decoder",
+          "install": true
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "label": "Wan2.2 14B I2V Video LoRA",
+        "description": "Train a Wan2.2 14B (A14B MoE, image-to-video) LoRA from still images. Trains both noise experts against the full-size dense bf16 base.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -2024,42 +2262,45 @@
         "seed": 42,
         "optimizer": "adamw8bit",
         "advanced": {
+          "mixedPrecision": "bf16",
           "cacheLatents": true,
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "mixedPrecision": "bf16",
           "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleEvery": 500,
-          "sampleGuidanceScale": 5.0,
-          "sampleSteps": 30,
-          "timestepBias": "high_noise",
           "timestepType": "sigmoid",
-          "weightDecay": 0.0001
+          "timestepBias": "high_noise",
+          "lossType": "mse",
+          "weightDecay": 0.0001,
+          "lrScheduler": "constant",
+          "sampleEvery": 500,
+          "sampleSteps": 30,
+          "sampleGuidanceScale": 5.0,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto"
         }
       },
       "limits": {
+        "rank": [
+          4,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          200,
+          6000
+        ],
+        "resolutions": [
+          512,
+          768,
+          1024
+        ],
         "batchSize": [
           1,
           4
-        ],
-        "lrSchedulers": [
-          "constant",
-          "linear",
-          "cosine"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr",
-          "full"
         ],
         "optimizers": [
           "adamw8bit",
@@ -2068,47 +2309,44 @@
           "prodigyopt",
           "rose"
         ],
+        "networkTypes": [
+          "lora",
+          "lokr",
+          "full"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
         "outputScopes": [
           "project",
           "global"
         ],
-        "rank": [
-          4,
-          128
-        ],
-        "resolutions": [
-          512,
-          768,
-          1024
-        ],
-        "steps": [
-          200,
-          6000
-        ],
+        "supportsWeightNoise": true,
+        "supportsGradientNoise": true,
+        "supportsDepthAnchoring": true,
         "supportsBodyProportionLoss": true,
         "supportsBodyShapeLoss": true,
-        "supportsDepthAnchoring": true,
-        "supportsFaceLandmarkLoss": true,
-        "supportsGradientNoise": true,
-        "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
-        "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsFaceLandmarkLoss": true,
+        "supportsResolutionBuckets": true,
         "x0Decoder": {
-          "install": false,
-          "label": "the base model's own VAE"
+          "label": "the base model's own VAE",
+          "install": false
         }
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train an image LoRA against the undistilled Mage-Flow Base model.",
         "label": "Mage-Flow Base LoRA",
+        "description": "Train an image LoRA against the undistilled Mage-Flow Base model.",
         "recommendedFor": [
           "character",
           "style"
-        ]
+        ],
+        "datasetModality": "image"
       }
     },
     {
@@ -2132,96 +2370,64 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
           "decomposeFactor": -1,
+          "timestepType": "logit_normal",
+          "timestepBias": "balanced",
+          "lossType": "mse",
+          "weightDecay": 0.0,
+          "lrScheduler": "constant",
+          "lrWarmupSteps": 0,
           "gradientCheckpointing": false,
+          "sampleEvery": 250,
+          "sampleSteps": 30,
+          "sampleGuidanceScale": 3.0,
+          "sampleCount": 4,
+          "qualityPreset": "balanced",
+          "outputScope": "project",
+          "requestedGpu": "auto",
           "iris": {
-            "auto_lr": "none",
-            "base_batch_size": 256,
+            "init": "weights",
+            "text_conditioning": "cached",
+            "text_dropout": 0.1,
+            "gradient_clip": 0.5,
+            "ema_enabled": true,
+            "ema_decay": 0.9999,
+            "on_caption_overflow": "warn",
+            "caption_field": "caption",
+            "caption_fields": [],
+            "keep_last_checkpoints": 2,
+            "milestone_steps": [],
+            "nan_loss_tolerance": 20,
             "betas": [
               0.9,
               0.95
             ],
-            "caption_field": "caption",
-            "caption_fields": [],
-            "ema_decay": 0.9999,
-            "ema_enabled": true,
-            "export_dtype": "fp32",
-            "gradient_clip": 0.5,
-            "init": "weights",
-            "keep_last_checkpoints": 2,
-            "milestone_steps": [],
-            "nan_loss_tolerance": 20,
-            "on_caption_overflow": "warn",
+            "auto_lr": "none",
+            "base_batch_size": 256,
             "preview_negative_prompt": "",
-            "text_conditioning": "cached",
-            "text_dropout": 0.1,
-            "upstream_validation_prompts": false
-          },
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "lrWarmupSteps": 0,
-          "mixedPrecision": "bf16",
-          "networkType": "lora",
-          "outputScope": "project",
-          "qualityPreset": "balanced",
-          "requestedGpu": "auto",
-          "sampleCount": 4,
-          "sampleEvery": 250,
-          "sampleGuidanceScale": 3.0,
-          "sampleSteps": 30,
-          "timestepBias": "balanced",
-          "timestepType": "logit_normal",
-          "weightDecay": 0.0
+            "upstream_validation_prompts": false,
+            "export_dtype": "fp32"
+          }
         }
       },
       "limits": {
+        "rank": [
+          1,
+          128
+        ],
         "alpha": [
           1,
           128
         ],
+        "steps": [
+          1,
+          5000000
+        ],
         "batchSize": [
           1,
           64
-        ],
-        "gradientCheckpointing": false,
-        "inits": [
-          "weights",
-          "random"
-        ],
-        "lossTypes": [
-          "mse"
-        ],
-        "lrSchedulers": [
-          "constant",
-          "cosine"
-        ],
-        "microStepFields": [
-          "steps",
-          "saveEvery",
-          "sampleEvery",
-          "lrWarmupSteps"
-        ],
-        "mixedPrecisions": [
-          "bf16",
-          "fp16",
-          "f32"
-        ],
-        "networkTypes": [
-          "lora",
-          "lokr",
-          "full"
-        ],
-        "optimizers": [
-          "adamw",
-          "muon"
-        ],
-        "outputScopes": [
-          "project",
-          "global"
-        ],
-        "rank": [
-          1,
-          128
         ],
         "resolutions": [
           256,
@@ -2232,103 +2438,135 @@
           1,
           4
         ],
-        "steps": [
-          1,
-          5000000
+        "optimizers": [
+          "adamw",
+          "muon"
         ],
-        "timestepBiases": [
-          "balanced"
+        "networkTypes": [
+          "lora",
+          "lokr",
+          "full"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "cosine"
         ],
         "timestepTypes": [
           "logit_normal",
           "uniform"
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "lossTypes": [
+          "mse"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "fp16",
+          "f32"
+        ],
+        "gradientCheckpointing": false,
+        "microStepFields": [
+          "steps",
+          "saveEvery",
+          "sampleEvery",
+          "lrWarmupSteps"
+        ],
+        "inits": [
+          "weights",
+          "random"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
         ]
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Train Iris-3B generation: a LoRA or LoKr adapter, or a full fine-tune from the released weights or from random init. Pixel-space flow matching on the frozen Qwen3-VL text encoder, on Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "label": "Iris 3B",
+        "description": "Train Iris-3B generation: a LoRA or LoKr adapter, or a full fine-tune from the released weights or from random init. Pixel-space flow matching on the frozen Qwen3-VL text encoder, on Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "recommendedFor": [
           "character",
           "style",
           "concept"
-        ]
+        ],
+        "datasetModality": "image"
       },
       "memoryFloors": {
+        "unit": "GiB",
         "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and training resolution; `full_ac` is a full fine-tune under full activation checkpointing. Measured rows are the whole-process peak of a real full fine-tune at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx full 512; mlx full 1024; mlx full_ac 1024; candle full 512; candle full_ac 512; candle full_ac 1024. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle full 1024. Extrapolated from measured rows: mlx full 256; mlx full_ac 256; mlx full_ac 512; candle full 256; candle full_ac 256. Declared, not measured: mlx adapter 256; mlx adapter 512; mlx adapter 1024; candle adapter 256; candle adapter 512; candle adapter 1024. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "lanes": {
-          "candle": {
-            "adapter": {
-              "1024": 48,
-              "256": 24,
-              "512": 32
-            },
-            "full": {
-              "1024": 122,
-              "256": 79,
-              "512": 79
-            },
-            "full_ac": {
-              "1024": 79,
-              "256": 67,
-              "512": 67
-            }
-          },
           "mlx": {
             "adapter": {
-              "1024": 40,
               "256": 16,
-              "512": 24
+              "512": 24,
+              "1024": 40
             },
             "full": {
-              "1024": 100,
               "256": 64,
-              "512": 64
+              "512": 64,
+              "1024": 100
             },
             "full_ac": {
-              "1024": 72,
               "256": 64,
-              "512": 64
+              "512": 64,
+              "1024": 72
+            }
+          },
+          "candle": {
+            "adapter": {
+              "256": 24,
+              "512": 32,
+              "1024": 48
+            },
+            "full": {
+              "256": 79,
+              "512": 79,
+              "1024": 122
+            },
+            "full_ac": {
+              "256": 67,
+              "512": 67,
+              "1024": 79
             }
           }
         },
         "provenance": {
-          "candle": {
-            "adapter": {
-              "1024": "declared",
-              "256": "declared",
-              "512": "declared"
-            },
-            "full": {
-              "1024": "measured_spill",
-              "256": "extrapolated",
-              "512": "measured"
-            },
-            "full_ac": {
-              "1024": "measured",
-              "256": "extrapolated",
-              "512": "measured"
-            }
-          },
           "mlx": {
             "adapter": {
-              "1024": "declared",
               "256": "declared",
-              "512": "declared"
+              "512": "declared",
+              "1024": "declared"
             },
             "full": {
-              "1024": "measured",
               "256": "extrapolated",
-              "512": "measured"
+              "512": "measured",
+              "1024": "measured"
             },
             "full_ac": {
-              "1024": "measured",
               "256": "extrapolated",
-              "512": "extrapolated"
+              "512": "extrapolated",
+              "1024": "measured"
+            }
+          },
+          "candle": {
+            "adapter": {
+              "256": "declared",
+              "512": "declared",
+              "1024": "declared"
+            },
+            "full": {
+              "256": "extrapolated",
+              "512": "measured",
+              "1024": "measured_spill"
+            },
+            "full_ac": {
+              "256": "extrapolated",
+              "512": "measured",
+              "1024": "measured"
             }
           }
-        },
-        "unit": "GiB"
+        }
       }
     },
     {
@@ -2352,62 +2590,77 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
-          "depthInit": "export",
+          "mixedPrecision": "bf16",
+          "networkType": "full",
+          "lossType": "l1",
+          "weightDecay": 0.01,
+          "lrScheduler": "constant",
+          "lrWarmupSteps": 0,
           "gradientCheckpointing": false,
+          "sampleEvery": 32000,
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "depthInit": "export",
           "iris": {
-            "betas": [
-              0.9,
-              0.999
-            ],
-            "clip_target": false,
-            "crop": "center",
             "depth_size": [
               480,
               640
             ],
-            "ema_enabled": false,
-            "export_weights": "raw",
-            "gradient_clip": 1.0,
-            "gradient_weight": 5.0,
+            "resize": "cover",
+            "crop": "center",
             "hflip_prob": 0.5,
-            "high_percentile": 98.0,
-            "invalid_examples": "reject",
-            "keep_last_checkpoints": 2,
-            "loss_reduction": "valid_pixels",
+            "gradient_weight": 5.0,
             "low_percentile": 2.0,
-            "milestone_steps": [],
+            "high_percentile": 98.0,
+            "clip_target": false,
+            "loss_reduction": "valid_pixels",
+            "invalid_examples": "reject",
             "min_valid_pixels": 2,
+            "betas": [
+              0.9,
+              0.999
+            ],
+            "gradient_clip": 1.0,
+            "ema_enabled": false,
             "nan_loss_tolerance": 20,
+            "keep_last_checkpoints": 2,
+            "milestone_steps": [],
             "preview_items": 4,
             "preview_weights": "raw",
-            "resize": "cover"
-          },
-          "lossType": "l1",
-          "lrScheduler": "constant",
-          "lrWarmupSteps": 0,
-          "mixedPrecision": "bf16",
-          "networkType": "full",
-          "outputScope": "project",
-          "requestedGpu": "auto",
-          "sampleEvery": 32000,
-          "weightDecay": 0.01
+            "export_weights": "raw"
+          }
         }
       },
       "limits": {
+        "steps": [
+          1,
+          3200000
+        ],
         "batchSize": [
           1,
           64
         ],
-        "gradientCheckpointingLanes": [
-          "candle",
-          "mlx"
+        "optimizers": [
+          "adamw",
+          "muon"
         ],
-        "lossTypes": [
-          "l1"
+        "networkTypes": [
+          "full"
         ],
         "lrSchedulers": [
           "constant",
           "cosine"
+        ],
+        "lossTypes": [
+          "l1"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "gradientCheckpointingLanes": [
+          "candle",
+          "mlx"
         ],
         "microStepFields": [
           "steps",
@@ -2415,116 +2668,101 @@
           "sampleEvery",
           "lrWarmupSteps"
         ],
-        "mixedPrecisions": [
-          "bf16",
-          "f32"
-        ],
-        "networkTypes": [
-          "full"
-        ],
-        "optimizers": [
-          "adamw",
-          "muon"
-        ],
         "outputScopes": [
           "project",
           "global"
-        ],
-        "steps": [
-          1,
-          3200000
         ]
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Fine-tune Iris-3B monocular depth on aligned RGB + numerical depth (+ validity mask) examples — the paper's recipe (full fine-tune, masked L1 + gradient loss, AdamW 3e-5). Writes a depth model you can pick in the Image Editor and Library depth actions. Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "label": "Iris 3B Depth",
-        "objective": "depth",
+        "description": "Fine-tune Iris-3B monocular depth on aligned RGB + numerical depth (+ validity mask) examples — the paper's recipe (full fine-tune, masked L1 + gradient loss, AdamW 3e-5). Writes a depth model you can pick in the Image Editor and Library depth actions. Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "recommendedFor": [
           "depth"
-        ]
+        ],
+        "datasetModality": "image",
+        "objective": "depth"
       },
       "depthTraining": {
+        "sizeMin": 64,
+        "sizeMax": 2048,
+        "sizeMultiple": 16,
+        "inits": [
+          "export",
+          "parent"
+        ],
         "depthFormats": [
           "npy",
           "png8",
           "png16"
         ],
-        "inits": [
-          "export",
-          "parent"
-        ],
-        "paperGlobalBatch": 32,
         "paperOptimizerSteps": 10000,
-        "sizeMax": 2048,
-        "sizeMin": 64,
-        "sizeMultiple": 16
+        "paperGlobalBatch": 32
       },
       "irisObjective": "depth",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width); `full_ac` holds the rows of a run under gradient (activation) checkpointing on the lanes that implement it. Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx 262144; mlx 1048576; mlx full_ac 1048576; candle 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle 1048576. Extrapolated from measured rows: mlx 16384; mlx 307200; mlx 589824; mlx full_ac 16384; mlx full_ac 262144; mlx full_ac 307200; mlx full_ac 589824; candle 307200; candle 589824; candle full_ac 262144; candle full_ac 307200; candle full_ac 589824. Declared, not measured: candle 16384; candle full_ac 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "unit": "GiB",
         "key": "microBatchPixels",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by the pixels of one micro-batch (batch size × training height × width); `full_ac` holds the rows of a run under gradient (activation) checkpointing on the lanes that implement it. Evidence is the whole-process peak of a real full fine-tune of the 3B depth model at batch 1, converted to GiB, plus a 2 GiB reserve. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx 262144; mlx 1048576; mlx full_ac 1048576; candle 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle 1048576. Extrapolated from measured rows: mlx 16384; mlx 307200; mlx 589824; mlx full_ac 16384; mlx full_ac 262144; mlx full_ac 307200; mlx full_ac 589824; candle 307200; candle 589824; candle full_ac 262144; candle full_ac 307200; candle full_ac 589824. Declared, not measured: candle 16384; candle full_ac 16384. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "lanes": {
-          "candle": {
-            "1048576": 111,
-            "16384": 68,
-            "262144": 68,
-            "307200": 71,
-            "589824": 86,
-            "full_ac": {
-              "1048576": 68,
-              "16384": 68,
-              "262144": 68,
-              "307200": 68,
-              "589824": 68
-            }
-          },
           "mlx": {
-            "1048576": 89,
             "16384": 52,
             "262144": 52,
             "307200": 54,
             "589824": 68,
+            "1048576": 89,
             "full_ac": {
-              "1048576": 61,
               "16384": 52,
               "262144": 52,
               "307200": 54,
-              "589824": 61
+              "589824": 61,
+              "1048576": 61
+            }
+          },
+          "candle": {
+            "16384": 68,
+            "262144": 68,
+            "307200": 71,
+            "589824": 86,
+            "1048576": 111,
+            "full_ac": {
+              "16384": 68,
+              "262144": 68,
+              "307200": 68,
+              "589824": 68,
+              "1048576": 68
             }
           }
         },
         "provenance": {
-          "candle": {
-            "1048576": "measured_spill",
-            "16384": "declared",
-            "262144": "measured",
-            "307200": "extrapolated",
-            "589824": "extrapolated",
-            "full_ac": {
-              "1048576": "measured",
-              "16384": "declared",
-              "262144": "extrapolated",
-              "307200": "extrapolated",
-              "589824": "extrapolated"
-            }
-          },
           "mlx": {
-            "1048576": "measured",
             "16384": "extrapolated",
             "262144": "measured",
             "307200": "extrapolated",
             "589824": "extrapolated",
+            "1048576": "measured",
             "full_ac": {
-              "1048576": "measured",
               "16384": "extrapolated",
               "262144": "extrapolated",
               "307200": "extrapolated",
-              "589824": "extrapolated"
+              "589824": "extrapolated",
+              "1048576": "measured"
+            }
+          },
+          "candle": {
+            "16384": "declared",
+            "262144": "measured",
+            "307200": "extrapolated",
+            "589824": "extrapolated",
+            "1048576": "measured_spill",
+            "full_ac": {
+              "16384": "declared",
+              "262144": "extrapolated",
+              "307200": "extrapolated",
+              "589824": "extrapolated",
+              "1048576": "measured"
             }
           }
-        },
-        "unit": "GiB"
+        }
       }
     },
     {
@@ -2548,59 +2786,84 @@
         "seed": 42,
         "optimizer": "adamw",
         "advanced": {
+          "mixedPrecision": "bf16",
+          "networkType": "full",
           "decomposeFactor": -1,
+          "lossType": "mse",
+          "weightDecay": 0.01,
+          "lrScheduler": "constant",
+          "lrWarmupSteps": 0,
           "gradientCheckpointing": false,
+          "sampleEvery": 1000,
+          "outputScope": "project",
+          "requestedGpu": "auto",
           "iris_restore": {
+            "loss_l2": 1.0,
+            "loss_lpips": 5.0,
+            "loss_gan": 0.5,
+            "gan_real_label": 0.8,
             "betas": [
               0.9,
               0.999
             ],
-            "critic_dtype": "bf16",
-            "critic_gradient_clip": 1.0,
-            "crop": "random",
-            "ema_decay": 0.999,
-            "ema_enabled": true,
-            "export_dtype": "fp32",
-            "gan_real_label": 0.8,
             "gradient_clip": 1.0,
+            "critic_gradient_clip": 1.0,
+            "ema_enabled": true,
+            "ema_decay": 0.999,
+            "crop": "random",
+            "critic_dtype": "bf16",
             "init": "export",
+            "nan_loss_tolerance": 20,
             "keep_last_checkpoints": 2,
-            "loss_gan": 0.5,
-            "loss_l2": 1.0,
-            "loss_lpips": 5.0,
             "milestone_steps": [],
-            "nan_loss_tolerance": 20
-          },
-          "lossType": "mse",
-          "lrScheduler": "constant",
-          "lrWarmupSteps": 0,
-          "mixedPrecision": "bf16",
-          "networkType": "full",
-          "outputScope": "project",
-          "requestedGpu": "auto",
-          "sampleEvery": 1000,
-          "weightDecay": 0.01
+            "export_dtype": "fp32"
+          }
         }
       },
       "limits": {
+        "rank": [
+          1,
+          128
+        ],
         "alpha": [
           1,
           128
+        ],
+        "steps": [
+          2,
+          2000000
         ],
         "batchSize": [
           1,
           16
         ],
-        "gradientCheckpointingLanes": [
-          "candle",
-          "mlx"
+        "resolutions": [
+          256,
+          512,
+          1024
         ],
-        "lossTypes": [
-          "mse"
+        "optimizers": [
+          "adamw"
+        ],
+        "networkTypes": [
+          "full",
+          "lora",
+          "lokr"
         ],
         "lrSchedulers": [
           "constant",
           "cosine"
+        ],
+        "lossTypes": [
+          "mse"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "gradientCheckpointingLanes": [
+          "candle",
+          "mlx"
         ],
         "microStepFields": [
           "steps",
@@ -2609,135 +2872,110 @@
           "lrWarmupSteps"
         ],
         "microStepMultiple": "2xGradientAccumulation",
-        "mixedPrecisions": [
-          "bf16",
-          "f32"
-        ],
-        "networkTypes": [
-          "full",
-          "lora",
-          "lokr"
-        ],
-        "optimizers": [
-          "adamw"
-        ],
         "outputScopes": [
           "project",
           "global"
-        ],
-        "rank": [
-          1,
-          128
-        ],
-        "resolutions": [
-          256,
-          512,
-          1024
-        ],
-        "steps": [
-          2,
-          2000000
         ]
       },
       "ui": {
-        "datasetModality": "image",
-        "description": "Fine-tune Iris-3B restoration with the paper's adversarial recipe (pixel + LPIPS + ConvNeXt-critic GAN loss): a full fine-tune by default, or a LoRA / LoKr merged into the export. Train on clean images (reproducible synthetic degradation) or on aligned degraded/clean pairs. Writes a restoration model you can pick wherever Iris restores. Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "label": "Iris 3B Restoration",
-        "objective": "restoration",
+        "description": "Fine-tune Iris-3B restoration with the paper's adversarial recipe (pixel + LPIPS + ConvNeXt-critic GAN loss): a full fine-tune by default, or a LoRA / LoKr merged into the export. Train on clean images (reproducible synthetic degradation) or on aligned degraded/clean pairs. Writes a restoration model you can pick wherever Iris restores. Apple Silicon (MLX) and NVIDIA (Candle/CUDA).",
         "recommendedFor": [
           "image_upscale"
-        ]
+        ],
+        "datasetModality": "image",
+        "objective": "restoration"
       },
       "irisObjective": "restoration",
       "memoryFloors": {
-        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus a 2 GiB reserve; `full_ac` is the full fine-tune under gradient (activation) checkpointing on the lanes that implement it. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; mlx full_ac 262144; mlx full_ac 1048576; candle full 65536; candle full 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle full 1048576. Extrapolated from measured rows: mlx full 65536; mlx full_ac 65536; candle full_ac 65536; candle full_ac 262144. Declared above a measured lower bound: mlx full 1048576. Declared, not measured: mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
+        "unit": "GiB",
         "key": "microBatchPixels",
+        "basis": "Floors are GiB (2^30 bytes), judged against the device's capacity in GiB (a \"96 GB\" NVIDIA card is 95.59 GiB; an MLX floor is judged against unified memory minus the macOS/app reserve). Keyed by artifact and the pixels of one micro-batch (batch size × crop²). Measured rows are the whole-process peak of the paper's full recipe at batch 1, converted to GiB, plus a 2 GiB reserve; `full_ac` is the full fine-tune under gradient (activation) checkpointing on the lanes that implement it. MLX peaks are the ACTIVE peak with MLX's buffer cache disabled; production runs keep the cache, so a process footprint can rise to the allocator's GC ceiling (0.95 × the recommended working set) without that being need. Candle peaks are the live pool peak over six optimizer steps (steady from step 2) on a 95.59 GiB card; a row marked measured_spill is a need the run met only by spilling to system memory, so it does not fit that card. Each row carries its own provenance. Measured at the row's own shape: mlx full 262144; mlx full_ac 262144; mlx full_ac 1048576; candle full 65536; candle full 262144; candle full_ac 1048576. Measured need that did not fit the measuring device (completed only by spilling to system memory): candle full 1048576. Extrapolated from measured rows: mlx full 65536; mlx full_ac 65536; candle full_ac 65536; candle full_ac 262144. Declared above a measured lower bound: mlx full 1048576. Declared, not measured: mlx adapter 65536; mlx adapter 262144; mlx adapter 1048576; candle adapter 65536; candle adapter 262144; candle adapter 1048576. A machine under its floor is refused before the model loads, and a shape above the last row is refused rather than admitted without a bound.",
         "lanes": {
-          "candle": {
-            "adapter": {
-              "1048576": 60,
-              "262144": 40,
-              "65536": 32
-            },
+          "mlx": {
             "full": {
-              "1048576": 136,
-              "262144": 84,
-              "65536": 73
+              "65536": 69,
+              "262144": 69,
+              "1048576": 128
             },
             "full_ac": {
-              "1048576": 83,
-              "262144": 83,
-              "65536": 73
+              "65536": 61,
+              "262144": 61,
+              "1048576": 74
+            },
+            "adapter": {
+              "65536": 28,
+              "262144": 36,
+              "1048576": 56
             }
           },
-          "mlx": {
-            "adapter": {
-              "1048576": 56,
-              "262144": 36,
-              "65536": 28
-            },
+          "candle": {
             "full": {
-              "1048576": 128,
-              "262144": 69,
-              "65536": 69
+              "65536": 73,
+              "262144": 84,
+              "1048576": 136
             },
             "full_ac": {
-              "1048576": 74,
-              "262144": 61,
-              "65536": 61
+              "65536": 73,
+              "262144": 83,
+              "1048576": 83
+            },
+            "adapter": {
+              "65536": 32,
+              "262144": 40,
+              "1048576": 60
             }
           }
         },
         "provenance": {
-          "candle": {
-            "adapter": {
-              "1048576": "declared",
-              "262144": "declared",
-              "65536": "declared"
-            },
+          "mlx": {
             "full": {
-              "1048576": "measured_spill",
+              "65536": "extrapolated",
               "262144": "measured",
-              "65536": "measured"
+              "1048576": "lower_bound"
             },
             "full_ac": {
-              "1048576": "measured",
-              "262144": "extrapolated",
-              "65536": "extrapolated"
+              "65536": "extrapolated",
+              "262144": "measured",
+              "1048576": "measured"
+            },
+            "adapter": {
+              "65536": "declared",
+              "262144": "declared",
+              "1048576": "declared"
             }
           },
-          "mlx": {
-            "adapter": {
-              "1048576": "declared",
-              "262144": "declared",
-              "65536": "declared"
-            },
+          "candle": {
             "full": {
-              "1048576": "lower_bound",
+              "65536": "measured",
               "262144": "measured",
-              "65536": "extrapolated"
+              "1048576": "measured_spill"
             },
             "full_ac": {
-              "1048576": "measured",
-              "262144": "measured",
-              "65536": "extrapolated"
+              "65536": "extrapolated",
+              "262144": "extrapolated",
+              "1048576": "measured"
+            },
+            "adapter": {
+              "65536": "declared",
+              "262144": "declared",
+              "1048576": "declared"
             }
           }
-        },
-        "unit": "GiB"
+        }
       },
       "trainingResources": [
         {
-          "component": "lpips_vgg16",
-          "modelId": "iris_restore_train_vgg16"
+          "modelId": "iris_restore_train_vgg16",
+          "component": "lpips_vgg16"
         },
         {
-          "component": "lpips_lin",
-          "modelId": "iris_restore_train_lpips_lin"
+          "modelId": "iris_restore_train_lpips_lin",
+          "component": "lpips_lin"
         },
         {
-          "component": "critic_trunk",
-          "modelId": "iris_restore_train_critic_trunk"
+          "modelId": "iris_restore_train_critic_trunk",
+          "component": "critic_trunk"
         }
       ]
     }
