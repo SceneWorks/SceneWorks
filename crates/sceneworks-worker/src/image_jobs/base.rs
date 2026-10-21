@@ -5979,6 +5979,7 @@ mod candle_image_load_shape_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: 24,
@@ -8156,6 +8157,9 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8217,6 +8221,9 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -10914,6 +10921,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
         "moss_image_base" => "candle_moss_image_base",
         "moss_image_sft" => "candle_moss_image_sft",
+        // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
+        "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -14094,6 +14103,7 @@ async fn generate_candle_stream_using(
                 frames: 1,
                 reference_count,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
@@ -14786,6 +14796,7 @@ fn effective_quant_label_gated(
         Quant::Q4 => "q4",
         Quant::Q8 => "q8",
         Quant::Nvfp4 => NVFP4_TIER,
+        Quant::Fp8Rowwise => "fp8r",
     };
     let floors = active
         .iter()
@@ -14794,6 +14805,7 @@ fn effective_quant_label_gated(
                 Quant::Q4 => "q4",
                 Quant::Q8 => "q8",
                 Quant::Nvfp4 => NVFP4_TIER,
+                Quant::Fp8Rowwise => "fp8r",
             };
             format!("{}:{resident}", floor.component.as_str())
         })
@@ -15573,6 +15585,8 @@ mod candle_label_tests {
         }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
+        // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
+        assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.

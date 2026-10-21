@@ -740,6 +740,7 @@ fn native_starvector_request(
             // SceneWorks exposes no presence-penalty knob; 0.0 is the contract's "disabled"
             // value and preserves the sampling behaviour from before the field existed.
             presence_penalty: 0.0,
+            presence_penalty_generated_only: false,
             repetition_penalty: request.sampling.repetition_penalty,
             repetition_context,
         },

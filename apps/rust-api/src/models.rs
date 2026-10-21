@@ -7072,6 +7072,57 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-24214: Supra2-IMG is served on Candle too, under the same engine id, so the running OS's
+    /// `retain_downloads_for_os` filter keeps the IDENTICAL install on Windows and Linux as on macOS:
+    /// the pinned `model_final_ema.pt` primary and both pinned co-requisites (`text_encoder`, `vae`).
+    #[test]
+    fn supra2_installs_the_same_three_components_on_every_platform() {
+        let base = builtin_models_entry("supra2_img");
+        assert_eq!(base.get("macOnly").and_then(Value::as_bool), Some(false));
+        let retained = |os: &str| {
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            model
+        };
+        let mac = retained("macos");
+        for os in ["windows", "linux"] {
+            let model = retained(os);
+            assert_eq!(
+                model["downloads"], mac["downloads"],
+                "{os}: same downloads as macOS"
+            );
+            let components: Vec<_> = model_co_requisite_downloads(&model)
+                .iter()
+                .map(|row| {
+                    (
+                        row["componentId"].as_str().unwrap().to_owned(),
+                        row["repo"].as_str().unwrap().to_owned(),
+                        row["revision"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                components,
+                [
+                    (
+                        "text_encoder".to_owned(),
+                        "google/flan-t5-base".to_owned(),
+                        "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2".to_owned()
+                    ),
+                    (
+                        "vae".to_owned(),
+                        "stabilityai/sd-vae-ft-mse".to_owned(),
+                        "31f26fdeee1355a5c34592e401dd41e45d25a493".to_owned()
+                    ),
+                ],
+                "{os}"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "SupraLabs/Supra2-IMG", "{os}");
+            assert_eq!(context.files, ["model_final_ema.pt"], "{os}");
+        }
+    }
+
     /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
     /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
     /// only when all three are present. Same on every platform (both lanes serve it).
@@ -9265,8 +9316,9 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // and its per-tier state from the Studio on macOS for directories that are genuinely present.
     //
     // Off macOS the probe is NARROWED, not skipped (sc-20529). A convert-at-install model whose
-    // converter has a real off-Mac (candle) implementation — `CANDLE_NATIVE_CONVERTERS`, today just
-    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` — needs the same convert affordance and the
+    // converter has a real off-Mac implementation — `CANDLE_NATIVE_CONVERTERS`, today
+    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` and the backend-neutral `supra2_img`
+    // (sc-24214) — needs the same convert affordance and the
     // same converted/needs_conversion/needs_source states on Windows and Linux that macOS gets: the
     // candle converter (sc-7459) is real, `POST /models/{id}/convert` is not platform-gated, and
     // `inject_converted_model_path` already reads the converted dir on every platform. Without these
@@ -12250,6 +12302,58 @@ mod variant_install_tests {
             .get("mlxConvertedPath")
             .and_then(Value::as_str)
             .is_some_and(|path| path.ends_with("flux2_klein_9b_true_v2")));
+    }
+
+    /// sc-24214: Supra2-IMG's converter is backend-neutral and `candle-gen-supra2` loads the bundle it
+    /// writes, so the shipped entry reports its conversion state on EVERY platform: `needs_conversion`
+    /// with the pinned `.pt` cached but unconverted, `converted` + the bundle path once the convert ran
+    /// — the Windows/Linux Model Manager offers the same convert step macOS does.
+    #[test]
+    fn supra2_reports_its_conversion_state_on_every_platform() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let shipped = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "supra2_img")
+            .and_then(Value::as_object)
+            .cloned()
+            .expect("supra2_img is in the builtin catalog");
+        assert!(entry_requires_converted_artifact_here(&shipped));
+
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        let mut model = shipped.clone();
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_conversion"),
+            "a downloaded but unconverted Supra2 checkpoint must say so on every platform"
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("missing")
+        );
+
+        seed_converted(data_dir, "supra2_img");
+        let mut model = shipped;
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        assert!(model
+            .get("mlxConvertedPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("supra2_img")));
     }
 
     /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
@@ -15242,9 +15346,15 @@ mod managed_predictor_queue_tests {
             .1;
         let catalog: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        // The H3 Veda predictor's own identity, selected by repo: the catalog carries more than one
+        // managed single-file pin (sc-24213's Supra2-IMG checkpoint is another), so "the first"
+        // is not a stable way to name it.
         let pin = sceneworks_core::managed_file::builtin_identities()
             .unwrap()
-            .first()
+            .iter()
+            .find(|identity| {
+                identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+            })
             .unwrap();
         for id in ["minimax_h3", "minimax_h3_ref"] {
             let model = catalog["models"]
