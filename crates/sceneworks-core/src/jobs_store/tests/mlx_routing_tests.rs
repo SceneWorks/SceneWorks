@@ -2180,11 +2180,12 @@ fn iris_routes_plain_text_to_image_only() {
 
 /// sc-24213: Supra2-IMG routes to MLX only as plain text-to-image. Every carrier the `supra2_img`
 /// engine has no input for (source/reference/mask/control/pose, adapters, a quant tier, a hires-fix
-/// img2img pass) keeps the job off the lane; off-Mac there is no lane yet.
+/// img2img pass) keeps the job off the lane. Off-Mac the same engine id routes to Candle (sc-24214,
+/// `supra2_routes_to_candle_for_plain_text_to_image_only`).
 #[test]
 fn supra2_routes_plain_text_to_image_only() {
     assert!(MLX_ROUTED_MODELS.contains(&"supra2_img"));
-    assert!(!CANDLE_ROUTED_MODELS.contains(&"supra2_img"));
+    assert!(CANDLE_ROUTED_MODELS.contains(&"supra2_img"));
     let eligible = |payload: Value| image_request_mlx_eligible("supra2_img", &object(payload));
     assert!(eligible(
         json!({ "model": "supra2_img", "mode": "text_to_image" })

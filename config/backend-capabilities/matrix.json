@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1083,
-    "mlxOnlyCellCount": 46,
+    "cellCount": 1082,
+    "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -15,18 +15,18 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "52ce1c2fdef390f05fb29d946f149fb536d7e676c2e1b5c3dcfbfaef264b2484",
-    "descriptorCandleFacts": "f7ee4c251284a7274fa58bf6c1810329b08f05d8b3c9c89d0299b60969ef987c",
-    "descriptorCandleRuntime": "d3d0c8972c26a8dc7811d4053bddc645690b23a7086abf60c8be7f1a3bb2f616",
-    "descriptorMlxFacts": "c812061ed49c1009c04adccdb64b79934c9894560b95588926028f7109e5c668",
-    "descriptorMlxRuntime": "d8aa1c62b4395fcb72d4c17bf7d2694e19cb5bff98b39431b74ae7333585e44e",
-    "descriptorPreviewFacts": "0ff333a69065d1ae63a6dfbed74930f774d4d3a86579dfbcad4e2c2e79aca3e4",
+    "descriptorAudioFacts": "e677b5caa4fc1e1d3e5d39e5203fd4bb69bc6b6ac980bd45866a44b5ca21a9b5",
+    "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
+    "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
+    "descriptorMlxFacts": "1ae25631931a6dbfa8da77b5f2f694983ca17f54d08e44218a01bc7b5235c2be",
+    "descriptorMlxRuntime": "ca5b0f3da96af240c9810633b19a9586e0edeb082ad47d6527c7b628791db64f",
+    "descriptorPreviewFacts": "c24bf449402a7d7a1d43e0a063fe6828d0304cf793bbee89ac152eac4a3561a7",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "de42c35eab5b63cdecf7e6e256538a12489c764ec3d5e8c55ba112d3f84d9fbc",
+    "manifest": "5a2291261850a46e6f2685c60e71f1669beefc53c3957804c916a4420aee3187",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
-    "routerCandle": "aefaabbd6210aef7c91775ef9ea22464189ca3576497531467f1278cc98f1910",
-    "routerCatalog": "9d146e33a39e12f7570b9d8f3ce67a493cb080596ff08a6ac6783152e2312cd9",
-    "routerGaps": "ccf33e36095487cdc183a576163a0ad7f2c26548d0a7caa66a5977f1b880adb3",
+    "routerCandle": "85bf9d1148f34da6339806d5ee1da1da90974ea8817f156aecb9f3ad681cc239",
+    "routerCatalog": "5ebff015a799e2efb3ebac0876967d388e5e2d636bc50f9fb9fb87519bda7882",
+    "routerGaps": "79ec643f4e36df95c3294b1a2ca8b8f75a0919fbbef13126c527e325e4e80bfe",
     "routerMlx": "6613d4174c44ff70cf611bb399d8d4c6c6571f2e2d48342a465ea7e5a7333069",
     "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
     "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
@@ -48,7 +48,7 @@
     "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
     "workerEngineTable": "14de886ba30b7e908be1f96cd9a04449d51ff01b963aa16bd933a787182388f9",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "e7285e97fda0cde883b61fffa33fd0bcdb9e621f62091ed416dab57faae8ecb4",
+    "workerImageDispatch": "fdb4f604e83e7446db2e232f6666b031c0ea02b2d50d0f962b99383472c65a38",
     "workerImageKreaImported": "52ab0f4bbba5eaedc5dfd8eb23de9d7bb1d973c9a7278d8669e110f763dd0bfe",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
@@ -6436,12 +6436,8 @@
       "operationAndMode": [
         {
           "capability": "text_to_image",
-          "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "sc-18481",
-            "url": "https://app.shortcut.com/trefry/story/18481"
-          }
+          "mlx": false,
+          "candle": false
         }
       ],
       "conditioningShape": [],
@@ -6457,23 +6453,12 @@
           "candle": false
         }
       ],
-      "precisionTier": [
-        {
-          "capability": "bf16",
-          "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
-        }
-      ],
+      "precisionTier": [],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": false,
-        "candle": false
+        "mlx": null,
+        "candle": null
       }
     },
     {

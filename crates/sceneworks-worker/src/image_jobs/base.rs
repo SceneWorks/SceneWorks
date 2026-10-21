@@ -10921,6 +10921,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
         "moss_image_base" => "candle_moss_image_base",
         "moss_image_sft" => "candle_moss_image_sft",
+        // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
+        "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -15583,6 +15585,8 @@ mod candle_label_tests {
         }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
+        // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
+        assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
