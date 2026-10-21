@@ -12537,6 +12537,12 @@ mod variant_install_tests {
     /// writes, so the shipped entry reports its conversion state on EVERY platform: `needs_conversion`
     /// with the pinned `.pt` cached but unconverted, `converted` + the bundle path once the convert ran
     /// — the Windows/Linux Model Manager offers the same convert step macOS does.
+    ///
+    /// sc-24216: "once the convert ran" means a bundle that satisfies the engine's pin contract, not
+    /// a bare install marker. A marker-only dir (an interrupted or pre-contract convert) therefore
+    /// stays `needs_conversion` with the engine's reason on EVERY platform; the positive `converted`
+    /// path needs the real pinned conversion and is proven by the nax-macos-2 real-weight profile
+    /// (`supra2-mlx-real-weights`).
     #[test]
     fn supra2_reports_its_conversion_state_on_every_platform() {
         let _env = isolate_hf_cache();
@@ -12577,12 +12583,14 @@ mod variant_install_tests {
         apply_mac_and_mlx_fields(&mut model, data_dir);
         assert_eq!(
             model.get("mlxConversionState").and_then(Value::as_str),
-            Some("converted")
+            Some("needs_conversion"),
+            "a marker without a pin-contract bundle must not read as converted"
         );
         assert!(model
-            .get("mlxConvertedPath")
+            .get("mlxConversionProblem")
             .and_then(Value::as_str)
-            .is_some_and(|path| path.ends_with("supra2_img")));
+            .is_some_and(|problem| problem.contains("is not a converted Supra2 bundle")));
+        assert_eq!(model.get("mlxConvertedPath"), Some(&Value::Null));
     }
 
     /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
