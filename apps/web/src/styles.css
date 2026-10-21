@@ -16414,6 +16414,14 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+.vector-studio__result-preview {
+  display: block;
+  width: 100%;
+  max-width: 384px;
+  max-height: 240px;
+  object-fit: contain;
+}
+
 .worker-progress-card__message {
   margin: 0;
   font-size: 12px;

@@ -472,6 +472,8 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ("worker", "pose_jobs.rs", "pose-uploads", CacheRole::Upload),
     // Rendered pose-detection previews, regenerated from the source image.
     ("worker", "pose_jobs.rs", "pose_detect", CacheRole::Scratch),
+    // Proven weight-seal SHA-256 digests (sc-26610); deleting one costs a re-hash, never a download.
+    ("worker", "lib.rs", "seal-digests", CacheRole::Scratch),
     // Cross-process model-conversion locks.
     (
         "worker",
