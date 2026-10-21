@@ -1855,3 +1855,7 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release supra2_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+          if errorlevel 1 exit /b 1
+          rem sc-24216: the offline installed-model lifecycle (cancel at the first progress event,
+          rem recovery, generator unload + reload) on the same card, same build.
+          cargo test -p sceneworks-worker --features backend-candle --release supra2_worker_gpu_lifecycle -- --ignored --nocapture --test-threads=1

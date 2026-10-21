@@ -6708,6 +6708,7 @@
           "repo": "SupraLabs/Supra2-IMG",
           "revision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
           "default": true,
+          "license": "Apache-2.0",
           "files": ["model_final_ema.pt"],
           "expectedSizeBytes": 416651529,
           "expectedSha256": "e96aa0537e0fd120af82b3a606dd50c90ae079ac7aa97b38a8da4882daeeee48",
@@ -6722,6 +6723,7 @@
           "revision": "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
           "coRequisite": true,
           "componentId": "text_encoder",
+          "license": "Apache-2.0",
           "files": ["config.json", "model.safetensors", "tokenizer.json"],
           "estimatedSizeBytes": 992770529
         },
@@ -6733,6 +6735,7 @@
           "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
           "coRequisite": true,
           "componentId": "vae",
+          "license": "MIT",
           "files": ["config.json", "diffusion_pytorch_model.safetensors"],
           "estimatedSizeBytes": 334643823
         }

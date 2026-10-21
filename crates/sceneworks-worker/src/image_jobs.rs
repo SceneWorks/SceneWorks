@@ -473,7 +473,20 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+/// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
+/// contract is explained (and a damaged converted bundle recorded for the catalog) by
+/// [`crate::converted_install::explain_job_result`] — sc-24216: same-size corruption of the bundle
+/// or of a shared co-requisite only surfaces as the engine's own load error.
 pub(crate) async fn run_image_generate_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+async fn run_image_generate_job_unexplained(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
