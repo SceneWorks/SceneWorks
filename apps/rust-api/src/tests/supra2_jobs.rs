@@ -62,6 +62,22 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
         (&json!(256), &json!(256), &json!(1)),
         "{bare}"
     );
+    let (status, batch) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        job(json!({ "count": 3 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{batch}");
+    // An unseeded native count batch records the seeds the ONE engine call uses: base, base+1, ….
+    let seeds: Vec<i64> = batch["payload"]["seeds"]
+        .as_array()
+        .expect("unseeded jobs carry a seed batch")
+        .iter()
+        .map(|seed| seed.as_i64().unwrap())
+        .collect();
+    assert_eq!(seeds, vec![seeds[0], seeds[0] + 1, seeds[0] + 2], "{batch}");
     let (status, full) = request(
         app.clone(),
         "POST",
@@ -107,10 +123,22 @@ async fn supra2_accepts_the_published_controls_and_refuses_the_rest_before_enque
         assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {body}");
         assert!(body.to_string().contains(needle), "{extra}: {body}");
     }
+    // Retry/duplicate skip the typed route's blanket 1..=8 check, so the Supra2 boundary itself
+    // refuses a count the worker would otherwise clamp to 8 and silently under-render.
+    let duplicate = format!("/api/v1/jobs/{}/duplicate", full["id"].as_str().unwrap());
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &duplicate,
+        json!({ "payloadChanges": { "count": 12 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("exceeds the 8 images"), "{body}");
     let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().unwrap().len(),
-        2,
-        "only the two honourable jobs exist: {jobs}"
+        3,
+        "only the three honourable jobs exist: {jobs}"
     );
 }

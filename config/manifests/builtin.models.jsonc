@@ -6750,6 +6750,9 @@
       },
       "limits": {
         "resolutions": ["256x256"],
+        // The engine renders up to 64 images per call (gen_core::supra2::MAX_IMAGES), but a
+        // SceneWorks job is capped at 8 (image_request::MAX_COUNT); the API and the worker refuse
+        // a larger count (`sceneworks_core::supra2::validate_request`) rather than clamp it.
         "count": [1, 2, 4, 8],
         "minDimension": 256,
         "maxDimension": 256,

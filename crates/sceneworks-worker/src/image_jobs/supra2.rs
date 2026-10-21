@@ -884,6 +884,34 @@ mod tests {
             assert_eq!(seeds, vec![41]);
         }
 
+        /// The default API path: no `seed`, a `seeds` batch. The one engine call draws image k's
+        /// noise from `seeds[0] + k`, so the published (recorded) seeds are exactly those, never the
+        /// unused `seeds[1..]`.
+        #[test]
+        fn an_unseeded_batch_publishes_the_seeds_the_engine_used() {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+            produce(
+                &request(json!({ "count": 3, "seeds": [9000, 17, 4242] })),
+                false,
+                Arc::clone(&seen),
+                tx,
+            )
+            .expect("renders");
+            let seen = seen.lock().unwrap().clone();
+            assert_eq!(
+                (seen.len(), seen[0].seed, seen[0].count),
+                (1, Some(9000), 3)
+            );
+            let mut published = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let lane::GenEvent::Image { index, seed, .. } = event {
+                    published.push((index, seed));
+                }
+            }
+            assert_eq!(published, vec![(0, 9000), (1, 9001), (2, 9002)]);
+        }
+
         /// A cancel inside the one call publishes NOTHING.
         #[test]
         fn a_cancelled_batch_publishes_no_image() {

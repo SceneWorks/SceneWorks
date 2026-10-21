@@ -25,6 +25,8 @@ pub fn is_supra2(model: &str) -> bool {
 /// than what it asked for.
 const UNSUPPORTED_ADVANCED: &[&str] = &[
     "schedulerShift",
+    // The legacy alias the generic lane still reads into the schedule shift (`base.rs`).
+    "timestepShift",
     "cfgInterval",
     "captionOverflow",
     "enhancePrompt",
@@ -245,6 +247,19 @@ pub fn validate_request(
             .filter(|count| *count >= 1)
             .ok_or_else(|| named(format!("count must be a positive integer, got {value}")))?,
     };
+    // The engine renders up to `MAX_IMAGES` (64) per call, but a SceneWorks job is capped at
+    // `image_request::MAX_COUNT` (8): `ImageRequest::from_payload` CLAMPS above it, so a larger
+    // count (e.g. through retry/duplicate, which skips the typed route's 1..=8 check) would
+    // silently render fewer images than asked. Refuse it here instead.
+    if count > crate::image_request::MAX_COUNT {
+        return Err(named(format!(
+            "count {count} exceeds the {} images a job renders (the engine allows up to {} per \
+             call, SceneWorks caps a job at {})",
+            crate::image_request::MAX_COUNT,
+            s2::MAX_IMAGES,
+            crate::image_request::MAX_COUNT
+        )));
+    }
     let request = GenerationRequest {
         prompt: payload
             .get("prompt")
@@ -350,7 +365,12 @@ mod tests {
         for (payload, needle) in [
             (json!({ "width": 512, "height": 512 }), "256x256"),
             (json!({ "width": 256, "height": 384 }), "256x256"),
-            (json!({ "count": 65 }), "at most 64"),
+            (json!({ "count": 9 }), "exceeds the 8 images"),
+            (json!({ "count": 65 }), "exceeds the 8 images"),
+            (
+                json!({ "advanced": { "timestepShift": 3 } }),
+                "timestepShift",
+            ),
             (json!({ "count": 0 }), "count"),
             (json!({ "advanced": { "steps": 0 } }), "advanced.steps"),
             (json!({ "advanced": { "steps": 100_001 } }), "1..=100000"),

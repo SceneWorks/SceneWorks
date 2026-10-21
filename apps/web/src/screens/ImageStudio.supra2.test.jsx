@@ -163,7 +163,7 @@ describe("ImageStudio — Supra2-IMG (sc-24215)", () => {
       negativePrompt: "",
     });
     expect(String(request.seed)).toBe("7");
-    expect(request.prompt).toContain("a red fox");
+    expect(request.prompt).toBe("a red fox");
     expect(request.advanced).toMatchObject({ steps: 30, guidanceScale: 1 });
   });
 });
