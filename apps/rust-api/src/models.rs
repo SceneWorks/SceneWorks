@@ -15575,9 +15575,15 @@ mod managed_predictor_queue_tests {
             .1;
         let catalog: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        // The H3 Veda predictor's own identity, selected by repo: the catalog carries more than one
+        // managed single-file pin (sc-24213's Supra2-IMG checkpoint is another), so "the first"
+        // is not a stable way to name it.
         let pin = sceneworks_core::managed_file::builtin_identities()
             .unwrap()
-            .first()
+            .iter()
+            .find(|identity| {
+                identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+            })
             .unwrap();
         for id in ["minimax_h3", "minimax_h3_ref"] {
             let model = catalog["models"]
