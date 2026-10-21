@@ -101,7 +101,10 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
         {
             return Err("witness config exceeds bound".to_owned());
         }
-        let cfg = gen_core::flux3::Flux3Config::from_dir(base)
+        // Pre-download PLANNING witness: config-only metadata (no header/tensor reads), bound to
+        // the catalog base model. Checkpoint identity is the post-download header resolution.
+        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(base)
+            .and_then(|metadata| metadata.for_model(BASE_ID))
             .map_err(|_| "witness config JSON refused".to_owned())?;
         cfg.validate_supported()
             .map_err(|_| "witness release format refused".to_owned())?;
@@ -5107,13 +5110,14 @@ mod tests {
         let base = temp.path().join(BASE_REVISION);
         std::fs::create_dir(&base).unwrap();
         let config = json!({
-            "format_version":1,"model":"flux-3-image-klein-base","quantization":null,
+            // Real released base key structure (1469d27c): same `model` as distilled, NO
+            // `dit.flow_map` key (absent = false), CFG sampler defaults.
+            "format_version":1,"model":"flux-3-image-klein","quantization":null,
             "torch_dtype":"bfloat16",
             "dit":{"hidden":3072,"heads":24,"depth":5,"depth_single":28,
                 "mlp_ratio":3.0,"axes_dim":[32,32,32,32],"theta":10000,
                 "in_channels":{"image":128,"image_cond":128,"text":20480},
-                "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5,
-                "flow_map":false},
+                "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5},
             "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder",
                 "layers":[4,8,12,16,20,24,28,32],"pad_multiple":80,
                 "max_tokens":8192,"dtype":"bfloat16"},
@@ -5162,7 +5166,9 @@ mod tests {
         // is read by request_fingerprint; no weights, preprocessing, tensors or device.
         let bytes_file = temp.path().join("declared-fingerprint-fixture.bin");
         std::fs::write(&bytes_file, b"DECLARED_SYNTHETIC_DATASET_BYTES").unwrap();
-        let cfg = gen_core::flux3::Flux3Config::from_dir(&base).unwrap();
+        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(&base)
+            .and_then(|metadata| metadata.for_model(BASE_ID))
+            .unwrap();
         for rank in [4, 8] {
             plan.config.rank = rank;
             let witness = flux3_training_config_witness(&plan).unwrap();

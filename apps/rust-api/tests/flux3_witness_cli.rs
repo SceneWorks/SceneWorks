@@ -72,12 +72,14 @@ fn witness_cli_binds_exact_bytes_without_weights_dataset_or_normal_app() {
     let base = temp.path().join(BASE_REVISION);
     std::fs::create_dir(&base).unwrap();
     let cfg = json!({
-        "format_version":1,"model":"flux-3-image-klein-base","quantization":null,
+        // Real released base key structure (1469d27c): same `model` as distilled, NO
+        // `dit.flow_map` key (absent = false), CFG sampler defaults.
+        "format_version":1,"model":"flux-3-image-klein","quantization":null,
         "torch_dtype":"bfloat16",
         "dit":{"hidden":3072,"heads":24,"depth":5,"depth_single":28,
             "mlp_ratio":3.0,"axes_dim":[32,32,32,32],"theta":10000,
             "in_channels":{"image":128,"image_cond":128,"text":20480},
-            "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5,"flow_map":false},
+            "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5},
         "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder",
             "layers":[4,8,12,16,20,24,28,32],"pad_multiple":80,
             "max_tokens":8192,"dtype":"bfloat16"},
