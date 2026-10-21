@@ -38,8 +38,12 @@ build), `sourceSha`, `inferenceMainSha`, and a nonempty unique `modelIds` array 
 `flux3_klein`, `flux3_klein_base`, `flux3_image_klein_pup`. Planning reads only
 provided JSON and shipped source catalogs. It never inspects environment,
 credentials, installed inventories, or caches; never launches or accesses network.
-It emits frozen whole-repository coordinates/bytes/license metadata and a plan
-hash, not expected or approved artifact hashes.
+It emits the complete source-derived frozen co-requisite closure (including soft
+PUP dependencies), deduplicated and dependency-first, with whole-repository
+coordinates/bytes/license metadata and a plan hash—not expected or approved
+artifact hashes. Requesting a primary alone still requires explicit approval for
+every repository the ordinary API can queue; cache presence never shrinks that
+approval boundary.
 
 Execution needs a **new explicit user provisioning approval**, `actualProvision:
 true`, `userProvisionApprovalId`, `admissionId`, `approvedBy`, the immutable
@@ -64,8 +68,21 @@ utility worker: `CUDA_VISIBLE_DEVICES=-1`, CPU IDs, both backends disabled,
 `SCENEWORKS_UTILITY_JOBS=model_download`, no GPU check or separate GPU worker.
 It waits for canonical ready API identity AND exactly the owned CPU/download-only
 worker. Only approved model-download POSTs and owned-job reads/cancellation are
-allowed; generation/training/raw queue/conversion routes are refused. Mac
-execution remains secondary `nax-macos-2` only. CPU boot skips GPU memory-limit
+allowed; generation/training/raw queue/conversion routes are refused. A busy
+verified CPU worker may expose exactly its current co-requisite job for read-only
+identity checks against the approved closure and this POST's parent/time binding;
+this is not a raw queue listing or permission to inspect arbitrary jobs. The
+primary's 300-second unclaimed clock is suspended only by a bounded lease renewed
+when both that verified dependency's heartbeat and numeric progress advance.
+Heartbeat-only keepalives, frozen progress, unknown dependencies, idle workers,
+and failed jobs do not earn an exemption. The 300-second idle/no-capability guard
+and global deadline remain intact; generation's claim guard is unchanged.
+
+Partial E: cache data is never promoted to an inventory or used to skip a job.
+Resume/reuse occurs only through the normal downloader's own verification,
+followed by a fresh owned completed-job v2 receipt and complete observed hashes.
+No manual receipt seeding, trust flag, cache borrowing or deletion is permitted.
+Mac execution remains secondary `nax-macos-2` only. CPU boot skips GPU memory-limit
 initialization, and CPU job metrics skip GPU reset/read/total-memory hooks; CPU
 wall time remains available, GPU measurements are absent rather than fabricated.
 
@@ -77,8 +94,13 @@ is required. These candidate observations are **not** the generation driver's
 `parent-approved-pinned-inventory`, do not publish base q4/q8 pins, and do not
 permit conversion or future GPU execution. Receipts are never seeded or invented.
 Only bounded redacted process logs and selected inventory evidence are exported;
-no complete state/DB upload. Credentials, Authorization values, URL credentials,
-and signed storage URL query strings are redacted.
+no complete state/DB upload. Logs retain first 64 KiB plus a rolling tail within
+2 MiB total, without aborting a long download or blocking its stdout/stderr pipes.
+Complete per-stream lines are redacted before retention/write; oversized lines
+are omitted whole rather than cutting through credentials or URLs. Shutdown pipes
+are drained through child close so final diagnostics remain in the tail.
+Credentials, Authorization values, URL credentials, and signed storage URL query
+strings are redacted.
 
 Source and CPU-fixture tests are not empirical model/host proof. Actual source
 provisioning, auth/downloads, sealed builds and CPU conversions require separate
