@@ -20,7 +20,7 @@ import {
   nativeResolutionHint,
   promptTokenLimitHint,
 } from "./samplerOptions.js";
-import { fallbackModels } from "./constants.js";
+import { fallbackModels } from "./modelCatalog.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
