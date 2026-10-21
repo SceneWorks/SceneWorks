@@ -319,8 +319,39 @@ async function runLogged(root, args, log, env, append = false) {
     writeSync(output, `${JSON.stringify(args)}\n`);
     const child = spawn(args[0], args.slice(1), { cwd: root, env, stdio: ["ignore", output, output] });
     const code = await new Promise((resolve, reject) => { child.on("error", reject); child.on("exit", resolve); });
+    // Evidence is best-effort: a diagnostics problem must never replace or mask the build's own failure.
+    if (code !== 0 && args[0] === "cargo") { try { writeSync(output, buildDiagnostics(root, env)); } catch (error) { writeSync(output, `\n(build diagnostics unavailable: ${error.message})\n`); } }
     requireFact(code === 0, `${args[0]} ${args[1] ?? ""} exited ${code}; retained log: ${path.basename(log)}`);
   } finally { closeSync(output); }
+}
+
+// Read-only, bounded evidence for a failed native build. Fixed commands only; never changes the
+// verdict. Records the compiler/SDK/linker identity and the target's proc-macro dylibs so a
+// toolchain/cache defect can be told apart from a source error.
+export function buildDiagnostics(root, env, run = (cmd, args) => spawnSync(cmd, args, { cwd: root, env, encoding: "utf8", timeout: 20000 })) {
+  const lines = ["", "=== remote verification build diagnostics (read-only) ==="];
+  const probe = (cmd, args) => { const r = run(cmd, args); lines.push(`$ ${[cmd, ...args].join(" ")}`, `${(r.stdout ?? "").trim()}${r.stderr ? `\n${r.stderr.trim()}` : ""}`.slice(0, 2000), `exit ${r.status}`); };
+  probe("rustc", ["-vV"]);
+  probe("cargo", ["-V"]);
+  probe("xcrun", ["--show-sdk-path"]);
+  probe("xcrun", ["--show-sdk-version"]);
+  probe("ld", ["-v"]);
+  probe("xcode-select", ["-p"]);
+  probe("rustc", ["--print", "sysroot"]);
+  for (const key of ["SDKROOT", "MACOSX_DEPLOYMENT_TARGET", "CARGO_TARGET_DIR", "RUSTUP_TOOLCHAIN", "TMPDIR"]) lines.push(`${key}=${env[key] ?? ""}`);
+  const deps = path.join(env.CARGO_TARGET_DIR ?? path.join(root, "target"), "debug", "deps");
+  // Inspect proc-macro dylibs as DATA only (file/otool/stat); nothing in the target is executed.
+  // Bounded to 12 libraries; LC_BUILD_VERSION/cputype only from otool, never full output.
+  probe("/bin/sh", ["-c", [
+    'n=0; for f in "$1"/*.dylib; do [ -e "$f" ] || { echo "no dylibs in $1"; break; }',
+    '  n=$((n+1)); [ "$n" -gt 12 ] && { echo "...truncated at 12"; break; }',
+    '  stat -f "%z %N" "$f"; file "$f"',
+    '  otool -hv "$f" 2>&1 | sed -n "3,4p"',
+    '  otool -l "$f" 2>&1 | grep -A4 -E "LC_BUILD_VERSION" | grep -E "platform|minos|sdk" | head -n 3',
+    '  otool -L "$f" 2>&1 | sed -n "2,6p"',
+    'done',
+  ].join("\n"), "sh", deps]);
+  return `${lines.join("\n")}\n`;
 }
 
 // This protects ONLY this workflow's dedicated target directory, not the physical host/GPU.

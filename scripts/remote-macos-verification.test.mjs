@@ -358,6 +358,21 @@ function fixtureNode(root, name) {
   catch (error) { if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error; copyFileSync(process.execPath, executable); }
   return executable;
 }
+test("failed native build records fixed read-only toolchain diagnostics without changing the verdict", () => {
+  const calls = [];
+  const text = policy.buildDiagnostics(ROOT, { SDKROOT: "/sdk", CARGO_TARGET_DIR: "/target" }, (cmd, args) => { calls.push([cmd, ...args].join(" ")); return { status: 0, stdout: `${cmd} ok`, stderr: "" }; });
+  for (const expected of ["rustc -vV", "cargo -V", "xcrun --show-sdk-path", "xcrun --show-sdk-version", "ld -v", "xcode-select -p", "rustc --print sysroot"]) assert.ok(calls.includes(expected), expected);
+  const dylibProbe = calls.find(call => call.endsWith(path.join("/target", "debug", "deps")));
+  assert.ok(dylibProbe);
+  for (const expected of ["otool -hv", "LC_BUILD_VERSION", "otool -L", "-gt 12", "file \"$f\""]) assert.ok(dylibProbe.includes(expected), expected);
+  // The library path is only ever an ARGUMENT to inspection tools, never a command to execute.
+  assert.doesNotMatch(dylibProbe, /(?:^|\n|;|&&|\||\bthen|\bdo)\s*"\$f"|\bexec\b|(?:^|\s)\.\s+"\$f"|dlopen/);
+  // A probe failure is evidence, not a new verdict.
+  const failing = policy.buildDiagnostics(ROOT, {}, () => ({ status: 1, stdout: "", stderr: "unavailable" }));
+  assert.match(failing, /exit 1/);
+  assert.match(text, /SDKROOT=\/sdk/); assert.match(text, /read-only/);
+  assert.ok(calls.every(call => !/\b(rm|mv|cp|chmod|install|sudo)\b/.test(call.split(" ").slice(0, 2).join(" "))));
+});
 test("self-hosted manual job uses provisioned Python 3.12, not the hosted toolcache installer", () => {
   const body = jobBody(JOB);
   assert.doesNotMatch(body, /actions\/setup-python@/);
