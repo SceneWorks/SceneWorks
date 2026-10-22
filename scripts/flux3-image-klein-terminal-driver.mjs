@@ -441,6 +441,7 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
         report.status = report.outputs.length ? 'AWAITING_VISUAL_INSPECTION' : 'PASSED';
       } catch (e) { report.status = e instanceof Blocked || e instanceof ArtifactReadinessBlocked ? 'BLOCKED' : 'FAILED'; report.executionStatus = report.status; report.error = e.message; }
       await save(); session.alive();
+      if (admission.queueReservation && report.executionStatus !== 'PASSED') throw new Error('queued campaign stops at its first failure; spent permits cannot be retried');
     }
     campaign.status = campaign.cases.some(c => c.status === 'FAILED') ? 'FAILED' : 'INCOMPLETE';
   } catch (error) { campaign.status = error instanceof Blocked || error instanceof ProvisioningBlocked || error instanceof ArtifactReadinessBlocked ? 'BLOCKED' : 'FAILED'; campaign.error = error.message;

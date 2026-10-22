@@ -74,6 +74,7 @@ on:
           - qwen-image-2-1-app-lifecycle
           - flux3-image-klein-app-lifecycle
           - flux3-image-klein-terminal-host
+          - flux3-image-klein-terminal-queue
           - iris-mlx-real-weights
         default: catalog
       inference_sha:
@@ -118,6 +119,11 @@ on:
         default: none
       flux3_terminal_control_sha256:
         description: "FLUX3 terminal host step only: sha256 of $HOME/sc26243-run/control/<host>/<step>.json on that Mac. The default none is refused."
+        required: false
+        type: string
+        default: none
+      flux3_queue_control_sha256:
+        description: "FLUX3 Windows queue only: sha256 of local D:/tmp/sc26243-run/queue-control.json. Default none refuses; an empty input never starts a campaign."
         required: false
         type: string
         default: none
@@ -295,6 +301,16 @@ jobs:
       host: ${{ inputs.flux3_terminal_host }}
       step: ${{ inputs.flux3_terminal_step }}
       control_sha256: ${{ inputs.flux3_terminal_control_sha256 }}
+  flux3-terminal-queue:
+    if: ${{ inputs.profile == 'flux3-image-klein-terminal-queue' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/flux3-image-klein-terminal-queue.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      control_sha256: ${{ inputs.flux3_queue_control_sha256 }}
   qwen-app-lifecycle:
     if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     permissions:

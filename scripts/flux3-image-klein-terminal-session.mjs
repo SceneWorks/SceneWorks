@@ -90,7 +90,16 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
   const table = await (processTable ? processTable() : observeProcessTable(checked, platform)); assert(Array.isArray(table) && table.some(p => p.pid === controllerPid), 'cannot prove controller process ancestry');
   const ancestors = processAncestors(table, controllerPid), runners = table.filter(p => /^Runner\.Worker(?:\.exe)?$/i.test(path.basename(p.command)));
-  assert(runners.every(p => ancestors.has(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job is allowed');
+  // A queued campaign may admit exactly three companions, but only after the signed four-slot
+  // proof revalidates API job identity, live heartbeats and actual PID/start-time/executable ancestry.
+  // Never use ownPids as a Runner.Worker allowlist. Local and Mac guards are unchanged.
+  let companions = [];
+  if (a.queueReservation) {
+    assert(platform === 'win32' && a.backend === 'candle', 'queue reservations are Windows Candle only');
+    const { verifyQueueReservation } = await import('./flux3-terminal-queue.mjs');
+    companions = await verifyQueueReservation(a, table, controllerPid, now());
+  }
+  assert(runners.every(p => ancestors.has(p.pid) || companions.includes(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job or verified queue companions are allowed');
   if (a.backend === 'mlx') {
     assert(platform === 'darwin' && arch === 'arm64', 'physical Apple Silicon Mac required');
     const mac = MAC_RUNNERS[a.runner]; assert(mac, 'only a known physical Mac runner admitted');
