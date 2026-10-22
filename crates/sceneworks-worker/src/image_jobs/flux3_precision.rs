@@ -306,8 +306,8 @@ mod native {
         let [row] = rows.as_slice() else {
             if rows.is_empty() && model_id == "flux3_klein_base" {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "{model_id}: the {} package is unavailable until base repository file access \
-                     (HTTP 403) permits verified conversion output size and SHA-256 pins. \
+                    "{model_id}: the {} package is unavailable without verified base conversion \
+                     output size and SHA-256 catalog pins. \
                      Distilled pins and dense fallback are not accepted.",
                     tier.key()
                 )));
@@ -850,12 +850,30 @@ mod tests {
         let base = crate::tests::builtin_model_entry("flux3_klein_base");
         for tier in [Flux3Tier::Q4, Flux3Tier::Q8] {
             for lane in [ImageLane::Candle, ImageLane::Mlx] {
+                // The real catalog now pins genuine local base conversions (sc-26243): with no
+                // converted package on disk the load is an actionable not-installed refusal,
+                // never a dense fallback.
                 let error = plan_flux3_load(tier, lane, &root, &data, base.as_object().unwrap())
                     .unwrap_err();
                 let reason = format!("{error:?}");
                 assert!(
+                    reason.contains("not installed")
+                        && reason.contains("converted on this machine")
+                        && reason.contains(tier.key()),
+                    "{reason}"
+                );
+                // Without those pins the tier still fails closed on the missing SHA-256 pins.
+                let mut unpinned = base.clone();
+                for row in unpinned["downloads"].as_array_mut().unwrap() {
+                    row.as_object_mut().unwrap().remove("localDerivation");
+                }
+                let error =
+                    plan_flux3_load(tier, lane, &root, &data, unpinned.as_object().unwrap())
+                        .unwrap_err();
+                let reason = format!("{error:?}");
+                assert!(
                     reason.contains("SHA-256")
-                        && reason.contains("403")
+                        && !reason.contains("403")
                         && reason.contains(tier.key()),
                     "{reason}"
                 );

@@ -35,21 +35,40 @@ export const FLUX3_REQUIRED_CANONICAL_ANCHORS = Object.freeze([
 ]);
 // Publication classification only: neither a trusted converted-artifact receipt nor permission
 // to generate/capture. Actual package bytes and all execution admissions remain separately required.
+// The four base q4/q8 coordinates that began as artifact prerequisites. Each is ALWAYS either an
+// explicit BLOCKED obligation or an `activated` record bound to its genuine converted bytes/SHA and
+// receipt recipe, never silently dropped.
+export const FLUX3_ARTIFACT_PREREQUISITE_COORDINATES = Object.freeze([
+  "flux3_klein_base:q4:candle", "flux3_klein_base:q8:candle",
+  "flux3_klein_base:q4:mlx", "flux3_klein_base:q8:mlx",
+]);
+// The native conversion receipt recipe each derived tier's conversion id denotes.
+export function flux3ConversionRecipe(backend, tier) {
+  const conversion = flux3Conversion(backend, tier);
+  if (!conversion) throw new Error(`BLOCKED: ${backend}:${tier} has no derived conversion recipe`);
+  const bits = tier === "q4" ? 4 : 8;
+  return backend === "candle"
+    ? { algorithm: tier === "q4" ? "ggml-q4_1" : "ggml-q8_0", bits, groupSize: 32, algorithmVersion: 1 }
+    : { algorithm: "mlx-affine", bits, groupSize: 64, algorithmVersion: 1 };
+}
 export function validateFlux3AnchorPrerequisites({ models, calibrationPlan, artifactPrerequisites }) {
+  const obligations = artifactPrerequisites?.obligations, activated = artifactPrerequisites?.activated ?? [];
   if (artifactPrerequisites?.schemaVersion !== 1 ||
       artifactPrerequisites.kind !== "flux3-terminal-blocked-artifact-prerequisites" ||
-      artifactPrerequisites.diagnosticOnly !== true || !Array.isArray(artifactPrerequisites.obligations) ||
-      (artifactPrerequisites.obligations.length > 0 && artifactPrerequisites.overallTerminalAcceptance !== "BLOCKED")) {
+      artifactPrerequisites.diagnosticOnly !== true || !Array.isArray(obligations) || !Array.isArray(activated) ||
+      // Honest status only: BLOCKED while any obligation remains, otherwise NOT_PROVEN (activation
+      // is publication, not measurement). PASS is never a valid inventory state.
+      artifactPrerequisites.overallTerminalAcceptance !== (obligations.length > 0 ? "BLOCKED" : "NOT_PROVEN")) {
     throw new Error("BLOCKED: explicit diagnostic artifact prerequisite inventory required");
   }
   const required = new Set(FLUX3_REQUIRED_CANONICAL_ANCHORS);
   const active = Object.keys(calibrationPlan.anchors).filter(key => key.startsWith("flux3_"));
-  const blocked = new Map();
-  const published = key => {
+  const blocked = new Map(), activations = new Map();
+  const publishedRow = key => {
     const [modelId, tier, backend] = key.split(":");
     const checkpoint = flux3Checkpoint(modelId);
     const platform = backend === "mlx" ? "macos" : "windows";
-    return models.find(model => model.id === modelId)?.downloads?.some(download => {
+    return models.find(model => model.id === modelId)?.downloads?.find(download => {
       if (download.coRequisite || download.variant !== tier ||
           download.repo !== checkpoint.repository || download.revision !== checkpoint.revision ||
           (download.platforms && !download.platforms.includes(platform))) return false;
@@ -58,9 +77,10 @@ export function validateFlux3AnchorPrerequisites({ models, calibrationPlan, arti
       return conversion?.fromVariant === "bf16" && conversion.conversion === flux3Conversion(backend, tier) &&
         conversion.weightsFile === "model.safetensors" && Number.isSafeInteger(conversion.weightsBytes) &&
         conversion.weightsBytes > 0 && /^[a-f0-9]{64}$/.test(conversion.weightsSha256 ?? "");
-    }) ?? false;
+    });
   };
-  for (const obligation of artifactPrerequisites.obligations) {
+  const published = key => Boolean(publishedRow(key));
+  for (const obligation of obligations) {
     const { coordinate, modelId, backend, tier } = obligation;
     if (!required.has(coordinate) || coordinate !== `${modelId}:${tier}:${backend}` || blocked.has(coordinate)) {
       throw new Error(`BLOCKED: unknown, duplicate or misbound artifact obligation ${coordinate}`);
@@ -75,6 +95,30 @@ export function validateFlux3AnchorPrerequisites({ models, calibrationPlan, arti
     if (published(coordinate)) throw new Error(`BLOCKED: published ${coordinate} must activate its canonical calibration row`);
     blocked.set(coordinate, obligation);
   }
+  for (const record of activated) {
+    const { coordinate, modelId, backend, tier } = record;
+    if (!FLUX3_ARTIFACT_PREREQUISITE_COORDINATES.includes(coordinate) || coordinate !== `${modelId}:${tier}:${backend}` ||
+        activations.has(coordinate) || blocked.has(coordinate)) {
+      throw new Error(`BLOCKED: unknown, duplicate or misbound activated artifact ${coordinate}`);
+    }
+    const checkpoint = flux3Checkpoint(modelId);
+    if (record.repository !== checkpoint.repository || record.resolvedRevision !== checkpoint.revision ||
+        record.conversion !== flux3Conversion(backend, tier) || record.weightsFile !== "model.safetensors" ||
+        !Number.isSafeInteger(record.weightsBytes) || record.weightsBytes <= 0 ||
+        !/^[a-f0-9]{64}$/.test(record.weightsSha256 ?? "") || !/^[a-f0-9]{64}$/.test(record.receiptSha256 ?? "") ||
+        JSON.stringify(record.receiptRecipe) !== JSON.stringify(flux3ConversionRecipe(backend, tier)) ||
+        record.measurement !== "NOT_RUN" || !record.evidence) {
+      throw new Error(`BLOCKED: incomplete activated artifact identity/recipe/evidence for ${coordinate}`);
+    }
+    if (!active.includes(coordinate)) throw new Error(`BLOCKED: activated ${coordinate} lacks its canonical calibration row`);
+    const row = publishedRow(coordinate)?.localDerivation;
+    if (!row || row.weightsBytes !== record.weightsBytes || row.weightsSha256 !== record.weightsSha256) {
+      throw new Error(`BLOCKED: published ${coordinate} row differs from its genuine converted weights bytes/SHA`);
+    }
+    activations.set(coordinate, record);
+  }
+  const prerequisiteMissing = FLUX3_ARTIFACT_PREREQUISITE_COORDINATES.filter(key => !blocked.has(key) && !activations.has(key));
+  if (prerequisiteMissing.length) throw new Error(`BLOCKED: artifact prerequisites neither blocked nor activated: ${prerequisiteMissing.join(", ")}`);
   for (const key of active) {
     if (!required.has(key) || blocked.has(key)) throw new Error(`BLOCKED: non-disjoint or unknown canonical anchor ${key}`);
     if (!published(key)) throw new Error(`BLOCKED: active canonical anchor ${key} lacks published pinned artifact bytes/SHA/row`);
@@ -84,7 +128,8 @@ export function validateFlux3AnchorPrerequisites({ models, calibrationPlan, arti
   const missing = [...required].filter(key => !classified.has(key));
   if (missing.length || classified.size !== required.size) throw new Error(`BLOCKED: missing required canonical obligations: ${missing.join(", ")}`);
   return { requiredCanonicalAnchors: required.size, activeCanonicalAnchors: active.length,
-    blockedArtifactCoordinates: [...blocked.keys()], terminalAcceptance: blocked.size ? "BLOCKED" : "NOT_PROVEN",
+    blockedArtifactCoordinates: [...blocked.keys()], activatedArtifactCoordinates: [...activations.keys()],
+    terminalAcceptance: blocked.size ? "BLOCKED" : "NOT_PROVEN",
     measurementProven: false, executionAuthorized: false };
 }
 export function missingFlux3ResourceObligations(cases) {

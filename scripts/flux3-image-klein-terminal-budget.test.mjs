@@ -20,7 +20,7 @@ test('representative default expands EXACTLY 26 product +12 resource =38 globall
   assert.deepEqual(profile.budget.byBackend, { mlx: 17, candle: 21 }); assert.equal(profile.budget.globalHardCeiling, 48); assert.equal(profile.budget.unallocatedNotAuthorized, 10);
   assert(profile.generationInvocations.every(i => i.nativeGenerationCalls === 1 && i.warmups === 0 && i.repeats === 0 && i.requestTemplate.count === 1));
   assert.equal(profile.trainingLifecycles.length, 2); assert(profile.trainingLifecycles.every(t => t.steps === 4 && t.saveEvery === 1 && t.generationReloads === 1));
-  assert(profile.resourceCases.every(c => c.status === 'BLOCKED')); assert(profile.uncovered.some(c => /Base q4\/q8/.test(c.requirement) && c.status === 'BLOCKED'));
+  assert(profile.resourceCases.every(c => c.status === 'BLOCKED')); assert(profile.uncovered.some(c => /Base q4\/q8/.test(c.requirement) && c.status === 'NOT_RUN')); assert(!profile.uncovered.some(c => /HF403/.test(c.reason))); assert(profile.uncovered.every(c => c.status !== 'PASS'));
   for (const backend of ['mlx', 'candle']) {
     assert.deepEqual(new Set(profile.cases.filter(c => c.backend === backend && c.options.enhancePrompt).map(c => c.options.pupMode)), new Set(['t2i', 'i2i', 't2i_bbox', 'i2i_bbox']));
     for (const modelId of ['flux3_klein', 'flux3_klein_base']) for (const count of [1, 10]) assert(profile.cases.some(c => c.backend === backend && c.modelId === modelId && c.options.references === count));

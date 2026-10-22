@@ -155,7 +155,7 @@ export async function provisionCell(session, cell, target, spec, report) {
 }
 export async function assertPackage(session, cell, target, inventory) {
   const model = (await session.endpoint.call('GET', '/api/v1/models')).find(m => m.id === cell.modelId);
-  need(model?.installState === 'installed', `${cell.modelId} not installed. Base HF403 is BLOCKED: authorize selected runner account and separately approve whole pinned repository download; never fallback.`);
+  need(model?.installState === 'installed', `${cell.modelId} not installed on this runner: authorize the selected runner account for the gated pinned repository and separately approve its whole pinned repository download; never fallback.`);
   const row = target.downloads.find(d => d.variant === cell.tier);
   if (['fp8r', 'nvfp4'].includes(cell.tier)) need(session.worker?.capabilities?.includes(cell.tier === 'fp8r' ? 'fp8r' : 'flux3_nvfp4'), `owned GPU worker does not advertise the actual ${cell.tier} device floor; retain this cell BLOCKED`);
   need(row, `No trusted production catalog ${cell.modelId}/${cell.tier} row; endpoint refusal is required, not an unsupported exception.`);

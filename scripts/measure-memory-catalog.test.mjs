@@ -789,15 +789,16 @@ test("FLUX3 base probes retain base identity and refuse unpinned conversions on 
   }
 });
 
-test("FLUX3 producer dispatch and unmeasured obligations partition published anchors from blocked artifacts", async () => {
+test("FLUX3 producer dispatch: all sixteen canonical anchors are published active rows, still unmeasured", async () => {
   const plan = await readPlan();
   const artifactPrerequisites = JSON.parse(await readFile(path.join(ROOT, "docs/testing/sc-26243-terminal-artifact-prerequisites.json"), "utf8"));
   const classification = validateFlux3AnchorPrerequisites({ models: await readManifestModels(), calibrationPlan: plan, artifactPrerequisites });
   assert.equal(classification.requiredCanonicalAnchors, 16);
-  assert.equal(classification.activeCanonicalAnchors, 12);
-  assert.equal(classification.blockedArtifactCoordinates.length, 4);
-  assert.equal(classification.terminalAcceptance, "BLOCKED");
+  assert.equal(classification.activeCanonicalAnchors, 16);
+  assert.equal(classification.blockedArtifactCoordinates.length, 0);
+  assert.equal(classification.terminalAcceptance, "NOT_PROVEN");
   const blocked = new Map(artifactPrerequisites.obligations.map(row => [row.coordinate, row]));
+  const activated = new Map(artifactPrerequisites.activated.map(row => [row.coordinate, row]));
   for (const tier of ["fp8r", "nvfp4"]) {
     const key = `flux3_klein:${tier}:candle`;
     assert.equal(anchorParts(key).tier, tier);
@@ -837,13 +838,13 @@ test("FLUX3 producer dispatch and unmeasured obligations partition published anc
       const activeBaseTier = plan.anchors[baseKey];
       const blockedBaseTier = blocked.get(baseKey);
       assert.notEqual(Boolean(activeBaseTier), Boolean(blockedBaseTier), `${baseKey} must be in exactly one required inventory`);
-      assert.equal(Boolean(blockedBaseTier), ["q4", "q8"].includes(tier), "unpublished base quants stay blocked, not executable");
-      if (blockedBaseTier) {
-        assert.equal(blockedBaseTier.status, "BLOCKED");
-        assert.equal(blockedBaseTier.required, true);
-      }
+      assert.equal(blockedBaseTier, undefined, "every base tier is published");
+      // The base quants were artifact prerequisites; each is activated by its genuine conversion
+      // evidence, which stays unmeasured.
+      assert.equal(activated.has(baseKey), ["q4", "q8"].includes(tier));
+      if (activated.has(baseKey)) assert.equal(activated.get(baseKey).measurement, "NOT_RUN");
       const baseTier = activeBaseTier ?? blockedBaseTier?.plannedAnchor;
-      assert.ok(baseTier, `base ${backend}:${tier} remains a REQUIRED unmeasured obligation`);
+      assert.ok(baseTier, `base ${backend}:${tier} is a REQUIRED canonical anchor`);
       assert.equal(baseTier.provider, "flux3_klein_base");
       assert.equal(baseTier.fixture, `flux3-klein-base-${backend}-${tier}-1024-seed26243-step50`);
       assert.deepEqual(baseTier.geometry, row.geometry);

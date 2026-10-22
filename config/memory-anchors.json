@@ -12583,6 +12583,28 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux3_klein_base:candle:q4",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "candle",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux3_klein_base:candle:q8",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "candle",
+      "tier": "q8",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:flux3_klein_base:mlx:bf16",
       "modelId": "flux3_klein_base",
       "modelFamily": "flux3",
@@ -12611,6 +12633,28 @@
       "route": "flux3_klein_base",
       "backend": "mlx",
       "tier": "nvfp4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux3_klein_base:mlx:q4",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux3_klein_base:mlx:q8",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "mlx",
+      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
