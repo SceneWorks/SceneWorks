@@ -1466,23 +1466,27 @@ mod tests {
         };
 
         /// Cell 7's verdict from the lifecycle test's own libtest log (`SUPRA2_LIFECYCLE_LOG`,
-        /// written by the lane script): passed iff that log shows the lifecycle test itself `ok`
-        /// and exactly one test passing. `None` when the lane named no log (a standalone matrix
-        /// run), which the matrix records as not applicable rather than as a pass.
+        /// written by the lane script, which runs it with `--exact`): passed iff the log shows the
+        /// lifecycle test itself started (`test …::<LIFECYCLE_TEST> ...`) and the run's summary is
+        /// exactly one test passing, none failing. The test's own `--nocapture` output lands
+        /// between its name and its `ok`, so the summary — not the `... ok` suffix — carries the
+        /// verdict; with one test run and that test named, it is that test's. `None` when the lane
+        /// named no log (a standalone matrix run), which the matrix records as not applicable
+        /// rather than as a pass.
         fn lifecycle_verdict(log: Option<&str>) -> Option<bool> {
             let log = log?;
+            let started = format!("::{LIFECYCLE_TEST} ...");
             Some(
-                log.lines().any(|line| {
-                    line.trim_end()
-                        .ends_with(&format!("{LIFECYCLE_TEST} ... ok"))
-                }) && log.contains("test result: ok. 1 passed"),
+                log.lines()
+                    .any(|line| line.starts_with("test ") && line.contains(&started))
+                    && log.contains("test result: ok. 1 passed; 0 failed"),
             )
         }
 
         /// sc-24217 pre-merge review: cell 7 is the lifecycle test's REAL result, never a constant.
         ///
-        /// *Mutations that red this:* return `Some(true)` for any log; drop the per-test `ok`
-        /// check (a log whose one passing test is some other test reads as a pass).
+        /// *Mutations that red this:* return `Some(true)` for any log; drop the which-test check (a
+        /// log whose one passing test is some other test reads as a pass).
         #[test]
         fn cell_7_folds_the_lifecycle_tests_own_result() {
             let passed = format!(
@@ -1490,6 +1494,14 @@ mod tests {
                  test result: ok. 1 passed; 0 failed; 0 ignored"
             );
             assert_eq!(lifecycle_verdict(Some(&passed)), Some(true));
+            // `--nocapture`: the test's own output sits between its name and its `ok` (the
+            // windows-candle lane's real shape, CRLF line endings included).
+            let interleaved = format!(
+                "running 1 test\r\ntest image_jobs::supra2::tests::{LIFECYCLE_TEST} ... RESULT \
+                 status=pass lifecycle=cancel,recover,unload,reload\r\nok\r\n\r\n\
+                 test result: ok. 1 passed; 0 failed; 0 ignored\r\n"
+            );
+            assert_eq!(lifecycle_verdict(Some(&interleaved)), Some(true));
             let failed = format!(
                 "running 1 test\ntest image_jobs::supra2::tests::{LIFECYCLE_TEST} ... FAILED\n\n\
                  test result: FAILED. 0 passed; 1 failed; 0 ignored"
