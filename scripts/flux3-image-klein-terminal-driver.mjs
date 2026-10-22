@@ -9,7 +9,7 @@ import { createReadStream } from 'node:fs';
 import { loadProductTargets, terminalPlan, terminalCatalog, targetRegistry, imageRequest, requestedDiskBudget, digestPattern, ROOT } from './flux3-image-klein-terminal-plan.mjs';
 import { assertAccepted, assertSavedAsset, assertServedPng, assertClaimedWithin, assertDownloadWorker } from './flux3-image-klein-app-lifecycle.mjs';
 import { contained, fileHash, validateAdmission, launchTerminalSession, ProvisioningBlocked } from './flux3-image-klein-terminal-session.mjs';
-import { validateApprovedPlan, planHash, initializeLedger, auditLedger, boundInputSpecSha256 } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, initializeLedger, auditLedger, boundInputSpecSha256, admittedHost, inHostLane, ledgerLane } from './flux3-image-klein-terminal-budget.mjs';
 import { verifyTerminalMapping, artifactStagingPlan, revalidateMappedArtifacts, invalidateArtifactVerification, ArtifactReadinessBlocked } from './flux3-image-klein-terminal-artifacts.mjs';
 import { bindTrainingExpectation, verifyNativeContinuation } from './flux3-image-klein-terminal-training-proof.mjs';
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -386,17 +386,21 @@ export async function executeCell(session, cell, target, project, inputs, spec, 
   }
 }
 export async function runTerminal({ admission, inputSpec, sources, caseIds, approvedPlan, inputSpecAddendum }, dependencies = {}) {
-  const approvedBudget = validateApprovedPlan(approvedPlan); assert.equal(admission.approvedPlanSha256, approvedBudget.approvedPlanSha256); assert.equal(admission.ledgerId, approvedPlan.ledgerId); assert.equal(admission.sourceSha, approvedPlan.sourceSha); assert.equal(admission.inferenceMainSha, approvedPlan.inferenceMainSha); assert.equal(objectHash(inputSpec), boundInputSpecSha256(approvedPlan, admission.backend, inputSpecAddendum));
+  const approvedBudget = validateApprovedPlan(approvedPlan); assert.equal(admission.approvedPlanSha256, approvedBudget.approvedPlanSha256); assert.equal(admission.ledgerId, approvedPlan.ledgerId); assert.equal(admission.sourceSha, approvedPlan.sourceSha); assert.equal(admission.inferenceMainSha, approvedPlan.inferenceMainSha);
+  // The admitted runner selects the ledger lane; every later check uses that host's lane only.
+  const host = admittedHost(approvedPlan, admission); assert.equal(objectHash(inputSpec), boundInputSpecSha256(approvedPlan, admission.backend, inputSpecAddendum, admission.runner));
   const expected = new Map([...terminalCatalog(sources).cases, ...terminalPlan(sources).cases].map(c => [c.caseId, c]));
   const plan = approvedPlan.plan, registry = targetRegistry(sources), cells = plan.cases.filter(c => caseIds.includes(c.caseId)).sort((a, b) => plan.phases.indexOf(a.phase) - plan.phases.indexOf(b.phase));
   for (const cell of cells) assert.equal(planHash(cell), planHash(expected.get(cell.caseId)), 'approved case/options must name a shipped representative or explicit diagnostic case; no automatic expansion');
   assert.equal(new Set(caseIds).size, caseIds.length); assert.equal(cells.length, caseIds.length, 'unknown requested case ID'); assert(cells.length);
   await validateAdmission(admission, cells[0].backend, dependencies.admission);
-  await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot, inputSpecAddendum });
+  await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot, inputSpecAddendum, host: admission.runner });
   const staging = artifactStagingPlan(cells, registry, inputSpec);
   for (const p of staging.derivedPackages) assert((admission.disk?.conversionOutputBytes?.[p.artifactKey] ?? 0) >= p.copyBytes, 'disk admission must include all actual unique owned package copies before any copy');
   (dependencies.print ?? console.log)(JSON.stringify({ kind: 'exact-approved-physical-run-budget', approvedPlanSha256: approvedBudget.approvedPlanSha256, userPlanApprovalId: approvedPlan.userPlanApprovalId, budget: plan.budget, artifactStaging: staging, invocations: plan.generationInvocations, trainingLifecycles: plan.trainingLifecycles, selectedCaseIds: caseIds, resourceBoundaryUnverified: plan.resourceCases.filter(c => c.status !== 'READY').map(c => c.caseId) }));
   assert(cells.every(c => c.backend === admission.backend && admission.phases.includes(c.phase)), 'case outside backend/phase admission');
+  // Wrong-host refusal before any launch/spend: a case whose permits belong to another host lane is never run here.
+  for (const cell of cells) for (const id of [...plan.generationInvocations.filter(i => i.caseId === cell.caseId).map(i => i.invocationId), ...plan.trainingLifecycles.filter(t => t.caseId === cell.caseId).flatMap(t => [t.startId, t.resumeId])]) assert(inHostLane(plan, admission.backend, host, id), `BLOCKED: ${cell.caseId} is assigned to another ${admission.backend} host lane, not ${admission.runner}`);
   if (cells.some(c => c.kind === 'training')) need(admission.trainingLicenseAcknowledged === true, 'explicit acknowledgment of actual adaptation license conditions required; output exceptions are not blanket commercial-training permission');
   if (admission.faultProfile) assert(admission.installationFaultAdmission === true && cells.every(c => c.kind === 'installation-failure' && c.options.failure === (admission.faultProfile === 'hf403' ? 'authentication-denied' : 'install-missing')), 'fault profile can select only its explicitly admitted failure cases');
   // Conservative across split volumes: each admitted root must cover the combined budget.
@@ -442,7 +446,7 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
   } catch (error) { campaign.status = error instanceof Blocked || error instanceof ProvisioningBlocked || error instanceof ArtifactReadinessBlocked ? 'BLOCKED' : 'FAILED'; campaign.error = error.message;
     if (campaign.status === 'BLOCKED') for (const c of campaign.cases.filter(c => caseIds.includes(c.caseId) && c.status === 'NOT_RUN')) { c.status = 'BLOCKED'; c.blocker = error.message; }
   }
-  finally { try { await session?.close(); } catch (error) { campaign.status = 'FAILED'; campaign.cleanupError = error.message; } finally { campaign.cleanup = session?.cleanup ?? []; campaign.permits = session?.permits ?? []; try { campaign.ledgerReceipt = await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot, inputSpecAddendum }); } catch (error) { campaign.status = 'FAILED'; campaign.ledgerError = error.message; } await save(); } }
+  finally { try { await session?.close(); } catch (error) { campaign.status = 'FAILED'; campaign.cleanupError = error.message; } finally { campaign.cleanup = session?.cleanup ?? []; campaign.permits = session?.permits ?? []; try { campaign.ledgerReceipt = await auditLedger({ approval: approvedPlan, backend: admission.backend, ledgerRoot: admission.ledgerRoot, inputSpecAddendum, host: admission.runner }); } catch (error) { campaign.status = 'FAILED'; campaign.ledgerError = error.message; } await save(); } }
   return { output, report: campaign };
 }
 export async function main(args = process.argv.slice(2)) {
@@ -459,8 +463,8 @@ export async function main(args = process.argv.slice(2)) {
   const sources = await loadProductTargets();
   if (!args.length || args[0] === 'plan' || args[0] === 'catalog') { assert(args.length <= 1); console.log(JSON.stringify(args[0] === 'catalog' ? terminalCatalog(sources) : terminalPlan(sources), null, 2)); return; }
   if (args[0] === 'produce-build') { assert(args.length === 2, 'produce-build requires one separately user-admitted build JSON'); const { produceTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); console.log(JSON.stringify(await produceTerminalBuild(JSON.parse(await readFile(args[1], 'utf8'))))); return; }
-  if (args[0] === 'init-ledger') { assert(args.length === 3 && ['mlx', 'candle'].includes(args[2]), 'init-ledger APPROVED_PLAN.json mlx|candle is explicit CPU setup, never runtime reset'); const approval = JSON.parse(await readFile(args[1], 'utf8')); console.log(JSON.stringify(await initializeLedger({ approval, backend: args[2], ledgerRoot: approval.ledgerRoots[args[2]] }))); return; }
-  assert(args[0] === 'run' && [5, 6].includes(args.length), 'usage: node scripts/flux3-image-klein-terminal-driver.mjs [plan | catalog | init-ledger APPROVED_PLAN.json mlx|candle | run ADMISSION.json INPUTS.json CASE_IDS.json APPROVED_PLAN.json [INPUT_SPEC_ADDENDUM.json]]');
+  if (args[0] === 'init-ledger') { assert([3, 4].includes(args.length) && ['mlx', 'candle'].includes(args[2]), 'init-ledger APPROVED_PLAN.json mlx|candle [HOST] is explicit CPU setup, never runtime reset'); const approval = JSON.parse(await readFile(args[1], 'utf8')), host = args[3]; console.log(JSON.stringify(await initializeLedger({ approval, backend: args[2], host, ledgerRoot: approval.ledgerRoots[ledgerLane(approval, args[2], host)] }))); return; }
+  assert(args[0] === 'run' && [5, 6].includes(args.length), 'usage: node scripts/flux3-image-klein-terminal-driver.mjs [plan | catalog | init-ledger APPROVED_PLAN.json mlx|candle [HOST] | run ADMISSION.json INPUTS.json CASE_IDS.json APPROVED_PLAN.json [INPUT_SPEC_ADDENDUM.json]]');
   const [admission, inputSpec, caseIds, approvedPlan, inputSpecAddendum] = await Promise.all(args.slice(1).map(async f => JSON.parse(await readFile(f, 'utf8'))));
   const result = await runTerminal({ admission, inputSpec, caseIds, sources, approvedPlan, inputSpecAddendum }); console.log(JSON.stringify({ output: result.output, status: result.report.status }));
   if (result.report.status !== 'PASSED') process.exitCode = 1;

@@ -5,8 +5,8 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
-import { validateApprovedPlan, validateInputSpecAddendum, boundInputSpecSha256, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, verifyLedgerReceipt, planHash } from './flux3-image-klein-terminal-budget.mjs';
+import { loadProductTargets, terminalPlan, usesPersonalInputs } from './flux3-image-klein-terminal-plan.mjs';
+import { validateApprovedPlan, validateInputSpecAddendum, boundInputSpecSha256, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, verifyLedgerReceipt, planHash, admittedHost } from './flux3-image-klein-terminal-budget.mjs';
 import { validateNativeBoundaryReceipt, nativeBoundaryReceiptSha256, buildSupplementalResourceCase, NATIVE_BOUNDARY_RECEIPT_KIND } from './lib/flux3-native-boundary.mjs';
 import { selfTestEnvironment, runNativeBoundarySelfTest, productionResourceRequest } from './flux3-native-boundary-self-test.mjs';
 import { launchFlux3Resource } from './flux3-resource-launcher.mjs';
@@ -192,4 +192,119 @@ test('a forged READY row (label/digest without its full re-validated receipt) is
     const changed = structuredClone(approval); mutate(changed);
     assert.throws(() => validateApprovedPlan(changed), pattern, label);
   }
+});
+
+// --- Host lanes (sc-26243): one backend's permits split across two named hosts, one ledger each. ---
+const DATASET_HOST = 'nax-macos', GENERAL_HOST = 'nax-macos-2';
+function lanedPlan() {
+  const unproved = terminalPlan(sources, { resourceBindings });
+  const receipt = receiptFor(unproved, 'candle', candleBinary, candleReceipt);
+  return terminalPlan(sources, { resourceBindings, addendumBackends: ['mlx'], hostLanes: { mlx: { datasetHost: DATASET_HOST, generalHost: GENERAL_HOST } },
+    nativeBoundary: { candle: { receipt, parentNativeBoundaryVerificationId: 'DECLARED-SYNTHETIC-candle-verification', binarySha256: candleBinary, buildReceiptSha256: candleReceipt, sourceSha: source, inferenceMainSha: inference } } });
+}
+async function lanedFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'flux3-host-lanes-DECLARED-SYNTHETIC-')); t.after(() => rm(root, { recursive: true, force: true }));
+  const plan = lanedPlan();
+  const approval = { schemaVersion: 1, kind: 'flux3-terminal-plan-approval', approvalId: 'DECLARED-SYNTHETIC', userPlanApprovalId: 'NOT_USER_AUTHORIZATION', approvedBy: 'CPU fixture',
+    sourceSha: source, inferenceMainSha: inference, ledgerId: 'declared-lanes-ledger',
+    ledgerRoots: { candle: path.join(root, 'candle'), [`mlx@${DATASET_HOST}`]: path.join(root, 'mlx-dataset'), [`mlx@${GENERAL_HOST}`]: path.join(root, 'mlx-general') },
+    inputSpecSha256: { candle: d('c') }, deferredInputSpecBackends: [`mlx@${DATASET_HOST}`, `mlx@${GENERAL_HOST}`], resourceBuildReceipts: { candle: { receiptSha256: candleReceipt, binarySha256: candleBinary } }, plan };
+  const laneResources = host => plan.generationInvocations.filter(i => i.backend === 'mlx' && i.kind.startsWith('resource_') && plan.hostLanes.mlx[host].includes(i.invocationId));
+  const addendumFor = (host, binary, build) => ({ schemaVersion: 1, kind: 'flux3-terminal-plan-input-spec-addendum', approvedPlanSha256: planHash(approval), ledgerId: approval.ledgerId, backend: 'mlx', lane: host,
+    inputSpecSha256: d(host === DATASET_HOST ? 'e' : 'f'), buildReceipt: { receiptSha256: d('5'), binarySha256: d('6') }, resourceBuildReceipt: { receiptSha256: build, binarySha256: binary },
+    nativeBoundaryReceipt: receiptFor({ generationInvocations: laneResources(host) }, 'mlx', binary, build), parentNativeBoundaryVerificationId: `DECLARED-SYNTHETIC-${host}-verification`,
+    addendumId: `DECLARED-SYNTHETIC-${host}-addendum`, userApprovalId: 'NOT_USER_AUTHORIZATION', approvedBy: 'CPU fixture' });
+  return { root, approval, dataset: addendumFor(DATASET_HOST, mlxBinary, mlxReceipt), general: addendumFor(GENERAL_HOST, d('7'), d('8')) };
+}
+const laneReserve = (approval, host, invocation, inputSpecAddendum) => reserveInvocation({ approval, ledgerRoot: approval.ledgerRoots[`mlx@${host}`], ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval),
+  invocationId: invocation.invocationId, backend: 'mlx', caseId: invocation.caseId, kind: invocation.kind, requestSha256: invocation.requestSha256 ?? d('a'), inputSpecAddendum, host });
+
+test('the planner splits MLX into disjoint covering host lanes: personal inputs on the dataset host, the rest on the general host', () => {
+  const plan = lanedPlan(), lanes = plan.hostLanes.mlx, mlx = plan.generationInvocations.filter(i => i.backend === 'mlx');
+  assert.equal(plan.generationInvocations.length, 38, 'counts unchanged'); assert.equal(mlx.length, 17);
+  assert.deepEqual(Object.keys(plan.hostLanes), ['mlx'], 'Candle stays one lane');
+  const ids = id => mlx.find(i => i.invocationId === id);
+  const datasetGenerations = lanes[DATASET_HOST].filter(ids), general = lanes[GENERAL_HOST];
+  assert.equal(datasetGenerations.length, 8); assert.equal(general.length, 9);
+  assert(datasetGenerations.every(id => usesPersonalInputs(ids(id))) && general.every(id => !usesPersonalInputs(ids(id))), 'every personal-input permit, and only those, is on the dataset host');
+  const training = plan.trainingLifecycles.find(t => t.backend === 'mlx');
+  assert(lanes[DATASET_HOST].includes(training.startId) && lanes[DATASET_HOST].includes(training.resumeId), 'training runs where the dataset is');
+  assert(lanes[DATASET_HOST].includes('mlx.base.pup_edit.bf16.generation-1') && general.filter(id => ids(id).kind === 'resource_anchor').length === 4);
+  assert.throws(() => terminalPlan(sources, { hostLanes: { mlx: { datasetHost: 'same', generalHost: 'same' } } }), /two distinct named hosts/);
+});
+test('approval validates host lanes: disjoint, covering, one ledger root per lane, lifecycle+adapter cases on one host', async t => {
+  const { approval } = await lanedFixture(t); validateApprovedPlan(approval);
+  const mlxProduct = id => approval.plan.generationInvocations.find(i => i.invocationId === id);
+  for (const [label, mutate, pattern] of [
+    ['overlap', a => { a.plan.hostLanes.mlx[GENERAL_HOST].push(a.plan.hostLanes.mlx[DATASET_HOST][0]); }, /disjoint/],
+    ['uncovered', a => { a.plan.hostLanes.mlx[GENERAL_HOST].pop(); }, /cover exactly/],
+    ['foreign id', a => { a.plan.hostLanes.mlx[GENERAL_HOST].push('candle.base.cancel.bf16.generation-1'); }, /disjoint|cover exactly/],
+    ['adapter split from its lifecycle', a => { const lanes = a.plan.hostLanes.mlx, id = lanes[DATASET_HOST].find(i => mlxProduct(i)?.adapterBinding); lanes[DATASET_HOST] = lanes[DATASET_HOST].filter(i => i !== id); lanes[GENERAL_HOST].push(id); }, /adapter case runs on the host holding/],
+    ['training split', a => { const lanes = a.plan.hostLanes.mlx, tr = a.plan.trainingLifecycles.find(t => t.backend === 'mlx'); lanes[DATASET_HOST] = lanes[DATASET_HOST].filter(i => i !== tr.resumeId); lanes[GENERAL_HOST].push(tr.resumeId); }, /one host/],
+    ['backend-keyed mlx root', a => { a.ledgerRoots.mlx = a.ledgerRoots[`mlx@${DATASET_HOST}`]; }, /one fixed ledger root per ledger lane/],
+    ['shared lane root', a => { a.ledgerRoots[`mlx@${GENERAL_HOST}`] = a.ledgerRoots[`mlx@${DATASET_HOST}`]; }, /distinct fixed roots/],
+    ['unknown deferred lane', a => { a.deferredInputSpecBackends = ['mlx']; }, /known ledger lanes/],
+    ['READY on a split backend', a => { a.plan.resourceCases.find(r => r.backend === 'mlx').status = 'READY'; }, /proved per host by addendum/],
+  ]) { const changed = structuredClone(approval); mutate(changed); assert.throws(() => validateApprovedPlan(changed), pattern, label); }
+});
+test('no permit is reservable on the wrong host, and the refusal writes nothing to the ledger', async t => {
+  const { approval, dataset, general } = await lanedFixture(t), lanes = approval.plan.hostLanes.mlx;
+  for (const host of [DATASET_HOST, GENERAL_HOST]) await initializeLedger({ approval, backend: 'mlx', host, ledgerRoot: approval.ledgerRoots[`mlx@${host}`] });
+  const of = host => approval.plan.generationInvocations.filter(i => lanes[host].includes(i.invocationId));
+  const generalProduct = of(GENERAL_HOST).find(i => i.kind === 'product_generation'), generalAnchor = of(GENERAL_HOST).find(i => i.kind === 'resource_anchor');
+  const datasetProduct = of(DATASET_HOST).find(i => i.kind === 'product_generation');
+  // A general-host permit presented on the dataset host's ledger (with that host's own valid addendum).
+  await assert.rejects(laneReserve(approval, DATASET_HOST, generalProduct, dataset), /assigned to another mlx host lane.*wrong host/);
+  await assert.rejects(laneReserve(approval, DATASET_HOST, generalAnchor, dataset), /wrong host/);
+  await assert.rejects(laneReserve(approval, GENERAL_HOST, datasetProduct, general), /wrong host/);
+  // An unknown host or the backend-keyed root never resolves to a lane.
+  await assert.rejects(reserveInvocation({ approval, ledgerRoot: approval.ledgerRoots[`mlx@${DATASET_HOST}`], ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval), invocationId: datasetProduct.invocationId, backend: 'mlx', caseId: datasetProduct.caseId, kind: datasetProduct.kind, requestSha256: d('a'), inputSpecAddendum: dataset }), /split by host/);
+  await assert.rejects(laneReserve(approval, 'nax-macos-3', datasetProduct, dataset), /not an approved mlx lane/);
+  // The other host's addendum never unlocks this host's permits.
+  await assert.rejects(laneReserve(approval, DATASET_HOST, datasetProduct, general), /different host lane/);
+  for (const host of [DATASET_HOST, GENERAL_HOST]) {
+    const receipt = await auditLedger({ approval, backend: 'mlx', host, ledgerRoot: approval.ledgerRoots[`mlx@${host}`] });
+    assert.equal(receipt.events.length, 0, 'refusals spent nothing'); assert.equal(receipt.inputSpecAddendumSha256, undefined, 'refusals pinned no addendum');
+    assert.deepEqual(receipt.manifest.permitIds, of(host).map(i => i.invocationId), 'each lane ledger allocates only its own permits'); assert.equal(receipt.manifest.host, host);
+  }
+  // Each lane spends its own permits under its own pinned addendum.
+  assert.equal((await laneReserve(approval, DATASET_HOST, datasetProduct, dataset)).invocationId, datasetProduct.invocationId);
+  assert.equal((await laneReserve(approval, GENERAL_HOST, generalAnchor, general)).invocationId, generalAnchor.invocationId);
+  await assert.rejects(laneReserve(approval, DATASET_HOST, of(DATASET_HOST).find(i => i.kind === 'resource_supplemental'), { ...dataset, addendumId: 'DECLARED-SYNTHETIC-other' }), /different addendum than the one recorded/);
+});
+test('a host addendum proves exactly its own lane: its receipt covers that lane\'s resource rows only', async t => {
+  const { approval, dataset, general } = await lanedFixture(t);
+  assert.equal(validateInputSpecAddendum(approval, dataset).ledgerLane, `mlx@${DATASET_HOST}`); assert.equal(validateInputSpecAddendum(approval, general).ledgerLane, `mlx@${GENERAL_HOST}`);
+  assert.equal(boundInputSpecSha256(approval, 'mlx', general, GENERAL_HOST), d('f'));
+  assert.throws(() => boundInputSpecSha256(approval, 'mlx', general, DATASET_HOST), /different host lane/);
+  assert.throws(() => boundInputSpecSha256(approval, 'mlx', undefined, GENERAL_HOST), /mlx@nax-macos-2 input specification is deferred/);
+  const allMlx = { ...general, nativeBoundaryReceipt: receiptFor(approval.plan, 'mlx', d('7'), d('8')) };
+  assert.throws(() => validateInputSpecAddendum(approval, allMlx), /exactly the plan resource invocations/);
+  const { lane, ...noLane } = general; assert.throws(() => validateInputSpecAddendum(approval, noLane), /exactly its binding fields/);
+  assert.throws(() => validateInputSpecAddendum(approval, { ...general, lane: 'nax-macos-3' }), /not an approved mlx lane/);
+});
+test('aggregation spans every lane ledger: candle plus both MLX hosts, never a partial set', async t => {
+  const { approval, dataset, general } = await lanedFixture(t), lanes = approval.plan.hostLanes.mlx;
+  await initializeLedger({ approval, backend: 'candle', ledgerRoot: approval.ledgerRoots.candle });
+  for (const host of [DATASET_HOST, GENERAL_HOST]) await initializeLedger({ approval, backend: 'mlx', host, ledgerRoot: approval.ledgerRoots[`mlx@${host}`] });
+  await laneReserve(approval, GENERAL_HOST, approval.plan.generationInvocations.find(i => lanes[GENERAL_HOST].includes(i.invocationId) && i.kind === 'product_generation'), general);
+  const receipts = [await auditLedger({ approval, backend: 'candle', ledgerRoot: approval.ledgerRoots.candle }),
+    ...await Promise.all([DATASET_HOST, GENERAL_HOST].map(host => auditLedger({ approval, backend: 'mlx', host, ledgerRoot: approval.ledgerRoots[`mlx@${host}`], inputSpecAddendum: host === GENERAL_HOST ? general : undefined })))];
+  const lane = r => r.manifest.host ? `${r.manifest.backend}@${r.manifest.host}` : r.manifest.backend;
+  const closure = { kind: 'flux3-terminal-finalized-ledger-heads', coordinatorClosureId: 'DECLARED_SYNTHETIC_TRUSTED_CLOSURE', producersStopped: true, collectionManifestSha256: d('9'), ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval),
+    backends: Object.fromEntries(receipts.map(r => [lane(r), { sequence: r.state.sequence, headSha256: r.state.headSha256 }])) };
+  const addenda = { [`mlx@${DATASET_HOST}`]: dataset, [`mlx@${GENERAL_HOST}`]: general };
+  assert.equal(aggregateLedgerReceipts(approval, receipts, closure, addenda).generationCount, 1);
+  assert.throws(() => aggregateLedgerReceipts(approval, receipts.slice(0, 2), closure, addenda), /every complete latest lane receipt/);
+  const { [`mlx@${DATASET_HOST}`]: _omitted, ...partialHeads } = closure.backends;
+  assert.throws(() => aggregateLedgerReceipts(approval, receipts, { ...closure, backends: partialHeads }, addenda), /EVERY ledger lane/);
+});
+test('admission: a split backend admits only its lane hosts; an unsplit MLX backend keeps nax-macos-2 only', async t => {
+  const { approval } = await lanedFixture(t);
+  assert.equal(admittedHost(approval, { backend: 'mlx', runner: DATASET_HOST }), DATASET_HOST);
+  assert.throws(() => admittedHost(approval, { backend: 'mlx', runner: 'nax-macos-3' }), /not an approved mlx lane/);
+  assert.equal(admittedHost(approval, { backend: 'candle', runner: 'declared-cuda-runner' }), undefined);
+  const { approval: unsplit } = await approvalFixture(t);
+  assert.throws(() => admittedHost(unsplit, { backend: 'mlx', runner: DATASET_HOST }), /only secondary nax-macos-2/);
+  assert.equal(admittedHost(unsplit, { backend: 'mlx', runner: GENERAL_HOST }), undefined);
 });

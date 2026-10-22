@@ -98,13 +98,20 @@ export function terminalCatalog(sources) {
     policy: { downloads: 'never automatic; explicit per-repository approved provision cells only', captures: false, resourceAnchorsAreImageProof: false, visualProof: 'human/oracle inspection; HTTP completion is insufficient', training: 'dryRun:false, real bounded job only' } };
 }
 // Small representative CODE default, not permission to execute. Full catalog is diagnostic only.
+/** Personal inputs: any permit that reads the user's reference images or training dataset. */
+export function usesPersonalInputs(invocation) {
+  return (invocation.options?.references ?? 0) > 0 || invocation.purpose === 'training-reload' || Boolean(invocation.adapterBinding);
+}
 /** `options` (all optional; the shipped default keeps every resource row BLOCKED):
  *  - resourceBindings[backend]: the bound PUP-edit supplemental resource case (hash-only inputs);
  *  - nativeBoundary[backend]: { receipt, parentNativeBoundaryVerificationId, binarySha256,
  *    buildReceiptSha256, sourceSha, inferenceMainSha } from the sealed adapter's zero-budget self-test;
  *  - addendumBackends: backends whose resource rows become READY_ON_ADDENDUM (proved later by the
- *    parent-recorded input-spec addendum, never reservable before it). */
-export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = {}, addendumBackends = [] } = {}) {
+ *    parent-recorded input-spec addendum, never reservable before it);
+ *  - hostLanes[backend]: { datasetHost, generalHost } splits that backend's permits across two
+ *    hosts: everything reading personal inputs (references, training dataset, its exported LoRA)
+ *    on datasetHost, the rest on generalHost. Each host is its own ledger lane. */
+export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = {}, addendumBackends = [], hostLanes = {} } = {}) {
   const catalog = terminalCatalog(sources), cases = [], resources = [], trainingLifecycles = [];
   const pick = (backend, checkpoint, scenario, { tier = 'bf16', options = {}, name = scenario } = {}) => {
     const source = catalog.cases.find(c => c.caseId === `${backend}.${checkpoint}.${scenario}.bf16`); assert(source);
@@ -175,7 +182,14 @@ export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = 
     }
   }
   assert.equal(generationInvocations.filter(i => i.kind === 'product_generation').length, 26); assert.equal(resources.length, 12);
-  return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, ...(Object.keys(nativeBoundaryReceipts).length ? { nativeBoundaryReceipts } : {}), trainingLifecycles, generationInvocations,
+  const lanes = {};
+  for (const [backend, { datasetHost, generalHost } = {}] of Object.entries(hostLanes)) {
+    assert(['mlx', 'candle'].includes(backend) && datasetHost && generalHost && datasetHost !== generalHost, 'host lanes need two distinct named hosts');
+    assert(!nativeBoundary[backend], `${backend}: a host-split backend proves its resource rows per host by addendum`);
+    const own = generationInvocations.filter(i => i.backend === backend), personal = own.filter(usesPersonalInputs).map(i => i.invocationId);
+    lanes[backend] = { [datasetHost]: [...personal, ...trainingLifecycles.filter(t => t.backend === backend).flatMap(t => [t.startId, t.resumeId])], [generalHost]: own.filter(i => !usesPersonalInputs(i)).map(i => i.invocationId) };
+  }
+  return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, ...(Object.keys(nativeBoundaryReceipts).length ? { nativeBoundaryReceipts } : {}), ...(Object.keys(lanes).length ? { hostLanes: lanes } : {}), trainingLifecycles, generationInvocations,
     budget: { globalHardCeiling: 48, productGenerations: 26, resourceGenerations: 12, totalGenerationInvocations: 38, byBackend: { mlx: 17, candle: 21 }, unallocatedNotAuthorized: 10, automaticWarmups: 0, automaticRepeats: 0, automaticRetries: 0, trainingLifecycles: 2, stepsPerLifecycle: 4 },
     uncovered: [{ requirement: 'Base q4/q8 canonical anchor measurements', status: 'NOT_RUN', reason: 'Production rows now pin genuine locally converted base bytes/SHA (activated in the artifact prerequisite inventory); the anchors are publishable but unmeasured, and every measurement still requires its own execution admission.' }, { requirement: 'Edit-LoRA training lifecycle', status: 'NOT_RUN', reason: 'No paired edit data in the provided dataset; never fabricated. Both backends exercise the captioned base lifecycle instead.' }, { requirement: 'Semantic image quality/reference/layout/adaptation acceptance', status: 'PENDING', reason: 'Requires human/oracle evidence bound to retained input/output hashes.' }, { requirement: 'Native resource invocation enforcement', status: 'BLOCKED', reason: 'Authorized resource owner must verify exactly one inner Generator.generate per permit; hidden warmups/rungs/seeds must expand counts and reduce the plan before approval.' }],
     policy: { ...catalog.policy, fullInventory: 'catalog command only; never automatically executed', execution: 'exact expanded plan/hash and explicit user approval required; disjoint per-backend single-use permits, local atomic ledgers, coordinator aggregates same global plan; no allocation of spare ten' } };
