@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan, terminalCatalog } from './flux3-image-klein-terminal-plan.mjs';
 import { validateApprovedPlan, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, planHash } from './flux3-image-klein-terminal-budget.mjs';
+import { declaredSyntheticReadyBackend } from './lib/flux3-native-boundary-fixtures.mjs';
 const sources = await loadProductTargets(), profile = terminalPlan(sources), digest = 'd'.repeat(64);
 async function fixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'sc26243-synthetic-ledger-only-')); t.after(() => rm(root, { recursive: true, force: true }));
@@ -79,10 +80,10 @@ test('resource permits remain BLOCKED without real owner-verified single-call bo
   await assert.rejects(reserveInvocation(reservation(approval, backend, resource)), /boundary is unverified/);
   assert.equal((await auditLedger({ approval, backend, ledgerRoot: approval.ledgerRoots[backend] })).state.generationCount, 0);
   // Separate DECLARED SYNTHETIC approved fixture, never a claim that native enforcement exists.
-  const second = await fixture(t), a = second.approval, r = a.plan.resourceCases.find(c => c.caseId === resource.caseId); r.status = 'READY'; r.parentNativeBoundaryVerificationId = 'synthetic-contract-only'; r.nativeBoundaryReceiptSha256 = digest;
-  const invocation = a.plan.generationInvocations.find(i => i.caseId === r.caseId); invocation.requestSha256 = digest; await initializeLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] });
+  const second = await fixture(t), a = second.approval; declaredSyntheticReadyBackend(a, backend); // full receipt for every resource row
+  const invocation = a.plan.generationInvocations.find(i => i.caseId === resource.caseId); await initializeLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] });
   await assert.rejects(reserveInvocation({ ...reservation(a, backend, invocation), requestSha256: 'e'.repeat(64) }), /exact normalized/);
-  await reserveInvocation(reservation(a, backend, invocation)); assert.equal((await auditLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] })).state.generationCount, 1);
+  await reserveInvocation({ ...reservation(a, backend, invocation), requestSha256: invocation.requestSha256 }); assert.equal((await auditLedger({ approval: a, backend, ledgerRoot: a.ledgerRoots[backend] })).state.generationCount, 1);
 });
 test('aggregation validates complete ledger manifests, contiguous chains and final state; forged/truncated receipts never become zero-spend proof', async t => {
   const { approval } = await fixture(t), backend = 'candle', ledgerRoot = approval.ledgerRoots[backend]; await initializeLedger({ approval, backend, ledgerRoot }); await reserveInvocation(reservation(approval, backend));

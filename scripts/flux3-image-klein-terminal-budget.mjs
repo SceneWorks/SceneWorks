@@ -62,6 +62,18 @@ export function validateApprovedPlan(approval) {
       assert.equal(row.nativeBoundaryBinarySha256, approval.resourceBuildReceipts?.[row.backend]?.binarySha256, `${row.caseId}: native-boundary receipt came from a binary other than the approved sealed resource build`);
     } else assert(deferred.includes(row.backend), `${row.caseId}: READY_ON_ADDENDUM is only for a deferred backend`);
   }
+  // Never trust a READY label or digest alone: re-validate the FULL receipt the plan carries against
+  // the approval's own sealed resource build, source, inference and every resource invocation.
+  for (const backend of ['mlx', 'candle']) {
+    const ready = (plan.resourceCases ?? []).filter(r => r.backend === backend && r.status === 'READY');
+    if (!ready.length) continue;
+    const build = approval.resourceBuildReceipts?.[backend];
+    const receiptSha256 = validateNativeBoundaryReceipt(plan.nativeBoundaryReceipts?.[backend], { backend,
+      invocations: invocations.filter(i => i.backend === backend && i.kind.startsWith('resource_')),
+      binarySha256: build?.binarySha256, buildReceiptSha256: build?.receiptSha256, sourceSha: approval.sourceSha, inferenceMainSha: approval.inferenceMainSha });
+    for (const row of ready) assert.equal(row.nativeBoundaryReceiptSha256, receiptSha256, `${row.caseId}: READY digest is not the carried receipt's`);
+    assert.equal(ready.length, (plan.resourceCases ?? []).filter(r => r.backend === backend).length, `${backend}: a receipt proves every resource row of its backend or none`);
+  }
   return { approvedPlanSha256: planHash(approval), generationCount: invocations.length, backendQuotas: plan.budget.byBackend, trainingLifecycles: training.length };
 }
 const ADDENDUM_KEYS = ['schemaVersion', 'kind', 'approvedPlanSha256', 'ledgerId', 'backend', 'inputSpecSha256', 'buildReceipt', 'resourceBuildReceipt', 'nativeBoundaryReceipt', 'parentNativeBoundaryVerificationId', 'addendumId', 'userApprovalId', 'approvedBy'].sort();
@@ -146,7 +158,16 @@ function approvedEvent(approval, event, addendum) {
 }
 export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt?.manifest?.backend, inputSpecAddendum) {
   validateApprovedPlan(approval); assert(['mlx', 'candle'].includes(expectedBackend), 'complete ledger manifest/backend required');
-  const { manifest, state, events } = receipt ?? {}; assert.deepEqual(manifest, expectedManifest(approval, expectedBackend), 'complete ledger manifest/plan/backend identity mismatch'); assert(Array.isArray(events));
+  const { manifest, state, events, inputSpecAddendumSha256 } = receipt ?? {};
+  // A deferred backend's ledger is bound to exactly ONE addendum: recorded before its first spend
+  // and required (identical) for every later reservation, audit and aggregation.
+  if ((approval.deferredInputSpecBackends ?? []).includes(expectedBackend)) {
+    if ((events?.length ?? 0) > 0) assert(sha.test(inputSpecAddendumSha256 ?? ''), 'BLOCKED: deferred backend ledger has spends but no recorded addendum binding');
+    if (inputSpecAddendumSha256 !== undefined) {
+      assert(inputSpecAddendum, 'BLOCKED: this ledger is bound to its recorded addendum; present that same addendum');
+      assert.equal(planHash(inputSpecAddendum), inputSpecAddendumSha256, 'BLOCKED: a different addendum than the one recorded in this ledger');
+    }
+  } else assert.equal(inputSpecAddendumSha256, undefined, 'a non-deferred backend ledger carries no addendum binding'); assert.deepEqual(manifest, expectedManifest(approval, expectedBackend), 'complete ledger manifest/plan/backend identity mismatch'); assert(Array.isArray(events));
   let head = planHash(manifest), generations = 0; const ids = [];
   for (const [index, event] of events.entries()) {
     const { eventSha256, ...record } = event;
@@ -157,18 +178,32 @@ export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt
   }
   assert(generations <= manifest.permitIds.length && generations <= GLOBAL_GENERATION_CEILING);
   assert.deepEqual(state, { sequence: events.length, generationCount: generations, consumedIds: ids, headSha256: head }, 'ledger crash/tamper mismatch; coordinator must reconcile, never reuse a reservation');
-  return { manifest, state, events };
+  return { manifest, state, events, ...(inputSpecAddendumSha256 !== undefined ? { inputSpecAddendumSha256 } : {}) };
+}
+const ADDENDUM_BINDING = 'input-spec-addendum.json';
+async function boundAddendum(root) {
+  try { return JSON.parse(await readFile(path.join(root, ADDENDUM_BINDING), 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
 }
 async function audited(approval, backend, root, inputSpecAddendum) {
   const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')), state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')), files = (await readdir(path.join(root, 'events'))).sort(), events = [];
   for (const [index, file] of files.entries()) { assert.equal(file, `${String(index + 1).padStart(6, '0')}.json`, 'ledger journal missing/foreign event'); events.push(JSON.parse(await readFile(path.join(root, 'events', file), 'utf8'))); }
-  return verifyLedgerReceipt(approval, { manifest, state, events }, backend, inputSpecAddendum);
+  const binding = await boundAddendum(root);
+  return verifyLedgerReceipt(approval, { manifest, state, events, ...(binding ? { inputSpecAddendumSha256: binding.addendumSha256 } : {}) }, backend, inputSpecAddendum);
 }
 export async function auditLedger({ approval, backend, ledgerRoot, inputSpecAddendum }) { const root = location(approval, backend, ledgerRoot); return lock(root, () => audited(approval, backend, root, inputSpecAddendum)); }
 export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256, inputSpecAddendum }) {
-  const root = location(approval, backend, ledgerRoot); boundInputSpecSha256(approval, backend, inputSpecAddendum); // deferred backend: no permit before its addendum assert.equal(ledgerId, approval.ledgerId); assert.equal(approvedPlanSha256, planHash(approval)); assert(sha.test(requestSha256 ?? ''), 'actual request digest required before each inner generation start');
+  const root = location(approval, backend, ledgerRoot);
+  // A deferred backend has no permit before its addendum (and only ever the SAME addendum, below).
+  boundInputSpecSha256(approval, backend, inputSpecAddendum);
+  assert.equal(ledgerId, approval.ledgerId, 'reservation ledger identity differs from the approval');
+  assert.equal(approvedPlanSha256, planHash(approval), 'reservation is bound to a different approved plan');
+  assert(sha.test(requestSha256 ?? ''), 'actual request digest required before each inner generation start');
   return lock(root, async () => {
-    const { state } = await audited(approval, backend, root, inputSpecAddendum); assert(!state.consumedIds.includes(invocationId), 'permit already consumed; failed/canceled attempts count and cannot auto-resubmit');
+    const { state } = await audited(approval, backend, root, inputSpecAddendum);
+    if ((approval.deferredInputSpecBackends ?? []).includes(backend) && !(await boundAddendum(root))) {
+      // First spend: record WHICH addendum this ledger is bound to, exclusively and durably.
+      await durableNew(path.join(root, ADDENDUM_BINDING), { ledgerId: approval.ledgerId, backend, approvedPlanSha256: planHash(approval), addendumSha256: planHash(inputSpecAddendum) });
+    } assert(!state.consumedIds.includes(invocationId), 'permit already consumed; failed/canceled attempts count and cannot auto-resubmit');
     if (kind === 'training_resume') { const training = approval.plan.trainingLifecycles.find(t => t.resumeId === invocationId); assert(training && state.consumedIds.includes(training.startId), 'planned resume requires the already-consumed initial training start'); }
     const record = { sequence: state.sequence + 1, previousSha256: state.headSha256, approvedPlanSha256, ledgerId, backend, caseId, invocationId, kind, requestSha256, reservedAt: new Date().toISOString(), controllerPid: process.pid };
     const generation = approvedEvent(approval, record, inputSpecAddendum), event = { ...record, eventSha256: planHash(record) };

@@ -159,6 +159,7 @@ export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = 
       row.resourceCase = structuredClone(bound); invocation.requestSha256 = resourceCaseDigest(bound);
     }
   }
+  const nativeBoundaryReceipts = {};
   for (const backend of ['mlx', 'candle']) {
     const invocations = generationInvocations.filter(i => i.backend === backend && i.kind.startsWith('resource_'));
     if (!invocations.every(i => i.requestSha256)) continue; // an unbound request stays BLOCKED
@@ -168,12 +169,13 @@ export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = 
       const receiptSha256 = validateNativeBoundaryReceipt(boundary.receipt, { backend, invocations, binarySha256: boundary.binarySha256, buildReceiptSha256: boundary.buildReceiptSha256, sourceSha: boundary.sourceSha, inferenceMainSha: boundary.inferenceMainSha });
       assert(typeof boundary.parentNativeBoundaryVerificationId === 'string' && boundary.parentNativeBoundaryVerificationId, 'parent native-boundary verification ID required');
       for (const row of resources.filter(r => r.backend === backend)) Object.assign(row, { status: 'READY', blocker: null, parentNativeBoundaryVerificationId: boundary.parentNativeBoundaryVerificationId, nativeBoundaryReceiptSha256: receiptSha256, nativeBoundaryBinarySha256: boundary.binarySha256 });
+      nativeBoundaryReceipts[backend] = structuredClone(boundary.receipt); // approval re-validates the full receipt
     } else if (addendumBackends.includes(backend)) {
       for (const row of resources.filter(r => r.backend === backend)) Object.assign(row, { status: 'READY_ON_ADDENDUM', blocker: 'Reservable only after the parent-recorded input-spec addendum binds this backend validated sealed-binary native-boundary self-test receipt.' });
     }
   }
   assert.equal(generationInvocations.filter(i => i.kind === 'product_generation').length, 26); assert.equal(resources.length, 12);
-  return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, trainingLifecycles, generationInvocations,
+  return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, ...(Object.keys(nativeBoundaryReceipts).length ? { nativeBoundaryReceipts } : {}), trainingLifecycles, generationInvocations,
     budget: { globalHardCeiling: 48, productGenerations: 26, resourceGenerations: 12, totalGenerationInvocations: 38, byBackend: { mlx: 17, candle: 21 }, unallocatedNotAuthorized: 10, automaticWarmups: 0, automaticRepeats: 0, automaticRetries: 0, trainingLifecycles: 2, stepsPerLifecycle: 4 },
     uncovered: [{ requirement: 'Base q4/q8 canonical anchor measurements', status: 'NOT_RUN', reason: 'Production rows now pin genuine locally converted base bytes/SHA (activated in the artifact prerequisite inventory); the anchors are publishable but unmeasured, and every measurement still requires its own execution admission.' }, { requirement: 'Edit-LoRA training lifecycle', status: 'NOT_RUN', reason: 'No paired edit data in the provided dataset; never fabricated. Both backends exercise the captioned base lifecycle instead.' }, { requirement: 'Semantic image quality/reference/layout/adaptation acceptance', status: 'PENDING', reason: 'Requires human/oracle evidence bound to retained input/output hashes.' }, { requirement: 'Native resource invocation enforcement', status: 'BLOCKED', reason: 'Authorized resource owner must verify exactly one inner Generator.generate per permit; hidden warmups/rungs/seeds must expand counts and reduce the plan before approval.' }],
     policy: { ...catalog.policy, fullInventory: 'catalog command only; never automatically executed', execution: 'exact expanded plan/hash and explicit user approval required; disjoint per-backend single-use permits, local atomic ledgers, coordinator aggregates same global plan; no allocation of spare ten' } };

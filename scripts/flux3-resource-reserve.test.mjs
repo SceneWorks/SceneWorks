@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { initializeLedger, auditLedger, planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { flux3AnchorRequestDigest } from './lib/flux3-resource-contract.mjs';
+import { declaredSyntheticReadyBackend } from './lib/flux3-native-boundary-fixtures.mjs';
 const script = fileURLToPath(new URL('./flux3-resource-reserve.mjs', import.meta.url));
 async function fixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), 'flux3-resource-DECLARED-CPU-fixture-'));
@@ -25,6 +26,7 @@ async function fixture(t) {
       resourceCases: [{ backend, caseId, status: 'READY', parentNativeBoundaryVerificationId: 'DECLARED-SYNTHETIC', nativeBoundaryReceiptSha256: digest }],
       budget: { globalHardCeiling: 48, totalGenerationInvocations: 1, byBackend: { candle: 1, mlx: 0 },
         unallocatedNotAuthorized: 47, automaticWarmups: 0, automaticRepeats: 0, automaticRetries: 0, trainingLifecycles: 0, stepsPerLifecycle: 4 } } };
+  declaredSyntheticReadyBackend(approval, backend); // full receipt, not a bare READY label
   const approvalFile = path.join(root, 'approval.json');
   await writeFile(approvalFile, JSON.stringify(approval));
   await initializeLedger({ approval, backend, ledgerRoot: approval.ledgerRoots[backend] });

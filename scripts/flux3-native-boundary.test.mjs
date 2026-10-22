@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
-import { validateApprovedPlan, validateInputSpecAddendum, boundInputSpecSha256, initializeLedger, reserveInvocation, planHash } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, validateInputSpecAddendum, boundInputSpecSha256, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, verifyLedgerReceipt, planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { validateNativeBoundaryReceipt, nativeBoundaryReceiptSha256, buildSupplementalResourceCase, NATIVE_BOUNDARY_RECEIPT_KIND } from './lib/flux3-native-boundary.mjs';
 import { selfTestEnvironment, runNativeBoundarySelfTest, productionResourceRequest } from './flux3-native-boundary-self-test.mjs';
 import { launchFlux3Resource } from './flux3-resource-launcher.mjs';
@@ -113,7 +113,7 @@ test('deferred-backend permits, including READY_ON_ADDENDUM resource rows, are n
   assert.equal(event.invocationId, resource.invocationId, 'only a validated addendum makes the row reservable');
 });
 test('the self-test is unreachable from production: the launcher never passes the guard and always sets the invocation', async () => {
-  const env = selfTestEnvironment({ PATH: 'x', SCENEWORKS_FLUX3_INVOCATION: '{}', SCENEWORKS_FLUX3_BUDGET_NODE: 'node', SCENEWORKS_FLUX3_KLEIN_ROOT: 'r', HF_TOKEN: 'secret', SCENEWORKS_GPU_ID: '1' }, 'inputs');
+  const env = selfTestEnvironment({ PATH: 'x', SCENEWORKS_FLUX3_INVOCATION: '{}', SCENEWORKS_FLUX3_BUDGET_NODE: 'node', SCENEWORKS_FLUX3_KLEIN_ROOT: 'r', HF_TOKEN: 'DECLARED-SYNTHETIC-NOT-A-CREDENTIAL', SCENEWORKS_GPU_ID: '1' }, 'inputs');
   assert.deepEqual(Object.keys(env).sort(), ['CUDA_VISIBLE_DEVICES', 'PATH', 'SCENEWORKS_FLUX3_BOUNDARY_SELF_TEST', 'SCENEWORKS_FLUX3_RESOURCE_INPUT_ROOT'].sort());
   assert.equal(env.CUDA_VISIBLE_DEVICES, '-1');
   const launcher = await (await import('node:fs/promises')).readFile(new URL('./flux3-resource-launcher.mjs', import.meta.url), 'utf8');
@@ -143,4 +143,53 @@ test('each self-test case carries the exact production run request (canonical an
   }
   assert.equal(nativeBoundaryReceiptSha256({ a: 1 }).length, 64);
   assert.throws(() => validateNativeBoundaryReceipt({ kind: 'x' }, {}), /kind\/schema/);
+});
+test('reservation refuses a wrong ledger identity, a different approved plan or a malformed request digest', async t => {
+  const { approval } = await approvalFixture(t);
+  await initializeLedger({ approval, backend: 'candle', ledgerRoot: approval.ledgerRoots.candle });
+  const product = approval.plan.generationInvocations.find(i => i.backend === 'candle' && i.kind === 'product_generation');
+  const base = { approval, ledgerRoot: approval.ledgerRoots.candle, ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval),
+    invocationId: product.invocationId, backend: 'candle', caseId: product.caseId, kind: product.kind, requestSha256: d('a') };
+  await assert.rejects(reserveInvocation({ ...base, ledgerId: 'another-ledger' }), /ledger identity differs/);
+  await assert.rejects(reserveInvocation({ ...base, approvedPlanSha256: d('f') }), /different approved plan/);
+  await assert.rejects(reserveInvocation({ ...base, requestSha256: 'not-a-digest' }), /actual request digest required/);
+  assert.equal((await reserveInvocation(base)).invocationId, product.invocationId, 'the correct identity still reserves');
+});
+test('a deferred ledger is bound to ONE addendum: a different valid addendum is refused after a spend', async t => {
+  const { approval, addendum } = await approvalFixture(t);
+  await initializeLedger({ approval, backend: 'mlx', ledgerRoot: approval.ledgerRoots.mlx });
+  await initializeLedger({ approval, backend: 'candle', ledgerRoot: approval.ledgerRoots.candle });
+  const other = { ...structuredClone(addendum), inputSpecSha256: d('7'), addendumId: 'DECLARED-SYNTHETIC-other-addendum' };
+  assert.equal(validateInputSpecAddendum(approval, other).inputSpecSha256, d('7'), 'the other addendum is valid on its own');
+  const product = approval.plan.generationInvocations.filter(i => i.backend === 'mlx' && i.kind === 'product_generation');
+  const reserve = (invocation, inputSpecAddendum) => reserveInvocation({ approval, ledgerRoot: approval.ledgerRoots.mlx, ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval),
+    invocationId: invocation.invocationId, backend: 'mlx', caseId: invocation.caseId, kind: invocation.kind, requestSha256: d('a'), inputSpecAddendum });
+  await reserve(product[0], addendum);
+  await assert.rejects(reserve(product[1], other), /different addendum than the one recorded/);
+  await assert.rejects(auditLedger({ approval, backend: 'mlx', ledgerRoot: approval.ledgerRoots.mlx, inputSpecAddendum: other }), /different addendum than the one recorded/);
+  await assert.rejects(auditLedger({ approval, backend: 'mlx', ledgerRoot: approval.ledgerRoots.mlx }), /present that same addendum/);
+  const mlx = await auditLedger({ approval, backend: 'mlx', ledgerRoot: approval.ledgerRoots.mlx, inputSpecAddendum: addendum });
+  assert.equal(mlx.inputSpecAddendumSha256, planHash(addendum), 'the ledger receipt carries its recorded addendum binding');
+  const stripped = { ...mlx }; delete stripped.inputSpecAddendumSha256;
+  assert.throws(() => verifyLedgerReceipt(approval, stripped, 'mlx', addendum), /spends but no recorded addendum binding/);
+  const candle = await auditLedger({ approval, backend: 'candle', ledgerRoot: approval.ledgerRoots.candle });
+  const closure = { kind: 'flux3-terminal-finalized-ledger-heads', coordinatorClosureId: 'DECLARED-SYNTHETIC', producersStopped: true, collectionManifestSha256: d('c'),
+    ledgerId: approval.ledgerId, approvedPlanSha256: planHash(approval), backends: Object.fromEntries([mlx, candle].map(r => [r.manifest.backend, { sequence: r.state.sequence, headSha256: r.state.headSha256 }])) };
+  assert.throws(() => aggregateLedgerReceipts(approval, [mlx, candle], closure, { mlx: other }), /different addendum than the one recorded/);
+  assert.equal(aggregateLedgerReceipts(approval, [mlx, candle], closure, { mlx: addendum }).caseCompletionProven, false);
+  await reserve(product[1], addendum); // the SAME addendum keeps working
+});
+test('a forged READY row (label/digest without its full re-validated receipt) is refused at approval', async t => {
+  const { approval } = await approvalFixture(t); validateApprovedPlan(approval);
+  for (const [label, mutate, pattern] of [
+    ['no carried receipt', a => { delete a.plan.nativeBoundaryReceipts; }, /native-boundary receipt/],
+    ['receipt digest swapped', a => { a.plan.resourceCases.find(r => r.backend === 'candle').nativeBoundaryReceiptSha256 = d('5'); }, /READY digest is not the carried receipt/],
+    ['receipt tampered', a => { a.plan.nativeBoundaryReceipts.candle.cases[0].valid.generateCalls = 2; }, /one reservation before exactly one generate/],
+    ['receipt for other request', a => { a.plan.nativeBoundaryReceipts.candle.cases[0].requestSha256 = d('0'); }, /request digest differs/],
+    ['partial readiness', a => { Object.assign(a.plan.resourceCases.find(r => r.backend === 'candle'), { status: 'BLOCKED' }); }, /every resource row of its backend or none/],
+    ['other source', a => { a.sourceSha = 'c'.repeat(40); }, /source identity differs/],
+  ]) {
+    const changed = structuredClone(approval); mutate(changed);
+    assert.throws(() => validateApprovedPlan(changed), pattern, label);
+  }
 });
