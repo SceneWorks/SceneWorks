@@ -39,7 +39,7 @@ async function fixture(t) {
       caseId:invocation.caseId,invocationId:invocation.invocationId,requestSha256:invocation.requestSha256,sourceSha:admission.sourceSha,
       inferenceMainSha:admission.inferenceMainSha,binarySha256:digest,buildReceiptSha256:digest,approvedPlanSha256:admission.approvedPlanSha256,
       observedAt:'2026-10-20T00:00:00.000Z',adapterProcess:{pid:adapterPid,startedAt:'DECLARED-SYNTHETIC',executable:admission.binary},
-      proof:{physicalGpuId:'1',gpuUuid:admission.gpuUuid,logicalCudaOrdinal:0,ownComputePids:[adapterPid]}};
+      proof:{physicalGpuId:'1',gpuUuid:admission.gpuUuid,logicalCudaOrdinal:0,ownComputePids:[adapterPid],foreignGraphics:{luid:'0x00000000_0x0001f363',processes:2,totalBytes:300*1024**2,maxProcessBytes:200*1024**2,processLimitBytes:1024**3,totalLimitBytes:3*1024**3}}};
     const spec={schemaVersion:1,provenanceKind:'actual_borrowed_load_spec_before_catalog_load',backend:'candle',provider:invocation.modelId,tier:'bf16',
       weights:{kind:'Dir',path:'DECLARED-SYNTHETIC'},components:{},adapters:[],precision:'Bf16',nativeDebugFormatVersion:1,nativeDebugSha256:digest};
     spec.sha256=flux3CaptureDigest('flux3_actual_load_spec_v1\0',spec);
@@ -94,6 +94,11 @@ test('capture verification rejects tampered fragment/output/request/permit/hardw
       delete changed.captureBindingSha256;changed.captureBindingSha256=flux3CaptureDigest('flux3_native_capture_binding_v1\0',changed);
       assert.throws(()=>verifyNativeResourceCapture(changed,context),/BLOCKED/);
     }
+  }
+  // The GPU1 foreign desktop memory observation is required capture evidence, even when re-hashed.
+  for(const mutate of [v=>{delete v.nativeOutput.reservation.hardwareObservation.proof.foreignGraphics;},v=>{v.nativeOutput.reservation.hardwareObservation.proof.foreignGraphics.totalBytes='unknown';}]) {
+    const changed=structuredClone(original);mutate(changed);delete changed.captureBindingSha256;changed.captureBindingSha256=flux3CaptureDigest('flux3_native_capture_binding_v1\0',changed);
+    assert.throws(()=>verifyNativeResourceCapture(changed,context),/foreign desktop memory observation missing/);
   }
   assert.deepEqual(verifyNativeResourceCapture(original,context).anchorFragment,f.anchorFragment);
   const {validateRecord}=await import('./memory-calibration-harness.mjs');assert.throws(()=>validateRecord({...original,id:original.caseId,logicalCaseId:original.caseId}),/invalid status/i);

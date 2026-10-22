@@ -53,7 +53,26 @@ export function offlineChildEnv(env, admission, identity, url) {
   return { ...bindOwnedEnv(base, identity, url), ...(url ? { SCENEWORKS_WORKER_ONLY: '1', SCENEWORKS_WORKER_CHILD: '1' } : {}) };
 }
 // Driver API UUID query runs in a separate short process with the SAME visibility mask.
-const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class TerminalCudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); }'; if([TerminalCudaIdentity]::cuInit(0) -ne 0){throw "CUDA init"}; $n=0; if([TerminalCudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA mask"}; $d=0; if([TerminalCudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal"}; $u=New-Object byte[] 16; if([TerminalCudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12))`;
+const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class TerminalCudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetLuid([Out] byte[] luid, out uint mask, int device); }'; if([TerminalCudaIdentity]::cuInit(0) -ne 0){throw "CUDA init"}; $n=0; if([TerminalCudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA mask"}; $d=0; if([TerminalCudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal"}; $u=New-Object byte[] 16; if([TerminalCudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); $l=New-Object byte[] 8; $m=[uint32]0; $luid=""; if([TerminalCudaIdentity]::cuDeviceGetLuid($l,[ref]$m,$d) -eq 0){$luid=(" luid=0x{0:x8}_0x{1:x8}" -f [BitConverter]::ToUInt32($l,4),[BitConverter]::ToUInt32($l,0))}; Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12)+$luid)`;
+// Windows desktop compositor/apps appear on the display GPU as C+G with N/A memory in nvidia-smi
+// (WDDM). Their actual dedicated memory comes from the Windows per-process counters of the
+// adapter LUID that CUDA itself reports for masked CUDA0 (physical GPU1). Bounded, never ignored.
+export const FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES = 1024 * 1024 ** 2;
+export const FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES = 3 * 1024 ** 3;
+const gpuProcessMemoryScript = luid => `$m=@{}; (Get-Counter '\\GPU Process Memory(*luid_${luid}_phys_*)\\Dedicated Usage' -ErrorAction Stop).CounterSamples | ForEach-Object { $p=[int]($_.InstanceName -split '_')[1]; $m[$p]=[double]$m[$p]+$_.CookedValue }; $m.GetEnumerator() | ForEach-Object { Write-Output ("{0},{1}" -f $_.Key,[int64]$_.Value) }`;
+/** Foreign desktop graphics on GPU1: every foreign C+G must be measured and within bounds; the
+ *  measured total is evidence (it reduces the headroom any resource anchor actually had). */
+export function assessForeignGraphics(foreignPids, memoryByPid, { processLimit = FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, totalLimit = FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } = {}) {
+  let totalBytes = 0, maxProcessBytes = 0;
+  for (const pid of foreignPids) {
+    const bytes = memoryByPid.get(pid);
+    assert(Number.isSafeInteger(bytes) && bytes >= 0, `foreign desktop C+G process ${pid} on GPU1 is unmeasurable; refusing`);
+    assert(bytes <= processLimit, `foreign desktop C+G process ${pid} uses ${Math.ceil(bytes / 1024 ** 2)} MiB of GPU1 (limit ${processLimit / 1024 ** 2} MiB)`);
+    totalBytes += bytes; maxProcessBytes = Math.max(maxProcessBytes, bytes);
+  }
+  assert(totalBytes <= totalLimit, `foreign desktop C+G processes use ${Math.ceil(totalBytes / 1024 ** 2)} MiB of GPU1 in total (limit ${totalLimit / 1024 ** 2} MiB)`);
+  return { processes: foreignPids.length, totalBytes, maxProcessBytes, processLimitBytes: processLimit, totalLimitBytes: totalLimit };
+}
 export async function observeProcessTable(checked, platform) {
   if (platform === 'win32') {
     const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}},@{n="executable";e={$_.ExecutablePath}},@{n="startedAt";e={$_.CreationDate.ToUniversalTime().ToString("o")}} | ConvertTo-Json -Compress';
@@ -90,17 +109,30 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
   const [index, uuid] = (await smi(['-i', '1', '--query-gpu=index,uuid', '--format=csv,noheader'])).split(',').map(s => s.trim());
   assert.equal(index, '1'); assert.equal(uuid.toLowerCase(), a.gpuUuid.toLowerCase());
-  const masked = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: '1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim();
+  const [masked = '', luidField] = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: '1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim().split(/\s+/);
   assert.equal(masked.toLowerCase(), uuid.toLowerCase(), 'masked CUDA0 must be physical GPU1');
+  const luid = /^luid=(0x[0-9a-f]{8}_0x[0-9a-f]{8})$/i.exec(luidField ?? '')?.[1]?.toLowerCase();
   const xml = await smi(['-i', '1', '-q', '-x']); assert(xml.includes('<processes>') && xml.includes(uuid), 'GPU1 process identity unavailable');
+  const types = new Map();
   for (const [, block] of xml.matchAll(/<process_info>([\s\S]*?)<\/process_info>/g)) {
     const pid = Number(/<pid>([^<]+)<\/pid>/.exec(block)?.[1]), type = /<type>([^<]+)<\/type>/.exec(block)?.[1]?.trim();
     assert(Number.isInteger(pid) && ['C', 'G', 'C+G'].includes(type));
-    assert(type !== 'C' || ownPids.includes(pid), 'foreign pure-compute process on GPU1');
+    assert(type !== 'C' || ownPids.includes(pid), 'foreign pure-compute process on GPU1'); types.set(pid, type);
   }
   const apps = (await smi(['--query-compute-apps=pid,gpu_uuid', '--format=csv,noheader,nounits'])).split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(x => x.trim()));
-  for (const [pid, device] of apps) { assert(Number.isInteger(Number(pid)) && Number(pid) > 0 && /^GPU-/i.test(device), 'compute-app identity unavailable'); if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0'); else assert.notEqual(device.toLowerCase(), uuid.toLowerCase(), 'foreign process actually computing on GPU1 (including C+G)'); }
-  return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)) };
+  const foreign = [];
+  for (const [pid, device] of apps) {
+    assert(Number.isInteger(Number(pid)) && Number(pid) > 0 && /^GPU-/i.test(device), 'compute-app identity unavailable');
+    if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0');
+    else if (device.toLowerCase() === uuid.toLowerCase()) { assert.equal(types.get(Number(pid)), 'C+G', 'foreign process actually computing on GPU1 (pure compute or unidentified type)'); foreign.push(Number(pid)); }
+  }
+  let memory = new Map();
+  if (foreign.length) {
+    assert(luid, 'foreign desktop C+G on GPU1 is unmeasurable: CUDA reported no adapter LUID; refusing');
+    memory = new Map((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid)], { timeout: 30_000 })).stdout.split(/\r?\n/).filter(Boolean).map(line => line.trim().split(',').map(Number)));
+  }
+  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory) };
+  return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)), foreignGraphics };
 }
 // Called ONLY by the adapter's synchronous native-boundary child CLI, before reservation.
 // No resource template can supply its own process/build/hardware observation.
@@ -169,7 +201,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     }
     assert.equal(await io.hash(a.binary), a.binarySha256, 'prebuilt binary mismatch');
     if (!dependencies.skipPinReadForFixture) assertPins(await Promise.all(['Cargo.toml', 'crates/sceneworks-worker/Cargo.toml', 'crates/sceneworks-memory-adapter/Cargo.toml'].map(f => io.readFile(path.join(ROOT, f), 'utf8'))), await io.readFile(path.join(ROOT, 'Cargo.lock'), 'utf8'), a.inferenceMainSha);
-    await guard();
+    const deviceAtLaunch = await guard();
     if (a.approvedProvisioning?.length) {
       assert(a.actualRun === true && !a.faultProfile, 'provisioning and injected faults are mutually exclusive');
       try {
@@ -225,7 +257,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     };
     const started = await startWorker();
     monitor = setInterval(() => { if (monitoring || restarting || closing) return; monitoring = true; monitorTask = (async () => { try { alive(); assert(api.exitCode === null && api.signalCode === null && worker.exitCode === null && worker.signalCode === null, 'owned service exited'); await guard(); } catch (e) { abort.abort(e); } finally { monitoring = false; } })(); }, 2000);
-    return { endpoint, identity, execution, artifactMapping, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
+    return { endpoint, identity, execution, artifactMapping, deviceAtLaunch, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
       async trainingWitness(plan) {
         assert(workerPaused, 'CPU witness must run with only our GPU worker paused');
         if (!dependencies.fixtureOnly) { const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a); }

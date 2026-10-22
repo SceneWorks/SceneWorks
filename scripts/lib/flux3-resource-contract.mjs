@@ -365,6 +365,9 @@ export function verifyNativeResourceCapture(value, { admission, invocation, adap
   if (admission.backend === 'candle') {
     if (proof?.physicalGpuId !== '1' || proof.gpuUuid?.toLowerCase() !== admission.gpuUuid?.toLowerCase()
       || proof.logicalCudaOrdinal !== 0 || !proof.ownComputePids?.includes(adapterPid)) fail('GPU1 UUID/PID proof missing');
+    // The measured foreign desktop share of GPU1 is part of the anchor's evidence: it is memory the
+    // anchor did NOT have, so it must be recorded rather than silently absorbed into headroom.
+    if (!Number.isSafeInteger(proof.foreignGraphics?.totalBytes) || !Number.isSafeInteger(proof.foreignGraphics?.processes)) fail('GPU1 foreign desktop memory observation missing');
   } else if (!['nax-macos', 'nax-macos-2'].includes(admission.runner) || proof?.runner !== admission.runner || proof.host?.split('.')[0] !== admission.hostName || proof.runtime?.platform !== 'darwin'
     || proof.runtime?.arch !== 'arm64' || !proof.coordinatorLeaseId || proof.exclusivity !== 'coordinator-attested-and-process-monitored') fail('secondary Mac runtime/host/lease proof missing');
   const spec = value.actualLoadSpec;
