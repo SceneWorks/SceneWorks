@@ -12,7 +12,7 @@ import { prepareCorpusInputs, downloadExact } from "./starvector-terminal-provis
 import { treeIdentity, validateCorpusAssets, validateTerminalServiceClosure } from "./starvector-terminal-readiness.mjs";
 import { terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 import { materializeLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
-import { assertTerminalCudaWorkerGpuIdentity, assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
+import { assertTerminalCudaWorkerGpuIdentity, assertTerminalProductWorkerReady, closureTreeHash, copyRegularTree, productServiceActiveStatePath, productServiceBackendEnv, productServiceBuildArgs, productServiceLogPaths, productServiceLogsIdentity, productServiceStateRoot, productServiceTaskkillArguments, relocateProductServiceLibrary, reloadOwnedWorker, runProductServiceGpuPreflight, stopProductService, unloadOwnedWorker, terminalProductWorkerContract, terminalProductWorkerId, validateTerminalProductWorkerReadiness, waitForTerminalProductWorker } from "./starvector-terminal-product-service.mjs";
 
 const workflow = await readFile(".github/workflows/starvector-terminal.yml", "utf8");
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
@@ -793,7 +793,7 @@ test("owned reload rejects changed binary and preserves an unloaded API for fina
     // never write into that shared executable inode.
     await rename(binary, original);
     await writeFile(binary, "changed binary");
-    try { await assert.rejects(() => runProductServiceCli(fixture, "reload-worker", 0), /binary differs from initial provenance/); }
+    try { await assert.rejects(() => reloadOwnedWorker(fixture.root, fixture.output), /binary differs from initial provenance/); }
     finally { await rm(binary); await rename(original, binary); }
     assert.doesNotThrow(() => process.kill(record.api_pid, 0));
     await runProductServiceCli(fixture, "stop", 0); record = null;

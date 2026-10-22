@@ -2006,6 +2006,11 @@ fn collect_strings(value: &Value, output: &mut Vec<String>) {
 fn normalize_family(value: &str) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     for (needle, family) in [
+        // MiniMax-H3's diffusers `_class_name` (`MiniMaxH3Transformer3DModel`, sc-26680). First so
+        // no broader needle below can claim it.
+        ("minimaxh3", "minimax-h3"),
+        ("minimax_h3", "minimax-h3"),
+        ("minimax-h3", "minimax-h3"),
         ("stable diffusion xl", "sdxl"),
         ("stablediffusionxl", "sdxl"),
         ("sdxl", "sdxl"),

@@ -2481,3 +2481,124 @@ async fn a_cancelled_managed_import_leaves_no_partial_install() {
 
     fixture.assert_nothing_installed("cancel");
 }
+
+/// The managed import job for a dense MiniMax-H3 DiT DIRECTORY (sc-26680), with the request
+/// guessing `type: "image"` — content decides.
+fn h3_import_job(fixture: &ManagedImportFixture, source: &std::path::Path) -> JobSnapshot {
+    let mut job = fixture.job(None);
+    job.payload.insert(
+        "sourcePath".to_owned(),
+        json!(source.to_str().expect("utf-8 source")),
+    );
+    let entry = job
+        .payload
+        .get_mut("manifestEntry")
+        .and_then(Value::as_object_mut)
+        .expect("manifest entry");
+    // What the API's synchronous gate resolved the family to from the same bytes.
+    entry.insert("family".to_owned(), json!("minimax-h3"));
+    job
+}
+
+/// sc-26680 AC1: a dense H3 DiT component directory imported through the existing managed import
+/// job persists a plan the H3 assembly binds and becomes a selectable VIDEO entry carrying the
+/// validated binding — the shape `minimax_h3_import_fixture::stage_managed_minimax_h3_import`
+/// builds for the arm tests, pinned here against the real job.
+#[tokio::test]
+async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
+    let _env = isolate_hf_cache();
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture_with_id(base_url, "my_h3_finetune").await;
+    let source = fixture.settings.data_dir.join("models/incoming/my-h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &h3_import_job(&fixture, &source),
+    )
+    .await
+    .expect("a dense H3 DiT directory imports");
+
+    let entry = fixture.manifest_entry().expect("the import writes a manifest entry");
+    let entry = entry.as_object().expect("entry object");
+    assert_eq!(entry["type"], json!("video"), "content decides the type");
+    assert_eq!(entry["family"], json!("minimax-h3"));
+    assert_eq!(entry["importSourceShape"], json!("transformer_directory"));
+    assert_eq!(entry["importQuantFormat"], json!("bf16"));
+    assert_eq!(
+        entry["importPlan"]["checkpointId"],
+        json!("managed/my_h3_finetune")
+    );
+    assert!(
+        sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(entry),
+        "the job must stamp the binding every consumer keys on: {entry:?}"
+    );
+    assert_eq!(
+        entry["capabilities"],
+        json!(["text_to_video", "image_to_video", "first_last_frame"])
+    );
+    assert!(entry.get("loraCompatibility").is_none());
+
+    // The binding is the persisted plan's own, re-derived through the store.
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+    let resolved = store
+        .resolve("managed/my_h3_finetune")
+        .expect("the persisted plan resolves");
+    assert_eq!(resolved.family(), "minimax-h3");
+    sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
+        .expect("the stamped binding is the plan's");
+    assert_eq!(entry["importPlan"]["planId"], json!(resolved.plan.plan_id));
+    assert!(
+        sceneworks_core::base_weights::is_minimax_h3_transformer_dir(&fixture.install_dir),
+        "the install is the complete DiT directory the provider opens"
+    );
+
+    // And the arm-test fixture builds the same discriminating fields the job wrote.
+    let data = tempdir().expect("tempdir");
+    let staged =
+        crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(data.path(), "twin");
+    for key in ["type", "family", "importSourceShape", "capabilities", "limits"] {
+        assert_eq!(staged.entry[key], entry[key], "{key}");
+    }
+    assert_eq!(
+        staged.entry["importPlan"]["assembly"],
+        entry["importPlan"]["assembly"]
+    );
+}
+
+/// sc-26680 E6: an H3 directory carrying a second weight file is an ambiguous assembly — the
+/// provider would map it unbound — so the job refuses and nothing is installed or registered.
+#[tokio::test]
+async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_installed() {
+    let _env = isolate_hf_cache();
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture_with_id(base_url, "stray_h3").await;
+    let source = fixture.settings.data_dir.join("models/incoming/stray-h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    crate::minimax_h3_import_fixture::write_safetensors(
+        &source.join("extra.safetensors"),
+        &[("token_refiner.refiner_blocks.0.x.weight", "BF16")],
+        0x01,
+    );
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    let _ = super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &h3_import_job(&fixture, &source),
+    )
+    .await;
+
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "an ambiguous H3 assembly must never become a catalog entry"
+    );
+    assert!(!fixture.install_dir.exists(), "nothing may stay installed");
+}

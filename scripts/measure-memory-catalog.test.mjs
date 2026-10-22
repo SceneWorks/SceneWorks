@@ -160,6 +160,7 @@ import {
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const UPSTREAM = "fedcba9876543210fedcba9876543210fedcba98";
+const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
 
 function fakeModels() {
   return [
@@ -7090,8 +7091,6 @@ async function fakePlanRoot(anchors, models) {
   );
   return root;
 }
-
-const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
 
 function downloadFixture() {
   return {

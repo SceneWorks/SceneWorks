@@ -387,6 +387,8 @@ fn apply_family_studio_surface_defaults(entry: &mut Map<String, Value>, family: 
     match family {
         "krea-2" => apply_krea_2_studio_surface_defaults(entry),
         "mage-flow" => apply_mage_flow_studio_surface_defaults(entry),
+        // sc-26680: an imported dense MiniMax-H3 DiT takes the shipped base partition's surface.
+        "minimax-h3" => crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(entry),
         _ => {}
     }
 }
