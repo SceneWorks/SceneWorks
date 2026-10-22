@@ -1176,6 +1176,10 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
   assert.doesNotMatch(job, /^    continue-on-error:/m);
   assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(job, /Initialize private browser fixture paths/);
+  assert.match(job, /actions\/setup-node@[0-9a-f]{40}/);
+  assert.match(job, /node-version: "20"/);
+  assert.match(job, /Validate browser fixture producer selection contracts/);
+  assert.match(job, /node --test --test-reporter=spec scripts\/platform-review-contracts\.test\.mjs scripts\/remote-macos-verification\.test\.mjs/);
   assert.match(job, /CARGO_TARGET_DIR=\$root\/target/);
   assert.match(job, /BROWSER_FIXTURE_OUTPUT=\$root\/output/);
   for (const entry of [
@@ -1203,9 +1207,16 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
   assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
   assert.match(job, /artifact source must be the exact clean workflow SHA/);
   assert.match(job, /cargo-artifacts\.jsonl/);
+  assert.match(job, /producer-contract-node-version\.txt/);
+  assert.match(job, /producer-contract-tests\.txt/);
+  assert.match(job, /producerContractCommand/);
+  assert.match(job, /producerContractNodeVersion/);
   assert.match(job, /PMETAL_METALLIB_PATH/);
   assert.match(job, /Exact prebuilt unavailable; compiling the pinned MLX source/);
-  assert.match(job, /find "\$CARGO_TARGET_DIR" -type f -name mlx\.metallib/);
+  assert.match(job, /pmetal-mlx-sys-\*\/out\/build\/lib\/mlx\.metallib/);
+  assert.match(job, /build-companion\.json/);
+  assert.match(job, /runtimeRequirementValidated/);
+  assert.doesNotMatch(job, /metallibLaunchEnv/);
   const upload = workflowStep(job, "Upload complete browser fixture artifact");
   assert.match(upload, /uses: actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(upload, /name: rust-api-browser-libtest-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);

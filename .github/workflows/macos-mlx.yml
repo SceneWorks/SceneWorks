@@ -534,6 +534,14 @@ jobs:
             echo "CARGO_TARGET_DIR=$root/target"
             echo "BROWSER_FIXTURE_OUTPUT=$root/output"
           } >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Validate browser fixture producer selection contracts
+        run: |
+          set -euo pipefail
+          node --version > "$BROWSER_FIXTURE_OUTPUT/producer-contract-node-version.txt"
+          node --test --test-reporter=spec scripts/platform-review-contracts.test.mjs scripts/remote-macos-verification.test.mjs | tee "$BROWSER_FIXTURE_OUTPUT/producer-contract-tests.txt"
       - name: Fetch current prebuilt MLX metallib
         run: |
           set +e
@@ -585,14 +593,45 @@ jobs:
           PY
           executable="$(cat "$BROWSER_FIXTURE_OUTPUT/executable-path.txt")"
           cp "$executable" "$BROWSER_FIXTURE_OUTPUT/sceneworks-rust-api-libtest"
+          companion="$BROWSER_FIXTURE_OUTPUT/build-companion.json"
           if [ -n "${PMETAL_METALLIB_PATH:-}" ] && [ -f "$PMETAL_METALLIB_PATH" ]; then
             metallib="$PMETAL_METALLIB_PATH"
+            companion_source="prebuilt"
           else
-            metallib="$(find "$CARGO_TARGET_DIR" -type f -name mlx.metallib -print)"
-            test -n "$metallib"
-            test "$(printf '%s\n' "$metallib" | wc -l | tr -d ' ')" = 1
+            candidates=()
+            for candidate in "$CARGO_TARGET_DIR"/debug/build/pmetal-mlx-sys-*/out/build/lib/mlx.metallib; do
+              [ -f "$candidate" ] && candidates+=("$candidate")
+            done
+            case "${#candidates[@]}" in
+              0) metallib="" ;;
+              1) metallib="${candidates[0]}"; companion_source="source-build-install" ;;
+              *) echo "::error::Ambiguous installed mlx.metallib build companions."; exit 1 ;;
+            esac
           fi
-          cp "$metallib" "$BROWSER_FIXTURE_OUTPUT/mlx.metallib"
+          if [ -n "$metallib" ]; then
+            cp "$metallib" "$BROWSER_FIXTURE_OUTPUT/mlx.metallib"
+            python3 - "$companion" "$metallib" "$companion_source" <<'PY'
+          import json
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "present": True,
+              "sourcePath": sys.argv[2],
+              "source": sys.argv[3],
+              "runtimeRequirementValidated": False,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          else
+            python3 - "$companion" <<'PY'
+          import json
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "present": False,
+              "runtimeRequirementValidated": False,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          fi
           "$BROWSER_FIXTURE_OUTPUT/sceneworks-rust-api-libtest" --list > "$BROWSER_FIXTURE_OUTPUT/test-list.txt"
           grep -Fx 'tests::browser_fixture::serve_owned_manual_browser_fixture: test' "$BROWSER_FIXTURE_OUTPUT/test-list.txt"
       - name: Record fixture artifact identity
@@ -618,7 +657,10 @@ jobs:
           pins = set(re.findall(r"https://github\.com/SceneWorks/inference\?rev=([0-9a-f]{40})#", lock))
           if len(pins) != 1:
               raise SystemExit(f"expected one inference pin, got {sorted(pins)!r}")
-          files = ["sceneworks-rust-api-libtest", "mlx.metallib", "cargo-artifacts.jsonl", "test-list.txt", "executable-path.txt"]
+          build_companion = json.loads((output / "build-companion.json").read_text())
+          files = ["sceneworks-rust-api-libtest", "cargo-artifacts.jsonl", "test-list.txt", "executable-path.txt", "producer-contract-node-version.txt", "producer-contract-tests.txt", "build-companion.json"]
+          if build_companion["present"]:
+              files.append("mlx.metallib")
           source_head = text(["git", "rev-parse", "HEAD"])
           source_clean = text(["git", "status", "--porcelain"]) == ""
           if source_head != os.environ["GITHUB_SHA"] or not source_clean:
@@ -653,7 +695,10 @@ jobs:
               "package": "sceneworks-rust-api",
               "target": "sceneworks_rust_api",
               "manualFixture": "tests::browser_fixture::serve_owned_manual_browser_fixture",
-              "metallibLaunchEnv": "PMETAL_METALLIB_PATH=mlx.metallib",
+              "producerContractCommand": "node --test --test-reporter=spec scripts/platform-review-contracts.test.mjs scripts/remote-macos-verification.test.mjs",
+              "producerContractNodeVersion": (output / "producer-contract-node-version.txt").read_text().strip(),
+              "buildCompanion": build_companion,
+              "runtimeRequirementValidated": False,
               "files": {name: {"sha256": digest(output / name), "bytes": (output / name).stat().st_size} for name in files},
           }
           (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
