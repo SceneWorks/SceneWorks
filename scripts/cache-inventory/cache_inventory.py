@@ -54,19 +54,86 @@ IRIS_SNAPSHOT_FILES = (
 )
 
 
-def _build_allowlist():
-    paths = []
-    for repo in (IRIS_REPO, QWEN_REPO):
-        paths += [repo, f"{repo}/blobs", f"{repo}/snapshots", f"{repo}/snapshots/rev"]
-    paths += [f"{IRIS_REPO}/snapshots/rev/depth", f"{IRIS_REPO}/snapshots/rev/upscaler"]
-    paths += [f"{IRIS_REPO}/blobs/{name}" for name in IRIS_BLOBS]
-    paths += [f"{IRIS_REPO}/snapshots/rev/{name}" for name in IRIS_SNAPSHOT_FILES]
-    paths += [f"{QWEN_REPO}/blobs/encoder-config", f"{QWEN_REPO}/snapshots/rev/config.json"]
+# f8c46 variant_delete_tests fixture repos, from the tests' own `repo_name` /
+# `huggingface_repo_cache_path` literals. The adapter repo is a REAL Hugging Face repo name; only
+# the tests' fixture-named blobs/links (literal snapshots/rev) are listed, never a real revision.
+MINIMAX_REPO = "models--SceneWorks--minimax-h3-mlx"
+ADAPTER_REPO = "models--ostris--zimage_turbo_training_adapter"
+SOLO_REPO = "models--Org--solo-model"
+PAIR_REPO = "models--SceneWorks--whole-repo-pair"
+
+
+def _repo_tree(repo, dirs, blobs, links):
+    """Fixed repo-level directories, blob names and snapshots/rev links for one fixture repo."""
+    paths = [repo, f"{repo}/blobs", f"{repo}/snapshots", f"{repo}/snapshots/rev"]
+    paths += [f"{repo}/snapshots/rev/{name}" for name in dirs]
+    paths += [f"{repo}/blobs/{name}" for name in blobs]
+    paths += [f"{repo}/snapshots/rev/{name}" for name in links]
     return tuple(paths)
 
 
-ALLOWLIST = _build_allowlist()
-assert len(ALLOWLIST) == 28 and len(set(ALLOWLIST)) == 28
+def _build_groups():
+    f203 = []
+    for repo in (IRIS_REPO, QWEN_REPO):
+        f203 += [repo, f"{repo}/blobs", f"{repo}/snapshots", f"{repo}/snapshots/rev"]
+    f203 += [f"{IRIS_REPO}/snapshots/rev/depth", f"{IRIS_REPO}/snapshots/rev/upscaler"]
+    f203 += [f"{IRIS_REPO}/blobs/{name}" for name in IRIS_BLOBS]
+    f203 += [f"{IRIS_REPO}/snapshots/rev/{name}" for name in IRIS_SNAPSHOT_FILES]
+    f203 += [f"{QWEN_REPO}/blobs/encoder-config", f"{QWEN_REPO}/snapshots/rev/config.json"]
+
+    # seed_minimax_tier(repo, tier, base, ref, size) is called with ("q4","q4dit","q4refdit") and
+    # ("bf16","bf16dit","bf16refdit"): a shared `<tier>-config` blob, `<etag>-index` and `<etag>`
+    # blobs per partition, and three snapshot links per tier/partition.
+    tiers = (("q4", "q4dit", "q4refdit"), ("bf16", "bf16dit", "bf16refdit"))
+    partitions = ("transformer", "transformer_ref")
+    dirs, blobs, links = [], [], []
+    for tier, base_etag, ref_etag in tiers:
+        dirs += [tier] + [f"{tier}/{part}" for part in partitions]
+        blobs += [f"{tier}-config", f"{base_etag}-index", base_etag, f"{ref_etag}-index", ref_etag]
+        for part in partitions:
+            links += [
+                f"{tier}/{part}/config.json",
+                f"{tier}/{part}/diffusion_pytorch_model.safetensors.index.json",
+                f"{tier}/{part}/diffusion_pytorch_model-00001-of-00001.safetensors",
+            ]
+    return (
+        ("f203_iris_qwen", tuple(f203)),
+        ("f8c46_minimax_h3_shared_repo", _repo_tree(MINIMAX_REPO, dirs, blobs, links)),
+        (
+            "f8c46_zimage_training_adapter",
+            _repo_tree(
+                ADAPTER_REPO,
+                [],
+                ["v1blob", "v2blob"],
+                [
+                    "zimage_turbo_training_adapter_v1.safetensors",
+                    "zimage_turbo_training_adapter_v2.safetensors",
+                ],
+            ),
+        ),
+        (
+            "f8c46_exclusive_solo_model",
+            _repo_tree(
+                SOLO_REPO,
+                ["q4", "q4/transformer"],
+                ["q4dit", "readme"],
+                ["q4/transformer/model.safetensors", "README.md"],
+            ),
+        ),
+        (
+            "f8c46_unscoped_whole_repo_pair",
+            _repo_tree(PAIR_REPO, [], ["dit"], ["model.safetensors"]),
+        ),
+    )
+
+
+GROUPS = _build_groups()
+ALLOWLIST = tuple(path for _, paths in GROUPS for path in paths)
+GROUP_OF = {path: name for name, paths in GROUPS for path in paths}
+GROUP_COUNTS = {name: len(paths) for name, paths in GROUPS}
+assert len(ALLOWLIST) == len(set(ALLOWLIST)) == 84, len(ALLOWLIST)
+assert GROUP_COUNTS["f203_iris_qwen"] == 28
+MAX_REPORT_BYTES = 32 * 1024
 
 LIMITATIONS = (
     "Metadata only (lstat/readlink); not product evidence and no host-impact claim by itself.",
@@ -76,6 +143,11 @@ LIMITATIONS = (
     "no file contents or hashes are read.",
     "Only fixture-named paths (literal snapshots/rev, fixed blob names) are checked; a deletion "
     "against a real non-'rev' snapshot of the same repos is outside this allowlist.",
+    "Provenance: groups f203_* come from the f203ec37 Iris/Qwen tests and f8c46_* from the f8c46 "
+    "variant_delete_tests fixtures (minimax shared repo, zimage adapter, solo model, whole-repo "
+    "pair). Behavior is source-derived; nothing proves the old test processes used this root.",
+    "The zimage adapter and minimax repo names are real Hugging Face repos: real revisions or "
+    "files in them are NOT inventoried, so real-install state and pre-state are unknown.",
     "Without HF_HUB_CACHE, HUGGINGFACE_HUB_CACHE or HF_HOME the old tests resolve to a temporary "
     "data_dir; no persistent root is resolvable here and the result is UNKNOWN (nothing scanned).",
 )
@@ -159,14 +231,13 @@ def _meta(st):
         "type": _kind(st.st_mode),
         "mode": oct(stat.S_IMODE(st.st_mode)),
         "size": st.st_size,
-        "mtime_ns": st.st_mtime_ns,
         "mtime": _iso(st.st_mtime_ns),
     }
 
 
 def inspect_path(resolved_root, relative):
     """lstat one allowlisted relative path without following any symlink."""
-    entry = {"path": relative}
+    entry = {"path": relative, "group": GROUP_OF.get(relative)}
     current = resolved_root
     parts = relative.split("/")
     for index, part in enumerate(parts):
@@ -267,6 +338,11 @@ def build_report(env, now=None, home=None):
         return report
     report["root_status"] = "RESOLVED"
     report["entries"] = [inspect_path(resolved, rel) for rel in ALLOWLIST]
+    groups = {name: {"count": count} for name, count in GROUP_COUNTS.items()}
+    for entry in report["entries"]:
+        tally = groups[entry["group"]]
+        tally[entry["status"]] = tally.get(entry["status"], 0) + 1
+    report["groups"] = groups
     return report
 
 
@@ -293,6 +369,13 @@ def validate_output_dir(output_dir, runner_temp, cache_root):
     return final
 
 
+def _serialize(report, enforce_cap=True):
+    text = json.dumps(report, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    if enforce_cap and len(text.encode("utf-8")) > MAX_REPORT_BYTES:
+        raise ValueError("report exceeds the size cap")
+    return text
+
+
 def main(argv=None, env=None):
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--output-dir", required=True)
@@ -304,6 +387,7 @@ def main(argv=None, env=None):
     try:
         report = build_report(env, home=env.get("HOME"))
         status = 0 if report["root_status"] in ("RESOLVED", "UNKNOWN") else 3
+        text = _serialize(report)
     except Exception as exc:  # the artifact must exist even when the diagnostic fails
         report = {
             "schema_version": SCHEMA_VERSION,
@@ -316,9 +400,9 @@ def main(argv=None, env=None):
             "entries": [],
         }
         status = 1
+        text = _serialize(report, enforce_cap=False)  # fixed small error shape
     with open(os.path.join(output, REPORT_NAME), "x", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
+        handle.write(text)
     print(f"{REPORT_NAME}: root_status={report['root_status']} entries={len(report['entries'])}")
     return status
 

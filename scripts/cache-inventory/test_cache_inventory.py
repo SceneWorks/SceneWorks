@@ -65,16 +65,53 @@ class Fixture(unittest.TestCase):
 
 class AllowlistTests(unittest.TestCase):
     def test_allowlist_is_finite_relative_and_fixture_scoped(self):
-        self.assertEqual(len(ci.ALLOWLIST), 28)
-        self.assertEqual(len(set(ci.ALLOWLIST)), 28)
+        self.assertEqual(len(ci.ALLOWLIST), 84)
+        self.assertEqual(len(set(ci.ALLOWLIST)), 84)
+        repos = {IRIS, QWEN, ci.MINIMAX_REPO, ci.ADAPTER_REPO, ci.SOLO_REPO, ci.PAIR_REPO}
         for rel in ci.ALLOWLIST:
             self.assertFalse(os.path.isabs(rel))
             self.assertNotIn("..", rel.split("/"))
-            self.assertTrue(rel.startswith((IRIS, QWEN)), rel)
+            self.assertIn(rel.split("/")[0], repos, rel)
+            # only literal fixture revision "rev" ever appears under snapshots/
+            parts = rel.split("/")
+            if len(parts) > 2 and parts[1] == "snapshots":
+                self.assertEqual(parts[2], "rev", rel)
+        self.assertEqual({rel.split("/")[0] for rel in ci.ALLOWLIST}, repos)
+        self.assertEqual(
+            ci.GROUP_COUNTS,
+            {
+                "f203_iris_qwen": 28,
+                "f8c46_minimax_h3_shared_repo": 32,
+                "f8c46_zimage_training_adapter": 8,
+                "f8c46_exclusive_solo_model": 10,
+                "f8c46_unscoped_whole_repo_pair": 6,
+            },
+        )
+        # f203 behavior is preserved verbatim
         self.assertIn(f"{IRIS}/blobs/empty-prompt-blob", ci.ALLOWLIST)
         self.assertIn(f"{IRIS}/snapshots/rev/upscaler/empty_prompt.safetensors", ci.ALLOWLIST)
         self.assertNotIn(f"{IRIS}/blobs/blob7", ci.ALLOWLIST)
-        self.assertEqual({rel.split("/")[0] for rel in ci.ALLOWLIST}, {IRIS, QWEN})
+        self.assertEqual(list(ci.ALLOWLIST[:28]), list(ci.GROUPS[0][1]))
+
+    def test_f8c46_fixture_names_match_the_source_seed_helpers(self):
+        m = ci.MINIMAX_REPO
+        for rel in (
+            "blobs/q4-config", "blobs/q4dit", "blobs/q4dit-index", "blobs/q4refdit",
+            "blobs/q4refdit-index", "blobs/bf16-config", "blobs/bf16refdit-index",
+            "snapshots/rev/q4/transformer/config.json",
+            "snapshots/rev/q4/transformer_ref/config.json",
+            "snapshots/rev/bf16/transformer_ref/diffusion_pytorch_model-00001-of-00001.safetensors",
+            "snapshots/rev/bf16/transformer/diffusion_pytorch_model.safetensors.index.json",
+        ):
+            self.assertIn(f"{m}/{rel}", ci.ALLOWLIST)
+        a = ci.ADAPTER_REPO
+        for rel in ("blobs/v1blob", "blobs/v2blob", "snapshots/rev/zimage_turbo_training_adapter_v1.safetensors"):
+            self.assertIn(f"{a}/{rel}", ci.ALLOWLIST)
+        self.assertIn(f"{ci.SOLO_REPO}/snapshots/rev/README.md", ci.ALLOWLIST)
+        self.assertIn(f"{ci.SOLO_REPO}/blobs/readme", ci.ALLOWLIST)
+        self.assertIn(f"{ci.PAIR_REPO}/blobs/dit", ci.ALLOWLIST)
+        # q8 is not seeded by the four named tests
+        self.assertFalse([p for p in ci.ALLOWLIST if "q8" in p])
 
 
 class ResolverTests(unittest.TestCase):
@@ -117,7 +154,7 @@ class InspectTests(Fixture):
         self.seed_iris()
         report = ci.build_report(self.env(), home=str(self.base))
         self.assertEqual(report["root_status"], "RESOLVED")
-        self.assertEqual(len(report["entries"]), 28)
+        self.assertEqual(len(report["entries"]), 84)
         got = self.entries(report)
         self.assertEqual(got[f"{IRIS}/blobs/blob0"]["status"], "present")
         self.assertEqual(got[f"{IRIS}/blobs/blob0"]["size"], 10)
@@ -233,7 +270,7 @@ class InspectTests(Fixture):
         root = str(self.root)
         # realpath() of the root lstat()s only the root's own ancestors; everything else must sit on
         # an allowlisted path.
-        self.assertLessEqual(len(calls), 20 + 28 * 5)
+        self.assertLessEqual(len(calls), 20 + 84 * 5)
         allowed = {os.path.join(root, rel) for rel in ci.ALLOWLIST}
         for call in calls:
             if root.startswith(call + os.sep) or call == root:
@@ -311,6 +348,34 @@ class PrivacyTests(Fixture):
         self.assertEqual(self.run_main_for(out), 0)
         self.assertLess((out / "cache-inventory.json").stat().st_size, 32 * 1024)
 
+    def test_all_present_report_stays_under_cap_and_tallies_groups(self):
+        paths = set(ci.ALLOWLIST)
+        parents = {os.path.dirname(p) for p in paths}
+        for rel in sorted(paths):
+            full = self.root / rel
+            if rel in parents:
+                full.mkdir(parents=True, exist_ok=True)
+        for rel in sorted(paths - parents):
+            full = self.root / rel
+            full.parent.mkdir(parents=True, exist_ok=True)
+            if "/snapshots/rev/" in rel:
+                os.symlink("../../blobs/x", full)
+            else:
+                full.write_bytes(b"z")
+        out = self.runner_temp / "inv-full"
+        self.assertEqual(self.run_main_for(out), 0)
+        raw = (out / "cache-inventory.json").read_bytes()
+        self.assertLess(len(raw), ci.MAX_REPORT_BYTES)
+        report = json.loads(raw.decode("utf-8"))
+        self.assertEqual(sum(g.get("present", 0) for g in report["groups"].values()), 84)
+        self.assertEqual({e["group"] for e in report["entries"]}, set(ci.GROUP_COUNTS))
+
+    def test_oversized_report_becomes_an_error_artifact(self):
+        out = self.runner_temp / "inv-big"
+        with mock.patch.object(ci, "MAX_REPORT_BYTES", 10):
+            self.assertEqual(self.run_main_for(out), 1)
+        self.assertEqual(json.loads((out / "cache-inventory.json").read_text())["root_status"], "ERROR")
+
     def run_main_for(self, out):
         with contextlib.redirect_stdout(io.StringIO()):
             return ci.main(["--output-dir", str(out)], env=self.env())
@@ -336,7 +401,7 @@ class MainTests(Fixture):
         report = json.loads(text)
         self.assertEqual(report["diagnosed_failed_run_id"], "39687007308")
         self.assertEqual(report["diagnostic"]["run_id"], "7")
-        self.assertEqual(report["allowlist_count"], 28)
+        self.assertEqual(report["allowlist_count"], 84)
         self.assertNotIn("sekrit-token", text)
         self.assertNotIn("PATH", report["resolver"])
         self.assertEqual(sorted(p.name for p in out.iterdir()), ["cache-inventory.json"])
