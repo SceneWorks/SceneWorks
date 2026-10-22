@@ -2764,7 +2764,7 @@ export function ImageStudio() {
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
       }
     })();
@@ -2804,7 +2804,7 @@ export function ImageStudio() {
           if (current) replaceBatchRun({ ...current, submitting: false });
           return;
         }
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         const promptBudgetOverages = batchPromptBudgetOverages(
           [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
           1,
@@ -2831,7 +2831,7 @@ export function ImageStudio() {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        const item = parsePromptResolution(entry.prompt);
+        const item = parsePromptResolution(entry.prompt, resolutionOptions);
         if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
           yield chunk;
           chunk = [];
@@ -2947,9 +2947,9 @@ export function ImageStudio() {
       restorePlanBodyForRenders({
         width,
         height,
-        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions).resolution) : [],
       }),
-    [batchMode, batchPrompts, height, width],
+    [batchMode, batchPrompts, height, width, resolutionOptions],
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
@@ -2959,7 +2959,7 @@ export function ImageStudio() {
   // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
   // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line).resolution)
+    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
     .filter(
       (res) =>
         res &&
@@ -3165,6 +3165,7 @@ export function ImageStudio() {
             <div className="prompt-input-row batch">
               <BatchPromptPanel
                 promptsText={batchPromptsText}
+                resolutionOptions={resolutionOptions}
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}
