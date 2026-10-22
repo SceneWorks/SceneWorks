@@ -39,8 +39,8 @@ export function targetRegistry({ models, capabilities }) {
 }
 const placement = { version: 1, boxes: [{ id: 'teapot', desc: 'teal ceramic teapot', bbox: [0.125, 0.25, 0.75, 0.875], bbox_space: 'normalized' }] };
 const edits = { version: 1, boxes: [
-  { id: 'move', desc: 'move the teapot', from: 'ref_image_0', reference_id: 'slot-0', src_bbox: [0.125, 0.25, 0.75, 0.875], src_space: 'normalized', tgt_bbox: [0.25, 0.125, 0.875, 0.75], tgt_space: 'normalized' },
-  { id: 'remove', desc: 'remove the cup', from: 'ref_image_0', reference_id: 'slot-0', src_bbox: [0.01, 0.02, 0.11, 0.12], src_space: 'normalized', tgt_bbox: null },
+  { id: 'move', desc: 'move the subject', from: 'ref_image_0', reference_id: 'slot-0', src_bbox: [0.125, 0.25, 0.75, 0.875], src_space: 'normalized', tgt_bbox: [0.25, 0.125, 0.875, 0.75], tgt_space: 'normalized' },
+  { id: 'remove', desc: 'remove the small object in the corner', from: 'ref_image_0', reference_id: 'slot-0', src_bbox: [0.01, 0.02, 0.11, 0.12], src_space: 'normalized', tgt_bbox: null },
 ] };
 export function terminalCatalog(sources) {
   const targets = targetRegistry(sources), cases = [];
@@ -113,9 +113,13 @@ export function terminalPlan(sources) {
     pick(backend, 'base', 'pup-i2i_bbox', { name: 'representative-move-remove-10', options: { references: 10 } });
     pick(backend, 'base', 'refs-1', { name: 'representative-base-ref-1', options: { width: 768, height: 1024 } });
     pick(backend, 'distilled', 'refs-10', { name: 'representative-distilled-ref-10', options: { width: 1024, height: 768 } });
-    pick(backend, 'distilled', 'lora-zero'); pick(backend, 'distilled', 'lora-on');
-    const train = pick(backend, 'base', `train-interrupt-resume-export-${backend === 'mlx' ? 'edit' : 'captioned'}`);
+    // No paired edit data exists in the provided dataset, so BOTH backends train the captioned
+    // base LoRA (edit training stays an explicit uncovered NOT_RUN). The adapter cases run on the
+    // SAME checkpoint the lifecycle trains (base LoRA identity), strictly AFTER it, bound to the
+    // exact adapter that lifecycle exports on the same backend.
+    const train = pick(backend, 'base', 'train-interrupt-resume-export-captioned');
     trainingLifecycles.push({ lifecycleId: train.caseId, caseId: train.caseId, backend, steps: 4, saveEvery: 1, rank: 4, resolution: 512, startId: `${train.caseId}.training-start`, resumeId: `${train.caseId}.training-resume`, generationReloads: 1 });
+    for (const scenario of ['lora-zero', 'lora-on']) pick(backend, 'base', scenario).adapterBinding = { source: 'training-export', lifecycleId: train.caseId, backend, modelId: train.modelId };
     pick(backend, 'base', 'cancel');
     if (backend === 'candle') for (const [checkpoint, tier] of [['base', 'fp8r'], ['distilled', 'nvfp4']]) pick(backend, checkpoint, 't2i', { tier, name: 'representative-native' });
     // API-only checks never imply additional GPU generations. Actual probes pause only our worker.
@@ -130,7 +134,7 @@ export function terminalPlan(sources) {
     resources.push({ caseId: `${backend}.base.pup_edit.bf16`, backend, modelId: 'flux3_klein_base', tier: 'bf16', kind: 'resource_supplemental', resourcePhase: 'prompt-upsampling', options: { references: 10, enhancePrompt: true, pupMode: 'i2i_bbox', layout: structuredClone(edits) }, artifactKey: `flux3_klein_base:${backend}:bf16`, nativeGenerationCalls: 1, warmups: 0, repeats: 0, status: 'BLOCKED', blocker: 'Native single-call permit boundary unverified; supplemental PUP observations are not anchors or installed-product image proof.' });
   }
   const generationInvocations = [];
-  for (const c of cases.filter(c => ['image', 'replay', 'cancel', 'training'].includes(c.kind))) for (let index = 0; index < (c.kind === 'replay' ? 2 : 1); index++) generationInvocations.push({ invocationId: `${c.caseId}.generation-${index + 1}`, caseId: c.caseId, backend: c.backend, kind: 'product_generation', purpose: c.kind === 'training' ? 'training-reload' : c.kind === 'replay' ? `repro-${index + 1}` : c.kind, modelId: c.modelId, tier: c.tier, options: structuredClone(c.options), nativeGenerationCalls: 1, warmups: 0, repeats: 0 });
+  for (const c of cases.filter(c => ['image', 'replay', 'cancel', 'training'].includes(c.kind))) for (let index = 0; index < (c.kind === 'replay' ? 2 : 1); index++) generationInvocations.push({ invocationId: `${c.caseId}.generation-${index + 1}`, caseId: c.caseId, backend: c.backend, kind: 'product_generation', purpose: c.kind === 'training' ? 'training-reload' : c.kind === 'replay' ? `repro-${index + 1}` : c.kind, modelId: c.modelId, tier: c.tier, options: structuredClone(c.options), ...(c.adapterBinding ? { adapterBinding: structuredClone(c.adapterBinding) } : {}), nativeGenerationCalls: 1, warmups: 0, repeats: 0 });
   for (const c of resources) generationInvocations.push({ invocationId: `${c.caseId}.generation-1`, caseId: c.caseId, backend: c.backend, kind: c.kind, purpose: c.resourcePhase, modelId: c.modelId, tier: c.tier, options: structuredClone(c.options), nativeGenerationCalls: 1, warmups: 0, repeats: 0 });
   for (const invocation of generationInvocations) {
     const source = cases.find(c => c.caseId === invocation.caseId) ?? resources.find(c => c.caseId === invocation.caseId), bindings = Array.from({ length: source.options.references ?? 0 }, (_, index) => ({ role: 'reference', index, binding: `reference-${index}`, instanceId: `slot-${index}` }));
@@ -140,13 +144,17 @@ export function terminalPlan(sources) {
   assert.equal(generationInvocations.filter(i => i.kind === 'product_generation').length, 26); assert.equal(resources.length, 12);
   return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, trainingLifecycles, generationInvocations,
     budget: { globalHardCeiling: 48, productGenerations: 26, resourceGenerations: 12, totalGenerationInvocations: 38, byBackend: { mlx: 17, candle: 21 }, unallocatedNotAuthorized: 10, automaticWarmups: 0, automaticRepeats: 0, automaticRetries: 0, trainingLifecycles: 2, stepsPerLifecycle: 4 },
-    uncovered: [{ requirement: 'Base q4/q8 canonical anchor measurements', status: 'NOT_RUN', reason: 'Production rows now pin genuine locally converted base bytes/SHA (activated in the artifact prerequisite inventory); the anchors are publishable but unmeasured, and every measurement still requires its own execution admission.' }, { requirement: 'Semantic image quality/reference/layout/adaptation acceptance', status: 'PENDING', reason: 'Requires human/oracle evidence bound to retained input/output hashes.' }, { requirement: 'Native resource invocation enforcement', status: 'BLOCKED', reason: 'Authorized resource owner must verify exactly one inner Generator.generate per permit; hidden warmups/rungs/seeds must expand counts and reduce the plan before approval.' }],
+    uncovered: [{ requirement: 'Base q4/q8 canonical anchor measurements', status: 'NOT_RUN', reason: 'Production rows now pin genuine locally converted base bytes/SHA (activated in the artifact prerequisite inventory); the anchors are publishable but unmeasured, and every measurement still requires its own execution admission.' }, { requirement: 'Edit-LoRA training lifecycle', status: 'NOT_RUN', reason: 'No paired edit data in the provided dataset; never fabricated. Both backends exercise the captioned base lifecycle instead.' }, { requirement: 'Semantic image quality/reference/layout/adaptation acceptance', status: 'PENDING', reason: 'Requires human/oracle evidence bound to retained input/output hashes.' }, { requirement: 'Native resource invocation enforcement', status: 'BLOCKED', reason: 'Authorized resource owner must verify exactly one inner Generator.generate per permit; hidden warmups/rungs/seeds must expand counts and reduce the plan before approval.' }],
     policy: { ...catalog.policy, fullInventory: 'catalog command only; never automatically executed', execution: 'exact expanded plan/hash and explicit user approval required; disjoint per-backend single-use permits, local atomic ledgers, coordinator aggregates same global plan; no allocation of spare ten' } };
 }
+// Reference cases describe only a setting/pose change of the referenced subject: never nudity,
+// age changes or a different identity. Text-only cases keep the person-free product scene.
+export const SCENE_PROMPT = 'A small teal ceramic teapot and a white cup on a pale yellow table, soft daylight, studio photograph';
+export const REFERENCE_PROMPT = 'The same subject from the reference image, unchanged identity and clothing, standing outdoors in a sunlit park with green trees behind, natural daylight, documentary photograph';
 export function imageRequest(cell, target, projectId, inputs, lora) {
   const options = cell.options;
   const body = { projectId, mode: options.references ? 'edit_image' : 'text_to_image', model: cell.modelId,
-    prompt: 'A small teal ceramic teapot and a white cup on a pale yellow table, soft daylight, studio photograph', negativePrompt: '', seed: 26243,
+    prompt: options.references ? REFERENCE_PROMPT : SCENE_PROMPT, negativePrompt: '', seed: 26243,
     width: options.width ?? 1024, height: options.height ?? 1024, count: 1,
     advanced: { steps: target.model.defaults.steps, sampler: target.model.defaults.sampler, guidanceScale: target.model.defaults.guidanceScale ?? 0, enhancePrompt: options.enhancePrompt === true, quantTier: cell.tier }, loras: [] };
   if (options.references) {

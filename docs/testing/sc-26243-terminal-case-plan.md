@@ -125,7 +125,8 @@ resource generations = 38 total across both backends**, including the two traini
 reloads. The hard global ceiling is **48**, not 48 per machine. The remaining ten
 are **unallocated, not authorized**, and cannot be used automatically. There are
 zero implicit warmups, repeats, seeds/rungs, or retries. Exactly two short training
-lifecycles are listed separately: MLX edit and Candle captioned, four steps each,
+lifecycles are listed separately: captioned base on BOTH backends (the provided dataset has
+no paired edit data, so edit-LoRA training is an explicit uncovered NOT_RUN), four steps each,
 save every step, rank 4, resolution 512. Their generation reloads already count in
 26; training previews are disabled.
 
@@ -140,8 +141,8 @@ The default named product list uses these suffixes with `mlx.` and `candle.`:
 | base.representative-move-remove-10.bf16 | 1 | Ordered ten base references, PUP i2i_bbox, source/target moves and removals |
 | base.representative-base-ref-1.bf16 | 1 | Single base reference, PUP bypass, portrait |
 | distilled.representative-distilled-ref-10.bf16 | 1 | Ten distilled references, PUP bypass, landscape |
-| distilled.lora-zero.bf16 / distilled.lora-on.bf16 | 2 total | Compatible real adapter identity, scales 0/0.75 and image-effect comparison |
-| base.train-interrupt-resume-export-edit.bf16 (MLX), or ...-captioned.bf16 (Candle) | 1 reload | Four-step TRAIN, interrupt, actual checkpoint state, fresh resume/export, fresh ordinary base T2I adapter reload |
+| base.train-interrupt-resume-export-captioned.bf16 | 1 reload | Four-step TRAIN, interrupt, actual checkpoint state, fresh resume/export, fresh ordinary base T2I adapter reload |
+| base.lora-zero.bf16 / base.lora-on.bf16 | 2 total | Strictly AFTER training: that backend's own just-exported base LoRA (hash-bound `adapterBinding`), scales 0/0.75 and image-effect comparison |
 | base.cancel.bf16 | 1 | Progress then real cancellation |
 | base.representative-native.fp8r (Candle only) | 1 | Actual CUDA FP8R package |
 | distilled.representative-native.nvfp4 (Candle only) | 1 | Actual CUDA NVFP4 package |
@@ -468,7 +469,16 @@ ambient credentials. No global process-name kill is used.
 - `adapters`: model ID to `{root,path,sha256,bytes,rank,repository,resolvedRevision}`.
   The actual safetensors rank is read, and the ordinary LoRA import API verifies
   the file hash. No fixture is accepted as real adapter evidence. Run `lora-zero`
-  before matching `lora-on` in the same session for image-effect comparison.
+  before matching `lora-on` in the same session for image-effect comparison. In the
+  representative plan the adapter cases carry `adapterBinding` to their own backend's
+  training lifecycle and use ONLY that exported file (same base checkpoint, strictly after
+  the lifecycle, hash-verified on import); approval and the driver refuse a reordered,
+  cross-backend or wrong-checkpoint binding. A base-trained LoRA never drives distilled.
+- Prompts: text-only cases use the person-free product scene. Reference cases use a neutral,
+  identity-preserving, setting-only prompt (`REFERENCE_PROMPT`) and subject-agnostic box
+  descriptions; layout geometry is unchanged. Prompts never request nudity, age changes or a
+  different identity. Reference/training inputs that depict a real person stay local: never
+  committed, uploaded, logged or placed in CI artifacts; evidence records hashes/dims only.
 - `training.captioned` and `.edit`: `{steps,saveEvery,rank,items}`. The executable
   global profile permits exactly **4 steps, saveEvery 1, rank 4, resolution 512**,
   one lifecycle per backend and two total. Supply real item bindings/captions. Each item is

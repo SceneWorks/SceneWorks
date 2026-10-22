@@ -99,3 +99,36 @@ test('aggregation validates complete ledger manifests, contiguous chains and fin
   assert.throws(()=>aggregateLedgerReceipts(approval,[receipt,other],latestClosure),/replayed\/stale/);assert.equal(aggregateLedgerReceipts(approval,[latest,other],latestClosure).generationCount,2);
   for(const mutate of [c=>c.producersStopped=false,c=>c.ledgerId='wrong',c=>c.approvedPlanSha256=digest,c=>delete c.backends.mlx]){const bad=structuredClone(latestClosure);mutate(bad);assert.throws(()=>aggregateLedgerReceipts(approval,[latest,other],bad));}
 });
+test('adapter cases bind their own backend training export, on the trained checkpoint, strictly after training', async t => {
+  const { approval } = await fixture(t); validateApprovedPlan(approval);
+  const invocations = approval.plan.generationInvocations;
+  for (const backend of ['mlx', 'candle']) {
+    const reload = invocations.findIndex(i => i.backend === backend && i.purpose === 'training-reload');
+    const adapters = invocations.map((i, index) => ({ i, index })).filter(({ i }) => i.backend === backend && i.adapterBinding);
+    assert.deepEqual(adapters.map(({ i }) => i.caseId), [`${backend}.base.lora-zero.bf16`, `${backend}.base.lora-on.bf16`]);
+    assert(adapters.every(({ i, index }) => index > reload && i.modelId === 'flux3_klein_base' && i.adapterBinding.lifecycleId === invocations[reload].caseId));
+  }
+  const first = invocations.findIndex(i => i.adapterBinding), find = (a, pred) => a.plan.generationInvocations.find(pred);
+  for (const [mutate, pattern] of [
+    // ORDERING mutation: the adapter case moved ahead of its LoRA's training lifecycle.
+    [a => { const list = a.plan.generationInvocations; const [moved] = list.splice(first, 1); list.unshift(moved); }, /strictly after/],
+    // Wrong checkpoint: a base-trained LoRA bound to a distilled adapter case is refused.
+    [a => { find(a, i => i.adapterBinding).modelId = 'flux3_klein'; }, /different checkpoint/],
+    [a => { find(a, i => i.adapterBinding).adapterBinding.modelId = 'flux3_klein'; }, /different checkpoint/],
+    [a => { delete find(a, i => i.adapterBinding).adapterBinding; }, /must bind the plan's own exported LoRA/],
+  ]) {
+    const changed = structuredClone(approval); mutate(changed);
+    assert.throws(() => validateApprovedPlan(changed), pattern);
+  }
+  const crossBackend = structuredClone(approval);
+  find(crossBackend, i => i.adapterBinding && i.backend === 'candle').adapterBinding.lifecycleId = 'mlx.base.train-interrupt-resume-export-captioned.bf16';
+  assert.throws(() => validateApprovedPlan(crossBackend), /own backend/);
+});
+test('both lifecycles are captioned; edit-LoRA training is an explicit uncovered NOT_RUN, never PASS', () => {
+  assert.deepEqual(profile.trainingLifecycles.map(t => t.caseId).sort(), ['candle.base.train-interrupt-resume-export-captioned.bf16', 'mlx.base.train-interrupt-resume-export-captioned.bf16']);
+  assert(!profile.cases.some(c => c.options.trainingMode === 'edit'), 'no paired edit data: no edit lifecycle is planned');
+  const edit = profile.uncovered.find(u => /Edit-LoRA training/.test(u.requirement));
+  assert.equal(edit?.status, 'NOT_RUN'); assert.match(edit.reason, /No paired edit data/);
+  assert(profile.uncovered.every(u => u.status !== 'PASS'));
+  assert.equal(profile.budget.trainingLifecycles, 2); assert.equal(profile.budget.stepsPerLifecycle, 4);
+});

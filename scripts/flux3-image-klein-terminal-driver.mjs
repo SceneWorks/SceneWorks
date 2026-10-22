@@ -289,6 +289,22 @@ export async function trainingSequence(session, cell, target, project, inputs, i
   const registered = (await session.endpoint.call('GET', `/api/v1/loras?projectId=${safeId(project.id)}`)).find(l => l.id === finished.result.loraId); assert(registered?.name, 'export must register a reloadable adapter');
   await runImage(session, imageCell, imageRequest(imageCell, target, project.id, inputs, registered), project, directory, report, inputs);
   assert.equal(report.outputs.at(-1).recipe.loras?.[0]?.hash, exportedHash, 'fresh ordinary generation must load the exact exported adapter file');
+  // The ONLY adapter this backend's bound adapter cases may use: the exact file just exported here.
+  const retained = path.join(directory, 'exported-adapter.safetensors');
+  session.trainingExports ??= {};
+  session.trainingExports[cell.backend] = { lifecycleId: cell.caseId, modelId: cell.modelId, root: directory, path: retained,
+    sha256: exportedHash, bytes: (await stat(retained)).size, rank: config.rank, repository: cell.repository, resolvedRevision: cell.resolvedRevision };
+}
+/** Resolve the adapter for a LoRA case: a plan-bound training export, or a provisioned spec. */
+export function boundAdapterSpec(session, cell, provisioned) {
+  const binding = cell.adapterBinding;
+  if (!binding) return provisioned;
+  need(binding.source === 'training-export' && binding.backend === cell.backend, 'adapter case must bind its own backend training export');
+  need(binding.modelId === cell.modelId, `${cell.caseId}: adapter trained on ${binding.modelId} cannot drive ${cell.modelId}`);
+  const exported = session.trainingExports?.[cell.backend];
+  need(exported && exported.lifecycleId === binding.lifecycleId, `${cell.caseId}: run its bound training lifecycle ${binding.lifecycleId} first; no other adapter substitutes`);
+  need(exported.modelId === cell.modelId, `${cell.caseId}: exported adapter checkpoint differs from this case`);
+  return exported;
 }
 // Negative ingress probes are CPU/API checks. Stop ONLY this nonce's GPU worker.
 // If ingress unexpectedly creates any job, cancel and prove terminal while still paused.
@@ -354,10 +370,11 @@ export async function executeCell(session, cell, target, project, inputs, spec, 
     const canceled = await waitJob(session, accepted.id, report, { until: j => j.status === 'canceled', allowCanceled: true }); assert(!canceled.result?.assetIds?.length);
     const library = await session.endpoint.call('GET', `/api/v1/projects/${safeId(project.id)}/assets`); assert(!library.some(a => a.lineage?.jobId === accepted.id), 'canceled job must not publish a finished library image'); report.jobs.push(canceled); return;
   }
-  if (Object.hasOwn(cell.options, 'loraScale')) { const lora = await importAdapter(session, spec.adapters?.[cell.modelId], cell, project, report); body.loras = [{ id: lora.id, name: lora.name, weight: cell.options.loraScale }]; }
+  const adapterSpec = Object.hasOwn(cell.options, 'loraScale') ? boundAdapterSpec(session, cell, spec.adapters?.[cell.modelId]) : undefined;
+  if (adapterSpec) { const lora = await importAdapter(session, adapterSpec, cell, project, report); body.loras = [{ id: lora.id, name: lora.name, weight: cell.options.loraScale }]; }
   await runImage(session, cell, body, project, directory, report, inputs);
   if (Object.hasOwn(cell.options, 'loraScale')) {
-    const proof = report.outputs.at(-1), specAdapter = spec.adapters[cell.modelId]; session.loraZeroProof ??= {};
+    const proof = report.outputs.at(-1), specAdapter = adapterSpec; session.loraZeroProof ??= {};
     if (cell.options.loraScale === 0) session.loraZeroProof[cell.modelId] = { sha256: proof.pngSha256, adapterSha256: specAdapter.sha256 };
     else { const baseline = session.loraZeroProof[cell.modelId]; need(baseline?.adapterSha256 === specAdapter.sha256, 'Run matching scale-zero case before adapter-on effect proof'); assert.notEqual(proof.pngSha256, baseline.sha256, 'adapter-on must have an observable image effect'); assert.equal(proof.recipe.loras[0].hash, specAdapter.sha256, 'worker must report actual loaded adapter hash'); report.adapterEffect = { scaleZeroPngSha256: baseline.sha256, scaleOnPngSha256: proof.pngSha256, adapterSha256: specAdapter.sha256 }; }
   }

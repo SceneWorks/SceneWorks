@@ -26,6 +26,19 @@ export function validateApprovedPlan(approval) {
   const training = plan.trainingLifecycles ?? []; assert(training.length <= 2, 'at most TWO short training lifecycles globally'); assert.equal(plan.budget.trainingLifecycles, training.length); assert.equal(plan.budget.stepsPerLifecycle, 4);
   const trainingIds = training.flatMap(t => { assert(['mlx', 'candle'].includes(t.backend) && t.caseId && t.lifecycleId); assert.equal(t.steps, 4); assert.equal(t.saveEvery, 1); assert.equal(t.rank, 4); assert.equal(t.resolution, 512); assert.equal(t.generationReloads, 1); assert([t.startId, t.resumeId].every(id => typeof id === 'string' && /^[a-zA-Z0-9_.-]+$/.test(id))); return [t.startId, t.resumeId]; });
   assert.equal(new Set([...trainingIds, ...invocations.map(i => i.invocationId)]).size, trainingIds.length + invocations.length);
+  // Adapter cases use ONLY the adapter their own backend's lifecycle exports in this plan: same
+  // backend, the lifecycle's trained (base) checkpoint, and strictly after its reload generation.
+  invocations.forEach((i, index) => {
+    if (i.purpose === 'training-reload' || !Object.hasOwn(i.options ?? {}, 'loraScale')) return;
+    const binding = i.adapterBinding;
+    assert(binding?.source === 'training-export', `adapter invocation ${i.invocationId} must bind the plan's own exported LoRA`);
+    const lifecycle = training.find(t => t.lifecycleId === binding.lifecycleId);
+    assert(lifecycle && lifecycle.backend === i.backend && binding.backend === i.backend, `adapter invocation ${i.invocationId} must bind its own backend's lifecycle`);
+    assert(binding.modelId === i.modelId, `adapter invocation ${i.invocationId} targets a different checkpoint than its LoRA was trained on`);
+    const reload = invocations.findIndex(j => j.caseId === lifecycle.caseId && j.purpose === 'training-reload');
+    assert(reload >= 0 && reload < index, `adapter invocation ${i.invocationId} must run strictly after its LoRA's training lifecycle`);
+    assert.equal(invocations[reload].modelId, i.modelId, `adapter invocation ${i.invocationId} checkpoint differs from the trained LoRA's`);
+  });
   return { approvedPlanSha256: planHash(approval), generationCount: invocations.length, backendQuotas: plan.budget.byBackend, trainingLifecycles: training.length };
 }
 function location(approval, backend, ledgerRoot) {
