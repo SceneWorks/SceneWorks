@@ -102,6 +102,7 @@ run_guarded() { # $1 test path, $2 cap GiB, $3 wall s
   local guard rc
   set +e
   guard="$(SUPRA2_HF_HUB_CACHE="$hub" HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 SUPRA2_RENDER_OUT="$out" \
+    SUPRA2_BUNDLE_OUT="$bundle" SUPRA2_BUNDLE_DIR="$bundle" \
     TMPDIR="$RUNNER_TEMP" python3.12 "$guard_py" "$cap_gib" "$limit_s" "$log" -- \
     "$bin" "$test" --ignored --exact --nocapture --test-threads=1)"
   rc=$?
@@ -115,7 +116,14 @@ run_guarded() { # $1 test path, $2 cap GiB, $3 wall s
   fi
 }
 
+# The convert test writes the bundle here (SUPRA2_BUNDLE_OUT); the acceptance matrix, a separate
+# process, loads it (SUPRA2_BUNDLE_DIR) and writes its PNGs + supra2_matrix_mlx.json into $out.
+# The installed layout (<data dir>/models/mlx/supra2_img): the worker admits a modelPath only
+# inside its own data dir, which the matrix takes from this path.
+rm -rf "$RUNNER_TEMP/supra2-data"
+bundle="$RUNNER_TEMP/supra2-data/models/mlx/supra2_img"
 run_guarded "model_jobs::supra2_convert_tests::supra2_real_weight_convert_writes_a_loadable_bundle" 16 600
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_render_through_the_worker_arm" 16 900
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload" 16 1200
+run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_acceptance_matrix" 16 1200
 exit "$failed"

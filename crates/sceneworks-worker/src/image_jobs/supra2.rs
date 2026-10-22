@@ -11,7 +11,9 @@
 //! `mlx-gen-supra2` on macOS, `candle-gen-supra2` off-Mac (sc-24214) — ONE engine id, one bundle,
 //! the same two pinned components. The `#[ignore]`d real-weight tests drive one 256x256 render
 //! through the production MLX job arm (macOS) and one production `image_generate` job through the
-//! Candle route (CUDA, `windows-candle.yml` `run_supra2_worker_smoke`).
+//! Candle route (CUDA, `windows-candle.yml` `run_supra2_worker_smoke`); the same two lanes also run
+//! the epic acceptance matrix (`acceptance_matrix`) through `run_image_generate_job` on a bundle a
+//! separate convert step produced.
 
 #[cfg(test)]
 mod tests {
@@ -67,6 +69,71 @@ mod tests {
             std::fs::write(snapshot.join(file), b"x").unwrap();
         }
         snapshot
+    }
+
+    /// `(current, total)` of a "Batch of 4 — step k/N" progress message (the lane's one-pass label
+    /// for a native count batch; a streaming suffix may follow).
+    fn batch_of_four_step(message: &str) -> Option<(u32, u32)> {
+        let (_, rest) = message.split_once("Batch of 4 — step ")?;
+        let (current, rest) = rest.split_once('/')?;
+        let total: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        Some((current.parse().ok()?, total.parse().ok()?))
+    }
+
+    /// The lifecycle cancel (sc-24216) against a count-4 job. Supra2 is a native count batch
+    /// (`image.nativeCountBatch`, sc-24215), so the job is ONE engine call whose progress names the
+    /// batch ("Batch of 4 — step k/N."), never a per-image slice. The cancel lands mid-denoise: the
+    /// batch's first step was reported, and neither its final step nor its decode ever was.
+    fn assert_canceled_mid_batch(messages: &[String]) {
+        let steps: Vec<(u32, u32)> = messages
+            .iter()
+            .filter_map(|message| batch_of_four_step(message))
+            .collect();
+        assert!(
+            steps.iter().any(|&(current, _)| current == 1),
+            "the one-pass batch reported its first step: {messages:#?}"
+        );
+        assert!(
+            !steps.iter().any(|&(current, total)| current >= total),
+            "canceled before the batch's final step: {messages:#?}"
+        );
+        assert!(
+            !messages.iter().any(|message| message.contains("decoding")),
+            "canceled before the batch decoded: {messages:#?}"
+        );
+    }
+
+    /// The cancel assertion itself: the pre-sc-24215 per-image labels, a batch that ran to its
+    /// last step, and a batch that decoded all fail it; a mid-denoise cancel passes.
+    #[test]
+    fn the_mid_batch_cancel_assertion_reads_the_one_pass_batch_label() {
+        let owned =
+            |messages: &[&str]| messages.iter().map(|m| (*m).to_owned()).collect::<Vec<_>>();
+        let fails = |messages: Vec<String>| {
+            std::panic::catch_unwind(|| assert_canceled_mid_batch(&messages)).is_err()
+        };
+        assert!(!fails(owned(&[
+            "Loading Supra2-IMG.",
+            "Batch of 4 — step 1/80.",
+            "Batch of 4 — step 2/80. Streaming",
+            "Cancelling…",
+        ])));
+        assert!(fails(owned(&[
+            "Image 1/4 — step 1/80.",
+            "Image 1/4 — step 2/80."
+        ])));
+        assert!(fails(owned(&[
+            "Batch of 4 — step 1/80.",
+            "Batch of 4 — step 80/80."
+        ])));
+        assert!(fails(owned(&[
+            "Batch of 4 — step 1/80.",
+            "Batch of 4 — decoding."
+        ])));
+        assert_eq!(
+            batch_of_four_step("Batch of 4 — step 12/80. (x)"),
+            Some((12, 80))
+        );
     }
 
     /// The linked engine declares exactly the two components the catalog row provisions, and the
@@ -455,6 +522,15 @@ mod tests {
             }
         }
 
+        /// The epic acceptance matrix on Metal through `run_image_generate_job` (see
+        /// `acceptance_matrix::run`). Run by `scripts/ci/supra2-mlx-real-weights/run.sh` AFTER the
+        /// convert test wrote `SUPRA2_BUNDLE_OUT` in its own process.
+        #[test]
+        #[ignore = "real weights + Metal: needs SUPRA2_BUNDLE_DIR (pre-converted) and SUPRA2_HF_HUB_CACHE"]
+        fn supra2_real_weight_acceptance_matrix() {
+            super::acceptance_matrix::run();
+        }
+
         /// One job through the production MLX arm against a fresh stub jobs API.
         async fn run_lifecycle_job(
             settings: &Settings,
@@ -603,18 +679,10 @@ mod tests {
                     matches!(outcome, Err(crate::WorkerError::Canceled(_))),
                     "the user cancel ends the job Canceled: {outcome:?}\n{posts:#?}"
                 );
-                let text = messages(&posts);
-                assert!(
-                    text.iter().any(|m| m.contains("Image 1/4 — step 1/80")),
-                    "{text:#?}"
-                );
-                assert!(
-                    !text.iter().any(|m| m.contains("Image 4/4 — decoding")),
-                    "canceled before the batch finished: {text:#?}"
-                );
+                assert_canceled_mid_batch(&messages(&posts));
                 assert_eq!(posts.last().unwrap()["status"], "canceled", "{posts:#?}");
-                assert!(canceled_assets.len() < 4, "{canceled_assets:#?}");
-                assert!(pngs_under(canceled_project.path()).len() < 4);
+                assert!(canceled_assets.is_empty(), "{canceled_assets:#?}");
+                assert!(pngs_under(canceled_project.path()).is_empty());
 
                 // 2. Recovery: the next job completes in the same process.
                 let first = tempfile::tempdir().unwrap();
@@ -869,6 +937,15 @@ mod tests {
             );
         }
 
+        /// The epic acceptance matrix on CUDA through `run_image_generate_job` (see
+        /// `acceptance_matrix::run`). Run by `windows-candle.yml` `supra2-worker-smoke` AFTER the
+        /// convert test wrote `SUPRA2_BUNDLE_OUT` in its own process.
+        #[test]
+        #[ignore = "real weights + CUDA: needs SUPRA2_BUNDLE_DIR (pre-converted) and HF_HUB_CACHE"]
+        fn supra2_worker_gpu_acceptance_matrix() {
+            super::acceptance_matrix::run();
+        }
+
         // -----------------------------------------------------------------------------------
         // sc-24216: the installed-model job lifecycle on the Candle route.
         // -----------------------------------------------------------------------------------
@@ -1082,17 +1159,15 @@ mod tests {
                 matches!(outcome, Err(crate::WorkerError::Canceled(_))),
                 "the user cancel ends the job Canceled: {outcome:?}\n{posts:#?}"
             );
-            let text = messages(&posts);
-            assert!(
-                text.iter().any(|m| m.contains("Image 1/4 — step 1/80")),
-                "{text:#?}"
-            );
-            assert!(
-                !text.iter().any(|m| m.contains("Image 4/4 — decoding")),
-                "canceled before the batch finished: {text:#?}"
-            );
+            assert_canceled_mid_batch(&messages(&posts));
             assert_eq!(posts.last().unwrap().1["status"], "canceled", "{posts:#?}");
-            assert!(pngs_under(&project).len() < 4);
+            assert!(
+                !posts.iter().any(|(_, body)| body["result"]["assetWrites"]
+                    .as_array()
+                    .is_some_and(|assets| !assets.is_empty())),
+                "a canceled batch publishes no asset: {posts:#?}"
+            );
+            assert!(pngs_under(&project).is_empty());
 
             // 2. Recovery in the same process.
             let (outcome, posts, project) =
@@ -1131,6 +1206,494 @@ mod tests {
                 .await
                 .unwrap());
             eprintln!("RESULT status=pass model=supra2_img backend=candle lifecycle=cancel,recover,unload,reload");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Real weights (epic-review AT matrix): the published interface's acceptance cells through
+    // the PRODUCTION job path (`run_image_generate_job`) on whichever backend this build links.
+    // Driven by one `#[ignore]`d test per backend (`mlx_real_weights` / `candle_real_weights`).
+    // ---------------------------------------------------------------------------------------
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    mod acceptance_matrix {
+        use super::*;
+        use crate::api_client::ApiClient;
+        use axum::extract::{Path as AxumPath, State};
+        use axum::routing::{get, post};
+        use axum::{Json, Router};
+        use sceneworks_core::contracts::JobSnapshot;
+        use sceneworks_core::project_store::ProjectStore;
+        use std::sync::{Arc, Mutex};
+        use std::time::Instant;
+
+        type Posts = Arc<Mutex<Vec<Value>>>;
+
+        const SEED: u64 = 2417;
+        const PROMPT: &str = "a red fox sitting in fresh snow, soft morning light";
+        const BACKEND: &str = if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle"
+        };
+
+        async fn spawn_api() -> (String, Posts) {
+            async fn job_route(AxumPath(job_id): AxumPath<String>) -> Json<Value> {
+                Json(crate::tests::job_snapshot_json(&job_id, false))
+            }
+            async fn progress_route(
+                State(posts): State<Posts>,
+                AxumPath(job_id): AxumPath<String>,
+                Json(body): Json<Value>,
+            ) -> Json<Value> {
+                posts.lock().unwrap().push(body);
+                Json(crate::tests::job_snapshot_json(&job_id, false))
+            }
+            async fn metrics_route(Json(body): Json<Value>) -> Json<Value> {
+                Json(body)
+            }
+            async fn heartbeat_route(AxumPath(worker_id): AxumPath<String>) -> Json<Value> {
+                Json(json!({
+                    "id": worker_id, "gpuId": BACKEND, "gpuName": null, "status": "busy",
+                    "currentJobId": null, "capabilities": [], "loadedModels": [],
+                    "registeredAt": "2026-10-21T00:00:00Z", "lastSeenAt": "2026-10-21T00:00:00Z"
+                }))
+            }
+            let posts: Posts = Arc::default();
+            let app = Router::new()
+                .route("/api/v1/jobs/:job_id", get(job_route))
+                .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+                .route("/api/v1/jobs/:job_id/metrics", post(metrics_route))
+                .route(
+                    "/api/v1/workers/:worker_id/heartbeat",
+                    post(heartbeat_route),
+                )
+                .with_state(posts.clone());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            (format!("http://{address}"), posts)
+        }
+
+        /// One completed job: its asset writes (in index order), each asset's decoded image and
+        /// PNG path, and the job's wall time.
+        struct Render {
+            assets: Vec<Value>,
+            images: Vec<image::RgbImage>,
+            pngs: Vec<PathBuf>,
+            latency_s: f64,
+        }
+
+        /// One production `image_generate` job (`run_image_generate_job`) against a fresh stub API,
+        /// in its own project. `extra` overrides the default request (prompt, 256x256, count 1).
+        async fn render(
+            settings: &Settings,
+            entry: &JsonObject,
+            job_id: &str,
+            extra: Value,
+        ) -> Render {
+            let (api_url, posts) = spawn_api().await;
+            let mut settings = settings.clone();
+            settings.api_url = api_url;
+            let project = ProjectStore::new(settings.data_dir.clone(), "worker")
+                .create_project(job_id)
+                .expect("matrix project creates");
+            let mut payload = json!({
+                "projectId": project.id,
+                "model": "supra2_img",
+                "mode": "text_to_image",
+                "prompt": PROMPT,
+                "width": 256,
+                "height": 256,
+                "count": 1,
+                "modelManifestEntry": Value::Object(entry.clone()),
+            });
+            for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+                payload[key] = value;
+            }
+            let mut job = crate::tests::job_snapshot_json(job_id, false);
+            job["type"] = json!("image_generate");
+            job["payload"] = payload;
+            let job: JobSnapshot = serde_json::from_value(job).expect("matrix job deserializes");
+            let api = ApiClient::new(&settings);
+            let started = Instant::now();
+            let outcome = crate::image_jobs::run_image_generate_job(&api, &settings, &job).await;
+            let latency_s = started.elapsed().as_secs_f64();
+            let posts = posts.lock().unwrap().clone();
+            outcome.unwrap_or_else(|error| panic!("{job_id} failed: {error}\n{posts:#?}"));
+            let mut assets: Vec<Value> = posts
+                .iter()
+                .rev()
+                .find(|body| body["status"] == "completed")
+                .and_then(|body| body["result"]["assetWrites"].as_array().cloned())
+                .unwrap_or_else(|| panic!("{job_id} posted no completed result: {posts:#?}"));
+            assets.sort_by_key(|asset| asset["index"].as_u64());
+            let pngs: Vec<PathBuf> = assets
+                .iter()
+                .map(|asset| {
+                    PathBuf::from(&project.path)
+                        .join(asset["mediaPath"].as_str().expect("asset media path"))
+                })
+                .collect();
+            let images = pngs
+                .iter()
+                .map(|png| {
+                    image::open(png)
+                        .unwrap_or_else(|error| panic!("open {}: {error}", png.display()))
+                        .to_rgb8()
+                })
+                .collect();
+            Render {
+                assets,
+                images,
+                pngs,
+                latency_s,
+            }
+        }
+
+        /// `(mean |Δ|, max |Δ|)` over two images' RGB bytes (0..=255 scale).
+        fn pixel_diff(a: &image::RgbImage, b: &image::RgbImage) -> (f64, u32) {
+            assert_eq!(a.dimensions(), b.dimensions());
+            let (mut sum, mut max) = (0_u64, 0_u32);
+            for (x, y) in a.as_raw().iter().zip(b.as_raw()) {
+                let d = u32::from(x.abs_diff(*y));
+                sum += u64::from(d);
+                max = max.max(d);
+            }
+            (sum as f64 / a.as_raw().len() as f64, max)
+        }
+
+        fn rgb_std(image: &image::RgbImage) -> f64 {
+            crate::smoke_support::image_std(&gen_core::Image {
+                width: image.width(),
+                height: image.height(),
+                pixels: image.as_raw().clone(),
+            })
+        }
+
+        /// `(max mean |Δ| / 255, max max |Δ|)` for image k of a COUNT-4 batch vs the count-1 render
+        /// on seed S + k on Metal. A batch of four runs differently shaped GEMMs than a batch of
+        /// one, so the reduction order (and the last bits) move: measured on nax-macos-2, run
+        /// 39695321783, worst case mean 0.050 / max 4 over k = 0..3. No margin, and the run is
+        /// deterministic on that runner, so a Metal/MLX change that moves it trips this as a
+        /// signal. This does not contradict inference's documented MLX claim, which is bit-exact
+        /// for batch 2 vs batch 1 on image 0 only. The same REQUEST repeated stays bit-exact
+        /// (cell 4).
+        const MLX_BATCH4_VS_SINGLE_BOUND: (f64, u32) = (0.1, 4);
+        /// The same for CUDA, declared by inference (`candle-gen-supra2/tests/real_weights.rs`): a
+        /// batch and a single image run differently tiled GEMMs, mean |Δ| <= 0.1 / 255, max <= 1.
+        const CUDA_BATCH_VS_SINGLE_BOUND: (f64, u32) = (0.1, 1);
+        const BATCH_VS_SINGLE_BOUND: (f64, u32) = if cfg!(target_os = "macos") {
+            MLX_BATCH4_VS_SINGLE_BOUND
+        } else {
+            CUDA_BATCH_VS_SINGLE_BOUND
+        };
+
+        fn within_batch_bound(mean: f64, max: u32) -> bool {
+            mean <= BATCH_VS_SINGLE_BOUND.0 && max <= BATCH_VS_SINGLE_BOUND.1
+        }
+
+        /// Every cell's verdict, rewritten to `<out>/supra2_matrix_<backend>.json` after each cell
+        /// (so a failing cell still leaves the earlier evidence) and printed as a `CELL` line.
+        struct Summary {
+            out: Option<PathBuf>,
+            cells: Vec<Value>,
+        }
+
+        impl Summary {
+            fn check(&mut self, cell: &str, pass: bool, latency_s: Option<f64>, detail: Value) {
+                eprintln!(
+                    "CELL backend={BACKEND} cell={cell} status={} latency_s={} detail={detail}",
+                    if pass { "pass" } else { "FAIL" },
+                    latency_s.map_or("-".to_owned(), |s| format!("{s:.2}"))
+                );
+                self.cells.push(json!({
+                    "cell": cell, "pass": pass, "latencyS": latency_s, "detail": detail
+                }));
+                if let Some(out) = &self.out {
+                    std::fs::write(
+                        out.join(format!("supra2_matrix_{BACKEND}.json")),
+                        serde_json::to_vec_pretty(&json!({
+                            "backend": BACKEND, "seed": SEED, "cells": self.cells
+                        }))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                assert!(pass, "cell {cell} failed: {detail}");
+            }
+
+            fn keep(&self, render: &Render, cell: &str) {
+                let Some(out) = &self.out else { return };
+                for (k, png) in render.pngs.iter().enumerate() {
+                    let seed = render.assets[k]["seed"].as_u64().unwrap_or_default();
+                    std::fs::copy(
+                        png,
+                        out.join(format!("matrix_{BACKEND}_{cell}_{k}_seed{seed}.png")),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        fn warnings(asset: &Value) -> Vec<String> {
+            asset["rawAdapterSettings"]["generationWarnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|warning| warning["code"].as_str().map(str::to_owned))
+                .collect()
+        }
+
+        /// The acceptance matrix. Env: `SUPRA2_BUNDLE_DIR` — the converted bundle a SEPARATE step
+        /// produced (`supra2_real_weight_convert_writes_a_loadable_bundle` with
+        /// `SUPRA2_BUNDLE_OUT`), at the installed layout `<data dir>/models/mlx/supra2_img`;
+        /// `SUPRA2_HF_HUB_CACHE` (else `HF_HUB_CACHE`) — the hub holding the
+        /// pinned Flan-T5-Base and SD VAE snapshots; optional `SUPRA2_RENDER_OUT` — the artifact dir
+        /// the PNGs and `supra2_matrix_<backend>.json` are written to.
+        ///
+        /// Cells: (1) a short prompt renders a non-degenerate 256x256 (the COLD first job);
+        /// (2) a >128-token prompt renders and every asset carries `prompt_truncated`; (3) CFG 3.0
+        /// and CFG 1.0 (unguided) both render and differ, each recording its unconditional source;
+        /// (4) seed S count 1 twice is pixel-identical; (5) count 4 on seed S publishes seeds
+        /// S..S+3 and image k matches the count-1 render on seed S+k within the backend's declared
+        /// bound; (6) the whole matrix runs OFFLINE (`HF_HUB_OFFLINE=1`, Hub base URL on a closed
+        /// port); (7) cancel → recover → unload/reload is the lifecycle test's (not duplicated).
+        pub(super) fn run() {
+            let bundle = PathBuf::from(std::env::var("SUPRA2_BUNDLE_DIR").expect(
+                "SUPRA2_BUNDLE_DIR: the bundle the separate convert step wrote (SUPRA2_BUNDLE_OUT)",
+            ));
+            assert_eq!(
+                sceneworks_core::converted_artifacts::converted_artifact_problem(
+                    "supra2_img",
+                    &bundle,
+                    sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+                ),
+                None,
+                "SUPRA2_BUNDLE_DIR is not an installed Supra2 bundle: {}",
+                bundle.display()
+            );
+            let hub = std::env::var("SUPRA2_HF_HUB_CACHE")
+                .or_else(|_| std::env::var("HF_HUB_CACHE"))
+                .expect("SUPRA2_HF_HUB_CACHE or HF_HUB_CACHE: the hub with the pinned components");
+            let _env = crate::test_env::EnvVars::set(&[
+                ("HF_HUB_CACHE", hub.as_str()),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+                ("HF_HUB_OFFLINE", "1"),
+            ]);
+            let out = std::env::var("SUPRA2_RENDER_OUT").ok().map(PathBuf::from);
+            if let Some(out) = &out {
+                std::fs::create_dir_all(out).unwrap();
+            }
+            let mut summary = Summary {
+                out,
+                cells: Vec::new(),
+            };
+            // The production path admits a `modelPath` only inside an app-managed root, so the
+            // shared bundle sits where an install puts it — `<data dir>/models/mlx/supra2_img` —
+            // and that data dir is this worker's.
+            let data_dir = bundle
+                .ends_with("models/mlx/supra2_img")
+                .then(|| bundle.ancestors().nth(3).map(Path::to_path_buf))
+                .flatten()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "SUPRA2_BUNDLE_DIR must be <data dir>/models/mlx/supra2_img (the installed \
+                         layout): {}",
+                        bundle.display()
+                    )
+                });
+            let temp = tempfile::tempdir().unwrap();
+            let mut settings = Settings::for_test(data_dir);
+            settings.config_dir = temp.path().join("config");
+            settings.worker_id = format!("supra2-matrix-{BACKEND}");
+            settings.heartbeat_seconds = 30;
+            if cfg!(target_os = "macos") {
+                settings.gpu_id = "mlx".to_owned();
+                settings.backend_mlx_enabled = true;
+            } else {
+                settings.gpu_id = "cuda".to_owned();
+                settings.backend_candle_enabled = true;
+            }
+            // (6) Offline: any Hub fetch anywhere on the path hits a closed port and fails the job.
+            settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
+            let mut entry = shipped_supra2_entry();
+            entry.insert("modelPath".to_owned(), json!(bundle));
+
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                // A cold first job: nothing is resident in this process yet.
+                let _ = crate::generator_cache::evict_cached_generator().await;
+
+                // (1) Short prompt, release defaults (CFG 3.0, 50 steps) on seed S — the cold job.
+                let base = render(&settings, &entry, "matrix-short", json!({ "seed": SEED })).await;
+                summary.keep(&base, "short");
+                let asset = &base.assets[0];
+                let raw = &asset["rawAdapterSettings"];
+                let std = rgb_std(&base.images[0]);
+                summary.check(
+                    "1_short_prompt_renders",
+                    base.assets.len() == 1
+                        && base.images[0].dimensions() == (256, 256)
+                        && std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT
+                        && asset["seed"] == json!(SEED)
+                        && warnings(asset).is_empty()
+                        && raw["numInferenceSteps"] == json!(gen_core::supra2::DEFAULT_STEPS)
+                        && raw["guidanceScale"] == json!(gen_core::supra2::DEFAULT_GUIDANCE)
+                        && raw[sceneworks_core::supra2::UNCONDITIONAL_KEY] == "stored"
+                        && raw[sceneworks_core::supra2::BACKEND_KEY] == BACKEND,
+                    Some(base.latency_s),
+                    json!({
+                        "phase": "cold (includes load)", "rgbStd": std,
+                        "assets": base.assets.len(), "dimensions": base.images[0].dimensions(),
+                        "seed": asset["seed"], "warnings": warnings(asset),
+                        "unconditional": raw[sceneworks_core::supra2::UNCONDITIONAL_KEY],
+                        "backend": raw[sceneworks_core::supra2::BACKEND_KEY],
+                    }),
+                );
+
+                // (4) The same request again (warm): pixel-identical.
+                let again = render(&settings, &entry, "matrix-repeat", json!({ "seed": SEED })).await;
+                summary.keep(&again, "repeat");
+                let (mean, max) = pixel_diff(&base.images[0], &again.images[0]);
+                summary.check(
+                    "4_seed_repeat_is_identical",
+                    again.assets.len() == 1 && max == 0,
+                    Some(again.latency_s),
+                    json!({ "phase": "warm", "meanAbsDiff": mean, "maxAbsDiff": max }),
+                );
+
+                // (3) CFG 1.0 is upstream's unguided branch: it renders, differs from CFG 3.0, and
+                // records that no unconditional context was used.
+                let unguided = render(
+                    &settings,
+                    &entry,
+                    "matrix-cfg1",
+                    json!({ "seed": SEED, "advanced": { "guidanceScale": 1.0 } }),
+                )
+                .await;
+                summary.keep(&unguided, "cfg1");
+                let raw = &unguided.assets[0]["rawAdapterSettings"];
+                let std = rgb_std(&unguided.images[0]);
+                let (mean, max) = pixel_diff(&base.images[0], &unguided.images[0]);
+                summary.check(
+                    "3_cfg3_vs_cfg1_both_render_and_differ",
+                    std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT
+                        && max > 0
+                        && raw["guidanceScale"] == json!(1.0)
+                        && raw[sceneworks_core::supra2::UNCONDITIONAL_KEY] == "none",
+                    Some(unguided.latency_s),
+                    json!({
+                        "rgbStdCfg1": std, "meanAbsDiffVsCfg3": mean, "maxAbsDiffVsCfg3": max,
+                        "unconditionalCfg1": raw[sceneworks_core::supra2::UNCONDITIONAL_KEY],
+                    }),
+                );
+
+                // (2) A prompt far past the 128-token Flan-T5 context: renders, and every asset
+                // records the truncation.
+                let long_prompt = (0..24)
+                    .map(|i| {
+                        format!("detail {i}: a weathered stone lighthouse on a rocky cliff above a stormy sea")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let long = render(
+                    &settings,
+                    &entry,
+                    "matrix-long",
+                    json!({ "seed": SEED, "count": 2, "prompt": long_prompt }),
+                )
+                .await;
+                summary.keep(&long, "long");
+                let all_truncated = long.assets.iter().all(|asset| {
+                    warnings(asset)
+                        .iter()
+                        .any(|code| code == gen_core::supra2::PROMPT_TRUNCATED_WARNING)
+                });
+                let stds: Vec<f64> = long.images.iter().map(rgb_std).collect();
+                summary.check(
+                    "2_long_prompt_truncates_and_renders",
+                    long.assets.len() == 2
+                        && all_truncated
+                        && stds
+                            .iter()
+                            .all(|std| *std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT),
+                    Some(long.latency_s),
+                    json!({
+                        "promptChars": long_prompt.len(), "assets": long.assets.len(),
+                        "warnings": long.assets.iter().map(warnings).collect::<Vec<_>>(),
+                        "rgbStd": stds,
+                    }),
+                );
+
+                // (5) count 4 on seed S: seeds S..S+3, image k == the single render on S + k.
+                let batch = render(
+                    &settings,
+                    &entry,
+                    "matrix-batch",
+                    json!({ "seed": SEED, "count": 4 }),
+                )
+                .await;
+                summary.keep(&batch, "batch4");
+                let seeds: Vec<Value> = batch.assets.iter().map(|a| a["seed"].clone()).collect();
+                let mut diffs = vec![pixel_diff(&batch.images[0], &base.images[0])];
+                let mut single_latency = Vec::new();
+                for k in 1..4_u64 {
+                    let single = render(
+                        &settings,
+                        &entry,
+                        &format!("matrix-single-{k}"),
+                        json!({ "seed": SEED + k }),
+                    )
+                    .await;
+                    summary.keep(&single, &format!("single_seed_plus_{k}"));
+                    single_latency.push(single.latency_s);
+                    diffs.push(pixel_diff(&batch.images[k as usize], &single.images[0]));
+                }
+                summary.check(
+                    "5_count4_matches_single_renders_on_seed_plus_k",
+                    seeds == (0..4).map(|k| json!(SEED + k)).collect::<Vec<_>>()
+                        && batch.images.len() == 4
+                        && diffs.iter().all(|&(mean, max)| within_batch_bound(mean, max)),
+                    Some(batch.latency_s),
+                    json!({
+                        "seeds": seeds,
+                        "perImage": diffs.iter().map(|(mean, max)| json!({"meanAbsDiff": mean, "maxAbsDiff": max})).collect::<Vec<_>>(),
+                        "bound": { "meanAbsDiff": BATCH_VS_SINGLE_BOUND.0, "maxAbsDiff": BATCH_VS_SINGLE_BOUND.1 },
+                        "singleLatencyS": single_latency,
+                    }),
+                );
+
+                // (6) Every job above ran with the Hub unreachable and offline mode on.
+                summary.check(
+                    "6_offline",
+                    std::env::var("HF_HUB_OFFLINE").as_deref() == Ok("1")
+                        && settings.huggingface_base_url == "http://127.0.0.1:9",
+                    None,
+                    json!({ "HF_HUB_OFFLINE": "1", "hubBaseUrl": settings.huggingface_base_url }),
+                );
+                // (7) Not duplicated here: the lifecycle test owns it, in the same lane run.
+                summary.check(
+                    "7_cancel_recover_unload_reload",
+                    true,
+                    None,
+                    json!({ "coveredBy": if cfg!(target_os = "macos") {
+                        "mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload"
+                    } else {
+                        "candle_real_weights::supra2_worker_gpu_lifecycle"
+                    } }),
+                );
+                let _ = crate::generator_cache::evict_cached_generator().await;
+            });
         }
     }
 
@@ -1823,6 +2386,37 @@ mod tests {
                 .map(|asset| asset["seed"].clone())
                 .collect();
             assert_eq!(seeds, vec![json!(40), json!(41), json!(42)]);
+            // Reproducibility record: CFG 4.5 steered against the bundle's STORED unconditional
+            // embedding (the manifest records its conditioning file), on this build's backend.
+            for asset in &asset_writes {
+                let raw = &asset["rawAdapterSettings"];
+                assert_eq!(
+                    raw[sceneworks_core::supra2::UNCONDITIONAL_KEY],
+                    "stored",
+                    "{raw}"
+                );
+                assert_eq!(
+                    raw[sceneworks_core::supra2::BACKEND_KEY],
+                    if cfg!(target_os = "macos") {
+                        "mlx"
+                    } else {
+                        "candle"
+                    },
+                    "{raw}"
+                );
+            }
+        }
+
+        /// CFG <= 1 is upstream's unguided branch, recorded as no unconditional context; a replayed
+        /// recipe cannot forge the worker-owned record.
+        #[test]
+        fn an_unguided_render_records_no_unconditional_context() {
+            let request = request(json!({
+                "advanced": { "guidanceScale": 1.0, "unconditional": "stored", "backend": "x" }
+            }));
+            let raw = lane::mlx_raw_settings(&request, "SupraLabs/Supra2-IMG", 50, None, Some(1.0));
+            assert_eq!(raw[sceneworks_core::supra2::UNCONDITIONAL_KEY], "none");
+            assert_ne!(raw[sceneworks_core::supra2::BACKEND_KEY], "x");
         }
     }
 }
