@@ -10988,6 +10988,51 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+      "modelId": "supra2_img",
+      "modelFamily": "supra2",
+      "route": "supra2_img",
+      "provider": "supra2_img",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
+        "sha256": "4e5dbb30ad68ed201e6c84cfd0b8348df7ba819dc97d8f6623729fd76b0f95a3",
+        "recordId": "imc-130e60e9f989be2191bc",
+        "calibrationFingerprint": "supra2-img-mlx-resident-v1",
+        "loaderClosureDigest": "79805375a0434636b88b7768723f1b015e8deba4e9b2226a25dba82cd34eb10b"
+      },
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1606876808,
+        "denoise": 1606893192,
+        "decode": 4276945936
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2121002352,
+        "denoise": 2121039732,
+        "decode": 9324071164
+      },
+      "overallAllocatorEnvelopeBytes": 9324071164
+    },
+    {
       "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
       "modelId": "wan_2_2",
       "modelFamily": "wan-video",
@@ -13113,20 +13158,19 @@
       "route": "supra2_img",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:supra2_img:mlx:bf16",
-      "modelId": "supra2_img",
-      "modelFamily": "supra2",
-      "route": "supra2_img",
-      "backend": "mlx",
-      "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json",
+        "sha256": "a94aaa1a4834d6d6fc377408dd8596e03f38b9bc45e1293d0a3addca4644eae5",
+        "recordId": "imc-720c45380d2ce4058aa0",
+        "envelopeBytes": 2821718016,
+        "values": {
+          "provider": "supra2_img"
+        }
+      }
     },
     {
       "id": "analytic:svd:candle:default",
