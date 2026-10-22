@@ -508,8 +508,14 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "15.0"
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: "false"
       CARGO_PROFILE_TEST_STRIP: "false"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -635,8 +641,14 @@ jobs:
               "cargoTargetDir": os.environ["CARGO_TARGET_DIR"],
               "cargoBuildJobs": os.environ["CARGO_BUILD_JOBS"],
               "cargoIncremental": os.environ["CARGO_INCREMENTAL"],
+              "cargoProfileDevDebug": os.environ["CARGO_PROFILE_DEV_DEBUG"],
               "cargoProfileTestDebug": os.environ["CARGO_PROFILE_TEST_DEBUG"],
+              "cargoProfileDevStrip": os.environ["CARGO_PROFILE_DEV_STRIP"],
               "cargoProfileTestStrip": os.environ["CARGO_PROFILE_TEST_STRIP"],
+              "cargoProfileDevBuildOverrideDebug": os.environ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG"],
+              "cargoProfileTestBuildOverrideDebug": os.environ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG"],
+              "cargoProfileDevBuildOverrideStrip": os.environ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP"],
+              "cargoProfileTestBuildOverrideStrip": os.environ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP"],
               "inferencePin": next(iter(pins)),
               "package": "sceneworks-rust-api",
               "target": "sceneworks_rust_api",

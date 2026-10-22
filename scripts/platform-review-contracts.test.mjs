@@ -1178,6 +1178,26 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
   assert.match(job, /Initialize private browser fixture paths/);
   assert.match(job, /CARGO_TARGET_DIR=\$root\/target/);
   assert.match(job, /BROWSER_FIXTURE_OUTPUT=\$root\/output/);
+  for (const entry of [
+    'CARGO_PROFILE_DEV_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_STRIP: "false"',
+    'CARGO_PROFILE_TEST_STRIP: "false"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"',
+  ]) assert.ok(job.includes(entry), entry);
+  for (const key of [
+    "cargoProfileDevDebug",
+    "cargoProfileTestDebug",
+    "cargoProfileDevStrip",
+    "cargoProfileTestStrip",
+    "cargoProfileDevBuildOverrideDebug",
+    "cargoProfileTestBuildOverrideDebug",
+    "cargoProfileDevBuildOverrideStrip",
+    "cargoProfileTestBuildOverrideStrip",
+  ]) assert.match(job, new RegExp(`"${key}": os\\.environ`));
   assert.match(job, /cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json/);
   assert.match(job, /expected one sceneworks_rust_api libtest executable/);
   assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
