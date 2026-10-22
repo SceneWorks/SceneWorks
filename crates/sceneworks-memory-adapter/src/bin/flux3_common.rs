@@ -6,6 +6,8 @@ use runtime_cuda::gen_core as core;
 #[cfg(target_os = "macos")]
 use runtime_macos::gen_core as core;
 
+#[path = "flux3_boundary_self_test.rs"]
+pub(crate) mod boundary_self_test;
 #[path = "flux3_resource.rs"]
 mod resource;
 
@@ -1654,6 +1656,196 @@ mod tests {
                 )
                 .is_err());
             }
+        }
+    }
+
+    // ---- sc-26243 zero-budget native-boundary self-test ----
+    use super::boundary_self_test as boundary;
+
+    fn self_test_request(lane: &str, binary: &str, cases: Vec<Value>) -> Value {
+        json!({"action": boundary::SELF_TEST_ACTION, "lane": lane, "expectedBinarySha256": binary,
+            "buildReceiptSha256": "c".repeat(64), "buildReceiptBinarySha256": binary,
+            "sourceSha": "a".repeat(40), "inferenceMainSha": protocol::INFERENCE_PIN, "cases": cases})
+    }
+
+    fn anchor_case(lane: &str, tier: &str) -> Value {
+        let planned = request(lane, tier);
+        let p = plan(&planned, lane).unwrap();
+        let digest = resource::anchor_digest(&p, &generation_request(&p)).unwrap();
+        json!({"invocationId": format!("{lane}.distilled.resource-native.{tier}.generation-1"),
+            "caseId": format!("{lane}.distilled.resource-native.{tier}"), "kind": "resource_anchor",
+            "requestSha256": digest, "request": planned})
+    }
+
+    fn env_of(pairs: Vec<(&'static str, &'static str)>) -> impl Fn(&str) -> Option<String> {
+        move |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn native_boundary_self_test_is_unreachable_without_its_explicit_cpu_guard() {
+        let guard_env = boundary::SELF_TEST_ENV;
+        assert!(boundary::guard(&env_of(vec![("CUDA_VISIBLE_DEVICES", "-1")])).is_err());
+        assert!(boundary::guard(&env_of(vec![
+            (guard_env, "true"),
+            ("CUDA_VISIBLE_DEVICES", "-1")
+        ]))
+        .is_err());
+        assert!(boundary::guard(&env_of(vec![
+            (guard_env, "1"),
+            ("CUDA_VISIBLE_DEVICES", "1")
+        ]))
+        .is_err());
+        assert!(
+            boundary::guard(&env_of(vec![(guard_env, "1")])).is_err(),
+            "unset CVD exposes devices"
+        );
+        for production in [
+            "SCENEWORKS_FLUX3_INVOCATION",
+            "SCENEWORKS_FLUX3_BUDGET_NODE",
+            "SCENEWORKS_FLUX3_KLEIN_ROOT",
+        ] {
+            assert!(
+                boundary::guard(&env_of(vec![
+                    (guard_env, "1"),
+                    ("CUDA_VISIBLE_DEVICES", "-1"),
+                    (production, "{}")
+                ]))
+                .is_err(),
+                "{production} present must refuse"
+            );
+        }
+        assert!(boundary::guard(&env_of(vec![
+            (guard_env, "1"),
+            ("CUDA_VISIBLE_DEVICES", "-1"),
+            ("SCENEWORKS_GPU_ID", "1")
+        ]))
+        .is_err());
+        assert!(boundary::guard(&env_of(vec![
+            (guard_env, "1"),
+            ("CUDA_VISIBLE_DEVICES", "-1")
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn native_boundary_self_test_proves_one_permit_one_generate_and_refusals_with_the_production_loop(
+    ) {
+        let binary = "b".repeat(64);
+        for lane in ["candle", "mlx"] {
+            let receipt = boundary::run_self_test(
+                &self_test_request(
+                    lane,
+                    &binary,
+                    vec![anchor_case(lane, "bf16"), anchor_case(lane, "q4")],
+                ),
+                lane,
+                render_guarded,
+                &binary,
+            )
+            .unwrap();
+            assert_eq!(receipt["binarySha256"], binary);
+            assert_eq!(receipt["campaignPermitsConsumed"], 0);
+            assert_eq!(receipt["inferenceMainSha"], protocol::INFERENCE_PIN);
+            for proof in receipt["cases"].as_array().unwrap() {
+                assert_eq!(
+                    proof["valid"],
+                    json!({"reserveCalls":1,"generateCalls":1,"order":["reserve","generate"]})
+                );
+                for refusal in ["reused", "missing", "mismatchedDigest", "mismatchedCase"] {
+                    assert_eq!(
+                        proof[refusal],
+                        json!({"refused":true,"generateCalls":0}),
+                        "{refusal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_boundary_self_test_refuses_a_binary_hash_or_planner_digest_mismatch() {
+        let binary = "b".repeat(64);
+        let request = self_test_request("candle", &binary, vec![anchor_case("candle", "bf16")]);
+        let error = boundary::run_self_test(&request, "candle", render_guarded, &"e".repeat(64))
+            .unwrap_err();
+        assert!(error.contains("sealed binary hash mismatch"), "{error}");
+        let mut wrong_receipt = request.clone();
+        wrong_receipt["buildReceiptBinarySha256"] = json!("d".repeat(64));
+        assert!(
+            boundary::run_self_test(&wrong_receipt, "candle", render_guarded, &binary).is_err()
+        );
+        let mut wrong_digest = request.clone();
+        wrong_digest["cases"][0]["requestSha256"] = json!("0".repeat(64));
+        assert!(
+            boundary::run_self_test(&wrong_digest, "candle", render_guarded, &binary).is_err(),
+            "a planner digest differing from the binary's own native request digest yields no receipt"
+        );
+        let mut wrong_pin = request.clone();
+        wrong_pin["inferenceMainSha"] = json!("f".repeat(40));
+        assert!(boundary::run_self_test(&wrong_pin, "candle", render_guarded, &binary).is_err());
+        assert!(
+            boundary::run_self_test(&request, "mlx", render_guarded, &binary).is_err(),
+            "lane mismatch"
+        );
+    }
+
+    fn generate_twice(
+        plan: &Plan,
+        generator: &dyn Generator,
+        _: &MemoryRunContext,
+        _: &mut dyn FnMut(protocol::ReferencePhase),
+        reserve: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        let request = generation_request(plan);
+        reserve(plan, &request)?;
+        let _ = generator.generate(&request, &mut |_| {});
+        let _ = generator.generate(&request, &mut |_| {});
+        Ok(json!({}))
+    }
+
+    fn generate_before_reserve(
+        plan: &Plan,
+        generator: &dyn Generator,
+        _: &MemoryRunContext,
+        _: &mut dyn FnMut(protocol::ReferencePhase),
+        reserve: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        let request = generation_request(plan);
+        let _ = generator.generate(&request, &mut |_| {});
+        reserve(plan, &request)?;
+        Ok(json!({}))
+    }
+
+    fn generate_without_reserve(
+        plan: &Plan,
+        generator: &dyn Generator,
+        _: &MemoryRunContext,
+        _: &mut dyn FnMut(protocol::ReferencePhase),
+        _: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
+    ) -> Result<Value, String> {
+        let _ = generator.generate(&generation_request(plan), &mut |_| {});
+        Ok(json!({}))
+    }
+
+    #[test]
+    fn native_boundary_self_test_catches_double_generate_late_or_missing_reservation_mutants() {
+        let binary = "b".repeat(64);
+        let request = self_test_request("candle", &binary, vec![anchor_case("candle", "bf16")]);
+        let mutants: [(&str, boundary::Render); 3] = [
+            ("two generates per permit", generate_twice),
+            ("generate before reserve", generate_before_reserve),
+            ("generate without reserve", generate_without_reserve),
+        ];
+        for (label, mutant) in mutants {
+            assert!(
+                boundary::run_self_test(&request, "candle", mutant, &binary).is_err(),
+                "{label} must be caught"
+            );
         }
     }
 }

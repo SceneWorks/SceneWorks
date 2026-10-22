@@ -12,7 +12,7 @@ import { userInfo } from 'node:os';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText } from './flux3-image-klein-app-lifecycle.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
-import { validateApprovedPlan, planHash, auditLedger, reserveInvocation } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256 } from './flux3-image-klein-terminal-budget.mjs';
 const execFile = promisify(execFileCb);
 export async function fileHash(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
 export async function contained(file, root) {
@@ -160,7 +160,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
   try {
     if (!dependencies.fixtureOnly) {
       await validateAdmission(a, a.backend); const budget = validateApprovedPlan(a.approvedPlan); assert.equal(budget.approvedPlanSha256, a.approvedPlanSha256); assert.equal(a.ledgerId, a.approvedPlan.ledgerId);
-      await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot });
+      await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot, inputSpecAddendum: a.inputSpecAddendum });
       const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a);
     }
     assert.equal(await io.hash(a.binary), a.binarySha256, 'prebuilt binary mismatch');
@@ -176,7 +176,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     await io.mkdir(identity.state); await io.mkdir(path.join(identity.state, 'data/projects'), { recursive: true }); await io.mkdir(path.join(identity.state, 'credentials')); await io.cp(path.join(ROOT, 'config'), path.join(identity.state, 'config'), { recursive: true });
     if (!dependencies.fixtureOnly || a.artifactCells) {
       assert(a.artifactCells?.length && a.artifactInputs && a.artifactTargets, 'concrete launcher requires exact approved artifact mapping inputs before any service launch');
-      assert.equal(planHash(a.artifactInputs), a.approvedPlan.inputSpecSha256[a.backend]);
+      assert.equal(planHash(a.artifactInputs), boundInputSpecSha256(a.approvedPlan, a.backend, a.inputSpecAddendum));
       const { stageTerminalArtifacts } = await import('./flux3-image-klein-terminal-artifacts.mjs'); artifactMapping = await stageTerminalArtifacts({ admission: a, identity, inputSpec: a.artifactInputs, cells: a.artifactCells, registry: a.artifactTargets });
     }
     if (a.faultProfile) {
@@ -193,7 +193,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     const url = await wait(async () => boundApiUrl(await io.readFile(api.logPath, 'utf8')));
     endpoint = io.controller({ url, state: identity.state, api, controller: abort }); await wait(() => endpoint.verify());
     const consume = async (invocationId, kind, body) => {
-      const receipt = await io.reserve({ approval: a.approvedPlan, ledgerRoot: a.ledgerRoot, ledgerId: a.ledgerId, approvedPlanSha256: a.approvedPlanSha256, invocationId, backend: a.backend, caseId: currentCase.caseId, kind, requestSha256: planHash(body) }); permits.push(receipt); return receipt;
+      const receipt = await io.reserve({ approval: a.approvedPlan, ledgerRoot: a.ledgerRoot, ledgerId: a.ledgerId, approvedPlanSha256: a.approvedPlanSha256, invocationId, backend: a.backend, caseId: currentCase.caseId, kind, requestSha256: planHash(body), inputSpecAddendum: a.inputSpecAddendum }); permits.push(receipt); return receipt;
     };
     const beforeMutation = async (method, route, body) => {
       if (method !== 'POST') return;

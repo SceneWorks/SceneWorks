@@ -22724,6 +22724,11 @@ fn main() {
         LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof(&request),
         LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry(&request),
         "assess_batch" => assess_z_image_batch(&request),
+        // Hidden zero-budget CPU self-test of THIS sealed binary's FLUX3 permit boundary; refused
+        // unless its own environment guard is set and no production invocation exists.
+        flux3_common::boundary_self_test::SELF_TEST_ACTION => {
+            flux3_common::boundary_self_test::native_boundary_self_test(&request, "mlx")
+        }
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));

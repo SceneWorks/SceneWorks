@@ -8356,6 +8356,11 @@ fn main() {
         "probe" => probe(),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
+        // Hidden zero-budget CPU self-test of THIS sealed binary's FLUX3 permit boundary; refused
+        // unless its own environment guard is set and no production invocation exists.
+        flux3_common::boundary_self_test::SELF_TEST_ACTION => {
+            flux3_common::boundary_self_test::native_boundary_self_test(&request, "candle")
+        }
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));

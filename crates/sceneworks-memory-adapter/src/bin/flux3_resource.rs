@@ -543,6 +543,44 @@ pub(super) fn anchor_digest(plan: &Plan, request: &GenerationRequest) -> Result<
 pub(super) fn reserve(plan: &Plan, request: &GenerationRequest) -> Result<Value, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+    let input = reservation_input(
+        plan,
+        request,
+        &protocol::required_env("SCENEWORKS_FLUX3_INVOCATION")?,
+    )?;
+    spawn_reservation(input, |input| {
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/flux3-resource-reserve.mjs");
+        let mut child = Command::new(protocol::required_env("SCENEWORKS_FLUX3_BUDGET_NODE")?)
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(blocked)?;
+        let write = child
+            .stdin
+            .take()
+            .ok_or_else(|| blocked("reservation stdin unavailable"))?
+            .write_all(&serde_json::to_vec(input).map_err(blocked)?);
+        let result = child.wait_with_output().map_err(blocked)?;
+        write.map_err(blocked)?;
+        if !result.status.success() {
+            return Err(blocked(String::from_utf8_lossy(&result.stderr)));
+        }
+        serde_json::from_slice(&result.stdout).map_err(blocked)
+    })
+}
+
+/// The production reservation identity check, independent of the ledger transport: the configured
+/// request must equal the approved inputs, the invocation must carry exactly its binding fields,
+/// and its backend/case/kind/request digest must equal this native invocation's own. Shared by the
+/// real reservation and the zero-budget native-boundary self-test.
+pub(super) fn reservation_input(
+    plan: &Plan,
+    request: &GenerationRequest,
+    invocation: &str,
+) -> Result<Value, String> {
     // Configuration may set memory policy, but may not silently change approved generation inputs.
     let intended = generation_request(plan);
     if request.count != 1
@@ -552,9 +590,7 @@ pub(super) fn reserve(plan: &Plan, request: &GenerationRequest) -> Result<Value,
             "configured generation differs from approved inputs",
         ));
     }
-    let mut input: Value =
-        serde_json::from_str(&protocol::required_env("SCENEWORKS_FLUX3_INVOCATION")?)
-            .map_err(blocked)?;
+    let mut input: Value = serde_json::from_str(invocation).map_err(blocked)?;
     exact(
         &input,
         &[
@@ -603,26 +639,16 @@ pub(super) fn reserve(plan: &Plan, request: &GenerationRequest) -> Result<Value,
     // Replace no caller-controlled identities: the CLI independently checks the immutable plan.
     input["requestSha256"] = json!(digest);
     input["adapterPid"] = json!(std::process::id());
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/flux3-resource-reserve.mjs");
-    let mut child = Command::new(protocol::required_env("SCENEWORKS_FLUX3_BUDGET_NODE")?)
-        .arg(script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(blocked)?;
-    let write = child
-        .stdin
-        .take()
-        .ok_or_else(|| blocked("reservation stdin unavailable"))?
-        .write_all(&serde_json::to_vec(&input).map_err(blocked)?);
-    let result = child.wait_with_output().map_err(blocked)?;
-    write.map_err(blocked)?;
-    if !result.status.success() {
-        return Err(blocked(String::from_utf8_lossy(&result.stderr)));
-    }
-    let event: Value = serde_json::from_slice(&result.stdout).map_err(blocked)?;
+    Ok(input)
+}
+
+/// Consume ONE permit through `transport` and verify the returned ledger event binds exactly the
+/// validated invocation (and, for the real ledger, the observed hardware/build/PID).
+pub(super) fn spawn_reservation(
+    input: Value,
+    transport: impl FnOnce(&Value) -> Result<Value, String>,
+) -> Result<Value, String> {
+    let event = transport(&input)?;
     for field in [
         "ledgerId",
         "approvedPlanSha256",

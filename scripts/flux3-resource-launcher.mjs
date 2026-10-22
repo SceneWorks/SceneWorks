@@ -61,7 +61,7 @@ export async function launchFlux3Resource({ admission, request, invocationId, re
   const digest = invocation.kind==='resource_supplemental' ? resourceCaseDigest(request.resourceCase)
     : (assert.equal(request.resourceCase,undefined,'canonical anchor cannot carry supplemental inputs'),flux3AnchorRequestDigest(a.backend,invocation.modelId,invocation.tier));
   assert.equal(digest,invocation.requestSha256,'actual normalized request differs from approved permit');
-  await io.audit({approval:a.approvedPlan,backend:a.backend,ledgerRoot:a.ledgerRoot}); // audit ONLY, no reserve/reset.
+  await io.audit({approval:a.approvedPlan,backend:a.backend,ledgerRoot:a.ledgerRoot,inputSpecAddendum:a.inputSpecAddendum}); // audit ONLY, no reserve/reset.
   const env = safeEnv(io.env);
   for (const key of Object.keys(resourceEnvironment)) { assert(loaderKeys.includes(key),'only fixed local loader environment permitted'); assert.equal(typeof resourceEnvironment[key],'string'); env[key]=resourceEnvironment[key]; }
   Object.assign(env,{HF_HOME:a.hfHome,HF_HUB_CACHE:path.join(a.hfHome,'hub'),HUGGINGFACE_HUB_CACHE:path.join(a.hfHome,'hub'),
@@ -82,7 +82,7 @@ export async function launchFlux3Resource({ admission, request, invocationId, re
   await io.writeFile(`${stem}.stdout.json`,output.stdout,{flag:'wx'}); await io.writeFile(`${stem}.stderr.log`,output.stderr,{flag:'wx'});
   assert(!output.failure && output.code===0 && !output.signal,`owned resource adapter failed; permit may be spent, never retry: ${output.failure ?? output.code}`);
   const envelope=JSON.parse(output.stdout);
-  const ledger=await io.audit({approval:a.approvedPlan,backend:a.backend,ledgerRoot:a.ledgerRoot});
+  const ledger=await io.audit({approval:a.approvedPlan,backend:a.backend,ledgerRoot:a.ledgerRoot,inputSpecAddendum:a.inputSpecAddendum});
   const ledgerEvent=ledger.events.find(e=>e.invocationId===invocationId); assert(ledgerEvent,'actual inner reservation absent');
   const verified=verifyNativeResourceCapture(envelope,{admission:a,invocation,adapterPid:output.adapterPid,ledgerEvent});
   const resultFile=`${stem}.${verified.anchorFragment?'anchor':'supplemental'}.json`;

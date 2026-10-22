@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { initializeLedger, reserveInvocation, auditLedger, planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { launchFlux3Resource } from './flux3-resource-launcher.mjs';
+import { declaredSyntheticReadyBackend } from './lib/flux3-native-boundary-fixtures.mjs';
 import { flux3AnchorRequestDigest, flux3CaptureDigest, verifyNativeResourceCapture } from './lib/flux3-resource-contract.mjs';
 const digest='d'.repeat(64), adapterPid=12345;
 async function fixture(t) {
@@ -17,6 +18,7 @@ async function fixture(t) {
     inputSpecSha256:{candle:digest,mlx:digest},plan:{kind:'flux3-installed-product-representative-plan',generationInvocations:[invocation],trainingLifecycles:[],
       resourceCases:[{backend:'candle',caseId:invocation.caseId,status:'READY',parentNativeBoundaryVerificationId:'DECLARED-SYNTHETIC',nativeBoundaryReceiptSha256:digest}],
       budget:{globalHardCeiling:48,totalGenerationInvocations:1,byBackend:{candle:1,mlx:0},unallocatedNotAuthorized:47,automaticWarmups:0,automaticRepeats:0,automaticRetries:0,trainingLifecycles:0,stepsPerLifecycle:4}}};
+  declaredSyntheticReadyBackend(approval,'candle',{binarySha256:digest,buildReceiptSha256:digest}); // full receipt, not a bare READY label
   await initializeLedger({approval,backend:'candle',ledgerRoot:approval.ledgerRoots.candle});
   const admission={actualRun:true,fixtureOnly:true,backend:'candle',approvedPlan:approval,approvedPlanSha256:planHash(approval),ledgerId:approval.ledgerId,ledgerRoot:approval.ledgerRoots.candle,
     sourceSha:approval.sourceSha,inferenceMainSha:approval.inferenceMainSha,binary:path.join(root,'DECLARED-NONEXISTENT-adapter.exe'),binarySha256:digest,binaryBuildReceipt:{sha256:digest},
