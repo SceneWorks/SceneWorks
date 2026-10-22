@@ -895,6 +895,24 @@ async fn validate_and_canonicalize_merged_generation_payload(
             }
         }
     }
+    // Edit options are server-defaulted and compatible across Base/SFT, but must not leak into
+    // another model or ordinary generation. An explicit advanced replacement remains authored
+    // input and reaches strict validation unchanged.
+    let is_moss_edit = |payload: &JsonObject| {
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            && sceneworks_core::moss_image::is_edit(payload)
+    };
+    if !payload_changes.contains_key("advanced")
+        && is_moss_edit(&persisted)
+        && !is_moss_edit(&merged)
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            advanced.remove(sceneworks_core::moss_image::EDIT_OPTIONS_KEY);
+        }
+    }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
