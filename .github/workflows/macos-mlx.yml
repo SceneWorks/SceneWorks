@@ -1158,14 +1158,14 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      INVENTORY_OUTPUT: ${{ runner.temp }}/cache-inventory-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Require actual secondary Mac before any checkout
         run: |
           test "$RUNNER_NAME" = nax-macos-2
           test "$(uname -s)" = Darwin
           test "$(uname -m)" = arm64
+          # The `runner` context is step-level only, so the output path is derived here.
+          echo "INVENTORY_OUTPUT=$RUNNER_TEMP/cache-inventory-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - name: Checkout only the inventory script
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
