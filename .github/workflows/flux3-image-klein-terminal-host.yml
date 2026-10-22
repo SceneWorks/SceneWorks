@@ -1,0 +1,104 @@
+# sc-26243 (epic 26233): one coordinator-approved MLX terminal step on ONE named Mac.
+# Manual registered dispatcher only (memory-catalog-campaign profile), never a per-change gate.
+# Personal inputs never leave the dataset host: this workflow has NO artifact upload step, its
+# logs carry hashes/counts only (the repository is public) and all work stays in $HOME/sc26243-run.
+name: FLUX3 Image Klein terminal host step
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact clean SceneWorks source commit (40 hex), identical to the dispatched ref
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference revision already pinned by source_sha (40 hex)
+        required: true
+        type: string
+      host:
+        description: "nax-macos (dataset host) | nax-macos-2 (general host); the sentinel none is refused"
+        required: true
+        type: string
+      step:
+        description: "prepare | self-test | run; the sentinel none is refused"
+        required: true
+        type: string
+      control_sha256:
+        description: "sha256 of $HOME/sc26243-run/control/<host>/<step>.json on that Mac; the sentinel none is refused"
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  gate:
+    # Typed-input refusal on a hosted runner first: an invalid dispatch never occupies a Mac.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Refuse sentinel/unknown host, step or control digest
+        run: node scripts/flux3-terminal-host.mjs
+        env:
+          FLUX3_TERMINAL_GATE_ONLY: "1"
+          FLUX3_TERMINAL_HOST: ${{ inputs.host }}
+          FLUX3_TERMINAL_STEP: ${{ inputs.step }}
+          FLUX3_TERMINAL_CONTROL_SHA256: ${{ inputs.control_sha256 }}
+          FLUX3_TERMINAL_SOURCE_SHA: ${{ inputs.source_sha }}
+          FLUX3_TERMINAL_INFERENCE_SHA: ${{ inputs.inference_sha }}
+  host:
+    needs: gate
+    runs-on: ${{ inputs.host == 'nax-macos' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') || fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') }}
+    timeout-minutes: 720
+    concurrency:
+      group: flux3-terminal-host-${{ inputs.host }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLUX3_TERMINAL_HOST: ${{ inputs.host }}
+      FLUX3_TERMINAL_STEP: ${{ inputs.step }}
+      FLUX3_TERMINAL_CONTROL_SHA256: ${{ inputs.control_sha256 }}
+      FLUX3_TERMINAL_SOURCE_SHA: ${{ inputs.source_sha }}
+      FLUX3_TERMINAL_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      CUDA_VISIBLE_DEVICES: "-1"
+      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.97.1 toolchain.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    steps:
+      - name: Refuse a runner other than the dispatched host before checkout
+        run: |
+          [[ "$RUNNER_NAME" == "$FLUX3_TERMINAL_HOST" ]] || { echo "::error::dispatched for $FLUX3_TERMINAL_HOST, running on $RUNNER_NAME"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Fetch locked crates for the offline sealed builds
+        if: ${{ inputs.step == 'prepare' }}
+        run: cargo fetch --locked > /dev/null
+      - name: Run the host step (hashes and counts only)
+        run: node scripts/flux3-terminal-host.mjs
