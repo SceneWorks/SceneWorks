@@ -92,6 +92,38 @@ fn an_imported_h3_dit_is_claimed_on_both_lanes_for_its_bound_partition() {
 }
 
 #[test]
+fn an_imported_h3_id_prefix_does_not_select_the_resident_checkpoint() {
+    let mut entry = imported_entry();
+    entry.insert("id".to_owned(), json!("minimax_h3_custom"));
+    let claim = payload(
+        "minimax_h3_custom",
+        "text_to_video",
+        json!({}),
+        entry.clone(),
+    );
+    assert_eq!(claimed_on_both(&claim), (true, true));
+    assert!(imported_video_model_mac_support(&entry).supported);
+    assert!(imported_video_model_candle_support(&entry).supported);
+
+    // Only the exact resident ids are reserved. Without an import plan, each retains its own
+    // partition's native route; attaching an imported assembly to either must still refuse.
+    for (model, mode, extra) in [
+        ("minimax_h3", "text_to_video", json!({})),
+        (
+            "minimax_h3_ref",
+            "reference_to_video",
+            json!({ "referenceAssetIds": ["ref"] }),
+        ),
+    ] {
+        let imported = payload(model, mode, extra, entry.clone());
+        assert_eq!(claimed_on_both(&imported), (false, false), "{model}");
+        let mut resident = imported;
+        resident.remove("modelManifestEntry");
+        assert_eq!(claimed_on_both(&resident), (true, true), "{model}");
+    }
+}
+
+#[test]
 fn the_imported_h3_claim_is_narrow_on_every_axis() {
     let t2v = |entry| payload(IMPORTED_ID, "text_to_video", json!({}), entry);
 

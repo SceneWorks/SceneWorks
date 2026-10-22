@@ -3195,7 +3195,7 @@ mod imported_minimax_h3_video_tests {
         stamp_imported_minimax_h3_entry, MiniMaxH3ImportAssembly,
     };
 
-    const IMPORTED_ID: &str = "singularity_fl2va_dense";
+    const IMPORTED_ID: &str = "minimax_h3_custom";
 
     /// The catalog entry `run_model_import_job` writes for a managed dense H3 DiT import.
     fn imported_entry(with_assembly: bool) -> Value {

@@ -108,6 +108,44 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
 
 #[cfg(target_os = "macos")]
 #[test]
+fn an_imported_h3_prefixed_id_routes_and_loads_its_plan_weights() {
+    let tiers = minimax_h3_tier_root("mm_prefix_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_prefix_base_");
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &minimax_h3_data_dir(tiers.path()),
+        "minimax_h3_custom",
+    );
+    let request = imported_minimax_h3_request("minimax_h3_custom", &imported.entry);
+    let settings = Settings {
+        data_dir: minimax_h3_data_dir(tiers.path()),
+        ..offline_settings()
+    };
+    assert_eq!(
+        resolve_video_route(&request, &settings),
+        VideoRoute::MiniMaxH3("minimax_h3")
+    );
+    let probe = ArmProbe::default();
+    let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("a user id sharing the builtin prefix is still an imported checkpoint");
+    let spec = probe
+        .spec
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a provider load ran");
+    let Some(WeightsSource::Dir(transformer)) = spec.components.get("transformer") else {
+        panic!("the imported transformer must be staged");
+    };
+    assert_eq!(canonical(transformer), canonical(&imported.install_dir));
+    assert_eq!(raw["model"], json!("minimax_h3_custom"));
+    assert_eq!(
+        raw["importPlan"]["checkpointId"],
+        json!(imported.checkpoint_id)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn an_imported_h3_entry_without_its_binding_or_under_a_builtin_id_never_loads() {
     let tiers = minimax_h3_tier_root("mm_imp_neg_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_imp_neg_base_");

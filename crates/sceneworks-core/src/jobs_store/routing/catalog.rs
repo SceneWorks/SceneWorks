@@ -1538,8 +1538,11 @@ pub(crate) fn plan_backed_minimax_h3_video_eligible(
     if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
         return false;
     }
-    if crate::video_request::is_minimax_h3_model(model)
-        || VIDEO_MLX_ROUTED_MODELS.contains(&model)
+    if matches!(
+        model,
+        crate::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
+            | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
+    ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
         || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
     {
         return false;

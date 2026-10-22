@@ -1934,7 +1934,11 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     };
     // A builtin id names the shipped weights. Rendering the imported DiT under it would record one
     // checkpoint as another; rendering the builtin under it would drop the import. Neither.
-    if sceneworks_core::video_request::is_minimax_h3_model(&request.model) {
+    if matches!(
+        request.model.as_str(),
+        sceneworks_core::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
+            | sceneworks_core::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
+    ) {
         return Err(refuse(
             "no-video-lane",
             format!(

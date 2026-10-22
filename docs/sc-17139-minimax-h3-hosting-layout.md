@@ -56,6 +56,8 @@ identifies H3; the directory name and user-selected model type do not select the
 The shared inspector persists an import plan and a component assembly binding on the new
 video model entry. Select that imported entry in Video Studio and generate normally; its
 model id and plan identity remain attached to the job and resulting asset.
+Imported ids may share the `minimax_h3` prefix (for example, `minimax_h3_custom`); only the
+exact resident ids `minimax_h3` and `minimax_h3_ref` are reserved for shipped checkpoints.
 
 The import replaces only the base FL2VA DiT (text-to-video, image-to-video, first/last frame).
 Its text encoder, tokenizer/processor and both VAEs reuse the installed MiniMax-H3 components;
