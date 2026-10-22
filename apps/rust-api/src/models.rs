@@ -14118,7 +14118,14 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
+            let hub = data_dir.join("cache/huggingface/hub");
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_path_buf(),
+                hub.clone(),
+            );
+            assert_eq!(huggingface_hub_cache_dir(data_dir), hub);
             let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            assert_eq!(repo, hub.join("models--speridlabs--iris-3b"));
             for (index, rel) in [
                 "config.yaml",
                 "model.safetensors",
@@ -14192,7 +14199,14 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
+            let hub = data_dir.join("cache/huggingface/hub");
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_path_buf(),
+                hub.clone(),
+            );
+            assert_eq!(huggingface_hub_cache_dir(data_dir), hub);
             let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            assert_eq!(repo, hub.join("models--speridlabs--iris-3b"));
             for (index, rel) in generation
                 .iter()
                 .chain(depth)

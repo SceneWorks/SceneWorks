@@ -142,8 +142,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
 }
 
 /// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
-/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
-/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// platforms — excluding Krea ControlNet, Iris and MOSS, whose trainers do not advertise
+/// this technique. Mutation:
 /// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
@@ -167,13 +167,117 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control" && !id.starts_with("iris_3b"))
+        .filter(|id| {
+            id != "krea_2_control"
+                && !id.starts_with("iris_3b")
+                && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
+        })
         .collect();
     assert_eq!(mlx, all);
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+            let target = registry
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap();
+            assert_ne!(
+                target.limits.get("supportsDepthAnchoring"),
+                Some(&json!(true))
+            );
+            assert!(
+                !sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    target
+                )
+            );
+        }
+    }
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
     assert!(mlx
         .iter()
         .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
+}
+
+/// MOSS must not advertise or accept depth anchoring through the HTTP training surface.
+#[tokio::test]
+async fn moss_training_catalog_and_submit_refuse_depth_anchoring() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MOSS depth refusal" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let path = format!(
+        "/api/v1/projects/{}/training/jobs",
+        project["id"].as_str().unwrap()
+    );
+    let (status, registry) =
+        request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{registry}");
+    for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+        let target = registry["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["id"] == id)
+            .expect("MOSS target advertised");
+        assert_ne!(
+            target["limits"]["supportsDepthAnchoring"],
+            json!(true),
+            "{id}"
+        );
+        for enabled in [false, true] {
+            let mut config = target["defaults"].clone();
+            if enabled {
+                config["advanced"]["depthAnchoringWeight"] = json!(0.01);
+            }
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &path,
+                json!({"targetId": id, "datasetId": "ds_missing", "config": config,
+                    "outputName": "MOSS depth refusal", "dryRun": true}),
+            )
+            .await;
+            if enabled {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
+                assert_eq!(error["code"], "training_field_error", "{id}: {error}");
+                assert_eq!(
+                    error["context"]["field"], "depthAnchoringWeight",
+                    "{id}: {error}"
+                );
+                assert!(
+                    error["detail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("does not support depth anchoring"),
+                    "{id}: {error}"
+                );
+            } else {
+                // The same config without depth passes validation and reaches dataset lookup.
+                assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {error}");
+                assert_eq!(
+                    error["detail"], "Training dataset not found",
+                    "{id}: {error}"
+                );
+            }
+        }
+    }
 }
 
 /// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
@@ -4773,7 +4877,17 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
 #[tokio::test]
 async fn real_training_job_rejected_when_base_model_missing() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
     let (_, project) = request(
         app.clone(),
         "POST",
