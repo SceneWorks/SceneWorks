@@ -1860,6 +1860,9 @@ jobs:
           SUPRA2_BUNDLE_OUT: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
           SUPRA2_BUNDLE_DIR: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
           SUPRA2_RENDER_OUT: ${{ runner.temp }}\supra2-worker-evidence
+          # The acceptance matrix folds the lifecycle test's real result (this log, written by the
+          # lifecycle invocation below) into cell 7 of supra2_matrix_candle.json.
+          SUPRA2_LIFECYCLE_LOG: ${{ runner.temp }}\supra2-worker-evidence\lifecycle.log
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -1878,7 +1881,7 @@ jobs:
           call scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_lifecycle "%SUPRA2_RENDER_OUT%\lifecycle.log"
           if errorlevel 1 exit /b 1
           rem Epic 24212 acceptance matrix (sc-24217): short / truncated prompt, CFG 3 vs 1, seed
-          rem repeat, count 4 vs single renders on seed + k, offline.
+          rem repeat, count 4 vs single renders on seed + k, offline; cell 7 folds lifecycle.log.
           call scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_acceptance_matrix "%SUPRA2_RENDER_OUT%\matrix.log"
       - name: Upload the Supra2-IMG Candle worker evidence
         if: ${{ always() }}

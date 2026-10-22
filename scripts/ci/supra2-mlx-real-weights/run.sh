@@ -102,7 +102,7 @@ run_guarded() { # $1 test path, $2 cap GiB, $3 wall s
   local guard rc
   set +e
   guard="$(SUPRA2_HF_HUB_CACHE="$hub" HF_HUB_CACHE="$hub" HF_HUB_OFFLINE=1 SUPRA2_RENDER_OUT="$out" \
-    SUPRA2_BUNDLE_OUT="$bundle" SUPRA2_BUNDLE_DIR="$bundle" \
+    SUPRA2_BUNDLE_OUT="$bundle" SUPRA2_BUNDLE_DIR="$bundle" SUPRA2_LIFECYCLE_LOG="$out/supra2_real_weight_offline_lifecycle_cancel_recover_unload.log" \
     TMPDIR="$RUNNER_TEMP" python3.12 "$guard_py" "$cap_gib" "$limit_s" "$log" -- \
     "$bin" "$test" --ignored --exact --nocapture --test-threads=1)"
   rc=$?
@@ -125,5 +125,7 @@ bundle="$RUNNER_TEMP/supra2-data/models/mlx/supra2_img"
 run_guarded "model_jobs::supra2_convert_tests::supra2_real_weight_convert_writes_a_loadable_bundle" 16 600
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_render_through_the_worker_arm" 16 900
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload" 16 1200
+# The matrix folds the lifecycle test's real result (its log above, SUPRA2_LIFECYCLE_LOG) into
+# cell 7 of supra2_matrix_mlx.json, so the summary file is the whole truthful verdict.
 run_guarded "image_jobs::supra2::tests::mlx_real_weights::supra2_real_weight_acceptance_matrix" 16 1200
 exit "$failed"

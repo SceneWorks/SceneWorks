@@ -63,6 +63,11 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     // The character lane's Angle Set / Key Point Library extras (`characterPanels.jsx`).
     "angleSet",
     "keypointCollectionId",
+    // A caller-chosen weights directory (sc-24217 pre-merge review): the API injects the converted
+    // bundle as `modelManifestEntry.modelPath`, and the load, the failed-load diagnosis and the
+    // asset's provenance all read that one bundle. No client sends this for Supra2; honoring it
+    // would load a different bundle from the one the install's diagnosis and records describe.
+    "modelPath",
 ];
 
 /// Top-level carriers of a source, reference, mask, control, adapter or prompt batch.
@@ -172,18 +177,15 @@ pub const BACKEND_KEY: &str = "backend";
 /// `guidance > 1` (`gen_core::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
 /// when its manifest records one, else the empty-prompt fallback. The engine's own
 /// `used_stored_unconditional` flag stays inside the provider (the `Generator` report does not carry
-/// it), so the worker reads the same fact off the converted bundle's manifest at the entry's
-/// `modelPath`. `Null` when the manifest cannot be read (that render fails at load anyway).
-pub fn unconditional_source(entry: &JsonObject, guidance: Option<f32>) -> Value {
+/// it), so the worker reads the same fact off the manifest of `bundle` — the confined directory the
+/// render LOADED (`resolve_weights_dir`), never a path re-read off the request. `Null` when the
+/// manifest cannot be read (that render fails at load anyway).
+pub fn unconditional_source(bundle: Option<&std::path::Path>, guidance: Option<f32>) -> Value {
     if !s2::cfg_enabled(guidance.unwrap_or(s2::DEFAULT_GUIDANCE)) {
         return Value::from(UNCONDITIONAL_NONE);
     }
-    let manifest = entry
-        .get("modelPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .and_then(|dir| std::fs::read(std::path::Path::new(dir).join(s2::BUNDLE_MANIFEST)).ok())
+    let manifest = bundle
+        .and_then(|dir| std::fs::read(dir.join(s2::BUNDLE_MANIFEST)).ok())
         .and_then(|bytes| serde_json::from_slice::<s2::BundleManifest>(&bytes).ok());
     match manifest {
         Some(manifest) if manifest.conditioning.is_some() => Value::from(UNCONDITIONAL_STORED),
@@ -415,7 +417,7 @@ mod tests {
             conditioning,
             components: Vec::new(),
         };
-        let entry = object(json!({ "modelPath": dir.path() }));
+        let bundle = Some(dir.path());
         let write = |m: &s2::BundleManifest| {
             std::fs::write(
                 dir.path().join(s2::BUNDLE_MANIFEST),
@@ -423,21 +425,18 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(unconditional_source(&entry, Some(3.0)), Value::Null);
+        assert_eq!(unconditional_source(bundle, Some(3.0)), Value::Null);
         write(&manifest(Some(file(s2::CONDITIONING_FILE))));
-        assert_eq!(unconditional_source(&entry, Some(3.0)), json!("stored"));
-        assert_eq!(unconditional_source(&entry, None), json!("stored"));
-        assert_eq!(unconditional_source(&entry, Some(1.0)), json!("none"));
-        assert_eq!(unconditional_source(&entry, Some(0.5)), json!("none"));
+        assert_eq!(unconditional_source(bundle, Some(3.0)), json!("stored"));
+        assert_eq!(unconditional_source(bundle, None), json!("stored"));
+        assert_eq!(unconditional_source(bundle, Some(1.0)), json!("none"));
+        assert_eq!(unconditional_source(bundle, Some(0.5)), json!("none"));
         write(&manifest(None));
         assert_eq!(
-            unconditional_source(&entry, Some(3.0)),
+            unconditional_source(bundle, Some(3.0)),
             json!("emptyPrompt")
         );
-        assert_eq!(
-            unconditional_source(&JsonObject::new(), Some(1.0)),
-            json!("none")
-        );
+        assert_eq!(unconditional_source(None, Some(1.0)), json!("none"));
     }
 
     #[test]
@@ -553,6 +552,12 @@ mod tests {
                 "mossImage",
             ),
             (json!({ "advanced": { "angleSet": true } }), "angleSet"),
+            // sc-24217 pre-merge review: a caller-chosen weights dir would load a bundle the
+            // diagnosis and the provenance record do not describe.
+            (
+                json!({ "advanced": { "modelPath": "/elsewhere/supra2_img" } }),
+                "advanced.modelPath",
+            ),
             (json!({ "characterId": "c1" }), "characterId"),
             (json!({ "characterLookId": "l1" }), "characterLookId"),
             (json!({ "advanced": "x" }), "advanced must be an object"),

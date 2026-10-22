@@ -6769,9 +6769,15 @@
         "types": []
       },
       "mlx": {
-        // Conservative DECLARED floor (no measurement campaign): the resident f32 set is ~1.2 GB
-        // (416 MB denoiser + the Flan-T5-Base encoder half + the 335 MB VAE) plus 256x256
-        // activations; the terminal campaign replaces it with measured evidence.
+        // DECLARED catalog floor; the MEASURED evidence lives in the anchor store, not here. The
+        // sc-24217 campaign measured anchor `imc-130e60e9f989be2191bc`
+        // (config/memory-anchors.json; docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json):
+        // active peak 4.28 GB (the VAE decode phase; conditioning/denoise ~1.61 GB) and an MLX
+        // allocator envelope of 9.32 GB at count 1 (10.69 GB at count 8) — the envelope includes
+        // MLX's reusable buffer cache, which the allocator returns under pressure, so it is not the
+        // working set. 8 GB stays above the measured active peak with headroom, and it is left
+        // declared the way every other anchored MLX row is (their floors sit below their allocator
+        // envelopes too): the anchor is the measured basis, not this scalar.
         "minMemoryGb": 8,
         "requiresConversion": true,
         "converter": "supra2_img",
@@ -6779,8 +6785,13 @@
         "convertSourceFile": "model_final_ema.pt"
       },
       "candle": {
-        // Conservative DECLARED floor (no measurement campaign; `measured: false`), the Candle twin
-        // of the MLX value above. `candle-gen-supra2` is resident-only (no quantization, sequential
+        // DECLARED floor, the Candle twin of the MLX value above. `measured: false` is this row's
+        // evidence class for a MEASURED `vramGbByTier` ladder, which Supra2 does not carry; the
+        // measured evidence lives in the anchor store instead: the sc-24217 campaign measured
+        // envelope `imc-720c45380d2ce4058aa0` (config/memory-anchors.json `analyticOnly`;
+        // docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json) is 2.82 GB of VRAM, flat
+        // from count 1 to count 8 because the VAE decodes the batch's images one at a time. The
+        // 4 GB floor stays above that measurement. `candle-gen-supra2` is resident-only (no quantization, sequential
         // offload or deferred materialization): every tensor is read once and lives on the device
         // for the generator's lifetime. The resident f32 set is ~1.2 GB (the 416 MB denoiser, the
         // Flan-T5-Base encoder half of the 990 MB checkpoint, the 335 MB VAE) plus 256x256
@@ -6788,9 +6799,10 @@
         // Candle floor it folds in the 2 GB allocator reserve, because `vram_gate::predicted_peak_gb`
         // adds no headroom to this scalar: ~1.2 GB + activations + 2.0 GB, rounded up to 4. Without
         // a floor the fit gate has no prediction and admits a load on any card
-        // (FitDecision::Unknown). The terminal campaign (sc-24217) replaces it with measured evidence.
-        // * `imageActivationGbPerMegapixel` — DECLARED from architecture facts, not measured (no
-        //   peak was recorded by the inference `candle-supra2` CUDA run). The gate
+        // (FitDecision::Unknown).
+        // * `imageActivationGbPerMegapixel` — DECLARED from architecture facts. The sc-24217
+        //   measurement above bounds it from above: the envelope does not grow from count 1 to 8,
+        //   so the charge below is conservative, never short. The gate
         //   (`lane_controls::declared_activation_overlay_bytes`) charges this ×
         //   (images × max(1, MP) − 1); Supra2 renders only 256² (0.0625 MP, clamped up to 1), so the
         //   term is charged once per EXTRA image of a native count batch (`image.nativeCountBatch`,

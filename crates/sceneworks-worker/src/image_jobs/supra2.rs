@@ -1414,6 +1414,24 @@ mod tests {
                 self.cells.push(json!({
                     "cell": cell, "pass": pass, "latencyS": latency_s, "detail": detail
                 }));
+                self.write();
+                assert!(pass, "cell {cell} failed: {detail}");
+            }
+
+            /// A cell this process has no verdict for, recorded as such — never as a pass.
+            fn not_applicable(&mut self, cell: &str, detail: Value) {
+                eprintln!(
+                    "CELL backend={BACKEND} cell={cell} status=not_applicable latency_s=- \
+                     detail={detail}"
+                );
+                self.cells.push(json!({
+                    "cell": cell, "pass": null, "status": "not_applicable", "latencyS": null,
+                    "detail": detail
+                }));
+                self.write();
+            }
+
+            fn write(&self) {
                 if let Some(out) = &self.out {
                     std::fs::write(
                         out.join(format!("supra2_matrix_{BACKEND}.json")),
@@ -1424,7 +1442,6 @@ mod tests {
                     )
                     .unwrap();
                 }
-                assert!(pass, "cell {cell} failed: {detail}");
             }
 
             fn keep(&self, render: &Render, cell: &str) {
@@ -1438,6 +1455,67 @@ mod tests {
                     .unwrap();
                 }
             }
+        }
+
+        /// The lifecycle test cell 7 folds in: the lane runs it in its own process before the
+        /// matrix, on the same build and card.
+        const LIFECYCLE_TEST: &str = if cfg!(target_os = "macos") {
+            "mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload"
+        } else {
+            "candle_real_weights::supra2_worker_gpu_lifecycle"
+        };
+
+        /// Cell 7's verdict from the lifecycle test's own libtest log (`SUPRA2_LIFECYCLE_LOG`,
+        /// written by the lane script, which runs it with `--exact`): passed iff the log shows the
+        /// lifecycle test itself started (`test …::<LIFECYCLE_TEST> ...`) and the run's summary is
+        /// exactly one test passing, none failing. The test's own `--nocapture` output lands
+        /// between its name and its `ok`, so the summary — not the `... ok` suffix — carries the
+        /// verdict; with one test run and that test named, it is that test's. `None` when the lane
+        /// named no log (a standalone matrix run), which the matrix records as not applicable
+        /// rather than as a pass.
+        fn lifecycle_verdict(log: Option<&str>) -> Option<bool> {
+            let log = log?;
+            let started = format!("::{LIFECYCLE_TEST} ...");
+            Some(
+                log.lines()
+                    .any(|line| line.starts_with("test ") && line.contains(&started))
+                    && log.contains("test result: ok. 1 passed; 0 failed"),
+            )
+        }
+
+        /// sc-24217 pre-merge review: cell 7 is the lifecycle test's REAL result, never a constant.
+        ///
+        /// *Mutations that red this:* return `Some(true)` for any log; drop the which-test check (a
+        /// log whose one passing test is some other test reads as a pass).
+        #[test]
+        fn cell_7_folds_the_lifecycle_tests_own_result() {
+            let passed = format!(
+                "running 1 test\ntest image_jobs::supra2::tests::{LIFECYCLE_TEST} ... ok\n\n\
+                 test result: ok. 1 passed; 0 failed; 0 ignored"
+            );
+            assert_eq!(lifecycle_verdict(Some(&passed)), Some(true));
+            // `--nocapture`: the test's own output sits between its name and its `ok` (the
+            // windows-candle lane's real shape, CRLF line endings included).
+            let interleaved = format!(
+                "running 1 test\r\ntest image_jobs::supra2::tests::{LIFECYCLE_TEST} ... RESULT \
+                 status=pass lifecycle=cancel,recover,unload,reload\r\nok\r\n\r\n\
+                 test result: ok. 1 passed; 0 failed; 0 ignored\r\n"
+            );
+            assert_eq!(lifecycle_verdict(Some(&interleaved)), Some(true));
+            let failed = format!(
+                "running 1 test\ntest image_jobs::supra2::tests::{LIFECYCLE_TEST} ... FAILED\n\n\
+                 test result: FAILED. 0 passed; 1 failed; 0 ignored"
+            );
+            assert_eq!(lifecycle_verdict(Some(&failed)), Some(false));
+            let other = "running 1 test\ntest image_jobs::supra2::tests::other ... ok\n\n\
+                         test result: ok. 1 passed; 0 failed; 0 ignored";
+            assert_eq!(lifecycle_verdict(Some(other)), Some(false));
+            assert_eq!(
+                lifecycle_verdict(Some("")),
+                Some(false),
+                "a missing log fails"
+            );
+            assert_eq!(lifecycle_verdict(None), None);
         }
 
         fn warnings(asset: &Value) -> Vec<String> {
@@ -1462,7 +1540,9 @@ mod tests {
         /// (4) seed S count 1 twice is pixel-identical; (5) count 4 on seed S publishes seeds
         /// S..S+3 and image k matches the count-1 render on seed S+k within the backend's declared
         /// bound; (6) the whole matrix runs OFFLINE (`HF_HUB_OFFLINE=1`, Hub base URL on a closed
-        /// port); (7) cancel → recover → unload/reload is the lifecycle test's (not duplicated).
+        /// port); (7) cancel → recover → unload/reload is the lifecycle test's (not duplicated):
+        /// its actual result is folded in from the libtest log the lane names in
+        /// `SUPRA2_LIFECYCLE_LOG` (recorded `not_applicable`, never passed, when none is named).
         pub(super) fn run() {
             let bundle = PathBuf::from(std::env::var("SUPRA2_BUNDLE_DIR").expect(
                 "SUPRA2_BUNDLE_DIR: the bundle the separate convert step wrote (SUPRA2_BUNDLE_OUT)",
@@ -1681,17 +1761,19 @@ mod tests {
                     None,
                     json!({ "HF_HUB_OFFLINE": "1", "hubBaseUrl": settings.huggingface_base_url }),
                 );
-                // (7) Not duplicated here: the lifecycle test owns it, in the same lane run.
-                summary.check(
-                    "7_cancel_recover_unload_reload",
-                    true,
-                    None,
-                    json!({ "coveredBy": if cfg!(target_os = "macos") {
-                        "mlx_real_weights::supra2_real_weight_offline_lifecycle_cancel_recover_unload"
-                    } else {
-                        "candle_real_weights::supra2_worker_gpu_lifecycle"
-                    } }),
-                );
+                // (7) Not duplicated here: the lifecycle test owns it, in its own process earlier in
+                // the same lane run; its actual result is folded in from its log.
+                let log_path = std::env::var("SUPRA2_LIFECYCLE_LOG").ok();
+                let log = log_path
+                    .as_ref()
+                    .map(|path| std::fs::read_to_string(path).unwrap_or_default());
+                let detail = json!({ "coveredBy": LIFECYCLE_TEST, "lifecycleLog": log_path });
+                match lifecycle_verdict(log.as_deref()) {
+                    Some(pass) => {
+                        summary.check("7_cancel_recover_unload_reload", pass, None, detail)
+                    }
+                    None => summary.not_applicable("7_cancel_recover_unload_reload", detail),
+                }
                 let _ = crate::generator_cache::evict_cached_generator().await;
             });
         }

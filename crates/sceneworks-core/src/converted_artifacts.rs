@@ -21,10 +21,10 @@
 //!   is hashed exactly once per load and never by SceneWorks.
 //!
 //! A same-size corruption passes the cheap check and is only caught by the engine's load-time
-//! digests. When [`diagnose_install`] confirms it, [`record_verification_failure`] writes
-//! [`VERIFICATION_FAILED_MARKER`] into the bundle directory; the cheap check reports that recorded
-//! reason from then on, so the catalog flips the model to `needs_conversion` and the Model Manager
-//! offers "Convert again". A re-convert replaces the whole directory, which clears the marker.
+//! digests. When [`diagnose_install`] confirms it, [`record_verification_failure_if_unchanged`]
+//! writes [`VERIFICATION_FAILED_MARKER`] into the bundle directory (only if that directory is still
+//! the one verified); the cheap check reports that recorded reason from then on, so the catalog
+//! flips the model to `needs_conversion` and the Model Manager offers "Convert again". A re-convert replaces the whole directory, which clears the marker.
 //!
 //! - `supra2_img` → [`gen_core::supra2::read_pinned_bundle`] for the bundle, and the pinned
 //!   [`gen_core::supra2::FLAN_T5_BASE`] / [`gen_core::supra2::SD_VAE`] snapshots (exact files,
@@ -95,6 +95,70 @@ pub fn recorded_verification_failure(dir: &Path) -> Option<String> {
 /// with it the catalog) reports it until the model is converted again.
 pub fn record_verification_failure(dir: &Path, problem: &str) -> std::io::Result<()> {
     std::fs::write(dir.join(VERIFICATION_FAILED_MARKER), problem)
+}
+
+/// Which directory currently sits at a converted-bundle path. A re-convert never edits a bundle in
+/// place: it builds a fresh directory and renames it over the old one, so the directory's own
+/// identity (device + inode on Unix, creation time everywhere) changes exactly when the bundle is
+/// replaced. Writing the verification marker does not change it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BundleIdentity {
+    #[cfg(unix)]
+    dev_ino: (u64, u64),
+    created: Option<std::time::SystemTime>,
+}
+
+/// The [`BundleIdentity`] of the directory at `dir`, or `None` when there is none.
+pub fn bundle_identity(dir: &Path) -> Option<BundleIdentity> {
+    let metadata = std::fs::metadata(dir).ok().filter(|meta| meta.is_dir())?;
+    Some(BundleIdentity {
+        #[cfg(unix)]
+        dev_ino: {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        },
+        created: metadata.created().ok(),
+    })
+}
+
+/// [`record_verification_failure`] for the bundle that was VERIFIED: the marker lands only if the
+/// directory at `dir` is still `verified` (see [`BundleIdentity`]). A full verification hashes for
+/// seconds; a "Convert again" promoted meanwhile must not inherit the old bundle's verdict and read
+/// as damaged. The reason is written to a temporary file in the directory, the identity is checked
+/// again, and the temporary file is renamed onto the marker — so the marker is never partial, and a
+/// swap at any point leaves the fresh bundle unmarked (a temporary file written into it is removed;
+/// a rename after the swap finds no temporary file there). `Ok(false)` when the bundle changed.
+pub fn record_verification_failure_if_unchanged(
+    dir: &Path,
+    verified: &BundleIdentity,
+    problem: &str,
+) -> std::io::Result<bool> {
+    record_if_unchanged_with(dir, verified, problem, || {})
+}
+
+/// [`record_verification_failure_if_unchanged`] with a hook between the temporary write and the
+/// second identity check — the seam the swap test drives.
+fn record_if_unchanged_with(
+    dir: &Path,
+    verified: &BundleIdentity,
+    problem: &str,
+    after_temp_write: impl FnOnce(),
+) -> std::io::Result<bool> {
+    if bundle_identity(dir).as_ref() != Some(verified) {
+        return Ok(false);
+    }
+    let temp = dir.join(format!(
+        "{VERIFICATION_FAILED_MARKER}.{}.tmp",
+        std::process::id()
+    ));
+    std::fs::write(&temp, problem)?;
+    after_temp_write();
+    if bundle_identity(dir).as_ref() != Some(verified) {
+        let _ = std::fs::remove_file(&temp);
+        return Ok(false);
+    }
+    std::fs::rename(&temp, dir.join(VERIFICATION_FAILED_MARKER))?;
+    Ok(true)
 }
 
 /// What a full verification found wrong with an installed convert-at-install model.
@@ -351,5 +415,62 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// sc-24217 pre-merge review: the marker lands in the bundle that was verified, never in a
+    /// fresh one a "Convert again" renamed over the same path meanwhile — and a write into the
+    /// unchanged bundle is whole (no temporary file left behind).
+    ///
+    /// *Mutations that red this:* drop the first identity check (the marker lands in the fresh
+    /// bundle); drop the second (the swap mid-write marks the fresh bundle).
+    #[test]
+    fn the_marker_only_lands_in_the_bundle_that_was_verified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("supra2_img");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let verified = bundle_identity(&bundle).expect("a directory");
+        assert!(record_verification_failure_if_unchanged(&bundle, &verified, "bad").unwrap());
+        assert_eq!(
+            recorded_verification_failure(&bundle).as_deref(),
+            Some("bad")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&bundle)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers,
+            [VERIFICATION_FAILED_MARKER],
+            "no temporary file left"
+        );
+
+        // A re-convert: a fresh directory promoted over the verified one (the old one is kept
+        // aside here only so its inode cannot be reused).
+        let fresh = tmp.path().join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        std::fs::rename(&bundle, tmp.path().join("old")).unwrap();
+        std::fs::rename(&fresh, &bundle).unwrap();
+        assert!(!record_verification_failure_if_unchanged(&bundle, &verified, "bad").unwrap());
+        assert_eq!(recorded_verification_failure(&bundle), None);
+        assert_eq!(std::fs::read_dir(&bundle).unwrap().count(), 0);
+
+        // A swap AFTER the first check, between the temporary write and the rename: the temporary
+        // file went into the verified (now displaced) bundle, the fresh one stays unmarked.
+        let verified = bundle_identity(&bundle).unwrap();
+        let swapped = record_if_unchanged_with(&bundle, &verified, "bad", || {
+            let fresh = tmp.path().join("fresh2");
+            std::fs::create_dir_all(&fresh).unwrap();
+            std::fs::rename(&bundle, tmp.path().join("old2")).unwrap();
+            std::fs::rename(&fresh, &bundle).unwrap();
+        })
+        .unwrap();
+        assert!(!swapped);
+        assert_eq!(std::fs::read_dir(&bundle).unwrap().count(), 0);
+        assert!(!record_verification_failure_if_unchanged(
+            &tmp.path().join("gone"),
+            &verified,
+            "bad"
+        )
+        .unwrap());
     }
 }
