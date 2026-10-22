@@ -566,6 +566,8 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "imageGuidanceScale",
       "lightning",
       "ltxPipeline",
+      "mossImageEdit",
+      "mossImageEditExecutionReport",
       "mossImageExecutionReport",
       "motion",
       "structuredPrompt",

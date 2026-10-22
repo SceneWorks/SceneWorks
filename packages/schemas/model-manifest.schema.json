@@ -1080,7 +1080,7 @@
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32"] },
+                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32", "moss_image_edit"] },
                   "description": "The purposes that need the component. Base generation is never one of them."
                 },
                 "provider": { "enum": ["huggingface"] },

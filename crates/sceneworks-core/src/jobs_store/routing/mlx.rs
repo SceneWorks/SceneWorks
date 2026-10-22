@@ -1294,6 +1294,26 @@ pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moss_edit_routes_only_the_strict_single_reference_shape() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let payload=serde_json::json!({"model":model,"mode":"edit_image","prompt":"blue cup","referenceAssetIds":["ref"],"modelManifestEntry":{"limits":{"minDimension":16,"maxDimension":4096}},"advanced":{"mossImageEdit":{"use_kv_cache":false}}}).as_object().unwrap().clone();
+            assert!(super::image_request_mlx_eligible(model, &payload));
+            for (key, value) in [
+                ("referenceAssetIds", serde_json::json!(["ref", "other"])),
+                ("sourceAssetId", serde_json::json!("conflict")),
+                (
+                    "advanced",
+                    serde_json::json!({"mossImage":{"acceleration":"unmerged_bf16"}}),
+                ),
+            ] {
+                let mut invalid = payload.clone();
+                invalid.insert(key.into(), value);
+                assert!(!super::image_request_mlx_eligible(model, &invalid));
+            }
+        }
+    }
+
     use serde_json::{json, Map, Value};
 
     use super::{image_request_mlx_eligible, MLX_ROUTED_MODELS};

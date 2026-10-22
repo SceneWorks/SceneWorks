@@ -89,7 +89,16 @@ fn moss_pin_spec(
             .flatten()
             .filter_map(Value::as_str)
         {
-            let _identity = gen_core::moss_image::moss_image_asset(repo, revision, relative).ok_or_else(|| WorkerError::InvalidPayload(format!("MOSS component file is not in the frozen asset contract: {repo}/{relative}")))?;
+            let edit_asset = repo == gen_core::moss_image_edit::EDIT_REPOSITORY
+                && revision == gen_core::moss_image_edit::EDIT_REVISION
+                && ["adapter_config.json", "adapter_model.safetensors"].contains(&relative);
+            if !edit_asset
+                && gen_core::moss_image::moss_image_asset(repo, revision, relative).is_none()
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "MOSS component file is not in the frozen asset contract: {repo}/{relative}"
+                )));
+            }
             if !moss_execution_asset_selected(mode, repo, relative) {
                 continue;
             }
@@ -101,9 +110,28 @@ fn moss_pin_spec(
     for (done, (repo, revision, relative, path)) in targets.into_iter().enumerate() {
         on_file(done, total);
         let pin = gen_core::PinnedWeightsFile::pin(&path).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
-        gen_core::moss_image::verify_moss_image_asset(&pin, repo, revision, relative).map_err(
-            |error| crate::classify_engine_error("MOSS frozen component identity", error),
-        )?;
+        if repo == gen_core::moss_image_edit::EDIT_REPOSITORY {
+            let expected = if relative == "adapter_config.json" {
+                gen_core::moss_image_edit::EDIT_CONFIG_SHA256
+            } else {
+                gen_core::moss_image_edit::EDIT_WEIGHTS_SHA256
+            };
+            if pin
+                .content_sha256()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+                != expected
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "MOSS edit frozen component identity mismatch: {relative}"
+                )));
+            }
+        } else {
+            gen_core::moss_image::verify_moss_image_asset(&pin, repo, revision, relative).map_err(
+                |error| crate::classify_engine_error("MOSS frozen component identity", error),
+            )?;
+        }
         pins.push(pin);
     }
     crate::paths::prepare_load_spec_with_file_pins(spec, pins, "MOSS component preparation")
@@ -153,6 +181,126 @@ fn moss_render(
     );
     Ok((images, facts))
 }
+fn moss_load_reference(
+    data_dir: &Path,
+    project_id: &str,
+    id: &str,
+    project_path: &Path,
+) -> WorkerResult<Image> {
+    use image::ImageDecoder;
+    let asset = ProjectStore::new(data_dir.to_path_buf(), "worker")
+        .get_asset(project_id, id)
+        .map_err(|e| WorkerError::InvalidPayload(format!("MOSS reference {id}: {e}")))?;
+    let mime = asset
+        .pointer("/file/mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if asset.get("type").and_then(Value::as_str) != Some("image")
+        || !mime.starts_with("image/")
+        || mime == "image/svg+xml"
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "MOSS reference {id} must be a project-owned raster image"
+        )));
+    }
+    let rel = asset
+        .pointer("/file/path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("MOSS reference {id} media missing")))?;
+    let path = crate::safe_project_path(project_path, rel)?;
+    let decoded = (|| -> image::ImageResult<image::DynamicImage> {
+        let mut decoder = image::ImageReader::open(&path)?
+            .with_guessed_format()?
+            .into_decoder()?;
+        let orientation = decoder.orientation()?;
+        let mut image = image::DynamicImage::from_decoder(decoder)?;
+        image.apply_orientation(orientation);
+        Ok(image)
+    })()
+    .or_else(|_| crate::image_decode::decode_image_any(&path))
+    .map_err(|e| WorkerError::InvalidPayload(format!("MOSS reference {id}: {e}")))?;
+    let rgb = decoded.to_rgb8();
+    Ok(Image {
+        width: rgb.width(),
+        height: rgb.height(),
+        pixels: rgb.into_raw(),
+    })
+}
+fn moss_edit_peak(
+    generator: &dyn Generator,
+    request: &GenerationRequest,
+    references: &[Image],
+    options: sceneworks_core::moss_image::EditOptions,
+) -> WorkerResult<u64> {
+    generator
+        .moss_image_edit_request_peak(
+            request,
+            gen_core::moss_image_edit::MossImageEditInputs {
+                references,
+                reference_max_edge: options.reference_max_edge,
+                use_kv_cache: options.use_kv_cache,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| crate::classify_engine_error("MOSS edit admission", e))
+}
+fn moss_edit_render(
+    generator: &dyn Generator,
+    request: &GenerationRequest,
+    references: &[Image],
+    options: sceneworks_core::moss_image::EditOptions,
+    progress: &mut dyn FnMut(Progress),
+) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
+    let output = generator
+        .generate_moss_image_edit(
+            request,
+            gen_core::moss_image_edit::MossImageEditInputs {
+                references,
+                reference_max_edge: options.reference_max_edge,
+                use_kv_cache: options.use_kv_cache,
+                ..Default::default()
+            },
+            progress,
+        )
+        .map_err(|e| crate::classify_engine_error("MOSS edit", e))?;
+    if request.cancel.is_cancelled() {
+        return Err(WorkerError::Canceled("MOSS edit canceled".into()));
+    }
+    let report = generator
+        .moss_image_edit_execution_report()
+        .ok_or_else(|| {
+            WorkerError::Engine("MOSS edit completed without its actual execution receipt".into())
+        })?;
+    report
+        .validate()
+        .map_err(|e| WorkerError::Engine(e.to_string()))?;
+    let gen_core::moss_image::MossImageAdvancedOutput::Images(images) = output else {
+        return Err(WorkerError::Engine(
+            "MOSS edit returned non-image output".into(),
+        ));
+    };
+    if report.base.data().samples.len() != images.len() {
+        return Err(WorkerError::Engine(
+            "MOSS edit receipt/output count mismatch".into(),
+        ));
+    }
+    let images = images
+        .into_iter()
+        .zip(&report.base.data().samples)
+        .map(|(image, sample)| {
+            sample
+                .seed
+                .map(|seed| (seed as i64, image))
+                .ok_or_else(|| WorkerError::Engine("MOSS edit receipt lacks effective seed".into()))
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    let mut facts = JsonObject::new();
+    facts.insert(
+        sceneworks_core::moss_image::EDIT_REPORT_KEY.into(),
+        serde_json::to_value(report).map_err(|e| WorkerError::Engine(e.to_string()))?,
+    );
+    Ok((images, facts))
+}
 #[allow(clippy::too_many_arguments)]
 async fn generate_moss_stream_using(
     api: &ApiClient,
@@ -171,12 +319,29 @@ async fn generate_moss_stream_using(
         sceneworks_core::moss_image::native_request(&job.payload, &request.model_manifest_entry)
             .map_err(WorkerError::InvalidPayload)?
             .ok_or_else(|| WorkerError::InvalidPayload("missing MOSS model".into()))?;
+    let edit = sceneworks_core::moss_image::is_edit(&job.payload);
+    let edit_options = sceneworks_core::moss_image::edit_options(&request.advanced)
+        .map_err(WorkerError::InvalidPayload)?;
+    let references = if edit {
+        sceneworks_core::moss_image::edit_reference_ids(&job.payload)
+            .map_err(WorkerError::InvalidPayload)?
+            .iter()
+            .map(|id| {
+                moss_load_reference(&settings.data_dir, &request.project_id, id, project_path)
+            })
+            .collect::<WorkerResult<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     let variant = MossImageVariant::from_provider_id(&request.model).expect("validated MOSS id");
     let resolved = MossImageResolved::resolve(variant, &native)
         .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    let entry = sceneworks_core::moss_image::selected_components(
+    let entry = sceneworks_core::moss_image::selected_components_for_purpose(
         &request.model_manifest_entry,
-        native.moss_image.as_ref().expect("options"),
+        sceneworks_core::moss_image::request_purpose(
+            &job.payload,
+            native.moss_image.as_ref().expect("options"),
+        ),
     )
     .map_err(WorkerError::InvalidPayload)?;
     let root = huggingface_pinned_snapshot_dir(
@@ -190,8 +355,10 @@ async fn generate_moss_stream_using(
             request.model
         ))
     })?;
-    let mut spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_resolved_route(format!("{}:{:?}", request.model, resolved.acceleration));
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(format!(
+        "{}:{:?}:edit={edit}",
+        request.model, resolved.acceleration
+    ));
     spec = attach_required_components(spec, variant.provider_id(), &entry, settings)?;
     for row in entry
         .get("downloads")
@@ -199,11 +366,9 @@ async fn generate_moss_stream_using(
         .into_iter()
         .flatten()
     {
-        if let Some(id) = row
-            .get("componentId")
-            .and_then(Value::as_str)
-            .filter(|id| id.starts_with("moss-dmd-"))
-        {
+        if let Some(id) = row.get("componentId").and_then(Value::as_str).filter(|id| {
+            id.starts_with("moss-dmd-") || *id == gen_core::moss_image_edit::EDIT_COMPONENT
+        }) {
             let source = crate::model_jobs::resolve_optional_component(
                 &Value::Object(entry.clone()),
                 id,
@@ -211,7 +376,7 @@ async fn generate_moss_stream_using(
             )
             .ok_or_else(|| {
                 WorkerError::InvalidPayload(format!(
-                    "MOSS component {id} missing; install the selected 8-step package in Models"
+                    "MOSS component {id} missing; install the selected optional package in Models"
                 ))
             })?;
             spec = spec.with_component(id, source);
@@ -258,7 +423,20 @@ async fn generate_moss_stream_using(
     let _ = poster.await;
     pinned?;
     #[cfg(target_os = "macos")]
-    let peak = {
+    let peak = if edit {
+        moss_memory::edit_request_peak(
+            variant,
+            &spec,
+            &native,
+            gen_core::moss_image_edit::MossImageEditInputs {
+                references: &references,
+                reference_max_edge: edit_options.reference_max_edge,
+                use_kv_cache: edit_options.use_kv_cache,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| crate::classify_engine_error("MOSS edit cold admission", e))?
+    } else {
         let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
         let expanded = if native.prompt_batch.is_empty() {
@@ -319,6 +497,13 @@ async fn generate_moss_stream_using(
         serde_json::to_value(native.moss_image.as_ref().expect("options"))
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
     );
+    if edit {
+        raw.insert(
+            sceneworks_core::moss_image::EDIT_OPTIONS_KEY.into(),
+            serde_json::to_value(edit_options)
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?,
+        );
+    }
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_owned(
         job.id.clone(),
         engine_id,
@@ -339,6 +524,11 @@ async fn generate_moss_stream_using(
             warm_policy
                 .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
             native.cancel = cancel.clone();
+            let peak = if edit {
+                moss_edit_peak(generator, &native, &references, edit_options)?
+            } else {
+                peak
+            };
             moss_admit(
                 peak,
                 moss_owned_weight_bytes(generator, owned),
@@ -353,7 +543,17 @@ async fn generate_moss_stream_using(
                     let seed = resolve_seed(&job_request, index);
                     native.seed = Some(seed as u64);
                     let mut progress = |p| send_gen_progress(&tx, index, p);
-                    let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                    let (images, facts) = if edit {
+                        moss_edit_render(
+                            generator,
+                            &native,
+                            &references,
+                            edit_options,
+                            &mut progress,
+                        )?
+                    } else {
+                        moss_render(generator, &native, &mut progress)?
+                    };
                     if images.len() != 1 {
                         return Err(WorkerError::Engine(
                             "MOSS single-image output count mismatch".into(),
@@ -375,7 +575,11 @@ async fn generate_moss_stream_using(
                 native.seed = Some(seed as u64);
                 let mut progress = |p| send_gen_progress(&tx, 0, p);
                 native.preview = preview_sink_for(&tx, 0);
-                let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                let (images, facts) = if edit {
+                    moss_edit_render(generator, &native, &references, edit_options, &mut progress)?
+                } else {
+                    moss_render(generator, &native, &mut progress)?
+                };
                 if images.len() != count {
                     return Err(WorkerError::Engine(
                         "MOSS batch output count mismatch".into(),
@@ -802,6 +1006,8 @@ mod moss_consumer_tests {
     struct Probe {
         descriptor: gen_core::ModelDescriptor,
         report: RefCell<Option<MossImageExecutionReport>>,
+        edit_report: RefCell<Option<gen_core::moss_image_edit::MossImageEditExecutionReport>>,
+        edit_inputs: RefCell<Vec<(u32, u32, Vec<u8>)>>,
         failure: Cell<bool>,
         cancel: Cell<bool>,
         reads: Cell<usize>,
@@ -822,6 +1028,8 @@ mod moss_consumer_tests {
                     required_components: &[],
                 },
                 report: RefCell::new(None),
+                edit_report: RefCell::new(None),
+                edit_inputs: RefCell::new(Vec::new()),
                 failure: Cell::new(false),
                 cancel: Cell::new(false),
                 reads: Cell::new(0),
@@ -830,6 +1038,82 @@ mod moss_consumer_tests {
         }
     }
     impl Generator for Probe {
+        fn moss_image_edit_request_peak(
+            &self,
+            request: &GenerationRequest,
+            inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
+        ) -> gen_core::Result<u64> {
+            inputs.validate()?;
+            gen_core::moss_image_edit::edit_request(request)?;
+            assert_eq!(inputs.reference_max_edge, 32);
+            assert!(!inputs.use_kv_cache);
+            assert_eq!(
+                (inputs.references[0].width, inputs.references[0].height),
+                (48, 16)
+            );
+            Ok(73)
+        }
+        fn generate_moss_image_edit(
+            &self,
+            req: &GenerationRequest,
+            inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
+            progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<MossImageAdvancedOutput> {
+            use gen_core::moss_image_edit::*;
+            *self.report.borrow_mut() = None;
+            *self.edit_report.borrow_mut() = None;
+            let dimensions = inputs.validate()?;
+            *self.edit_inputs.borrow_mut() = inputs
+                .references
+                .iter()
+                .map(|i| (i.width, i.height, i.pixels.clone()))
+                .collect();
+            progress(Progress::Step {
+                current: 1,
+                total: 1,
+            });
+            if self.failure.get() {
+                return Err(gen_core::Error::Unsupported("edit fixture failure".into()));
+            }
+            if self.cancel.get() {
+                req.cancel.cancel();
+            }
+            *self.edit_report.borrow_mut() = Some(MossImageEditExecutionReport {
+                base: completed_receipt(&edit_request(req)?),
+                adapter_path: "/private/adapter_model.safetensors".into(),
+                edit_contract: EDIT_CONTRACT.into(),
+                adapter_repository: EDIT_REPOSITORY.into(),
+                adapter_revision: EDIT_REVISION.into(),
+                adapter_sha256: EDIT_WEIGHTS_SHA256.into(),
+                config_sha256: EDIT_CONFIG_SHA256.into(),
+                applied_projections: 252,
+                references: inputs
+                    .references
+                    .iter()
+                    .zip(dimensions)
+                    .map(|(image, dimensions)| MossImageEditReferenceReceipt {
+                        original_dimensions: [image.width, image.height],
+                        encoded_dimensions: dimensions,
+                        pixels_sha256: "a".repeat(64),
+                        resized_pixels_sha256: "b".repeat(64),
+                        latent_sha256: "c".repeat(64),
+                    })
+                    .collect(),
+                reference_max_edge: inputs.reference_max_edge,
+                use_kv_cache: inputs.use_kv_cache,
+            });
+            Ok(MossImageAdvancedOutput::Images(vec![Image {
+                width: 16,
+                height: 16,
+                pixels: vec![0; 16 * 16 * 3],
+            }]))
+        }
+        fn moss_image_edit_execution_report(
+            &self,
+        ) -> Option<gen_core::moss_image_edit::MossImageEditExecutionReport> {
+            self.reads.set(self.reads.get() + 1);
+            self.edit_report.borrow().clone()
+        }
         fn descriptor(&self) -> &gen_core::ModelDescriptor {
             &self.descriptor
         }
@@ -866,6 +1150,65 @@ mod moss_consumer_tests {
                 pixels: vec![0; 16 * 16 * 3],
             }]))
         }
+    }
+    #[test]
+    fn edit_calls_typed_native_method_with_uncropped_rgb_and_only_publishes_actual_success() {
+        let probe = Probe::new();
+        let req = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+            width: 16,
+            height: 16,
+            ..Default::default()
+        })
+        .unwrap();
+        let refs = vec![Image {
+            width: 48,
+            height: 16,
+            pixels: vec![73; 48 * 16 * 3],
+        }];
+        let options = sceneworks_core::moss_image::EditOptions {
+            reference_max_edge: 32,
+            use_kv_cache: false,
+        };
+        assert_eq!(moss_edit_peak(&probe, &req, &refs, options).unwrap(), 73);
+        let mut progress = 0;
+        let (images, facts) =
+            moss_edit_render(&probe, &req, &refs, options, &mut |_| progress += 1).unwrap();
+        assert_eq!(images[0].0, 173);
+        assert_eq!(progress, 1);
+        assert_eq!(
+            probe.edit_inputs.borrow()[0],
+            (48, 16, vec![73; 48 * 16 * 3])
+        );
+        assert!(facts.get(sceneworks_core::moss_image::REPORT_KEY).is_none());
+        let report = &facts[sceneworks_core::moss_image::EDIT_REPORT_KEY];
+        assert_eq!(
+            report["adapter_sha256"],
+            gen_core::moss_image_edit::EDIT_WEIGHTS_SHA256
+        );
+        assert_eq!(
+            report["references"][0]["encoded_dimensions"],
+            json!([32, 16])
+        );
+        assert_eq!(report["use_kv_cache"], false);
+        let shared =
+            sceneworks_core::workflow_share::sanitize_moss_edit_execution_report(report).unwrap();
+        assert_eq!(shared["adapter_path"], "adapter_model.safetensors");
+        assert!(!shared.to_string().contains("/private/"));
+        probe.failure.set(true);
+        assert!(moss_edit_render(&probe, &req, &refs, options, &mut |_| {}).is_err());
+        assert!(probe.edit_report.borrow().is_none());
+        assert_eq!(probe.reads.get(), 1);
+        probe.failure.set(false);
+        probe.cancel.set(true);
+        assert!(matches!(
+            moss_edit_render(&probe, &req, &refs, options, &mut |_| {}),
+            Err(WorkerError::Canceled(_))
+        ));
+        assert_eq!(
+            probe.reads.get(),
+            1,
+            "canceled output must not publish a receipt"
+        );
     }
     #[test]
     fn actual_provider_receipt_and_seed_reach_facts_and_failed_attempt_never_reads_stale_report() {
@@ -1050,19 +1393,53 @@ mod moss_consumer_tests {
                 .as_object()
                 .unwrap()
                 .clone();
-        let error =
-            moss_pin_spec(
-                &mut spec,
-                &entry,
-                &settings,
-                MossImageAcceleration::Off,
-                &mut |_, _| {},
-            )
-            .unwrap_err();
+        let error = moss_pin_spec(
+            &mut spec,
+            &entry,
+            &settings,
+            MossImageAcceleration::Off,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("MOSS frozen component identity"),
             "{error}"
         );
+    }
+    #[test]
+    fn corrupt_edit_package_is_rejected_during_file_preparation() {
+        use gen_core::moss_image_edit::*;
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let root = hub
+            .join("models--chinoll--Moss-Image-Edit")
+            .join("snapshots")
+            .join(EDIT_REVISION);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("adapter_config.json"), b"corrupted").unwrap();
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+            .with_component(EDIT_COMPONENT, WeightsSource::Dir(root));
+        let entry=json!({"downloads":[{"repo":EDIT_REPOSITORY,"revision":EDIT_REVISION,"files":["adapter_config.json"]}]}).as_object().unwrap().clone();
+        let error = moss_pin_spec(
+            &mut spec,
+            &entry,
+            &Settings::for_test(temp.path().join("data")),
+            MossImageAcceleration::Off,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("MOSS edit frozen component identity mismatch"),
+            "{error}"
+        );
+        assert!(!spec.prepared_file_pins().is_prepared());
     }
     #[test]
     fn every_mode_and_content_change_has_an_independent_cache_identity() {

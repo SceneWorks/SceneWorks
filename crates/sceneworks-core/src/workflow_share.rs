@@ -1265,6 +1265,8 @@ pub enum AdvancedShape {
     MossImageOptions,
     /// Provider receipt with local adapter paths reduced to their frozen relative filename.
     MossImageReport,
+    MossImageEditOptions,
+    MossImageEditReport,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
@@ -1353,6 +1355,8 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow_from("mossImageEdit", AdvancedShape::MossImageEditOptions, AdvancedKeySource::Server, "API-canonicalized native edit reference edge and cache policy."),
+    allow_from("mossImageEditExecutionReport", AdvancedShape::MossImageEditReport, AdvancedKeySource::Server, "Actual edit adapter and ordered reference identity; imported receipts are scrubbed before execution."),
     allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
     deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
     allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
@@ -2985,6 +2989,14 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
             AdvancedShape::MossImageOptions => sanitize_moss_options(value),
             AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
+            AdvancedShape::MossImageEditOptions => {
+                let mut advanced = JsonObject::new();
+                advanced.insert(crate::moss_image::EDIT_OPTIONS_KEY.into(), value.clone());
+                crate::moss_image::edit_options(&advanced)
+                    .ok()
+                    .and_then(|v| serde_json::to_value(v).ok())
+            }
+            AdvancedShape::MossImageEditReport => sanitize_moss_edit_execution_report(value),
             AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
@@ -3017,6 +3029,16 @@ pub fn sanitize_moss_execution_report(value: &Value) -> Option<Value> {
         adapter.adapter_path = std::path::PathBuf::from("lora.safetensors");
     }
     serde_json::to_value(MossImageExecutionReport::new(data).ok()?).ok()
+}
+
+/// Native validation protects report identities; only local filesystem locations are scrubbed.
+pub fn sanitize_moss_edit_execution_report(value: &Value) -> Option<Value> {
+    let mut report: gen_core::moss_image_edit::MossImageEditExecutionReport =
+        serde_json::from_value(value.clone()).ok()?;
+    report.adapter_path = std::path::PathBuf::from("adapter_model.safetensors");
+    let base = serde_json::to_value(&report.base).ok()?;
+    report.base = serde_json::from_value(sanitize_moss_execution_report(&base)?).ok()?;
+    serde_json::to_value(report).ok()
 }
 
 /// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire

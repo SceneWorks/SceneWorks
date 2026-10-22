@@ -2955,6 +2955,19 @@ pub(crate) fn write_image_asset(
                     .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
             }
         }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::EDIT_REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_edit_execution_report)
+            {
+                if let Some(steps) = report.pointer("/base/resolved/steps") {
+                    share.advanced.insert("steps".into(), steps.clone());
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::EDIT_REPORT_KEY.into(), report);
+            }
+        }
         share.model_hash = plan.model_hash.clone();
         // Replace request-derived hints with the exact adapter stack the worker resolved. This is
         // the only seam that can attach hashes, so client-supplied attribution fields never win.

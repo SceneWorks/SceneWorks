@@ -1190,6 +1190,45 @@ pub(crate) async fn canonicalize_image_model_payload(
         if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
             .map_err(ApiError::bad_request)?
         {
+            if sceneworks_core::moss_image::is_edit(payload) {
+                let project_id = payload
+                    .get("projectId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| ApiError::bad_request("MOSS edit requires projectId"))?
+                    .to_owned();
+                let ids = sceneworks_core::moss_image::edit_reference_ids(payload)
+                    .map_err(ApiError::bad_request)?;
+                crate::generation::validate_ordered_image_references(
+                    state.clone(),
+                    project_id,
+                    ids,
+                )
+                .await?;
+                payload
+                    .entry("width".to_owned())
+                    .or_insert(json!(request.width));
+                payload
+                    .entry("height".to_owned())
+                    .or_insert(json!(request.height));
+                let edit = sceneworks_core::moss_image::edit_options(
+                    payload
+                        .get("advanced")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&JsonObject::new()),
+                )
+                .map_err(ApiError::bad_request)?;
+                payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                    .insert(
+                        sceneworks_core::moss_image::EDIT_OPTIONS_KEY.into(),
+                        serde_json::to_value(edit)
+                            .map_err(|e| ApiError::internal(e.to_string()))?,
+                    );
+            }
             let options = request
                 .moss_image
                 .as_ref()
@@ -1209,7 +1248,7 @@ pub(crate) async fn canonicalize_image_model_payload(
                     serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
                 );
 
-            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+            if let Some(purpose) = sceneworks_core::moss_image::request_purpose(payload, options) {
                 let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
                     &model_manifest_entry,
                     purpose,
@@ -1223,8 +1262,11 @@ pub(crate) async fn canonicalize_image_model_payload(
                 }
             }
             model_manifest_entry = Value::Object(
-                sceneworks_core::moss_image::selected_components(entry, options)
-                    .map_err(ApiError::bad_request)?,
+                sceneworks_core::moss_image::selected_components_for_purpose(
+                    entry,
+                    sceneworks_core::moss_image::request_purpose(payload, options),
+                )
+                .map_err(ApiError::bad_request)?,
             );
         }
     }
