@@ -319,10 +319,10 @@ test("Cargo pin reader rejects multiple or differently resolved inference source
 const workflowPath = process.env.REMOTE_MACOS_WORKFLOW_UNDER_TEST ?? path.join(ROOT, WORKFLOW);
 const workflow = readFileSync(workflowPath, "utf8");
 function jobBody(name, body = workflow) { const after = body.split(`\n  ${name}:\n`)[1]; assert.ok(after, name); return after.split(/\n  [a-z][a-z-]+:\n/)[0]; }
-function condition(name, event, profile, relevant = "true", result = "success", target = "feature/sc-26584-moss-image-training", repository = REPOSITORY) {
+function condition(name, event, profile, relevant = "true", result = "success", target = "feature/sc-26584-moss-image-training", repository = REPOSITORY, extraInputs = {}) {
   const expression = /\n    if: \$\{\{ (.+) \}\}/.exec(`\n${jobBody(name)}`)?.[1]; assert.ok(expression, name);
   const github = { event_name: event, repository, event: { pull_request: { base: { ref: target }, head: { repo: { full_name: REPOSITORY } } } } };
-  return Boolean(Function("github", "inputs", "needs", "cancelled", `return (${expression});`)(github, { verification_profile: profile }, { changes: { result, outputs: { relevant } } }, () => false));
+  return Boolean(Function("github", "inputs", "needs", "cancelled", `return (${expression});`)(github, { verification_profile: profile, ...extraInputs }, { changes: { result, outputs: { relevant } } }, () => false));
 }
 test("manual profiles never run legacy jobs", () => {
   for (const profile of ["facts-and-projections", "consumer-assertions", "unknown-unsafe-value"]) {
@@ -330,6 +330,23 @@ test("manual profiles never run legacy jobs", () => {
     assert.equal(condition(JOB, "workflow_dispatch", profile), true);
   }
 });
+test("browser fixture artifact profile never queues the self-hosted manual verifier", () => {
+  assert.equal(condition(JOB, "workflow_dispatch", "browser-fixture-artifact"), false);
+  assert.equal(
+    condition(
+      JOB,
+      "workflow_dispatch",
+      "browser-fixture-artifact",
+      "true",
+      "success",
+      base,
+      REPOSITORY,
+      { run_memory_calibration: true },
+    ),
+    false,
+  );
+});
+
 test("fork manual verification never queues a self-hosted runner", () => {
   assert.equal(condition(JOB, "workflow_dispatch", "consumer-assertions", "true", "success", base, "fork/SceneWorks"), false);
 });

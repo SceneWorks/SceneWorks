@@ -1135,6 +1135,61 @@ test("macos-mlx routes an explicit Mac2 final PR and merge push without changing
   }
 });
 
+test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const job = workflowJob(workflow, "browser-fixture-artifact");
+  const expression = workflowExpression(job);
+  const disabled = {
+    run_memory_calibration: false,
+    run_five_rung_reference: false,
+    provision_qwen_snapshot: false,
+    provision_z_image_snapshot: false,
+  };
+  const evaluate = (event, inputs = {}) => Boolean(evaluateWorkflow(expression, event, inputs));
+  const validate = (candidate) => {
+    const run = (event, inputs = {}) => Boolean(evaluateWorkflow(candidate, event, inputs));
+    for (const event of ["push", "pull_request", "merge_group"]) {
+      assert.equal(run(event, { verification_profile: "browser-fixture-artifact", ...disabled }), false, event);
+    }
+    for (const profile of [undefined, "legacy", "facts-and-projections", "consumer-assertions", "unknown"]) {
+      assert.equal(run("workflow_dispatch", { verification_profile: profile, ...disabled }), false, String(profile));
+    }
+    assert.equal(run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled }), true);
+    for (const selector of Object.keys(disabled)) {
+      assert.equal(
+        run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled, [selector]: true }),
+        false,
+        `${selector} must exclude the artifact producer`,
+      );
+    }
+  };
+  validate(expression);
+  for (const mutant of [
+    expression.replace("inputs.verification_profile == 'browser-fixture-artifact'", "inputs.verification_profile != 'legacy'"),
+    expression.replace(" && !inputs.run_memory_calibration", ""),
+  ]) {
+    assert.throws(() => validate(mutant));
+  }
+
+  assert.match(job, /^    runs-on: macos-26$/m);
+  assert.doesNotMatch(job, /^    needs:/m);
+  assert.doesNotMatch(job, /^    continue-on-error:/m);
+  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(job, /cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json/);
+  assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
+  assert.match(job, /PMETAL_METALLIB_PATH/);
+  const upload = workflowStep(job, "Upload complete browser fixture artifact");
+  assert.match(upload, /uses: actions\/upload-artifact@[0-9a-f]{40}\b/);
+  assert.match(upload, /name: rust-api-browser-libtest-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /path: \$\{\{ env\.BROWSER_FIXTURE_OUTPUT \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+
+  assert.match(
+    workflow,
+    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact\]/,
+  );
+});
+
 test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
