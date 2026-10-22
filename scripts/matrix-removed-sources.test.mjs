@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
-import { buildMatrix, SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 
 /**
  * sc-22513 (epic 22505, E5) — the removed-source probe, in its own file ON PURPOSE.
  *
- * It edits shared repo artifacts on disk and regenerates the matrix between the edit and the
- * restore. Sibling suites in `npm run check` hash those same bytes — `extract-memory-anchors`
- * embeds a sha256 of the evidence bundle, `compare-engine-capability-facts` reads the MLX dump —
- * and `node --test` runs test FILES in parallel, so probing from inside the main generator suite
- * would make those siblings flake at random. `npm run check` therefore runs this file in a second,
- * SERIAL `node --test` segment, after the parallel pool has drained.
+ * The probe edits real files in a disposable fixture, never the source checkout. A separate
+ * `node --test` segment protected sibling suites within one check invocation, but a concurrent
+ * invocation could still hash the temporary edits. Copy the generator and its inputs so the
+ * on-disk probe remains meaningful without sharing writable artifacts with any other suite.
  */
 
 // Every path the collapse removed from `SOURCE_PATHS`. Six of the seven were load-bearing before
@@ -38,13 +39,37 @@ test("no removed source is in the fingerprint (the list this file probes is the 
   }
 });
 
-test("a change to a REMOVED source produces no matrix diff at all (sc-22513)", async () => {
+async function matrixFixture(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "matrix-removed-sources-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const modules = [
+    "scripts/generate-memory-matrix.mjs",
+    "scripts/check-tier-integrity.mjs",
+    "scripts/tier-integrity-measurement-receipts.mjs",
+    "scripts/lib/jsonc.mjs",
+    "scripts/lib/source-revision.mjs",
+    "scripts/lib/manifest-memory-declarations.mjs",
+  ];
+  const files = new Set([...modules, ...Object.values(SOURCE_PATHS), ...REMOVED_SOURCES,
+    "docs/generated/memory-matrix.json"]);
+  for (const relative of files) {
+    const destination = path.join(root, relative);
+    await mkdir(path.dirname(destination), { recursive: true });
+    await copyFile(new URL(`../${relative}`, import.meta.url), destination);
+  }
+  const { buildMatrix } = await import(pathToFileURL(path.join(root, modules[0])).href);
+  return { root, buildMatrix };
+}
+
+test("a change to a REMOVED source produces no matrix diff at all (sc-22513)", async (t) => {
   // Mutated ON DISK rather than through `sourceOverrides`, because an override keyed by a name the
   // map no longer has would be silently ignored and the test would pass without touching anything.
+  const { root, buildMatrix } = await matrixFixture(t);
   const baseline = JSON.stringify(await buildMatrix());
   let probed = 0;
   for (const relative of REMOVED_SOURCES) {
-    const url = new URL(`../${relative}`, import.meta.url);
+    const source = new URL(`../${relative}`, import.meta.url);
+    const url = path.join(root, relative);
     let original;
     try {
       original = await readFile(url, "utf8");
@@ -76,8 +101,9 @@ test("a change to a REMOVED source produces no matrix diff at all (sc-22513)", a
         `${relative}: the probe must really have edited the file`,
       );
       assert.equal(JSON.stringify(await buildMatrix()), baseline, relative);
+      assert.equal(await readFile(source, "utf8"), original, `${relative}: source checkout is untouched`);
     } finally {
-      // Restore before anything else can observe the edit, on the failure path too.
+      // Restore only our disposable copy, on the failure path too.
       await writeFile(url, original);
     }
     assert.equal(await readFile(url, "utf8"), original, `${relative} was restored`);
