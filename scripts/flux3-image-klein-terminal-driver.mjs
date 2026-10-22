@@ -417,7 +417,7 @@ export async function runTerminal({ admission, inputSpec, sources, caseIds, appr
   await save();
   try {
     const approvedProvisioning = cells.filter(c => c.kind === 'provision').map(c => provisioningApproval(c, registry.find(t => t.backend === c.backend && t.modelId === c.modelId), admission));
-    session = await (dependencies.launch ?? launchTerminalSession)({ ...admission, approvedProvisioning, approvedPlan, inputSpecAddendum, artifactInputs: inputSpec, artifactCells: cells, artifactTargets: registry }); campaign.sessionIdentity = session.identity; campaign.artifactStaging = session.artifactMapping?.stagingPlan ?? staging; campaign.artifactCopies = session.artifactMapping ? { files: session.artifactMapping.copies, bytes: session.artifactMapping.copiedBytes } : null;
+    session = await (dependencies.launch ?? launchTerminalSession)({ ...admission, approvedProvisioning, approvedPlan, inputSpecAddendum, artifactInputs: inputSpec, artifactCells: cells, artifactTargets: registry }); campaign.sessionIdentity = session.identity; campaign.deviceAtLaunch = session.deviceAtLaunch ?? null; campaign.artifactStaging = session.artifactMapping?.stagingPlan ?? staging; campaign.artifactCopies = session.artifactMapping ? { files: session.artifactMapping.copies, bytes: session.artifactMapping.copiedBytes } : null;
     const project = await session.endpoint.call('POST', '/api/v1/projects', { name: 'S10 installed product terminal acceptance' });
     const rel = path.relative(await realpath(session.identity.state), await realpath(project.path)); assert(rel && !rel.startsWith('..') && !path.isAbsolute(rel), 'project escaped owned state');
     const inputs = {};

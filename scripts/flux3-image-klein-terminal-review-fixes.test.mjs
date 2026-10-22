@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { loadProductTargets, targetRegistry, terminalCatalog, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { snapshotPath, stageTerminalArtifacts, verifyTerminalMapping, artifactStagingPlan } from './flux3-image-klein-terminal-artifacts.mjs';
-import { launchTerminalSession, guardHardware, fileHash, verifyResourceProducerHardware } from './flux3-image-klein-terminal-session.mjs';
+import { launchTerminalSession, guardHardware, fileHash, verifyResourceProducerHardware, assessForeignGraphics, FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } from './flux3-image-klein-terminal-session.mjs';
 import { produceTerminalBuild, verifyTerminalBuild, verifyPreparationBuild, buildRecipe } from './flux3-image-klein-terminal-build.mjs';
 import { nativeDatasetFingerprint, expectedNativeArtifacts, bindTrainingExpectation, verifyNativeContinuation, RNG_ALGORITHM } from './flux3-image-klein-terminal-training-proof.mjs';
 import { assertFinishedPng, assertCheckpoint, trainingSequence, pngCrc32, sha256 } from './flux3-image-klein-terminal-driver.mjs';
@@ -109,11 +109,43 @@ test('resource native-boundary observation binds actual adapter parent PID, exec
  }
 });
 
-test('foreign compute-app C+G is rejected, graphics-only accepted, own hosting Runner ancestor distinguished from foreign runners',async()=>{
- const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'}];let compute=true;
- const exec=async(cmd,args)=>{if(cmd==='powershell.exe')return{stdout:a.gpuUuid};if(args.includes('--query-gpu=index,uuid'))return{stdout:`1,${a.gpuUuid}`};if(args.includes('-x'))return{stdout:`<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>99</pid><type>${compute?'C+G':'G'}</type></process_info></processes>`};return{stdout:compute?`99,${a.gpuUuid}`:''};};const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>table};
- await assert.rejects(guardHardware(a,own,deps),/foreign process actually computing/);compute=false;await guardHardware(a,own,deps);
- await assert.rejects(guardHardware(a,own,{...deps,processTable:async()=>[...table,{pid:11,ppid:0,command:'Runner.Worker.exe'}]}),/foreign Runner.Worker/);
+test('GPU1 guard: bounded measured desktop C+G passes, pure compute/over-limit/unmeasurable refuse, foreign runners refuse (DECLARED MOCK)',async()=>{
+ const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'}],MiB=1024**2,LUID='0x00000000_0x0001f363';
+ let procs,memory,luid,memoryQueries;
+ const exec=async(cmd,args)=>{const script=args.at(-1);
+  if(cmd==='powershell.exe'&&script.includes('cuDeviceGetLuid'))return{stdout:`${a.gpuUuid}${luid?` luid=${luid}`:''}`};
+  if(cmd==='powershell.exe'&&script.includes('GPU Process Memory')){memoryQueries.push(script);return{stdout:[...memory].map(([pid,bytes])=>`${pid},${bytes}`).join('\r\n')};}
+  if(args.includes('--query-gpu=index,uuid'))return{stdout:`1,${a.gpuUuid}`};
+  if(args.includes('-x'))return{stdout:`<uuid>${a.gpuUuid}</uuid><processes>${procs.map(([pid,type])=>`<process_info><pid>${pid}</pid><type>${type}</type></process_info>`).join('')}</processes>`};
+  return{stdout:procs.filter(([,type])=>type!=='G').map(([pid])=>`${pid},${a.gpuUuid}`).join('\n')};};
+ const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>table};
+ const reset=(p,m,l=LUID)=>{procs=p;memory=new Map(m);luid=l;memoryQueries=[];};
+ // The real desktop shape: compositor + shell apps as C+G, measured on the CUDA-reported LUID.
+ reset([[99,'C+G'],[98,'C+G'],[97,'G']],[[99,900*MiB],[98,100*MiB],[12345,5000*MiB]]);
+ const proof=await guardHardware(a,own,deps);
+ assert.deepEqual(proof.foreignGraphics,{luid:LUID,processes:2,totalBytes:1000*MiB,maxProcessBytes:900*MiB,processLimitBytes:1024*MiB,totalLimitBytes:3*1024*MiB},'measured foreign total is recorded, never hidden');
+ assert(memoryQueries.length===1&&memoryQueries[0].includes(`luid_${LUID}_phys_`),'memory comes from the GPU1 LUID CUDA itself reported');
+ reset([[97,'G']],[]);assert.equal((await guardHardware(a,own,deps)).foreignGraphics.totalBytes,0);assert.equal(memoryQueries.length,0,'graphics-only needs no measurement');
+ reset([[99,'C+G']],[[99,1024*MiB+1]]);await assert.rejects(guardHardware(a,own,deps),/uses 1025 MiB of GPU1 \(limit 1024 MiB\)/);
+ reset([[99,'C+G'],[98,'C+G'],[96,'C+G'],[95,'C+G']],[[99,900*MiB],[98,900*MiB],[96,900*MiB],[95,900*MiB]]);await assert.rejects(guardHardware(a,own,deps),/in total \(limit 3072 MiB\)/);
+ reset([[99,'C']],[[99,1]]);await assert.rejects(guardHardware(a,own,deps),/foreign pure-compute/,'pure compute refuses at any size');
+ reset([[99,'C+G']],[]);await assert.rejects(guardHardware(a,own,deps),/process 99 on GPU1 is unmeasurable/);
+ reset([[99,'C+G']],[[99,MiB]],null);await assert.rejects(guardHardware(a,own,deps),/no adapter LUID/);
+ reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,processTable:async()=>[...table,{pid:11,ppid:0,command:'Runner.Worker.exe'}]}),/foreign Runner.Worker/);
+ // An unidentified compute-app type on GPU1 is not presumed desktop.
+ reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,exec:async(c,args)=>args.includes('-x')?{stdout:`<uuid>${a.gpuUuid}</uuid><processes></processes>`}:exec(c,args)}),/pure compute or unidentified type/);
+});
+test('foreign desktop thresholds are exactly 1 GiB per process and 3 GiB in total (mutation checks)',()=>{
+ const MiB=1024**2;assert.equal(FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES,1024*MiB);assert.equal(FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES,3*1024*MiB);
+ assert.equal(assessForeignGraphics([1],new Map([[1,1024*MiB]])).totalBytes,1024*MiB,'the limit itself is allowed');
+ assert.throws(()=>assessForeignGraphics([1],new Map([[1,1024*MiB+1]])),/limit 1024 MiB/,'one byte over refuses');
+ const three=new Map([[1,1024*MiB],[2,1024*MiB],[3,1024*MiB]]);assert.equal(assessForeignGraphics([1,2,3],three).totalBytes,3*1024*MiB);
+ assert.throws(()=>assessForeignGraphics([1,2,3,4],new Map([...three,[4,1]])),/in total/);
+ // Mutated (tighter or looser) thresholds change the verdict, so the constants are load-bearing.
+ assert.throws(()=>assessForeignGraphics([1],new Map([[1,900*MiB]]),{processLimit:512*MiB}),/limit 512 MiB/);
+ assert.throws(()=>assessForeignGraphics([1,2],new Map([[1,900*MiB],[2,900*MiB]]),{totalLimit:1024*MiB}),/in total/);
+ assert.equal(assessForeignGraphics([1],new Map([[1,2047*MiB]]),{processLimit:2048*MiB}).processes,1);
+ assert.throws(()=>assessForeignGraphics([1],new Map([[1,-1]])),/unmeasurable/);assert.throws(()=>assessForeignGraphics([1],new Map([[1,Number.NaN]])),/unmeasurable/);
 });
 test('secondary Mac cannot infer exclusivity from labels: hashed coordinator lease, ancestor runner and stable process snapshot monitored',async t=>{
  const root=await temp(t),a={backend:'mlx',runner:'nax-macos-2',runnerTarget:'secondary',runnerLabel:'rw-mage',hostName:'nax-macos-2',admissionId:'fixture',sourceSha:source,inferenceMainSha:inference,runnerAccount:'fixture-account',timeoutSeconds:60};
