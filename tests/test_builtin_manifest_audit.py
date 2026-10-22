@@ -4974,10 +4974,34 @@ def test_flux3_base_and_distilled_have_separate_defaults_and_adapter_identity():
     assert size == proof["repository_size_bytes"] == 43229093855
     assert base["downloads"][0]["estimatedSizeBytes"] == size
     assert base["downloads"][0]["footprint"]["diskSizeBytes"] == size
-    primary = [row for row in base["downloads"] if not row.get("coRequisite")]
+    rows = [row for row in base["downloads"] if not row.get("coRequisite")]
+    primary = [row for row in rows if "localDerivation" not in row]
     assert [row["variant"] for row in primary] == ["bf16", "fp8r", "nvfp4"]
-    # Public metadata proves paths and claimed sizes, NOT downloaded weight bytes. Converted
-    # q4/q8 rows must stay absent until real base conversions provide independent size/hash pins.
+    # Public metadata proves paths and claimed sizes, NOT downloaded weight bytes. The converted
+    # q4/q8 rows exist only because genuine local base conversions (sc-26243) supplied their own
+    # size/hash pins, recorded in the artifact-prerequisite inventory's `activated` evidence.
+    derived = [row for row in rows if "localDerivation" in row]
+    assert sorted((row["variant"], tuple(row["platforms"]), row["localDerivation"]["conversion"]) for row in derived) == sorted([
+        ("q8", ("windows", "linux"), "flux3-candle-ggml-q8_0-v1"),
+        ("q4", ("windows", "linux"), "flux3-candle-ggml-q4_1-v1"),
+        ("q8", ("macos",), "flux3-mlx-affine-q8-g64-v1"),
+        ("q4", ("macos",), "flux3-mlx-affine-q4-g64-v1"),
+    ])
+    activated = {
+        record["conversion"]: record
+        for record in json.loads(
+            (ROOT / "docs/testing/sc-26243-terminal-artifact-prerequisites.json").read_text(encoding="utf-8")
+        )["activated"]
+    }
+    for row in derived:
+        conversion = row["localDerivation"]
+        record = activated[conversion["conversion"]]
+        assert conversion["fromVariant"] == "bf16" and conversion["weightsFile"] == "model.safetensors"
+        assert conversion["weightsBytes"] == record["weightsBytes"]
+        assert conversion["weightsSha256"] == record["weightsSha256"]
+        assert row["repo"] == proof["repository"] and row["revision"] == proof["revision"]
+        assert row["files"] == [] and row["estimatedSizeBytes"] == size
+        assert row["footprint"]["diskSizeBytes"] > size + conversion["weightsBytes"]
     metadata_paths = {row["rfilename"] for row in proof["files"]}
     for row in primary:
         assert row["repo"] == proof["repository"] and row["revision"] == proof["revision"]
