@@ -468,7 +468,7 @@ jobs:
           fi
       - name: Upload fresh MLX capability facts
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backend-capability-facts-mlx
           path: ${{ runner.temp }}/engine-capability-facts-verify
@@ -926,7 +926,7 @@ jobs:
             --source-root "$SCENEWORKS_MEMORY_CAPTURE_DIR"
       - name: Upload raw schema-checked MLX calibration evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: memory-mlx-evidence-${{ inputs.qwen_tier }}-${{ github.run_id }}
           path: |
@@ -953,7 +953,7 @@ jobs:
             --input "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
       - name: Upload the raw schema-checked Z-Image MLX anchor
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-16059-mlx-anchor-${{ github.run_id }}
           path: |

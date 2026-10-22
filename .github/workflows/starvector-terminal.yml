@@ -57,7 +57,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/starvector-terminal-recovery.mjs prepare release/starvector-terminal-recovery-v1.json "$RUNNER_TEMP/starvector-recovery"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
@@ -81,7 +81,7 @@ jobs:
       STARVECTOR_TERMINAL_PRODUCT_ROUTE_COMMAND: ${{ github.workspace }}\\scripts\\starvector-terminal-route.mjs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
@@ -97,7 +97,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'upstream reference failed' }
       - name: Preserve upstream reference and partial failure evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-upstream
@@ -114,12 +114,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified recovery quarantine
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
       - name: Download the shared upstream reference from this workflow attempt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-upstream
@@ -148,7 +148,7 @@ jobs:
         run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-1b"
       - name: Upload MLX 1B raw evidence even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-terminal-mlx-1b-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-terminal/mlx-1b
@@ -163,12 +163,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified recovery quarantine
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
       - name: Download the shared upstream reference from this workflow attempt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-upstream
@@ -188,7 +188,7 @@ jobs:
         run: node scripts/starvector-terminal-product-service.mjs stop "$RUNNER_TEMP/starvector-terminal/mlx-8b"
       - name: Upload MLX 8B raw evidence even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-terminal-mlx-8b-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-terminal/mlx-8b
@@ -212,12 +212,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified recovery quarantine
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
       - name: Download the shared upstream reference from this workflow attempt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-upstream
@@ -244,7 +244,7 @@ jobs:
         run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-1b"
       - name: Upload CUDA 1B raw evidence even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-terminal-cuda-1b-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}\starvector-terminal\cuda-1b
@@ -270,12 +270,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified recovery quarantine
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
       - name: Download the shared upstream reference from this workflow attempt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-upstream-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-upstream
@@ -302,7 +302,7 @@ jobs:
         run: node scripts/starvector-terminal-product-service.mjs stop "$env:RUNNER_TEMP\starvector-terminal\cuda-8b"
       - name: Upload CUDA 8B raw evidence and terminal suites even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-terminal-cuda-8b-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}\starvector-terminal\cuda-8b
@@ -315,7 +315,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified recovery quarantine
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: starvector-recovery-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-recovery
@@ -324,7 +324,7 @@ jobs:
       - name: Validate immutable dispatch identity before artifact selection
         run: node scripts/starvector-terminal-campaign.mjs validate-dispatch release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_PERMANENT_PIN" "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID"
       - name: Download every raw tuple artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: starvector-terminal-*-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: ${{ runner.temp }}/starvector-terminal-evidence
@@ -334,7 +334,7 @@ jobs:
           node scripts/starvector-terminal-producer.mjs seal "$GITHUB_WORKSPACE" release/starvector-terminal-campaign-v1.json "$STARVECTOR_TERMINAL_INFERENCE_ROOT" "$RUNNER_TEMP/starvector-terminal-evidence" "$RUNNER_TEMP/starvector-terminal-receipt" "$STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID" "$STARVECTOR_TERMINAL_PERMANENT_PIN"
       - name: Upload combined evidence even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: starvector-terminal-receipt-${{ env.STARVECTOR_TERMINAL_CAMPAIGN_RUN_ID }}
           path: |
