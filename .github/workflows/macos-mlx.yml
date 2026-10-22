@@ -122,7 +122,7 @@ on:
         type: choice
         required: false
         default: legacy
-        options: [legacy, facts-and-projections, consumer-assertions, canonical-preflight]
+        options: [legacy, facts-and-projections, consumer-assertions, canonical-preflight, cache-inventory]
       source_sha:
         description: "Exact SceneWorks commit for explicit verification profiles"
         type: string
@@ -988,7 +988,7 @@ jobs:
   # No legacy job runs for an explicit verification profile. The receipt is produced by the exact
   # canonical command, not by translating ordinary CI verdicts or skipping NAX on a hosted Mac.
   manual-verification:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_profile != 'legacy' && github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_profile != 'legacy' && inputs.verification_profile != 'cache-inventory' && github.repository == 'SceneWorks/SceneWorks' }}
     runs-on: [self-hosted, macOS, ARM64, rw-llm]
     permissions:
       contents: read
@@ -1142,3 +1142,48 @@ jobs:
           path: ${{ env.VERIFICATION_OUTPUT }}
           if-no-files-found: error
           retention-days: 14
+
+  # DIAGNOSTIC-ONLY (sc-26584, never merged): read-only lstat metadata of a fixed fixture-path
+  # allowlist, to bound the safety impact of failed run 39687007308. No source/build setup, no
+  # secrets, no writes in any cache; the script is requested code kept apart from cache data.
+  cache-inventory:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_profile == 'cache-inventory' && github.repository == 'SceneWorks/SceneWorks' }}
+    runs-on: [self-hosted, macOS, ARM64, rw-llm]
+    permissions:
+      contents: read
+    timeout-minutes: 3
+    concurrency:
+      group: macos-mlx-cache-inventory
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      INVENTORY_OUTPUT: ${{ runner.temp }}/cache-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Require actual secondary Mac before any checkout
+        run: |
+          test "$RUNNER_NAME" = nax-macos-2
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+      - name: Checkout only the inventory script
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: inventory-src
+          sparse-checkout: scripts/cache-inventory
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+      - name: Record read-only cache metadata
+        working-directory: ${{ runner.temp }}
+        run: |
+          py="$(command -v python3.12)"
+          "$py" --version | grep -E '^Python 3\.12\.'
+          "$py" -I "$GITHUB_WORKSPACE/inventory-src/scripts/cache-inventory/cache_inventory.py" --output-dir "$INVENTORY_OUTPUT"
+      - name: Upload cache metadata artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.INVENTORY_OUTPUT }}/cache-inventory.json
+          if-no-files-found: error
+          retention-days: 7
