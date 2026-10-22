@@ -647,6 +647,41 @@ export function resolveRevision(repo, revision, { runGit = git } = {}) {
  * revision. A declaration pointing at the wrong crate would otherwise digest an unrelated code path
  * and report currency for a provider it never looked at — a false green, and the expensive kind.
  */
+/**
+ * The one other spelling a crate may name its provider by (sc-24217): the backend-neutral
+ * `gen_core::<family>::PROVIDER_ID` constant both backends of a family share. `mlx-gen-supra2`
+ * registers `supra2_img` only as `mlx_gen::gen_core::supra2::PROVIDER_ID`, never as a literal, so
+ * the literal check alone would refuse a correct pointer. Still checked, not trusted: the crate's
+ * own source must spell `gen_core::<family>::PROVIDER_ID`, and gen-core's `src/<family>.rs` must
+ * declare that constant as exactly this provider id at the same revision.
+ */
+export const GEN_CORE_SOURCE_DIR = "crates/contracts/gen-core/src";
+
+export function providerNamedThroughGenCore({ repo, revision, provider, crateDir, runGit = git }) {
+  let named = "";
+  try {
+    named = runGit(repo, [
+      "grep", "-h", "-o", "-E", "gen_core::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
+    ]);
+  } catch {
+    return false;
+  }
+  const families = new Set(
+    named.split("\n").map((line) => /gen_core::([a-z0-9_]+)::PROVIDER_ID/.exec(line)?.[1]).filter(Boolean),
+  );
+  const declaration = `pub const PROVIDER_ID: &str = "${provider}";`;
+  for (const family of families) {
+    let body = "";
+    try {
+      body = runGit(repo, ["show", `${revision}:${GEN_CORE_SOURCE_DIR}/${family}.rs`]);
+    } catch {
+      continue;
+    }
+    if (body.split("\n").some((line) => line.trim() === declaration)) return true;
+  }
+  return false;
+}
+
 export function assertProviderIsDeclaredInCrate({ repo, revision, provider, crateDir, runGit = git }) {
   let hits = "";
   try {
@@ -655,6 +690,9 @@ export function assertProviderIsDeclaredInCrate({ repo, revision, provider, crat
     // `git grep` exits 1 on "no match", which execFileSync raises. Treat as the empty result and
     // let the check below produce the real message.
     hits = "";
+  }
+  if (!hits.trim() && providerNamedThroughGenCore({ repo, revision, provider, crateDir, runGit })) {
+    return;
   }
   if (!hits.trim()) {
     throw new Error(
