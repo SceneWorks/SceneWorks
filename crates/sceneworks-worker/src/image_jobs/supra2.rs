@@ -1375,15 +1375,26 @@ mod tests {
             })
         }
 
-        /// The backend's declared pixel bound for image k of a batch vs the single render on seed
-        /// S + k (inference `*-supra2/tests/real_weights.rs`): exact on MLX; on CUDA a batch and a
-        /// single image run differently tiled GEMMs, so mean |Δ| <= 0.1 / 255 and max |Δ| <= 1.
+        /// `(max mean |Δ| / 255, max max |Δ|)` for image k of a COUNT-4 batch vs the count-1 render
+        /// on seed S + k on Metal. A batch of four runs differently shaped GEMMs than a batch of
+        /// one, so the reduction order (and the last bits) move: measured on nax-macos-2, run
+        /// 39695321783, worst case mean 0.050 / max 4 over k = 0..3. No margin, and the run is
+        /// deterministic on that runner, so a Metal/MLX change that moves it trips this as a
+        /// signal. This does not contradict inference's documented MLX claim, which is bit-exact
+        /// for batch 2 vs batch 1 on image 0 only. The same REQUEST repeated stays bit-exact
+        /// (cell 4).
+        const MLX_BATCH4_VS_SINGLE_BOUND: (f64, u32) = (0.1, 4);
+        /// The same for CUDA, declared by inference (`candle-gen-supra2/tests/real_weights.rs`): a
+        /// batch and a single image run differently tiled GEMMs, mean |Δ| <= 0.1 / 255, max <= 1.
+        const CUDA_BATCH_VS_SINGLE_BOUND: (f64, u32) = (0.1, 1);
+        const BATCH_VS_SINGLE_BOUND: (f64, u32) = if cfg!(target_os = "macos") {
+            MLX_BATCH4_VS_SINGLE_BOUND
+        } else {
+            CUDA_BATCH_VS_SINGLE_BOUND
+        };
+
         fn within_batch_bound(mean: f64, max: u32) -> bool {
-            if cfg!(target_os = "macos") {
-                max == 0
-            } else {
-                mean <= 0.1 && max <= 1
-            }
+            mean <= BATCH_VS_SINGLE_BOUND.0 && max <= BATCH_VS_SINGLE_BOUND.1
         }
 
         /// Every cell's verdict, rewritten to `<out>/supra2_matrix_<backend>.json` after each cell
@@ -1657,7 +1668,7 @@ mod tests {
                     json!({
                         "seeds": seeds,
                         "perImage": diffs.iter().map(|(mean, max)| json!({"meanAbsDiff": mean, "maxAbsDiff": max})).collect::<Vec<_>>(),
-                        "bound": if cfg!(target_os = "macos") { "exact" } else { "mean<=0.1,max<=1" },
+                        "bound": { "meanAbsDiff": BATCH_VS_SINGLE_BOUND.0, "maxAbsDiff": BATCH_VS_SINGLE_BOUND.1 },
                         "singleLatencyS": single_latency,
                     }),
                 );
