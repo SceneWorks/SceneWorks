@@ -365,7 +365,7 @@ export function verifyNativeResourceCapture(value, { admission, invocation, adap
   if (admission.backend === 'candle') {
     if (proof?.physicalGpuId !== '1' || proof.gpuUuid?.toLowerCase() !== admission.gpuUuid?.toLowerCase()
       || proof.logicalCudaOrdinal !== 0 || !proof.ownComputePids?.includes(adapterPid)) fail('GPU1 UUID/PID proof missing');
-  } else if (proof?.runner !== 'nax-macos-2' || proof.host?.split('.')[0] !== admission.hostName || proof.runtime?.platform !== 'darwin'
+  } else if (!['nax-macos', 'nax-macos-2'].includes(admission.runner) || proof?.runner !== admission.runner || proof.host?.split('.')[0] !== admission.hostName || proof.runtime?.platform !== 'darwin'
     || proof.runtime?.arch !== 'arm64' || !proof.coordinatorLeaseId || proof.exclusivity !== 'coordinator-attested-and-process-monitored') fail('secondary Mac runtime/host/lease proof missing');
   const spec = value.actualLoadSpec;
   const { sha256:specSha256, ...actualSpec } = spec ?? {};

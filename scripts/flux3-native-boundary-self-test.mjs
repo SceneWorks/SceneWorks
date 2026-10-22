@@ -50,7 +50,7 @@ async function execute(binary, request, env) {
 }
 
 export async function runNativeBoundarySelfTest(config, { run = execute, env = process.env } = {}) {
-  const { lane, binary, buildReceipt, sourceSha, inferenceMainSha, planFile, resourceInputRoot } = config;
+  const { lane, host, binary, buildReceipt, sourceSha, inferenceMainSha, planFile, resourceInputRoot } = config;
   assert(['candle', 'mlx'].includes(lane), 'lane must be candle or mlx');
   // The sealed binary under test IS the approved resource-adapter build.
   const receiptFile = await contained(buildReceipt.path, buildReceipt.root), receiptBytes = await readFile(receiptFile);
@@ -62,7 +62,9 @@ export async function runNativeBoundarySelfTest(config, { run = execute, env = p
   assert.equal(await fileHash(binary), build.binary.sha256, 'binary differs from its sealed build receipt');
   const plan = JSON.parse(await readFile(planFile, 'utf8'));
   const calibrationPlan = JSON.parse(await readFile(path.join(ROOT, 'config/memory-calibration-plan.json'), 'utf8'));
-  const invocations = plan.generationInvocations.filter(i => i.backend === lane && i.kind.startsWith('resource_'));
+  // A host-split backend proves only the resource invocations of the named host's lane.
+  const lanes = plan.hostLanes?.[lane]; if (lanes) assert(Object.hasOwn(lanes, host ?? ''), `${lane} is split by host; name an approved host lane`); else assert.equal(host, undefined, `${lane} is not split by host`);
+  const invocations = plan.generationInvocations.filter(i => i.backend === lane && i.kind.startsWith('resource_') && (!lanes || lanes[host].includes(i.invocationId)));
   assert(invocations.length && invocations.every(i => /^[a-f0-9]{64}$/.test(i.requestSha256 ?? '')), 'every resource request digest must be fixed in the plan first');
   const request = {
     action: SELF_TEST_ACTION, lane, expectedBinarySha256: build.binary.sha256, buildReceiptSha256: buildReceipt.sha256,

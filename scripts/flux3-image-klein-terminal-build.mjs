@@ -71,10 +71,12 @@ export async function produceTerminalBuild(a, dependencies = {}) {
 }
 export async function verifyTerminalBuild(a, { sourceRoot = rootDefault, role = 'api-worker' } = {}) {
   let binding = (role === 'api-worker' ? a.approvedPlan?.buildReceipts : a.approvedPlan?.resourceBuildReceipts)?.[a.backend];
-  // A deferred backend's sealed builds are bound ONLY by its validated parent-recorded addendum.
-  if (!binding && (a.approvedPlan?.deferredInputSpecBackends ?? []).includes(a.backend) && a.inputSpecAddendum) {
-    const { validateInputSpecAddendum } = await import('./flux3-image-klein-terminal-budget.mjs');
+  // A deferred backend (or host lane) has its sealed builds bound ONLY by its validated
+  // parent-recorded addendum, and only for the admitted runner's own lane.
+  const { validateInputSpecAddendum, ledgerLane } = await import('./flux3-image-klein-terminal-budget.mjs');
+  if (!binding && a.approvedPlan && a.inputSpecAddendum && (a.approvedPlan.deferredInputSpecBackends ?? []).includes(ledgerLane(a.approvedPlan, a.backend, a.runner))) {
     const bound = validateInputSpecAddendum(a.approvedPlan, a.inputSpecAddendum); assert.equal(bound.backend, a.backend, 'addendum binds a different backend');
+    assert.equal(bound.ledgerLane, ledgerLane(a.approvedPlan, a.backend, a.runner), 'addendum binds a different host lane than the admitted runner');
     binding = role === 'api-worker' ? bound.buildReceipt : bound.resourceBuildReceipt;
   }
   return verifyBoundBuild(a, sourceRoot, role, binding);

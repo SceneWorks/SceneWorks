@@ -12,8 +12,10 @@ import { userInfo } from 'node:os';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText } from './flux3-image-klein-app-lifecycle.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
-import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256 } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256, admittedHost } from './flux3-image-klein-terminal-budget.mjs';
 const execFile = promisify(execFileCb);
+// Physical Macs: runner name -> its GitHub runner target and unique label.
+export const MAC_RUNNERS = Object.freeze({ 'nax-macos': Object.freeze({ runnerTarget: 'primary', runnerLabel: 'rw-starvector' }), 'nax-macos-2': Object.freeze({ runnerTarget: 'secondary', runnerLabel: 'rw-mage' }) });
 export async function fileHash(file) { const h = createHash('sha256'); for await (const chunk of createReadStream(file)) h.update(chunk); return h.digest('hex'); }
 export async function contained(file, root) {
   const resolved = await realpath(file), relative = path.relative(await realpath(root), resolved);
@@ -35,7 +37,8 @@ export async function validateAdmission(a, backend, { git = async (cwd, ...args)
   assert(path.isAbsolute(a.outputRoot ?? '') && path.isAbsolute(a.hfHome ?? ''), 'stable absolute output/cache roots required');
   const relative = path.relative(root, a.outputRoot); assert(relative.startsWith('..') || path.isAbsolute(relative), 'retained output must be outside checkout');
   assert(Number.isInteger(a.timeoutSeconds) && a.timeoutSeconds >= 60 && a.timeoutSeconds <= 10800, 'bounded run timeout required');
-  if (backend === 'mlx') assert.equal(a.runner, 'nax-macos-2', 'only secondary nax-macos-2 admitted');
+  // Which Mac a plan admits is its host lanes' decision (admittedHost); an unsplit plan keeps nax-macos-2.
+  if (backend === 'mlx') assert(Object.hasOwn(MAC_RUNNERS, a.runner ?? ''), 'only a known physical Mac runner admitted');
   else assert(a.runner && a.physicalGpuId === '1' && a.cudaVisibleDevices === '1' && a.logicalCudaOrdinal === 0 && /^GPU-[a-f0-9-]+$/i.test(a.gpuUuid ?? ''), 'physical GPU1/masked CUDA0 admission required');
 }
 export function safeEnvironment(env) {
@@ -71,8 +74,9 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   assert(runners.every(p => ancestors.has(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job is allowed');
   if (a.backend === 'mlx') {
     assert(platform === 'darwin' && arch === 'arm64', 'physical Apple Silicon Mac required');
-    assert.equal(a.runner, 'nax-macos-2'); assert.equal(a.runnerTarget, 'secondary'); assert.equal(a.runnerLabel, 'rw-mage'); assert.equal(env.RUNNER_NAME, 'nax-macos-2', 'secondary runner identity required (rw-mage is its label, not its runner name)');
-    const host = (await checked('hostname', [], { timeout: 5000 })).stdout.trim(); assert.equal(host.split('.')[0], a.hostName, 'admitted secondary physical hostname mismatch');
+    const mac = MAC_RUNNERS[a.runner]; assert(mac, 'only a known physical Mac runner admitted');
+    assert.equal(a.runnerTarget, mac.runnerTarget); assert.equal(a.runnerLabel, mac.runnerLabel); assert.equal(env.RUNNER_NAME, a.runner, 'admitted Mac runner identity required (the label is not its runner name)');
+    const host = (await checked('hostname', [], { timeout: 5000 })).stdout.trim(); assert.equal(host.split('.')[0], a.hostName, 'admitted Mac physical hostname mismatch');
     assert(a.hostName, 'explicit admitted secondary hostname required');
     const lease = await leaseReader(a); assert.equal(lease.kind, 'flux3-secondary-mac-exclusive-workload-lease'); assert(lease.coordinatorApprovalId && lease.approvedBy && lease.exclusiveGpuWorkload === true && lease.noForeignGpuWorkload === true, 'exclusive Metal workload cannot be inferred from hostname; coordinator must attest it');
     for (const key of ['admissionId','sourceSha','inferenceMainSha','runnerAccount','hostName']) assert.equal(lease[key], a[key], `Mac lease ${key} mismatch`);
@@ -104,7 +108,7 @@ export async function verifyResourceProducerHardware(a, context, dependencies = 
   const io = { validate: validateAdmission, verifyBuild: async admission => (await import('./flux3-image-klein-terminal-build.mjs')).verifyTerminalBuild(admission, { role: 'resource-adapter' }), guard: guardHardware, exec: execFile, hash: fileHash, realpath, parentPid: process.ppid, controllerPid: process.pid, platform: process.platform, env: process.env, ...dependencies };
   assert(Number.isInteger(context.adapterPid) && context.adapterPid > 0 && context.adapterPid === io.parentPid, 'native-boundary CLI must be the ACTUAL adapter child, not a caller-labelled PID');
   await io.validate(a, a.backend); await io.verifyBuild(a);
-  const approved = validateApprovedPlan(a.approvedPlan); assert.equal(context.approvedPlanSha256, approved.approvedPlanSha256); assert.equal(a.approvedPlanSha256, approved.approvedPlanSha256);
+  const approved = validateApprovedPlan(a.approvedPlan); admittedHost(a.approvedPlan, a); assert.equal(context.approvedPlanSha256, approved.approvedPlanSha256); assert.equal(a.approvedPlanSha256, approved.approvedPlanSha256);
   assert.equal(a.approvedPlan.sourceSha, a.sourceSha); assert.equal(a.approvedPlan.inferenceMainSha, a.inferenceMainSha);
   for (const key of ['sourceSha','binarySha256']) assert.equal(context[key], a[key], 'adapter context does not match sealed source/build');
   const invocation = a.approvedPlan.plan.generationInvocations.find(i => i.invocationId === context.invocationId);
@@ -118,7 +122,7 @@ export async function verifyResourceProducerHardware(a, context, dependencies = 
   const resolved = await io.realpath(executable); assert.equal(resolved, await io.realpath(a.binary), 'actual adapter process is not the sealed admitted executable'); assert.equal(await io.hash(resolved), a.binarySha256, 'actual running adapter executable bytes differ from owned build');
   const proof = await io.guard(a, [context.adapterPid]);
   if (a.backend === 'candle') { assert.equal(proof.physicalGpuId, '1'); assert.equal(proof.gpuUuid?.toLowerCase(), a.gpuUuid.toLowerCase()); assert.equal(proof.logicalCudaOrdinal, 0); assert(proof.ownComputePids?.includes(context.adapterPid), 'actual adapter PID/GPU1 UUID compute observation missing'); }
-  else { assert.equal(proof.runner, 'nax-macos-2'); assert.equal(proof.host?.split('.')[0], a.hostName); assert.deepEqual(proof.runtime, { platform: 'darwin', arch: 'arm64' }); assert(proof.coordinatorLeaseId && proof.exclusivity === 'coordinator-attested-and-process-monitored', 'actual secondary Mac exclusive runtime observation missing'); }
+  else { assert(Object.hasOwn(MAC_RUNNERS, a.runner ?? '') && proof.runner === a.runner, 'observed Mac runner differs from the admitted lane host'); assert.equal(proof.host?.split('.')[0], a.hostName); assert.deepEqual(proof.runtime, { platform: 'darwin', arch: 'arm64' }); assert(proof.coordinatorLeaseId && proof.exclusivity === 'coordinator-attested-and-process-monitored', 'actual secondary Mac exclusive runtime observation missing'); }
   const after = (await observe()).find(p => p.pid === context.adapterPid); assert.deepEqual(after, producer, 'adapter exited/changed identity during hardware observation');
   return { kind: 'flux3-resource-producer-hardware-observation', backend: a.backend, adapterPid: context.adapterPid, caseId: context.caseId, invocationId: context.invocationId, requestSha256: context.requestSha256, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt.sha256, approvedPlanSha256: approved.approvedPlanSha256, observedAt: new Date().toISOString(), adapterProcess: producer, proof };
 }
@@ -159,8 +163,8 @@ export async function launchTerminalSession(a, dependencies = {}) {
   };
   try {
     if (!dependencies.fixtureOnly) {
-      await validateAdmission(a, a.backend); const budget = validateApprovedPlan(a.approvedPlan); assert.equal(budget.approvedPlanSha256, a.approvedPlanSha256); assert.equal(a.ledgerId, a.approvedPlan.ledgerId);
-      await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot, inputSpecAddendum: a.inputSpecAddendum });
+      await validateAdmission(a, a.backend); const budget = validateApprovedPlan(a.approvedPlan); assert.equal(budget.approvedPlanSha256, a.approvedPlanSha256); assert.equal(a.ledgerId, a.approvedPlan.ledgerId); admittedHost(a.approvedPlan, a);
+      await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot, inputSpecAddendum: a.inputSpecAddendum, host: a.runner });
       const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a);
     }
     assert.equal(await io.hash(a.binary), a.binarySha256, 'prebuilt binary mismatch');
@@ -176,7 +180,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     await io.mkdir(identity.state); await io.mkdir(path.join(identity.state, 'data/projects'), { recursive: true }); await io.mkdir(path.join(identity.state, 'credentials')); await io.cp(path.join(ROOT, 'config'), path.join(identity.state, 'config'), { recursive: true });
     if (!dependencies.fixtureOnly || a.artifactCells) {
       assert(a.artifactCells?.length && a.artifactInputs && a.artifactTargets, 'concrete launcher requires exact approved artifact mapping inputs before any service launch');
-      assert.equal(planHash(a.artifactInputs), boundInputSpecSha256(a.approvedPlan, a.backend, a.inputSpecAddendum));
+      assert.equal(planHash(a.artifactInputs), boundInputSpecSha256(a.approvedPlan, a.backend, a.inputSpecAddendum, a.runner));
       const { stageTerminalArtifacts } = await import('./flux3-image-klein-terminal-artifacts.mjs'); artifactMapping = await stageTerminalArtifacts({ admission: a, identity, inputSpec: a.artifactInputs, cells: a.artifactCells, registry: a.artifactTargets });
     }
     if (a.faultProfile) {
@@ -193,7 +197,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     const url = await wait(async () => boundApiUrl(await io.readFile(api.logPath, 'utf8')));
     endpoint = io.controller({ url, state: identity.state, api, controller: abort }); await wait(() => endpoint.verify());
     const consume = async (invocationId, kind, body) => {
-      const receipt = await io.reserve({ approval: a.approvedPlan, ledgerRoot: a.ledgerRoot, ledgerId: a.ledgerId, approvedPlanSha256: a.approvedPlanSha256, invocationId, backend: a.backend, caseId: currentCase.caseId, kind, requestSha256: planHash(body), inputSpecAddendum: a.inputSpecAddendum }); permits.push(receipt); return receipt;
+      const receipt = await io.reserve({ approval: a.approvedPlan, ledgerRoot: a.ledgerRoot, ledgerId: a.ledgerId, approvedPlanSha256: a.approvedPlanSha256, invocationId, backend: a.backend, caseId: currentCase.caseId, kind, requestSha256: planHash(body), inputSpecAddendum: a.inputSpecAddendum, host: a.runner }); permits.push(receipt); return receipt;
     };
     const beforeMutation = async (method, route, body) => {
       if (method !== 'POST') return;
