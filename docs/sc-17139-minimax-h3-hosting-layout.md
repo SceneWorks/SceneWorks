@@ -47,6 +47,25 @@ Downstream consumers of this document:
 | sc-17158 | the `downloads[]` shape (§4), two manifest ids, the license gate (§8) |
 | sc-17149 | `transformer_ref` lands as its own catalog entry (§7) |
 
+## Dense community DiT imports (sc-26680)
+
+The existing model Add/Import workflow also accepts an unsharded, dense F16/BF16/F32 H3
+Diffusers transformer component directory: `config.json` declaring
+`MiniMaxH3Transformer3DModel` beside `diffusion_pytorch_model.safetensors`. Tensor content
+identifies H3; the directory name and user-selected model type do not select the engine.
+The shared inspector persists an import plan and a component assembly binding on the new
+video model entry. Select that imported entry in Video Studio and generate normally; its
+model id and plan identity remain attached to the job and resulting asset.
+
+The import replaces only the base FL2VA DiT (text-to-video, image-to-video, first/last frame).
+Its text encoder, tokenizer/processor and both VAEs reuse the installed MiniMax-H3 components;
+MLX also requires the installed reference partition as a load-time companion. Install those
+components through Model Manager before generating. A missing or changed plan binding, an
+incomplete DiT directory, or unavailable resident components refuses before provider loading,
+never substitutes the built-in DiT or produces procedural video. Both native MLX and
+Candle/CUDA routes stage the imported transformer explicitly. Single-file, sharded, quantized,
+Ref2VA/hybrid imports and adapters on imported H3 entries are outside this story's surface.
+
 ---
 
 ## 1. Summary of decisions

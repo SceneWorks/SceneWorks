@@ -280,6 +280,18 @@ pub enum BaseWeightDetection {
 /// never the encodings.
 pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow", "sdxl"];
 
+/// The VIDEO families model import accepts (sc-26680, epic 26679). Separate from
+/// [`IMPORT_SUPPORTED_FAMILIES`] because that list is the IMAGE route-by-family contract — the
+/// image provider registry, the capability matrix's imported probes and `MLX_ROUTED_FAMILIES` all
+/// key on it — while a video import is claimed by its own entry-keyed lane
+/// (`jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible`).
+///
+/// `minimax-h3` is a dense MiniMax-H3 DiT fine-tune: a diffusers transformer component directory
+/// ([`is_minimax_h3_transformer_dir`]) whose shared components — text encoder, tokenizer, both VAEs
+/// and the reference partition — are bound to the resident MiniMax-H3 install
+/// ([`crate::minimax_h3_import`]), never carried by the import itself.
+pub const VIDEO_IMPORT_SUPPORTED_FAMILIES: &[&str] = &["minimax-h3"];
+
 /// The file a Mage-Flow transformer component directory carries its weights in (the diffusers
 /// name the trainer's full-fine-tune writer emits).
 pub const MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE: &str = "diffusion_pytorch_model.safetensors";
@@ -297,6 +309,65 @@ pub const MAGE_FLOW_TRANSFORMER_CONFIG_FILE: &str = "config.json";
 pub fn is_mage_flow_transformer_dir(dir: &Path) -> bool {
     dir.join(MAGE_FLOW_TRANSFORMER_CONFIG_FILE).is_file()
         && dir.join(MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE).is_file()
+}
+
+/// The file a dense MiniMax-H3 transformer component directory carries its weights in — the
+/// diffusers name the H3 tooling writes for an unsharded component (sc-26680).
+pub const MINIMAX_H3_TRANSFORMER_WEIGHTS_FILE: &str = "diffusion_pytorch_model.safetensors";
+/// The architecture config a MiniMax-H3 transformer component directory carries.
+pub const MINIMAX_H3_TRANSFORMER_CONFIG_FILE: &str = "config.json";
+/// The diffusers `_class_name` the published MiniMax-H3 DiT config declares
+/// (`MiniMaxH3Transformer3DModel`, read by both native providers' `dit::config`).
+pub const MINIMAX_H3_TRANSFORMER_CLASS: &str = "MiniMaxH3Transformer3DModel";
+
+/// Whether `dir` is a **loadable dense** MiniMax-H3 transformer component directory (sc-26680): the
+/// architecture `config.json` declaring [`MINIMAX_H3_TRANSFORMER_CLASS`], the one unsharded weight
+/// file, and NO other visible weight file.
+///
+/// The last clause is load-bearing rather than tidy. Both native providers open the DiT with
+/// `Weights::from_dir`, which maps every `.safetensors` in the directory — so a stray second weight
+/// file would be loaded into the model without ever having been inspected, hashed or bound by the
+/// import plan. Shared by the API's synchronous import gate, the worker's import job and the
+/// worker's render route, so "what the app accepts" and "what the provider opens" cannot drift.
+pub fn is_minimax_h3_transformer_dir(dir: &Path) -> bool {
+    let config = dir.join(MINIMAX_H3_TRANSFORMER_CONFIG_FILE);
+    let weights = dir.join(MINIMAX_H3_TRANSFORMER_WEIGHTS_FILE);
+    let regular_file = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    };
+    if !regular_file(&config) || !regular_file(&weights) {
+        return false;
+    }
+    let declares_h3 = std::fs::read_to_string(&config)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("_class_name")
+                .and_then(Value::as_str)
+                .map(|class| class == MINIMAX_H3_TRANSFORMER_CLASS)
+        })
+        .unwrap_or(false);
+    if !declares_h3 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().all(|entry| {
+        let path = entry.path();
+        if is_hidden_file(&path) || path == weights {
+            return true;
+        }
+        !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("safetensors") || ext.eq_ignore_ascii_case("gguf")
+            })
+    })
 }
 
 /// Resolve the one weight file carried by a user-import source without guessing across a model
@@ -333,6 +404,10 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
             .ok()
             .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
         return (config_is_regular && is_plain_safetensors_file(&weights)).then_some(weights);
+    }
+    if is_minimax_h3_transformer_dir(source) {
+        let weights = source.join(MINIMAX_H3_TRANSFORMER_WEIGHTS_FILE);
+        return is_plain_safetensors_file(&weights).then_some(weights);
     }
     if source.join("model_index.json").is_file()
         || source.join("config.json").is_file()
@@ -395,6 +470,15 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         // the caller must additionally pass the directory shape through
         // [`is_mage_flow_transformer_dir`]; this triple gate cannot see the config sibling.
         (Some("mage-flow"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
+        // sc-26680: a dense MiniMax-H3 DiT fine-tune. Loadable only as a transformer component
+        // DIRECTORY — the caller must additionally pass [`is_minimax_h3_transformer_dir`]; this
+        // triple gate cannot see the config sibling. Dense only: the packed q4/q8 tiers and the
+        // community quantized dialects have no import loader yet and are refused below.
+        (
+            Some("minimax-h3"),
+            ComponentRole::Transformer,
+            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
+        ) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
         (None, _, _) => Err(
@@ -402,10 +486,20 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              refused rather than guessing at a loader."
                 .to_owned(),
         ),
-        (Some(family), _, _) if !IMPORT_SUPPORTED_FAMILIES.contains(&family) => Err(format!(
-            "Model import does not yet support the '{family}' family. Supported today: {}.",
-            IMPORT_SUPPORTED_FAMILIES.join(", ")
-        )),
+        (Some(family), _, _)
+            if !IMPORT_SUPPORTED_FAMILIES.contains(&family)
+                && !VIDEO_IMPORT_SUPPORTED_FAMILIES.contains(&family) =>
+        {
+            Err(format!(
+                "Model import does not yet support the '{family}' family. Supported today: {}.",
+                IMPORT_SUPPORTED_FAMILIES
+                    .iter()
+                    .chain(VIDEO_IMPORT_SUPPORTED_FAMILIES)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
         (Some("flux2"), component, _) if component != ComponentRole::Transformer => Err(format!(
             "Model import for the 'flux2' family requires a diffusion transformer, not a \
              {component} file."
@@ -429,6 +523,13 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
                  {component} file."
             ))
         }
+        (Some("minimax-h3"), component, _) if component != ComponentRole::Transformer => {
+            Err(format!(
+                "Model import for the 'minimax-h3' family requires the MiniMax-H3 diffusion \
+                 transformer, not a {component} file. Its text encoder, tokenizer and VAEs are \
+                 reused from the installed MiniMax-H3 model."
+            ))
+        }
         (Some("krea_2"), _, quant) => Err(format!(
             "Model import for the 'krea_2' family supports dense bf16, descriptor-gated \
              int8-per-row, or NVIDIA Kitchen NVFP4 weights, not {quant}. Re-export the checkpoint \
@@ -442,6 +543,10 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
             "Model import for the 'mage-flow' family supports a dense bf16 transformer, not \
              {quant}. A pre-quantized q4/q8 Mage-Flow tier is installed through the model catalog, \
              not imported."
+        )),
+        (Some("minimax-h3"), _, quant) => Err(format!(
+            "Model import for the 'minimax-h3' family supports a dense f16, bf16, or f32 \
+             transformer component directory, not {quant}."
         )),
         (Some(family), _, _) => Err(format!(
             "Model import has no compatible loader arm for the '{family}' family."
@@ -966,6 +1071,16 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     // (`transformer_blocks.*`) is loaded by the Krea snapshot path, not here.
     if any_key_contains(keys, "txtfusion.") {
         return Some("krea_2");
+    }
+    // MiniMax-H3 (epic 17137; import sc-26680): a single-stream DiT whose two-block text refiner
+    // (`token_refiner.refiner_blocks.N`) and joint-audio input head (`audio_proj_in`) appear in no
+    // other family. MUST precede the Ideogram arm below: every H3 `transformer_blocks.N` carries an
+    // `adaln_proj.linear`, which Ideogram's bare `adaln_proj.` marker would otherwise claim — an H3
+    // DiT used to classify as `ideogram`.
+    if any_key_contains(keys, "token_refiner.refiner_blocks.")
+        && any_key_contains(keys, "audio_proj_in.")
+    {
+        return Some("minimax-h3");
     }
     // Ideogram 4 (epic 6561): single-stream `layers.N.attention.qkv` +
     // `adaln_modulation` (lowercase) + `feed_forward.w`, with the unique
@@ -2475,13 +2590,23 @@ mod tests {
                 &[QuantFormat::Bf16],
             ),
             ("flux2", ComponentRole::Transformer, &[QuantFormat::Nvfp4]),
+            // sc-26680: the dense H3 DiT component directory, every dense precision.
+            (
+                "minimax-h3",
+                ComponentRole::Transformer,
+                &[QuantFormat::Bf16, QuantFormat::F16, QuantFormat::F32],
+            ),
         ];
         let mut rows = expected
             .iter()
             .map(|(family, _, _)| *family)
             .collect::<Vec<_>>();
         rows.sort_unstable();
-        let mut advertised = IMPORT_SUPPORTED_FAMILIES.to_vec();
+        let mut advertised = IMPORT_SUPPORTED_FAMILIES
+            .iter()
+            .chain(VIDEO_IMPORT_SUPPORTED_FAMILIES)
+            .copied()
+            .collect::<Vec<_>>();
         advertised.sort_unstable();
         assert_eq!(
             rows, advertised,

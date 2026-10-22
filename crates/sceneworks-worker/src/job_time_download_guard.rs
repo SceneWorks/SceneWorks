@@ -294,6 +294,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "training-inputs",
         CacheRole::Scratch,
     ),
+    // Staged symlink directory for imported dense H3 DiT assembly (transformer + reference links).
+    (
+        "worker",
+        "video_jobs/minimax_h3.rs",
+        "minimax-h3-assemblies",
+        CacheRole::Scratch,
+    ),
     // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
     (
         "worker",

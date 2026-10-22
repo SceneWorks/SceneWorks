@@ -11,6 +11,10 @@ use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
 use sceneworks_core::checkpoint_ingest::ManagedIngest;
 use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
 use sceneworks_core::file_lock::FileLock;
+use sceneworks_core::minimax_h3_import::{
+    stamp_imported_minimax_h3_entry, MiniMaxH3ImportAssembly, MINIMAX_H3_IMPORT_FAMILY,
+    MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+};
 
 /// Post the terminal `Completed` update for a Hugging Face cache download, building the shared
 /// `{<id_key>, repo, path, storage:"huggingface_cache", completedAt}` result object (F-116). Both
@@ -5787,6 +5791,14 @@ pub(crate) fn linked_checkpoint_manifest_entry(
     if let Some(paths) = entry.get_mut("paths").and_then(Value::as_object_mut) {
         paths.remove("model");
     }
+    // sc-26680: a linked MiniMax-H3 DiT directory binds exactly as a managed one does. The caller
+    // has already refused a plan that is not a complete assembly, so an `Err` here leaves the entry
+    // without a binding — which every consumer reads as "not an imported H3 model".
+    if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
+        if let Ok(assembly) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+            stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        }
+    }
     let model_type = entry
         .get("type")
         .and_then(Value::as_str)
@@ -5886,6 +5898,21 @@ async fn run_linked_checkpoint_import_job(
             }
             None => None,
         };
+        // sc-26680: an H3 DiT that is not a complete assembly is refused rather than registered.
+        if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
+            if let Err(reason) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(format!(
+                        "[checkpoint-plan:ambiguous-component] the linked MiniMax-H3 checkpoint \
+                         is not a complete DiT assembly: {reason}"
+                    )),
+                )
+                .await;
+            }
+        }
         let manifest_entry =
             linked_checkpoint_manifest_entry(manifest_entry, &compiled, classification);
         let manifest_path = model_manifest_target(settings, &job.payload)?;
@@ -6276,6 +6303,30 @@ pub(crate) async fn run_model_import_job(
                     )
                     .await;
                 }
+                // sc-26680: the MiniMax-H3 twin of the Mage-Flow gate above, with one more clause:
+                // the directory must carry NO other weight file, because both native providers map
+                // every safetensors in the DiT directory (`Weights::from_dir`).
+                if matches!(
+                    &detection,
+                    BaseWeightDetection::Recognized(verdict)
+                        if verdict.family.as_deref() == Some(MINIMAX_H3_IMPORT_FAMILY)
+                ) && !sceneworks_core::base_weights::is_minimax_h3_transformer_dir(&staging_dir)
+                {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import is not supported for this file.",
+                        Some(
+                            "Model import for the 'minimax-h3' family requires a complete \
+                             transformer directory containing a MiniMaxH3Transformer3DModel \
+                             config.json and exactly one diffusion_pytorch_model.safetensors; a \
+                             bare weights file, a sharded directory, or a directory with other \
+                             weight files is refused."
+                                .to_owned(),
+                        ),
+                    )
+                    .await;
+                }
                 // sc-14108: a single-file base checkpoint is a bare DiT — neither a diffusers
                 // directory nor a LoRA — so the LoRA-oriented `detect_model_family` below returns
                 // None for it. Reuse the family the gate's base-weight verdict already resolved so
@@ -6293,6 +6344,12 @@ pub(crate) async fn run_model_import_job(
                                     ) =>
                             {
                                 "transformer_directory"
+                            }
+                            ComponentRole::Transformer
+                                if verdict.family.as_deref() == Some(MINIMAX_H3_IMPORT_FAMILY) =>
+                            {
+                                // Proven a complete H3 component directory by the gate above.
+                                MINIMAX_H3_IMPORT_SOURCE_SHAPE
                             }
                             ComponentRole::Transformer => "transformer_file",
                             ComponentRole::Checkpoint => "fused_checkpoint",
@@ -6506,6 +6563,45 @@ pub(crate) async fn run_model_import_job(
                 "importQuantFormat".to_owned(),
                 Value::String(quant.to_owned()),
             );
+        }
+        // sc-26680: a MiniMax-H3 DiT is a component of an ASSEMBLY, not a whole model. Bind it —
+        // validated against the plan the commit just published — before the entry can exist, so
+        // an incomplete or ambiguous assembly never becomes a selectable catalog row.
+        if manifest_entry.get("family").and_then(Value::as_str) == Some(MINIMAX_H3_IMPORT_FAMILY) {
+            match MiniMaxH3ImportAssembly::from_plan(&install.compiled.plan) {
+                Ok(assembly) => {
+                    manifest_entry.insert(
+                        "importPlan".to_owned(),
+                        json!({
+                            "checkpointId": install.checkpoint_id,
+                            "planId": install.compiled.plan.plan_id,
+                            "semanticDigest": install.compiled.record.plan.semantic_digest,
+                        }),
+                    );
+                    stamp_imported_minimax_h3_entry(&mut manifest_entry, &assembly);
+                }
+                Err(reason) => {
+                    // Roll the commit back: the bytes are not a model SceneWorks can assemble, so
+                    // they must not stay installed and addressable either.
+                    if let Err(error) = plan_store.remove_managed(&install.install_id) {
+                        tracing::warn!(
+                            checkpoint_id = %install.checkpoint_id,
+                            %error,
+                            "could not roll back an unassemblable MiniMax-H3 import"
+                        );
+                    }
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Model import is not supported for this file.",
+                        Some(format!(
+                            "[checkpoint-plan:ambiguous-component] the imported MiniMax-H3 \
+                             checkpoint is not a complete DiT assembly: {reason}"
+                        )),
+                    )
+                    .await;
+                }
+            }
         }
         let model_type = manifest_entry
             .get("type")

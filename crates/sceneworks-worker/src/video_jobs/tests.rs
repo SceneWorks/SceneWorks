@@ -2310,7 +2310,7 @@ fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
 #[tokio::test]
 async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc17160");
@@ -2581,7 +2581,7 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     }
 
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
+    let mut settings = crate::test_env::offline_settings();
     settings.data_dir = data_dir.path().to_path_buf();
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc24070");
@@ -20987,19 +20987,9 @@ fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
 
 /// The MLX-lane twin of the candle refusals below (sc-20651 feature-end review minor).
 ///
-/// Every arm of the macOS `resolve_video_route` ladder is matched off a BUILTIN engine model id, and
-/// a plan-backed imported entry carries none of them — so it reaches `VideoRoute::Stub`, whose
-/// handler calls `ensure_video_engine_weights` and, finding no engine family in the id either, used
-/// to pass straight through to `generate_stub_video`. The job then COMPLETED with a procedural
-/// clip at the requested geometry, which is indistinguishable from a real render until watched.
-/// There is no macOS video lane that loads a checkpoint plan, so the honest answer is a refusal —
-/// the same `[checkpoint-plan:no-video-lane]` verdict `plan_backed_wan_video_route` gives on candle.
-///
-/// The control at the end is what makes this an assertion about the PLAN and not about the model
-/// id: the identical request without `importPlan` still passes the gate and keeps its stub.
-///
-/// Failing mutation: delete the `checkpoint_plan_checkpoint_id` arm at the top of
-/// `wan::ensure_video_engine_weights` — the plan-backed request passes the gate and stubs.
+/// Non-H3 plan-backed entries have no MLX plan lane. The router now refuses them before the
+/// builtin-id ladder (sc-26680), rather than allowing the procedural stub arm. The legacy weight
+/// gate remains a second refusal boundary. Removing the plan alone preserves stub routing.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_plan_backed_video_request_refuses_on_macos_instead_of_reaching_the_stub() {
@@ -21021,9 +21011,8 @@ fn a_plan_backed_video_request_refuses_on_macos_instead_of_reaching_the_stub() {
     }));
     assert_eq!(
         resolve_video_route(&plan_backed, &settings),
-        VideoRoute::Stub,
-        "fixture check: no macOS ladder arm claims a plan-backed entry — the Stub arm is exactly \
-         where this request lands, which is why the gate has to be the thing that refuses"
+        VideoRoute::NoPlanLane,
+        "a plan-backed Wan entry must be refused before the builtin-id ladder"
     );
     let message = match wan::ensure_video_engine_weights(&plan_backed, &settings) {
         Err(WorkerError::InvalidPayload(message)) => message,
@@ -21042,6 +21031,7 @@ fn a_plan_backed_video_request_refuses_on_macos_instead_of_reaching_the_stub() {
         "id": "imported_wan_2_2_abc123",
         "family": "wan-video"
     }));
+    assert_eq!(resolve_video_route(&unplanned, &settings), VideoRoute::Stub);
     assert!(
         wan::ensure_video_engine_weights(&unplanned, &settings).is_ok(),
         "an entry with no plan must be untouched by this gate"
@@ -21533,3 +21523,8 @@ fn minimax_h3_veda_queued_request_prices_bound_before_engine_generate() {
         }
     }
 }
+
+// Imported dense MiniMax-H3 DiT import → plan → worker → provider seam (sc-26680). A child module so
+// it reuses this suite's harness (`ArmProbe`, `drive_minimax_h3_arm`, the tier/base fixtures).
+#[path = "minimax_h3_import_tests.rs"]
+mod minimax_h3_import_tests;
