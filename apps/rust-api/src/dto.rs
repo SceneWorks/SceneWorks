@@ -1510,6 +1510,11 @@ pub(crate) struct ModelImportRequest {
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
+    /// Explicit MiniMax-H3 compatibility: tensor architecture cannot identify its operation partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) minimax_h3_partition: Option<String>,
     /// Optional caller-supplied SHA-256 of the imported file. When present, the worker
     /// verifies the downloaded file against it and fails on a mismatch (sc-6137). HF
     /// repo imports are verified automatically from HF's own per-file digests.

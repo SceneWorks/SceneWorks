@@ -3752,7 +3752,7 @@ pub(crate) async fn queue_model_import_job(
         payload.license_acknowledged,
     )
     .await?;
-    let model_type = match payload.model_type.as_deref().map(str::trim) {
+    let mut model_type = match payload.model_type.as_deref().map(str::trim) {
         Some(value) if !value.is_empty() => {
             let normalized = value.to_ascii_lowercase();
             if !ALLOWED_MODEL_TYPES.contains(&normalized.as_str()) {
@@ -3768,7 +3768,16 @@ pub(crate) async fn queue_model_import_job(
     payload.model_type = Some(model_type.clone());
     if let Some(family) = payload.family.take() {
         let models = model_catalog(&state).await?;
-        payload.family = Some(validate_lora_family(&models, &family)?);
+        let normalized = normalize_lora_family(&family);
+        payload.family = Some(if models.iter().any(|model| {
+            model.get("family").and_then(Value::as_str).is_some_and(|own_family| {
+                normalize_lora_family(own_family) == normalized
+            })
+        }) {
+            normalized
+        } else {
+            validate_lora_family(&models, &family)?
+        });
     }
     let name = payload
         .name
@@ -3861,6 +3870,11 @@ pub(crate) async fn queue_model_import_job(
             &format!("source_path={source_path}"),
         )?;
     }
+    validate_minimax_h3_import_declaration(&payload)?;
+    if payload.family.as_deref() == Some("minimax-h3") || payload.minimax_h3_partition.is_some() {
+        model_type = "video".to_owned();
+        payload.model_type = Some(model_type.clone());
+    }
     let timestamp = now_rfc3339();
     // A linked entry names its library by root id and relative path and carries NO install path:
     // nothing is copied, and the plan-driven route reads the plan's own layers. The worker stamps
@@ -3914,6 +3928,12 @@ pub(crate) async fn queue_model_import_job(
         }
     }
     if let Some(object) = manifest_entry.as_object_mut() {
+        if let Some(base_model) = &payload.base_model {
+            object.insert("baseModel".to_owned(), Value::String(base_model.clone()));
+        }
+        if let Some(partition) = &payload.minimax_h3_partition {
+            object.insert("minimaxH3Partition".to_owned(), Value::String(partition.clone()));
+        }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
     let ownership_mode = payload.ownership_mode;
@@ -3957,6 +3977,39 @@ pub(crate) async fn queue_model_import_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+// The detector establishes architecture, never whether a fine-tune was trained for first/last
+// frames, references, or both. A caller must declare that compatibility before an H3 job is queued;
+// remote bytes are checked again by the shared worker importer after detection.
+fn validate_minimax_h3_import_declaration(payload: &ModelImportRequest) -> Result<(), ApiError> {
+    let family = payload.family.as_deref();
+    let base = payload.base_model.as_deref();
+    let partition = payload.minimax_h3_partition.as_deref();
+    let declares_h3 = partition.is_some()
+        || matches!(base, Some("minimax_h3" | "minimax_h3_ref"));
+    if family != Some("minimax-h3") && !declares_h3 {
+        return Ok(());
+    }
+    if family.is_some_and(|family| family != "minimax-h3") {
+        return Err(ApiError::bad_request(
+            "baseModel and minimaxH3Partition declare MiniMax-H3 compatibility, but family is not minimax-h3",
+        ));
+    }
+    let expected_base = match partition {
+        Some("fl2va" | "hybrid") => "minimax_h3",
+        Some("ref2va") => "minimax_h3_ref",
+        _ => return Err(ApiError::bad_request(
+            "MiniMax-H3 import requires explicit minimaxH3Partition: fl2va, ref2va, or hybrid; tensor shapes cannot determine the partition",
+        )),
+    };
+    if base != Some(expected_base) {
+        return Err(ApiError::bad_request(format!(
+            "MiniMax-H3 minimaxH3Partition '{}' requires baseModel '{expected_base}'; baseModel is missing or incompatible",
+            partition.unwrap_or_default(),
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) async fn model_import_request_from_multipart(
     state: &AppState,
     mut multipart: Multipart,
@@ -3974,6 +4027,8 @@ pub(crate) async fn model_import_request_from_multipart(
         linked_relative_path: None,
         files: Vec::new(),
         family: None,
+        base_model: None,
+        minimax_h3_partition: None,
         expected_sha256: None,
         license_acknowledged: false,
         uploaded_source_path: false,
@@ -4015,6 +4070,8 @@ pub(crate) async fn model_import_request_from_multipart(
                 "name" => payload.name = Some(value.to_owned()),
                 "type" => payload.model_type = Some(value.to_owned()),
                 "family" => payload.family = Some(value.to_owned()),
+                "baseModel" => payload.base_model = Some(value.to_owned()),
+                "minimaxH3Partition" => payload.minimax_h3_partition = Some(value.to_owned()),
                 "repo" => payload.repo = Some(value.to_owned()),
                 "sourceUrl" => payload.source_url = Some(value.to_owned()),
                 // The multipart form accepts `repo`/`sourceUrl` too, so it can reach a
@@ -15432,6 +15489,8 @@ mod model_import_source_tests {
             linked_relative_path: None,
             files: Vec::new(),
             family: None,
+            base_model: None,
+            minimax_h3_partition: None,
             expected_sha256: None,
             license_acknowledged: false,
             uploaded_source_path: false,
@@ -15764,6 +15823,108 @@ mod managed_predictor_queue_tests {
             let mut conflict = payload;
             conflict.insert("expectedSha256".into(), json!("0".repeat(64)));
             assert!(sceneworks_core::managed_file::authoritative_job_identity(&conflict).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod minimax_h3_import_declaration_tests {
+    use super::{model_import_request_from_multipart, validate_minimax_h3_import_declaration, ModelImportRequest};
+    use crate::tests::support::*;
+    use axum::extract::FromRequest;
+
+    fn app(temp: &tempfile::TempDir) -> axum::Router {
+        let manifests = temp.path().join("config/manifests");
+        std::fs::create_dir_all(&manifests).unwrap();
+        // H3 need not support LoRAs to be a supported model-import architecture.
+        std::fs::write(manifests.join("builtin.models.jsonc"), json!({
+            "schemaVersion": 1,
+            "models": [
+                { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] } },
+                { "id": "sdxl", "type": "image", "family": "sdxl" }
+            ]
+        }).to_string()).unwrap();
+        create_app(test_settings(temp)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(&temp);
+        for (partition, base) in [("fl2va", "minimax_h3"), ("ref2va", "minimax_h3_ref"), ("hybrid", "minimax_h3")] {
+            let (status, job) = request(app.clone(), "POST", "/api/v1/models/import", json!({
+                "name": format!("Custom H3 {partition}"),
+                "source": { "kind": "huggingFace", "repo": "owner/h3-finetune" },
+                "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition
+            })).await;
+            assert_eq!(status, StatusCode::CREATED, "{job}");
+            assert_eq!(job["payload"]["baseModel"], base);
+            assert_eq!(job["payload"]["minimaxH3Partition"], partition);
+            let entry = &job["payload"]["manifestEntry"];
+            assert_eq!(entry["baseModel"], base);
+            assert_eq!(entry["minimaxH3Partition"], partition);
+            assert_eq!(entry["type"], "video");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_and_incompatible_declarations_fail_by_field_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(&temp);
+        for (declaration, field) in [
+            (json!({}), "minimaxH3Partition"),
+            (json!({ "baseModel": "minimax_h3" }), "minimaxH3Partition"),
+            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "auto" }), "minimaxH3Partition"),
+            (json!({ "minimaxH3Partition": "fl2va" }), "baseModel"),
+            (json!({ "minimaxH3Partition": "fl2va", "baseModel": "minimax_h3_ref" }), "baseModel"),
+            (json!({ "minimaxH3Partition": "ref2va", "baseModel": "minimax_h3" }), "baseModel"),
+            (json!({ "minimaxH3Partition": "hybrid", "baseModel": "minimax_h3_ref" }), "baseModel"),
+        ] {
+            let mut body = json!({ "name": "Custom H3", "repo": "owner/custom", "family": "minimax-h3" });
+            body.as_object_mut().unwrap().extend(declaration.as_object().unwrap().clone());
+            let (status, error) = request(app.clone(), "POST", "/api/v1/models/import", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(error["detail"].as_str().unwrap().contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn detected_h3_without_a_declaration_is_not_assigned_semantics() {
+        let mut payload: ModelImportRequest = serde_json::from_value(json!({ "repo": "owner/custom" })).unwrap();
+        validate_minimax_h3_import_declaration(&payload).unwrap();
+        // Family reconciliation may discover H3 even when the request left family unspecified.
+        payload.family = Some("minimax-h3".to_owned());
+        let error = validate_minimax_h3_import_declaration(&payload).unwrap_err();
+        assert!(error.detail.contains("minimaxH3Partition"));
+        assert!(payload.base_model.is_none());
+        assert!(payload.minimax_h3_partition.is_none());
+        payload.family = Some("sdxl".to_owned());
+        validate_minimax_h3_import_declaration(&payload).unwrap();
+        payload.base_model = Some("minimax_h3".to_owned());
+        payload.minimax_h3_partition = Some("hybrid".to_owned());
+        assert!(validate_minimax_h3_import_declaration(&payload).unwrap_err().detail.contains("family"));
+    }
+
+    #[tokio::test]
+    async fn multipart_preserves_the_same_explicit_declaration_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, state) = create_app_with_state(test_settings(&temp)).unwrap();
+        for (partition, base) in [("fl2va", "minimax_h3"), ("ref2va", "minimax_h3_ref"), ("hybrid", "minimax_h3")] {
+            let boundary = "H3_DECLARATION_BOUNDARY";
+            let mut body = String::new();
+            for (name, value) in [("family", "minimax-h3"), ("baseModel", base), ("minimaxH3Partition", partition)] {
+                body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"));
+            }
+            body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"h3.safetensors\"\r\nContent-Type: application/octet-stream\r\n\r\nheader\r\n--{boundary}--\r\n"));
+            let request = Request::builder().method("POST")
+                .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+                .body(Body::from(body)).unwrap();
+            let multipart = axum::extract::Multipart::from_request(request, &state).await.unwrap();
+            let (payload, path) = model_import_request_from_multipart(&state, multipart).await.unwrap();
+            assert_eq!(payload.base_model.as_deref(), Some(base));
+            assert_eq!(payload.minimax_h3_partition.as_deref(), Some(partition));
+            validate_minimax_h3_import_declaration(&payload).unwrap();
+            super::cleanup_staged_model_upload(&path).await;
         }
     }
 }

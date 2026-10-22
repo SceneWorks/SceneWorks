@@ -127,9 +127,8 @@ export function CheckpointImportPanel({
   const [renameLabelDraft, setRenameLabelDraft] = useState("");
   const [renaming, setRenaming] = useState("");
 
-  // Managed state. `type` is image-only for the same reason the pre-epic form fixed it: the import
-  // route writes this type verbatim into the user manifest and never reconciles it against the
-  // detected family, so offering the others would let an image checkpoint be mis-typed (sc-14020).
+  // H3 is the supported video import. Architecture detection cannot establish its trained
+  // conditioning partition, so both compatibility fields start unselected.
   const [managed, setManaged] = useState({
     kind: "upload",
     file: null,
@@ -143,11 +142,19 @@ export function CheckpointImportPanel({
     name: "",
     family: "",
     type: "image",
+    baseModel: "",
+    minimaxH3Partition: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
   // The last submission, kept so "Try again" re-sends exactly what failed rather than whatever the
   // form happens to hold by then.
   const [lastAttempt, setLastAttempt] = useState(null);
+  const importFamilies = useMemo(
+    () => Array.from(new Set([...families, ...models.filter((model) => model.family === "minimax-h3").map((model) => model.family)])).sort(),
+    [families, models],
+  );
+  const isH3Import = managed.family === "minimax-h3";
+  const compatibleH3Bases = models.filter((model) => ["minimax_h3", "minimax_h3_ref"].includes(model.id));
 
   const modelsByCheckpoint = useMemo(() => {
     const index = new Map();
@@ -808,24 +815,28 @@ export function CheckpointImportPanel({
           ) : null}
           <label>
             Type
-            {/* Image-only, exactly as the pre-epic form was: the import route writes this value
-                verbatim into the user manifest and never reconciles it against the detected family
-                (sc-14020). */}
-            <select aria-readonly="true" disabled value="image">
+            <select aria-readonly="true" disabled value={managed.type}>
               <option value="image">Image</option>
+              <option value="video">Video</option>
             </select>
           </label>
           <label>
             Family
             <select
-              disabled={!families.length}
-              onChange={(event) => setManaged((current) => ({ ...current, family: event.target.value }))}
+              disabled={!importFamilies.length}
+              onChange={(event) => setManaged((current) => ({
+                ...current,
+                family: event.target.value,
+                type: event.target.value === "minimax-h3" ? "video" : "image",
+                baseModel: "",
+                minimaxH3Partition: "",
+              }))}
               value={managed.family}
             >
-              {families.length ? (
+              {importFamilies.length ? (
                 <>
                   <option value="">Auto-detect</option>
-                  {families.map((family) => (
+                  {importFamilies.map((family) => (
                     <option key={family} value={family}>
                       {family}
                     </option>
@@ -836,6 +847,39 @@ export function CheckpointImportPanel({
               )}
             </select>
           </label>
+          {isH3Import ? (
+            <>
+              <label>
+                Compatible base model
+                <select
+                  onChange={(event) => setManaged((current) => ({ ...current, baseModel: event.target.value }))}
+                  value={managed.baseModel}
+                >
+                  <option value="">Select baseModel</option>
+                  {compatibleH3Bases.map((model) => (
+                    <option key={model.id} value={model.id}>{model.name ?? model.id}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                MiniMax-H3 partition
+                <select
+                  onChange={(event) => setManaged((current) => ({ ...current, minimaxH3Partition: event.target.value }))}
+                  value={managed.minimaxH3Partition}
+                >
+                  <option value="">Select minimaxH3Partition</option>
+                  <option value="fl2va">fl2va — first/last frame</option>
+                  <option value="ref2va">ref2va — reference images</option>
+                  <option value="hybrid">hybrid — base or references</option>
+                </select>
+              </label>
+              <p className="inline-note checkpoint-h3-compatibility-note">
+                Declare the fine-tune’s trained compatibility; tensor shapes identify architecture only.
+                fl2va and hybrid require baseModel minimax_h3; ref2va requires minimax_h3_ref.
+                Hybrid supports either operation, not simultaneous keyframes and references.
+              </p>
+            </>
+          ) : null}
           <label>
             Name
             <input

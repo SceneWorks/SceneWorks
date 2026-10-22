@@ -136,6 +136,8 @@ export function managedImportBody(input = {}) {
   const body = { ownershipMode: OWNERSHIP_MANAGED, type };
   if (name) body.name = name;
   if (family) body.family = family;
+  if (input.baseModel) body.baseModel = input.baseModel;
+  if (input.minimaxH3Partition) body.minimaxH3Partition = input.minimaxH3Partition;
   switch (kind) {
     case "upload":
       body.source = { kind: "upload" };
@@ -167,6 +169,15 @@ export function managedImportBody(input = {}) {
 // What the submit button must not let through, stated per source so the user is told WHICH field is
 // missing instead of watching a disabled button and guessing. Returns "" when the form can be sent.
 export function managedSourceProblem(input = {}) {
+  if (input.family === "minimax-h3" || input.minimaxH3Partition || ["minimax_h3", "minimax_h3_ref"].includes(input.baseModel)) {
+    if (!["fl2va", "ref2va", "hybrid"].includes(input.minimaxH3Partition)) {
+      return "Choose minimaxH3Partition: fl2va, ref2va, or hybrid. Tensor shapes cannot determine it.";
+    }
+    const expectedBase = input.minimaxH3Partition === "ref2va" ? "minimax_h3_ref" : "minimax_h3";
+    if (input.baseModel !== expectedBase) {
+      return `minimaxH3Partition ${input.minimaxH3Partition} requires baseModel ${expectedBase}.`;
+    }
+  }
   switch (input.kind) {
     case "upload":
       return input.file ? "" : "Choose a checkpoint file to upload.";
