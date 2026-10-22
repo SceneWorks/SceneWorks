@@ -192,16 +192,15 @@ function main() {
         "nvcc is generated — cargo check never links, so the typecheck is still real.\n\n" +
         "This TYPECHECKS only; it cannot RUN candle tests (cargo test links, needing real libcuda).\n\n" +
         "  --allow-skip   exit 0 (with guidance) instead of 1 when the toolchain for this host is\n" +
-        "                 missing. For the pre-push hook: a dev who never opted into the cross\n" +
-        "                 target should not be blocked from pushing by a check they cannot run.\n\n" +
+        "                 missing, for callers that treat this local check as optional.\n\n" +
         "Env: SCENEWORKS_CANDLE_TARGET overrides the cross target (default x86_64-unknown-linux-gnu).",
     );
     return 0;
   }
 
   // A missing toolchain is a "cannot run here", not "your code is broken" — the caller decides
-  // whether that blocks. Interactive runs fail loudly (you asked for the check); the pre-push hook
-  // passes --allow-skip so it never turns an un-opted-in dev's push into an error.
+  // whether that blocks. Interactive runs fail loudly (you asked for the check); callers
+  // can pass --allow-skip when the check is optional.
   const unavailable = process.argv.includes("--allow-skip") ? 0 : 1;
   const env = { ...process.env };
   const targetArgs = [];
