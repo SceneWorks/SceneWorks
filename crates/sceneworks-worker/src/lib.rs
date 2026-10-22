@@ -150,7 +150,8 @@ pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> 
     for name in ["config.json", "model.safetensors"] {
         flux3_snapshot_member(root, &package.join(name), false)?;
     }
-    let config = gen_core::flux3::Flux3Config::from_dir(&package).map_err(|e| e.to_string())?;
+    // Header-authoritative checkpoint boundary: flow map from the selected native header.
+    let config = gen_core::flux3::resolve_checkpoint(&package).map_err(|e| e.to_string())?;
     let storage = gen_core::flux3::artifacts::NativeDitStorage::from_package(&package)
         .map_err(|e| e.to_string())?;
     if storage.key().map_err(|e| e.to_string())? != tier {
@@ -182,7 +183,8 @@ pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> 
 /// integrity check, not a GPU load or memory measurement.
 pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
     use gen_core::flux3::conversion::ComponentRole;
-    let config = gen_core::flux3::Flux3Config::from_dir(package).map_err(|e| e.to_string())?;
+    // Header-authoritative checkpoint boundary for the converted native package.
+    let config = gen_core::flux3::resolve_checkpoint(package).map_err(|e| e.to_string())?;
     let receipt =
         gen_core::flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
     let te = root.join(&config.text_encoder.path);

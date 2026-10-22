@@ -81,6 +81,7 @@ mod tests {
             assert_eq!(
                 common::fingerprint("candle", tier).unwrap(),
                 engine::tier_fingerprint(
+                    common::PROVIDER,
                     engine::MEMORY_CALIBRATION_FINGERPRINT,
                     common::quant("candle", tier).unwrap()
                 )
@@ -105,7 +106,12 @@ mod tests {
         for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
             assert_eq!(
                 common::fingerprint_for("candle", tier, common::BASE_PROVIDER).unwrap(),
-                engine::tier_fingerprint(&base, common::quant("candle", tier).unwrap()).unwrap()
+                engine::tier_fingerprint(
+                    common::BASE_PROVIDER,
+                    &base,
+                    common::quant("candle", tier).unwrap()
+                )
+                .unwrap()
             );
         }
     }

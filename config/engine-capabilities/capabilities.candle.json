@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "c8f6e5efbdf4c55466d9f4ad5cf3085940795c6c",
+    "inferenceRevision": "da7534d5ea663ee42234422cf717bf5f62f922c1",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1048,6 +1048,27 @@
       "id": "sensenova_u1_8b_fast",
       "modality": "image",
       "supportsPreview": true
+    },
+    {
+      "id": "supra2_img",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 4,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1044022664,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "svd_xt",

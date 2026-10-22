@@ -594,6 +594,113 @@ pub(crate) fn builtin_model_entry(id: &str) -> Value {
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
 }
 
+/// The REAL released FLUX 3 DiT `model.safetensors` header structure
+/// (`tests/fixtures/flux3-dit-header-structure.json`, captured read-only from base 1469d27c and
+/// distilled 8454017f): `(name, dtype, shape)` for the 357 base tensors, plus the two flow-map
+/// `ref_time_in` tensors when `distilled`.
+pub(crate) fn flux3_dit_header_structure(distilled: bool) -> Vec<(String, String, Vec<u64>)> {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/flux3-dit-header-structure.json"),
+        )
+        .expect("read flux3-dit-header-structure.json"),
+    )
+    .expect("parse flux3-dit-header-structure.json");
+    let mut rows: Vec<&Value> = fixture["base"].as_array().unwrap().iter().collect();
+    if distilled {
+        rows.extend(fixture["distilledAdditional"].as_array().unwrap());
+    }
+    rows.into_iter()
+        .map(|row| {
+            (
+                row[0].as_str().unwrap().to_owned(),
+                row[1].as_str().unwrap().to_owned(),
+                row[2]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d.as_u64().unwrap())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// A tiny, internally consistent FLUX 3 DiT `model.safetensors` in `dir`: the REAL released tensor
+/// NAMES and dtypes, each with a rank-preserving all-ones shape and actual zero-filled payload, so
+/// every `data_offsets` range lies within the file. No real weights. Checkpoint identity (flow map)
+/// is the presence of `ref_time_in`, never these placeholder shapes. Returns the file length.
+pub(crate) fn write_flux3_dit_stub(dir: &Path, distilled: bool) -> u64 {
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "__metadata__".into(),
+        json!({"format": "pt", "model": "f3-image-small", "dtype": "bfloat16"}),
+    );
+    let mut offset = 0_u64;
+    for (name, dtype, shape) in flux3_dit_header_structure(distilled) {
+        assert_eq!(dtype, "BF16", "released DiT tensors are bf16");
+        let end = offset + 2; // one bf16 element per tensor
+        header.insert(
+            name,
+            json!({"dtype": dtype, "shape": vec![1_u64; shape.len()], "data_offsets": [offset, end]}),
+        );
+        offset = end;
+    }
+    let header = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(&header);
+    bytes.resize(bytes.len() + offset as usize, 0);
+    std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
+    bytes.len() as u64
+}
+
+#[test]
+fn flux3_dit_header_structure_matches_the_released_checkpoints_and_config_geometry() {
+    let base = flux3_dit_header_structure(false);
+    let distilled = flux3_dit_header_structure(true);
+    assert_eq!((base.len(), distilled.len()), (357, 359));
+    let names = |rows: &[(String, String, Vec<u64>)]| {
+        rows.iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let extra: Vec<_> = names(&distilled).difference(&names(&base)).cloned().collect();
+    assert_eq!(
+        extra,
+        ["ref_time_in.in_layer.weight", "ref_time_in.out_layer.weight"],
+        "distilled is exactly base plus the flow-map ref_time_in tensors"
+    );
+    assert!(!names(&base).iter().any(|n| n.starts_with("ref_time_in.")));
+    assert!(distilled.iter().all(|(_, dtype, _)| dtype == "BF16"));
+    // Block indices agree with the real released config (`dit.depth` 5, `dit.depth_single` 28).
+    let blocks = |prefix: &str| {
+        names(&base)
+            .iter()
+            .filter_map(|n| n.strip_prefix(prefix)?.split('.').next()?.parse::<usize>().ok())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(blocks("txt_mode_blocks."), (0..5).collect());
+    assert_eq!(blocks("single_blocks."), (0..28).collect());
+    // The stub is internally consistent: every range within the file, payload actually present.
+    let dir = tempfile::tempdir().unwrap();
+    for (distilled, tensors) in [(false, 357_usize), (true, 359)] {
+        let len = write_flux3_dit_stub(dir.path(), distilled);
+        let bytes = std::fs::read(dir.path().join("model.safetensors")).unwrap();
+        assert_eq!(bytes.len() as u64, len);
+        let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let header: Value = serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
+        let header = header.as_object().unwrap();
+        assert_eq!(header.len() - 1, tensors);
+        assert_eq!(header.contains_key("ref_time_in.in_layer.weight"), distilled);
+        let payload = bytes.len() - 8 - header_len;
+        assert_eq!(payload, tensors * 2);
+        assert!(header.iter().filter(|(k, _)| *k != "__metadata__").all(|(_, v)| {
+            v["data_offsets"][1].as_u64().unwrap() as usize <= payload
+        }));
+    }
+}
+
 /// sc-20754: the three MiniMax-H3 Candle tiers were measured in separate idle CUDA processes at the
 /// shipped 1344x768 / 124-frame / 50-NFE workload. Pin the evidence as one atomic manifest fact so
 /// dropping a tier, reverting `measured`, or falling back to the old absent gate is immediately red.

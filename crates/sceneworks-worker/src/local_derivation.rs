@@ -198,8 +198,17 @@ impl Flux3Conversion {
     }
 }
 
-/// Bind the source's actual checkpoint configuration to its frozen repository identity before
-/// converting. Merely pointing the base environment variable at distilled weights is not base proof.
+/// The `model` both published FLUX 3 checkpoints declare in `config.json`. The base checkpoint does
+/// NOT name itself `-base`: its released config is the distilled one without `dit.flow_map`, and
+/// its native header has no `ref_time_in`.
+const FLUX3_RELEASED_CONFIG_MODEL: &str = "flux-3-image-klein";
+
+/// Bind the source's actual checkpoint to its frozen repository identity before converting. Merely
+/// pointing the base environment variable at distilled weights is not base proof. Identity is the
+/// frozen repository + revision, then inference's header-authoritative checkpoint resolution (the
+/// flow map comes from the native `model.safetensors` header, an optional config flag must agree)
+/// and its shared route check for the matching catalog model, plus dense storage and the released
+/// model name. SceneWorks never re-derives the flow map from `config.json`.
 fn validate_flux3_dense_identity(
     root: &Path,
     repository: &str,
@@ -209,9 +218,9 @@ fn validate_flux3_dense_identity(
         BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
         DISTILLED_WEIGHTS_REVISION,
     };
-    let (model, expected_revision, flow_map) = match repository {
-        DISTILLED_WEIGHTS_REPO => ("flux-3-image-klein", DISTILLED_WEIGHTS_REVISION, true),
-        BASE_WEIGHTS_REPO => ("flux-3-image-klein-base", BASE_WEIGHTS_REVISION, false),
+    let (expected_revision, model_id) = match repository {
+        DISTILLED_WEIGHTS_REPO => (DISTILLED_WEIGHTS_REVISION, "flux3_klein"),
+        BASE_WEIGHTS_REPO => (BASE_WEIGHTS_REVISION, "flux3_klein_base"),
         _ => return Err("FLUX3 conversion source is not a frozen checkpoint repository".into()),
     };
     if revision != expected_revision {
@@ -219,10 +228,13 @@ fn validate_flux3_dense_identity(
             "FLUX3 {repository} requires revision {expected_revision}"
         ));
     }
-    let config = gen_core::flux3::Flux3Config::from_dir(root).map_err(|e| e.to_string())?;
-    if config.model != model || config.dit.flow_map != flow_map || config.quantization.is_some() {
+    let resolved = gen_core::flux3::resolve_checkpoint(root).map_err(|e| e.to_string())?;
+    resolved
+        .validate_route(model_id)
+        .map_err(|e| e.to_string())?;
+    if resolved.model != FLUX3_RELEASED_CONFIG_MODEL || resolved.quantization.is_some() {
         return Err(format!(
-            "FLUX3 {repository}@{revision} requires its own dense {model} configuration; another checkpoint or packed source is not a substitute"
+            "FLUX3 {repository}@{revision} requires its own dense released configuration; another checkpoint or packed source is not a substitute"
         ));
     }
     Ok(())
@@ -602,8 +614,14 @@ mod tests {
 
     #[test]
     fn flux3_capture_refuses_distilled_config_presented_as_base_or_wrong_revision() {
+        use gen_core::flux3::{
+            BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
+            DISTILLED_WEIGHTS_REVISION,
+        };
         let dir = tempfile::tempdir().unwrap();
-        let mut config = json!({
+        // REAL released distilled key structure (8454017f): `dit.flow_map: true`, 16 steps, no
+        // guidance. Tiny dimensions; identity never depends on geometry.
+        let distilled_config = json!({
             "format_version":1,"model":"flux-3-image-klein","quantization":null,"torch_dtype":"bfloat16",
             "dit":{"hidden":64,"heads":2,"depth":1,"depth_single":1,"mlp_ratio":3.0,
                 "axes_dim":[8,8,8,8],"theta":10000,"in_channels":{"image":16,"image_cond":16,"text":256},
@@ -612,53 +630,91 @@ mod tests {
             "vae":{"path":"ae.safetensors","dtype":"float32"},
             "sampler":{"steps":16,"guidance":null,"alpha":6.93,"size":[1024,1024]}
         });
-        let write = |value: &Value| {
+        // REAL released base key structure (1469d27c): the SAME `model`, NO `dit.flow_map` key,
+        // CFG sampler defaults.
+        let mut base_config = distilled_config.clone();
+        base_config["dit"]
+            .as_object_mut()
+            .unwrap()
+            .remove("flow_map");
+        base_config["sampler"]["steps"] = json!(50);
+        base_config["sampler"]["guidance"] = json!(3.5);
+        let write = |config: &Value, distilled_header: Option<bool>| {
             std::fs::write(
                 dir.path().join("config.json"),
-                serde_json::to_vec(value).unwrap(),
+                serde_json::to_vec(config).unwrap(),
             )
-            .unwrap()
+            .unwrap();
+            let weights = dir.path().join("model.safetensors");
+            match distilled_header {
+                // Real released tensor names/dtypes, tiny shapes, actual small zero payload.
+                Some(distilled) => {
+                    crate::tests::write_flux3_dit_stub(dir.path(), distilled);
+                }
+                None => {
+                    let _ = std::fs::remove_file(&weights);
+                }
+            }
         };
-        write(&config);
-        use gen_core::flux3::{
-            BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
-            DISTILLED_WEIGHTS_REVISION,
+        let base =
+            || validate_flux3_dense_identity(dir.path(), BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION);
+        let distilled = || {
+            validate_flux3_dense_identity(
+                dir.path(),
+                DISTILLED_WEIGHTS_REPO,
+                DISTILLED_WEIGHTS_REVISION,
+            )
         };
-        assert!(validate_flux3_dense_identity(
-            dir.path(),
-            DISTILLED_WEIGHTS_REPO,
-            DISTILLED_WEIGHTS_REVISION
-        )
-        .is_ok());
-        assert!(validate_flux3_dense_identity(
-            dir.path(),
-            BASE_WEIGHTS_REPO,
-            BASE_WEIGHTS_REVISION
-        )
-        .is_err());
+
+        write(&distilled_config, Some(true));
+        assert_eq!(distilled(), Ok(()));
+        assert!(base().is_err(), "a flow-map checkpoint is never the base");
         assert!(validate_flux3_dense_identity(
             dir.path(),
             DISTILLED_WEIGHTS_REPO,
             BASE_WEIGHTS_REVISION
         )
         .is_err());
-        config["model"] = json!("flux-3-image-klein-base");
-        config["dit"]["flow_map"] = json!(false);
-        config["sampler"]["guidance"] = json!(3.5);
-        config["sampler"]["steps"] = json!(50);
-        write(&config);
-        assert!(validate_flux3_dense_identity(
-            dir.path(),
-            BASE_WEIGHTS_REPO,
-            BASE_WEIGHTS_REVISION
-        )
-        .is_ok());
-        assert!(validate_flux3_dense_identity(
-            dir.path(),
-            DISTILLED_WEIGHTS_REPO,
-            DISTILLED_WEIGHTS_REVISION
-        )
-        .is_err());
+
+        write(&base_config, Some(false));
+        assert_eq!(base(), Ok(()));
+        assert!(
+            distilled().is_err(),
+            "a non-flow-map checkpoint is never the distilled"
+        );
+
+        // The native HEADER is authoritative: a base-shaped config cannot relabel distilled weights.
+        write(&base_config, Some(true));
+        assert!(
+            base().is_err(),
+            "ref_time_in in the header resolves the flow map, not the config"
+        );
+        // An explicit config flag must agree with the header; an explicit `false` is the base.
+        let mut explicit = base_config.clone();
+        explicit["dit"]["flow_map"] = json!(true);
+        write(&explicit, Some(false));
+        assert!(
+            base().is_err(),
+            "config/header flow-map disagreement is refused"
+        );
+        explicit["dit"]["flow_map"] = json!(false);
+        write(&explicit, Some(false));
+        assert_eq!(base(), Ok(()));
+        // No native weights header: a typed refusal, never a config-only identity.
+        write(&base_config, None);
+        assert!(base().is_err(), "missing model.safetensors is refused");
+
+        // The base identity refuses a renamed/foreign model label or packed storage.
+        for (key, value) in [
+            ("model", json!("flux-3-image-klein-base")),
+            ("model", json!("flux-2-klein")),
+            ("quantization", json!("fp8r")),
+        ] {
+            let mut changed = base_config.clone();
+            changed[key] = value;
+            write(&changed, Some(false));
+            assert!(base().is_err(), "{key} mutation must not pass as base");
+        }
     }
 
     #[test]
@@ -732,11 +788,10 @@ mod tests {
                         dense_targets: vec![],
                     });
                 }
-                std::fs::write(
-                    output.join("model.safetensors"),
-                    format!("fixture packed {model} {id}"),
-                )
-                .unwrap();
+                // The converted package is a native checkpoint boundary: real released tensor
+                // NAMES/dtypes (flow-map `ref_time_in` only for the distilled source), tiny
+                // shapes, actual small zero payload. Not packed numerics or real weights.
+                crate::tests::write_flux3_dit_stub(&output, model == "flux3_klein");
                 let weight = hash_source_file(&output.join("model.safetensors")).unwrap();
                 components.push(ComponentInventory {
                     role: ComponentRole::Dit,
@@ -752,12 +807,6 @@ mod tests {
                     quantized_targets: vec!["fixture.weight".into()],
                     dense_targets: vec![],
                 });
-                let mut package_files = BTreeMap::new();
-                for name in ["config.json", "LICENSE.md", "NOTICE.md"] {
-                    std::fs::write(output.join(name), b"fixture").unwrap();
-                    package_files
-                        .insert(name.into(), hash_source_file(&output.join(name)).unwrap());
-                }
                 let (algorithm, bits, group_size, backend) = match conversion {
                     Flux3Conversion::CandleGgmlQ4_1 => ("ggml-q4_1", 4, 32, "candle"),
                     Flux3Conversion::CandleGgmlQ8_0 => ("ggml-q8_0", 8, 32, "candle"),
@@ -765,6 +814,39 @@ mod tests {
                         ("mlx-affine", bits, group, "mlx")
                     }
                 };
+                // Real released config key structure: distilled declares `flow_map: true`, the
+                // base omits it; the converter replaces `quantization` with its storage marker.
+                let mut package_config = json!({
+                    "format_version":1,"model":"flux-3-image-klein","torch_dtype":"bfloat16",
+                    "quantization":{"format":algorithm,"bits":bits,"group_size":group_size,"algorithm_version":1},
+                    "dit":{"hidden":64,"heads":2,"depth":1,"depth_single":1,"mlp_ratio":3.0,
+                        "axes_dim":[8,8,8,8],"theta":10000,"in_channels":{"image":16,"image_cond":16,"text":256},
+                        "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5,"flow_map":true},
+                    "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder","layers":[1],"pad_multiple":80,"max_tokens":8192,"dtype":"bfloat16"},
+                    "vae":{"path":"ae.safetensors","dtype":"float32"},
+                    "sampler":{"steps":16,"guidance":null,"alpha":6.93,"size":[1024,1024]}
+                });
+                if model == "flux3_klein_base" {
+                    package_config["dit"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("flow_map");
+                    package_config["sampler"]["steps"] = json!(50);
+                    package_config["sampler"]["guidance"] = json!(3.5);
+                }
+                std::fs::write(
+                    output.join("config.json"),
+                    serde_json::to_vec(&package_config).unwrap(),
+                )
+                .unwrap();
+                let mut package_files = BTreeMap::new();
+                for name in ["config.json", "LICENSE.md", "NOTICE.md"] {
+                    if name != "config.json" {
+                        std::fs::write(output.join(name), b"fixture").unwrap();
+                    }
+                    package_files
+                        .insert(name.into(), hash_source_file(&output.join(name)).unwrap());
+                }
                 let receipt = ConversionReceipt {
                     source_repository: repository.into(),
                     source_revision: revision.into(),
@@ -947,11 +1029,16 @@ mod tests {
                 use runtime_cuda::providers::flux3::memory_strategy::{
                     dit_bytes, native_dit_bytes,
                 };
-                let config = gen_core::flux3::Flux3Config::from_dir(&dir).unwrap();
+                let config = gen_core::flux3::resolve_checkpoint(&dir).unwrap();
                 let storage = NativeDitStorage::from_package(&dir).unwrap();
-                let dense = dit_bytes(&source.join("model.safetensors"), gen_core::Precision::Bf16)
-                    .unwrap();
+                let dense = dit_bytes(
+                    "flux3_klein",
+                    &source.join("model.safetensors"),
+                    gen_core::Precision::Bf16,
+                )
+                .unwrap();
                 let packed = native_dit_bytes(
+                    "flux3_klein",
                     &dir.join("model.safetensors"),
                     gen_core::Precision::Bf16,
                     storage,
