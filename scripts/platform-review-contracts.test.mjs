@@ -1514,7 +1514,7 @@ function jobSteps(workflow) {
       body: chunk,
       // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
       // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
-      cargo: chunk.split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+      cargo: chunk.split("\n").some((line) => /^\s+(run: )?(?:node scripts\/unit-hf-sandbox\.mjs -- )?cargo\s/.test(line)),
     });
     at = next;
   }
@@ -1675,7 +1675,7 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
   // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
   // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
-  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
+  assert.match(workflow, /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
   assert.doesNotMatch(
     workflow,
     /cargo test -p sceneworks-memory-adapter --features candle --bin/,
@@ -1700,7 +1700,7 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
   assert.doesNotMatch(
     hosted,
@@ -2460,14 +2460,14 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
   // which is precisely what sc-17026 fixed.
   const NAX_TEST = "nax_16bit_sdpa_is_correct";
-  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  assert.match(mlx, new RegExp(`^\\s+run: node scripts/unit-hf-sandbox\\.mjs -- cargo test -- --skip ${NAX_TEST}$`, "m"));
   // The one exemption is the targeted guard invocation below; a bare narrowing of the
   // suite to the single crate is still forbidden.
   assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
   // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
   // self-hosted half would drop the entire NAX verdict while every lane stayed green —
   // the same declared-but-unreachable trap as sc-17026, one job over.
-  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard$/m);
+  assert.match(mlx, /^\s+run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard$/m);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the
@@ -2478,7 +2478,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
+  const testAt = mlx.indexOf(`run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -2759,8 +2759,8 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
   ]) {
     const step = workflowStep(worker, name);
     assert.ok(step.includes('set "capability_facts_test_args="'));
-    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          ${command} %capability_facts_test_args%`));
-    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("cargo test ")).map(line => line.trim()), [`${command} %capability_facts_test_args%`]);
+    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`));
+    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("node scripts/unit-hf-sandbox.mjs -- cargo test ")).map(line => line.trim()), [`node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`]);
   }
   assert.match(workflowStep(worker, "Check the candle sidecar builds (rust-api, backend-candle)"), /cargo check -p sceneworks-rust-api --features backend-candle/);
   assert.match(workflowStep(worker, "Clippy (candle worker)"), /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);

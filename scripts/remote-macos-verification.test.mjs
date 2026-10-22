@@ -5,7 +5,6 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
-import { selectSteps } from "./preflight.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const nestedTestArgs = target => ["--test", "--test-reporter=spec", `--test-name-pattern=^${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, fileURLToPath(import.meta.url)];
@@ -18,19 +17,14 @@ test("nested Node probes require spec reporter and exact test scope", () => {
 });
 const modulePath = process.env.REMOTE_MACOS_CONTROLLER_UNDER_TEST ?? path.join(ROOT, "scripts/remote-macos-verification.mjs");
 const policy = await import(pathToFileURL(modulePath));
-const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, CACHE_FLAGS, ASSERTION_DRIVER, CONTROL_FILES, CROSS_TOOLCHAIN_HELPER, TARGET_REGISTRY, TARGET_REGISTRY_WRITER, acquireTargetLease, validateCacheContext, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, requireFreshStamp, sha256, unitKind, unitRunner, validateCapabilityFile, validateFacts, validateMachine, validateRequest, validateStamp, validateUnits } = policy;
+const { REPOSITORY, WORKFLOW, CONTROLLER, JOB, OUTPUTS, CACHE_FLAGS, ASSERTION_DRIVER, CONTROL_FILES, UNIT_SANDBOX, TARGET_REGISTRY, TARGET_REGISTRY_WRITER, acquireTargetLease, validateCacheContext, artifactName, authenticateReceipt, checkoutContext, dispatchIdentity, importReceipt, inferencePin, readArchive, sha256, validateCapabilityFile, validateFacts, validateMachine, validateRequest } = policy;
 const { loadRegistry, TESTS: ASSERTION_TESTS, MUTABLE_FILES, REGISTRY_PATH } = await import("./moss-consumer-assertions.mjs");
 const SOURCE = "a".repeat(40), PIN = "b".repeat(40), BASE = "c".repeat(40), DISPATCHER = "d".repeat(40);
-const { TOOL_KEYS, identityDigest } = await import("./canonical-cross-toolchain.mjs");
-function crossIdentity() {
-  return { schema_version: 1, source: "existing", provider: null, host: "aarch64-apple-darwin", target: "x86_64-unknown-linux-gnu", reported_target: "x86_64-linux-gnu", cc_version: "gcc (GCC) 15.2.0", cxx_version: "g++ (GCC) 15.2.0", sysroot: path.join(os.tmpdir(), "fixture-sysroot"), tools: Object.fromEntries(TOOL_KEYS.map(key => [key, { path: path.join(os.tmpdir(), "cross-fixture", key), sha256: "3".repeat(64), host: "aarch64-apple-darwin" }])), smoke: Object.fromEntries(["c", "cpp"].map(key => [key, { class: 64, machine: 62, type: 2, sha256: "4".repeat(64) }])) };
-}
 const sourceRef = "story/sc-26585-epic-26584-moss-image-training", base = "feature/sc-26584-moss-image-training";
 const machine = () => ({ runner_name: "nax-macos-2", platform: "darwin", arch: "arm64", runtime: "26.5.2", sdk: "26.5", deployment_target: "26.2", chip: "Apple M5 Max", developer_dir: "/Applications/Xcode.app/Contents/Developer", metal_compiler: "/Applications/Xcode.app/Contents/Developer/usr/bin/metal" });
-const request = (profile = "canonical-preflight") => ({ repository: REPOSITORY, profile, source_sha: SOURCE, source_ref: sourceRef, inference_sha: PIN, base_ref: base, allow_nax_unit: profile === "canonical-preflight", legacy_device_inputs: false });
-const unitLedger = () => ({ limit_seconds: 300, rss_limit_bytes: 8 * 1024 ** 3, used_seconds: 3, runs: ["adapter-library", "adapter-bin", "nax-gpu"].map((kind, index) => ({ kind, pid: 100 + index, exit_code: 0, peak_rss_bytes: 1024, rss_samples: 1, seconds: 1, violation: null })) });
-function cacheContext(profile = "canonical-preflight") {
-  const value = { serialized: true, released: true, runner_name: "nax-macos-2", toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: "26.5", target_directory_sha256: "1".repeat(64), rustc_sha256: "2".repeat(64), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), build_flags: policy.cacheFlags(profile), ...(profile === "canonical-preflight" ? { cross_toolchain_sha256: identityDigest(crossIdentity()) } : {}) };
+const request = (profile = "consumer-assertions") => ({ repository: REPOSITORY, profile, source_sha: SOURCE, source_ref: sourceRef, inference_sha: PIN, base_ref: base, legacy_device_inputs: false });
+function cacheContext(profile = "facts-and-projections") {
+  const value = { serialized: true, released: true, runner_name: "nax-macos-2", toolchain: "1.97.1", host: "aarch64-apple-darwin", sdk: "26.5", target_directory_sha256: "1".repeat(64), rustc_sha256: "2".repeat(64), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), build_flags: policy.cacheFlags(profile) };
   return { ...value, context_sha256: sha256(JSON.stringify(value)) };
 }
 function syntheticAssertionResult() {
@@ -54,14 +48,10 @@ function capability(backend, kind) {
     ? { generatedFrom, schemaVersion: 2, modelMappings: {}, videoModelMappings: [], trainerMappings: {}, workerCapabilities: [], snapshot: { backend, platform: backend === "mlx" ? "macos" : "cuda", generator_ids: ["fixture"], trainer_ids: ["fixture"], generator_capabilities: [{ id: "fixture", backend }], trainer_capabilities: [{ id: "fixture", backend }] } }
     : { generatedFrom, backend, ...(kind === "audio" ? { registry: "audio" } : {}), engines: [{ id: "fixture", modality: kind === "audio" ? "audio" : "image", supportsPreview: false }] };
 }
-function fixture(profile = "canonical-preflight") {
-  const context = { ...request(profile), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), base_sha: BASE, merge_base: BASE, changed_files: ["Cargo.toml", "config/manifests/builtin.models.jsonc"], selection_platform: profile === "canonical-preflight" ? "darwin" : null, selected_steps: profile === "canonical-preflight" ? ["rust:check (tier docs, fmt, clippy, test, build)", "candle build (not-macOS + candle)"] : [] };
+function fixture(profile = "consumer-assertions") {
+  const context = { ...request(profile), cargo_config_sha256: sha256(readFileSync(path.join(ROOT, ".cargo/config.toml"))), base_sha: BASE, merge_base: BASE, changed_files: ["Cargo.toml", "config/manifests/builtin.models.jsonc"] };
   const files = {};
-  if (profile === "canonical-preflight") {
-    files["stamp.txt"] = Buffer.from(`preflight summary @ ${SOURCE.slice(0, 9)}, base origin/${base}:\n${context.selected_steps.map(step => `  PASS  ${step} (1s)`).join("\n")}\n`);
-    files["native-units.json"] = Buffer.from(JSON.stringify(unitLedger()));
-    files["preflight.log"] = Buffer.from("actual canonical command output\n");
-  } else if (profile === "consumer-assertions") {
+  if (profile === "consumer-assertions") {
     files["assertions.json"] = Buffer.from(JSON.stringify(syntheticAssertionResult()));
     files["assertions.log"] = Buffer.from("synthetic assertion protocol fixture, not remote execution\n");
   } else {
@@ -71,10 +61,10 @@ function fixture(profile = "canonical-preflight") {
     files["facts.log"] = Buffer.from("actual static producer output\n");
     files[`payload/${TARGET_REGISTRY}`] = Buffer.from(JSON.stringify(targetRegistry()));
   }
-  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(profile), ...(profile === "canonical-preflight" ? { cross_toolchain: crossIdentity() } : {}), ...(profile === "facts-and-projections" ? { target_registry_generation: generationRecord() } : {}), clean_before: true, clean_after: profile !== "facts-and-projections", stamp_created_this_run: profile === "canonical-preflight", command: profile === "canonical-preflight" ? ["npm", "run", "preflight", "--", "--base", `origin/${base}`] : profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
+  const receipt = { schema_version: 1, status: "passed", ...context, workflow_sha: DISPATCHER, workflow_ref: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, run_id: 41, run_attempt: 2, job: JOB, runner_name: "nax-macos-2", machine: machine(), cache_context: cacheContext(profile), ...(profile === "facts-and-projections" ? { target_registry_generation: generationRecord() } : {}), clean_before: true, clean_after: profile !== "facts-and-projections", command: profile === "consumer-assertions" ? ["consumer-assertions", ASSERTION_DRIVER] : ["facts-and-projections"], files: Object.fromEntries(Object.entries(files).map(([name, bytes]) => [name, sha256(bytes)])) };
   const controls = Object.fromEntries(CONTROL_FILES.map(file => [file, sha256(readFileSync(path.join(ROOT, file)))]));
   const run = { id: 41, run_attempt: 2, event: "workflow_dispatch", status: "completed", conclusion: "success", repository: { id: 9, full_name: REPOSITORY }, head_repository: { id: 9, full_name: REPOSITORY }, head_branch: sourceRef, head_sha: DISPATCHER, path: WORKFLOW };
-  const ownedJob = { name: JOB, run_id: 41, run_attempt: 2, head_sha: DISPATCHER, conclusion: "success", runner_name: "nax-macos-2", labels: ["self-hosted", "macOS", "ARM64", "rw-llm"], steps: ["Run exact remote verification", "Upload remote verification artifact", ...(profile === "canonical-preflight" ? ["Prepare real canonical cross toolchain", "Require real canonical cross checks"] : [])].map(name => ({ name, conclusion: "success" })) };
+  const ownedJob = { name: JOB, run_id: 41, run_attempt: 2, head_sha: DISPATCHER, conclusion: "success", runner_name: "nax-macos-2", labels: ["self-hosted", "macOS", "ARM64", "rw-llm"], steps: ["Run exact remote verification", "Upload remote verification artifact"].map(name => ({ name, conclusion: "success" })) };
   const jobs = { total_count: 2, jobs: [ownedJob, { name: "nax-worker", conclusion: "skipped" }] };
   const artifact = { id: 83, expired: false, name: artifactName(profile, SOURCE, 41, 2), digest: `sha256:${"e".repeat(64)}`, size_in_bytes: 1, workflow_run: { id: 41, head_sha: DISPATCHER, repository_id: 9, head_repository_id: 9 } };
   const f = { context, receipt, files, controls, run, jobs, artifact, archiveDigest: artifact.digest, sourceHistory: { merge_base_commit: { sha: SOURCE } }, baseHistory: { merge_base_commit: { sha: BASE } }, alteredControl: null };
@@ -97,22 +87,23 @@ function fixture(profile = "canonical-preflight") {
 }
 function replaceMember(f, name, bytes) { f.files[name] = Buffer.from(bytes); f.receipt.files[name] = sha256(f.files[name]); }
 
-for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) test(`authenticated ${profile} accepts a different valid dispatcher SHA, not a relabeled checkout`, async () => { const f = fixture(profile); await f.verify(); assert.notEqual(f.receipt.workflow_sha, f.context.source_sha); });
+for (const profile of ["facts-and-projections", "consumer-assertions"]) test(`authenticated ${profile} accepts a different valid dispatcher SHA, not a relabeled checkout`, async () => { const f = fixture(profile); await f.verify(); assert.notEqual(f.receipt.workflow_sha, f.context.source_sha); });
 
 const requestFaults = {
   "foreign repository": value => { value.repository = "fork/SceneWorks"; },
   "unknown profile": value => { value.profile = "anything"; },
+  "retired canonical profile": value => { value.profile = "canonical-preflight"; },
   "short source SHA": value => { value.source_sha = SOURCE.slice(0, 8); },
   "short inference SHA": value => { value.inference_sha = PIN.slice(0, 8); },
   "pull ref": value => { value.source_ref = "refs/pull/2/head"; },
   "external ref": value => { value.source_ref = "other/repo@main"; },
   "story base": value => { value.base_ref = sourceRef; },
   "legacy GPU mixing": value => { value.legacy_device_inputs = true; },
-  "missing NAX admission": value => { value.allow_nax_unit = false; },
+  "device admission": value => { value.allow_nax_unit = true; },
 };
 for (const [name, mutate] of Object.entries(requestFaults)) test(`request rejects ${name}`, () => { const value = request(); mutate(value); assert.throws(() => validateRequest(value)); });
 test("facts request rejects device admission", () => { const value = request("facts-and-projections"); value.allow_nax_unit = true; assert.throws(() => validateRequest(value)); });
-for (const [name, patch] of Object.entries({ "primary runner": { runner_name: "nax-macos" }, "Linux": { platform: "linux" }, "Intel": { arch: "x64" }, "old runtime": { runtime: "26.1" }, "old SDK": { sdk: "26.0" }, "hosted deployment override": { deployment_target: "15.0" }, "pre-M5": { chip: "Apple M4 Max" }, "CLT instead of Xcode": { developer_dir: "/Library/Developer/CommandLineTools" }, "missing Metal": { metal_compiler: "" } })) test(`machine rejects ${name}`, () => assert.throws(() => validateMachine({ ...machine(), ...patch }, "canonical-preflight")));
+for (const [name, patch] of Object.entries({ "primary runner": { runner_name: "nax-macos" }, "Linux": { platform: "linux" }, "Intel": { arch: "x64" }, "old runtime": { runtime: "26.1" }, "old SDK": { sdk: "26.0" }, "hosted deployment override": { deployment_target: "15.0" }, "pre-M5": { chip: "Apple M4 Max" }, "CLT instead of Xcode": { developer_dir: "/Library/Developer/CommandLineTools" }, "missing Metal": { metal_compiler: "" } })) test(`machine rejects ${name}`, () => assert.throws(() => validateMachine({ ...machine(), ...patch }, "facts-and-projections")));
 test("dispatcher rejects missing or foreign execution identity", () => {
   const valid = { VERIFICATION_WORKFLOW_SHA: DISPATCHER, VERIFICATION_WORKFLOW_REF: `${REPOSITORY}/${WORKFLOW}@refs/heads/${sourceRef}`, GITHUB_RUN_ID: "41", GITHUB_RUN_ATTEMPT: "2" };
   assert.equal(dispatchIdentity(valid).run_attempt, 2);
@@ -126,17 +117,15 @@ const faults = {
   "receipt base ref": f => { f.receipt.base_ref = "main"; },
   "receipt pin": f => { f.receipt.inference_sha = BASE; },
   "receipt merge base": f => { f.receipt.merge_base = SOURCE; },
-  "receipt scope": f => { f.receipt.selected_steps = []; },
-  "Linux consumer scope": f => { f.context.selection_platform = "linux"; },
+  "receipt scope": f => { f.receipt.changed_files = ["unrelated.rs"]; },
   "receipt changed sources": f => { f.receipt.changed_files = []; },
   "dirty initial source": f => { f.receipt.clean_before = false; },
   "dirty final source": f => { f.receipt.clean_after = false; },
-  "older reused stamp": f => { f.receipt.stamp_created_this_run = false; },
   "receipt run": f => { f.receipt.run_id = 40; },
   "receipt attempt": f => { f.receipt.run_attempt = 1; },
   "receipt job": f => { f.receipt.job = "other"; },
   "receipt runner": f => { f.receipt.runner_name = "nax-macos"; },
-  "receipt GPU permission": f => { f.receipt.allow_nax_unit = false; },
+  "receipt GPU permission": f => { f.receipt.allow_nax_unit = true; },
   "receipt legacy mixing": f => { f.receipt.legacy_device_inputs = true; },
   "run outcome": f => { f.run.conclusion = "failure"; },
   "incomplete run": f => { f.run.status = "in_progress"; },
@@ -150,11 +139,11 @@ const faults = {
   "dispatcher code": f => { f.alteredControl = `${DISPATCHER}:${CONTROLLER}`; },
   "workflow code": f => { f.alteredControl = `${DISPATCHER}:${WORKFLOW}`; },
   "parser dependency code": f => { f.alteredControl = `${DISPATCHER}:scripts/lib/jsonc.mjs`; },
+  "unit sandbox dependency code": f => { f.alteredControl = `${DISPATCHER}:${UNIT_SANDBOX}`; },
   "assertion driver code": f => { f.alteredControl = `${DISPATCHER}:${ASSERTION_DRIVER}`; },
   "case registry code": f => { f.alteredControl = `${DISPATCHER}:${REGISTRY_PATH}`; },
   "cache not released": f => { f.receipt.cache_context.released = false; },
   "cache compiler": f => { f.receipt.cache_context.toolchain = "other"; },
-  "candidate selector code": f => { f.alteredControl = `${SOURCE}:scripts/preflight.mjs`; },
   "unowned source ancestry": f => { f.sourceHistory.merge_base_commit.sha = BASE; },
   "foreign base ancestry": f => { f.baseHistory.merge_base_commit.sha = SOURCE; },
   "malformed base SHA": f => { f.receipt.base_sha = "../other"; },
@@ -166,7 +155,7 @@ const faults = {
   "job head": f => { f.jobs.jobs[0].head_sha = SOURCE; },
   "actual primary runner": f => { f.jobs.jobs[0].runner_name = "nax-macos"; },
   "wrong runner labels": f => { f.jobs.jobs[0].labels = ["nax"]; },
-  "missing canonical step": f => { f.jobs.jobs[0].steps.shift(); },
+  "missing verification step": f => { f.jobs.jobs[0].steps.shift(); },
   "legacy job ran": f => { f.jobs.jobs[1].conclusion = "success"; },
   "artifact expired": f => { f.artifact.expired = true; },
   "artifact id": f => { f.artifact.id = 84; },
@@ -177,23 +166,15 @@ const faults = {
   "artifact repository": f => { f.artifact.workflow_run.repository_id = 10; },
   "artifact digest changed": f => { f.artifact.digest = `sha256:${"f".repeat(64)}`; },
   "command changed": f => { f.receipt.command.push("--all"); },
-  "missing artifact member": f => { delete f.files["stamp.txt"]; },
+  "missing artifact member": f => { delete f.files["assertions.json"]; },
   "extra artifact executable": f => { f.files["run-me.py"] = Buffer.from("not executable data"); },
-  "member digest": f => { f.files["stamp.txt"] = Buffer.from("forged"); },
-  "failed stamp row": f => { replaceMember(f, "stamp.txt", f.files["stamp.txt"].toString().replace("PASS", "FAIL")); },
-  "wrong stamp base": f => { replaceMember(f, "stamp.txt", f.files["stamp.txt"].toString().replace(`origin/${base}`, "origin/main")); },
-  "missing unit target": f => { const value = unitLedger(); value.runs.pop(); value.used_seconds = 2; replaceMember(f, "native-units.json", JSON.stringify(value)); },
-  "late unit": f => { const value = unitLedger(); value.used_seconds = 301; replaceMember(f, "native-units.json", JSON.stringify(value)); },
-  "unit RSS": f => { const value = unitLedger(); value.runs[0].peak_rss_bytes = 9 * 1024 ** 3; replaceMember(f, "native-units.json", JSON.stringify(value)); },
-  "unit negative telemetry": f => { const value = unitLedger(); value.runs[0].peak_rss_bytes = -1; replaceMember(f, "native-units.json", JSON.stringify(value)); },
-  "unobserved unit": f => { const value = unitLedger(); value.runs[0].rss_samples = 0; replaceMember(f, "native-units.json", JSON.stringify(value)); },
-  "reset cumulative ledger": f => { const value = unitLedger(); value.used_seconds = 1; replaceMember(f, "native-units.json", JSON.stringify(value)); },
+  "member digest": f => { f.files["assertions.json"] = Buffer.from("forged"); },
 };
 for (const [name, mutate] of Object.entries(faults)) test(`fault rejects ${name}`, async () => { const f = fixture(); mutate(f); await assert.rejects(f.verify); });
 
 for (const [name, mutate] of Object.entries({ "wrong produced pin": value => { value.generatedFrom.inferenceRevision = BASE; }, "CPU runtime": value => { value.snapshot.backend = "cpu"; }, "CUDA on Mac": value => { value.snapshot.platform = "cuda"; }, "unknown runtime schema": value => { value.schemaVersion = 0; }, "duplicate identities": value => { value.snapshot.generator_ids.push("fixture"); }, "foreign descriptor": value => { value.snapshot.trainer_capabilities[0].backend = "candle"; }, "missing mapping": value => { delete value.trainerMappings; } })) test(`facts rejects ${name}`, async () => { const f = fixture("facts-and-projections"), value = capability("mlx", "runtime"); mutate(value); replaceMember(f, `payload/${OUTPUTS[2]}`, JSON.stringify(value)); await assert.rejects(f.verify); });
 test("facts rejects malformed generated JSONC", async () => { const f = fixture("facts-and-projections"); replaceMember(f, `payload/${OUTPUTS[4]}`, "invalid JSONC"); await assert.rejects(f.verify); });
-test("provenance-only drift is not a canonical currency gate", () => {
+test("provenance-only drift does not invalidate capability semantics", () => {
   const older = capability("mlx", "media"); older.generatedFrom.inferenceRevision = BASE;
   assert.doesNotThrow(() => validateCapabilityFile(older, "mlx", "media"));
   assert.throws(() => validateCapabilityFile(older, "mlx", "media", PIN));
@@ -215,14 +196,7 @@ sys.stdout.buffer.write(b.getvalue())`;
   const result = spawnSync(process.platform === "win32" ? "python" : "python3", ["-I", "-c", python, JSON.stringify(entries.map(([name, value, mode = 0o100644]) => [name, Buffer.from(value).toString("base64"), mode]))], { maxBuffer: 8 * 1024 * 1024 });
   assert.equal(result.status, 0, result.stderr.toString()); return result.stdout;
 }
-test("old stamp cannot stand in for a new canonical execution", () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-freshness-"));
-  try {
-    requireFreshStamp(root, SOURCE);
-    mkdirSync(path.join(root, "sceneworks-preflight")); writeFileSync(path.join(root, "sceneworks-preflight", SOURCE), "old synthetic proof");
-    assert.throws(() => requireFreshStamp(root, SOURCE), /fresh checkout/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+
 test("archive digest rejects substituted bytes", () => { const bytes = zip([["receipt.json", "{}"]]); assert.throws(() => readArchive(bytes, `sha256:${"0".repeat(64)}`)); });
 test("archive rejects excess members before reading their data", () => {
   const bytes = zip(Array.from({ length: 65 }, (_, index) => [`entry-${index}.json`, "{}"]));
@@ -239,26 +213,18 @@ function localFixture(f) {
   f.api.archive = async () => bytes;
   return { root, options: { runId: 41, attempt: 2, artifactId: 83, api: f.api, contextFor: () => f.context, commonDirectory: () => path.join(root, ".git") } };
 }
-test("authentic importer preserves actual stamp bytes and independent transport evidence", async () => {
-  const f = fixture(), local = localFixture(f);
-  try {
-    await importReceipt(local.root, request(), local.options);
-    const imported = path.join(local.root, ".git/sceneworks-preflight", SOURCE);
-    assert.deepEqual(readFileSync(imported), f.files["stamp.txt"]);
-    assert.equal(JSON.parse(readFileSync(path.join(local.root, ".git/sceneworks-preflight-receipts", SOURCE, "41-2-83.json"))).artifact_id, 83);
-  } finally { rmSync(local.root, { recursive: true, force: true }); }
-});
-for (const [name, change] of Object.entries({ "failed actual run": (f) => { f.run.conclusion = "failure"; }, "local changed during authentication": (_f, local) => { let calls = 0; local.options.contextFor = () => { if (++calls > 1) throw new Error("dirty local source"); return _f.context; }; }, "unexpected artifact code": (f) => { f.files["evil.py"] = Buffer.from("not executed"); } })) test(`import writes no stamp for ${name}`, async () => {
+
+for (const [name, change] of Object.entries({ "failed actual run": (f) => { f.run.conclusion = "failure"; }, "local changed during authentication": (_f, local) => { let calls = 0; local.options.contextFor = () => { if (++calls > 1) throw new Error("dirty local source"); return _f.context; }; }, "unexpected artifact code": (f) => { f.files["evil.py"] = Buffer.from("not executed"); } })) test(`import writes no proof for ${name}`, async () => {
   const f = fixture(); change(f, { options: {} }); const local = localFixture(f); if (name === "local changed during authentication") change(f, local);
-  try { await assert.rejects(() => importReceipt(local.root, request(), local.options)); assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false); }
+  try { await assert.rejects(() => importReceipt(local.root, request(), local.options)); assert.equal(existsSync(path.join(local.root, ".git/sceneworks-consumer-assertions", SOURCE)), false); }
   finally { rmSync(local.root, { recursive: true, force: true }); }
 });
-test("consumer assertion evidence is authenticated but can never create a canonical stamp", async () => {
+test("consumer assertion evidence preserves independently authenticated receipt bytes", async () => {
   const f = fixture("consumer-assertions"), local = localFixture(f);
   try {
     await importReceipt(local.root, request("consumer-assertions"), local.options);
     assert.equal(existsSync(path.join(local.root, ".git/sceneworks-consumer-assertions", SOURCE, "41-2-83.json")), true);
-    assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false);
+    assert.equal(JSON.parse(readFileSync(path.join(local.root, ".git/sceneworks-consumer-assertions", SOURCE, "41-2-83.json"))).artifact_id, 83);
   } finally { rmSync(local.root, { recursive: true, force: true }); }
 });
 for (const [name, change] of Object.entries({ registry: value => { value.registry_sha256 = "0".repeat(64); }, implementation: value => { value.driver_sha256 = "0".repeat(64); }, survivor: value => { value.cases[0].killed = false; }, missing: value => { value.cases.pop(); }, counts: value => { value.cases[0].green[0].passed = 0; }, wrongTest: value => { const row = value.cases[0].green[0]; row.test_id = row.test_id === "protocol" ? "target" : "protocol"; }, restore: value => { value.source_after[MUTABLE_FILES[0]] = "wrong"; }, carry: value => { value.carried = { status: "carried-prior-proof-not-executed" }; } })) test(`consumer evidence rejects ${name}`, async () => {
@@ -283,9 +249,9 @@ test("cache context rejects changed compiler flags even with a self-consistent d
   const { context_sha256: _hash, ...changed } = context; changed.build_flags.jobs = "3";
   assert.throws(() => validateCacheContext({ ...changed, context_sha256: sha256(JSON.stringify(changed)) }), /flags/);
 });
-test("facts importer writes only authenticated derived outputs and no stamp", async () => {
+test("facts importer writes only authenticated derived outputs and no proof", async () => {
   const f = fixture("facts-and-projections"), local = localFixture(f);
-  try { await importReceipt(local.root, request("facts-and-projections"), local.options); for (const file of OUTPUTS) assert.deepEqual(readFileSync(path.join(local.root, file)), f.files[`payload/${file}`]); assert.equal(existsSync(path.join(local.root, ".git/sceneworks-preflight", SOURCE)), false); }
+  try { await importReceipt(local.root, request("facts-and-projections"), local.options); for (const file of OUTPUTS) assert.deepEqual(readFileSync(path.join(local.root, file)), f.files[`payload/${file}`]); assert.equal(existsSync(path.join(local.root, ".git/sceneworks-consumer-assertions", SOURCE)), false); }
   finally { rmSync(local.root, { recursive: true, force: true }); }
 });
 test("facts importer refuses a symlink destination before any output writes", async () => {
@@ -297,7 +263,7 @@ test("facts importer refuses a symlink destination before any output writes", as
   } finally { rmSync(local.root, { recursive: true, force: true }); }
 });
 
-test("checkout identity uses exact clean owned source, ancestry and recomputed Mac scope", () => {
+test("checkout identity uses exact clean owned source, ancestry and changed-file scope", () => {
   const calls = [];
   const executeGit = (_root, ...args) => {
     calls.push(args);
@@ -308,15 +274,14 @@ test("checkout identity uses exact clean owned source, ancestry and recomputed M
     return args[0] === "rev-parse" && args[1] === "HEAD" ? SOURCE : BASE;
   };
   const result = checkoutContext(ROOT, request(), { executeGit, readPin: () => PIN, platform: "darwin" });
-  assert.deepEqual(result.selected_steps, selectSteps(result.changed_files, false, ROOT, "darwin").map(step => step.name));
+  assert.deepEqual(result.changed_files, ["Cargo.toml", "config/manifests/builtin.models.jsonc"]);
   assert.ok(calls.some(args => args.join(" ") === `merge-base --is-ancestor HEAD origin/${sourceRef}`));
-  for (const fault of ["dirty", "head", "origin", "ancestry", "pin", "empty scope"]) {
+  for (const fault of ["dirty", "head", "origin", "ancestry", "pin"]) {
     const changed = (root, ...args) => {
       if (fault === "dirty" && args[0] === "status") return " M source.rs";
       if (fault === "head" && args.join(" ") === "rev-parse HEAD") return BASE;
       if (fault === "origin" && args[0] === "remote") return "https://github.com/fork/SceneWorks.git";
       if (fault === "ancestry" && args.includes("--is-ancestor")) throw new Error("not an ancestor");
-      if (fault === "empty scope" && args[0] === "diff") return "";
       return executeGit(root, ...args);
     };
     assert.throws(() => checkoutContext(ROOT, request(), { executeGit: changed, readPin: () => fault === "pin" ? BASE : PIN, platform: "darwin" }), fault);
@@ -360,13 +325,13 @@ function condition(name, event, profile, relevant = "true", result = "success", 
   return Boolean(Function("github", "inputs", "needs", "cancelled", `return (${expression});`)(github, { verification_profile: profile }, { changes: { result, outputs: { relevant } } }, () => false));
 }
 test("manual profiles never run legacy jobs", () => {
-  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight", "unknown-unsafe-value"]) {
+  for (const profile of ["facts-and-projections", "consumer-assertions", "unknown-unsafe-value"]) {
     for (const name of ["changes", "macos-checks", "nax-worker"]) for (const result of ["success", "skipped", "failure"]) assert.equal(condition(name, "workflow_dispatch", profile, "true", result), false, `${profile}/${name}/${result}`);
     assert.equal(condition(JOB, "workflow_dispatch", profile), true);
   }
 });
 test("fork manual verification never queues a self-hosted runner", () => {
-  assert.equal(condition(JOB, "workflow_dispatch", "canonical-preflight", "true", "success", base, "fork/SceneWorks"), false);
+  assert.equal(condition(JOB, "workflow_dispatch", "consumer-assertions", "true", "success", base, "fork/SceneWorks"), false);
 });
 test("legacy PR main dispatch and fail-open decisions remain unchanged", () => {
   assert.equal(condition("changes", "workflow_dispatch", "legacy"), true);
@@ -389,10 +354,6 @@ test("manual job pins read-only control and exact candidate before any build", (
   assert.match(body, /ref: \$\{\{ github\.workflow_sha \}\}/);
   assert.match(body, /ref: \$\{\{ inputs\.source_sha \}\}/);
   assert.doesNotMatch(body, /secrets\.|--skip|--ignored|no-verify|SKIP_/);
-  assert.match(body, /canonical-cross-toolchain\.mjs/);
-  assert.match(body, /test -x "\$CC_x86_64_unknown_linux_gnu"/);
-  assert.match(body, /test -x "\$CXX_x86_64_unknown_linux_gnu"/);
-  assert.match(body, /rustup target add x86_64-unknown-linux-gnu/);
   assert.match(body, /remote-macos-verification\.mjs" run/);
 });
 
@@ -409,7 +370,7 @@ test("manual verifier overrides only host build strip and binds both profiles in
   const expected = {
     CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none", CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none",
     CARGO_PROFILE_DEV_DEBUG: "0", CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0",
-    CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2", SCENEWORKS_CANDLE_TARGET: "x86_64-unknown-linux-gnu",
+    CARGO_BUILD_JOBS: "2", CMAKE_BUILD_PARALLEL_LEVEL: "2", RUST_TEST_THREADS: "1", RUSTC_WRAPPER: "", RUSTUP_TOOLCHAIN: "1.97.1", MACOSX_DEPLOYMENT_TARGET: "26.2",
   };
   for (const [key, value] of Object.entries(expected)) assert.equal(env[key], value, key);
   assert.deepEqual(Object.keys(env).filter(key => key.endsWith("_STRIP")).sort(), ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP", "CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP"]);
@@ -423,14 +384,14 @@ test("manual verifier overrides only host build strip and binds both profiles in
     assert.throws(() => validateCacheContext(stale), /build flags/);
   }
   const controller = readFileSync(modulePath, "utf8");
-  assert.match(controller, /const runEnv = remoteBuildEnv\(env, request.profile\);/);
-  assert.ok(controller.indexOf("const runEnv = remoteBuildEnv(env, request.profile);") < controller.indexOf('if (request.profile === "facts-and-projections")'));
+  assert.match(controller, /const runEnv = \{ \.\.\.remoteBuildEnv\(env, request.profile\), \.\.\.createUnitHfSandbox\(root, env\)\.env \};/);
+  assert.ok(controller.indexOf("const runEnv = { ...remoteBuildEnv(env, request.profile)") < controller.indexOf('if (request.profile === "facts-and-projections")'));
   assert.equal([...controller.matchAll(/\bremoteBuildEnv\(/g)].length, 2); // definition + single common profile entry
   // No global Cargo/toolchain/workflow profile edits: only the controller constructs this override.
   assert.doesNotMatch(workflow, /BUILD_OVERRIDE_STRIP|CARGO_PROFILE_(?:DEV|TEST)_STRIP/);
 });
 test("incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", async () => {
-  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) {
+  for (const profile of ["facts-and-projections", "consumer-assertions"]) {
     const expected = profile === "consumer-assertions" ? "1" : "0";
     for (const ambient of [undefined, "0", "1", "foreign-value"]) {
       const env = policy.remoteBuildEnv({ CARGO_INCREMENTAL: ambient, VERIFICATION_PROFILE: "consumer-assertions", TMPDIR: "/tmp/unchanged", SDKROOT: "/sdk/unchanged", CARGO_TARGET_DIR: "/leased/target" }, profile);
@@ -447,7 +408,7 @@ test("incremental compilation is scoped to the declared consumer profile and aut
       assert.throws(() => validateCacheContext(stale, profile), /cache build flags/);
     }
   }
-  assert.notEqual(cacheContext("consumer-assertions").context_sha256, cacheContext("canonical-preflight").context_sha256);
+  assert.notEqual(cacheContext("consumer-assertions").context_sha256, cacheContext("facts-and-projections").context_sha256);
   assert.throws(() => policy.remoteBuildEnv({}, "foreign-profile"), /unknown cache recipe profile/);
   const controller = readFileSync(modulePath, "utf8");
   assert.match(controller, /build_flags: cacheFlags\(request.profile\)/);
@@ -456,7 +417,7 @@ test("incremental compilation is scoped to the declared consumer profile and aut
   assert.match(controller, /remoteBuildEnv\(env, request.profile\)/);
   const valid = fixture("consumer-assertions"); await valid.verify();
   const stale = fixture("consumer-assertions");
-  stale.receipt.cache_context = cacheContext("canonical-preflight");
+  stale.receipt.cache_context = cacheContext("facts-and-projections");
   await assert.rejects(stale.verify, /cache build flags/);
 });
 test("facts transport binds the exact authoritative target writer as generation only", async () => {
@@ -466,7 +427,7 @@ test("facts transport binds the exact authoritative target writer as generation 
   const writer = `running 1 test\ntest ${TARGET_REGISTRY_WRITER} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.01s\n`;
   assert.deepEqual(policy.registryGenerationRecord(writer), generationRecord());
   for (const bad of [writer.replace("1 passed", "0 passed"), writer.replace("0 ignored", "1 ignored"), writer.replaceAll(TARGET_REGISTRY_WRITER, "other_writer"), "error[E0308]: cannot compile"]) assert.throws(() => policy.registryGenerationRecord(bad));
-  for (const profile of ["facts-and-projections", "consumer-assertions", "canonical-preflight"]) assert.equal(policy.remoteBuildEnv({ REGEN_FIXTURE: "ambient" }, profile).REGEN_FIXTURE, undefined);
+  for (const profile of ["facts-and-projections", "consumer-assertions"]) assert.equal(policy.remoteBuildEnv({ REGEN_FIXTURE: "ambient" }, profile).REGEN_FIXTURE, undefined);
   const registry = targetRegistry(); policy.validateTargetRegistry(registry);
   const expanded = structuredClone(registry); expanded.targets.push({ ...expanded.targets[0], id: "extra_target" }); policy.validateTargetRegistry(expanded); // no pinned total population
   for (const change of [
@@ -485,28 +446,7 @@ test("facts transport binds the exact authoritative target writer as generation 
   }
   const badWire = fixture("facts-and-projections"); replaceMember(badWire, `payload/${TARGET_REGISTRY}`, JSON.stringify({ schemaVersion: 1, targets: [] })); await assert.rejects(badWire.verify);
 });
-test("canonical compiler proof binds helper source, real setup steps, identity and profile cache", async () => {
-  assert.ok(CONTROL_FILES.includes("scripts/canonical-cross-toolchain.mjs"));
-  const body = jobBody(JOB), start = body.indexOf("      - name: Prepare real canonical cross toolchain");
-  const setup = body.slice(start, body.indexOf("      - name: Require real canonical cross checks", start));
-  assert.ok(start >= 0); assert.match(setup, /if: \$\{\{ inputs.verification_profile == 'canonical-preflight' \}\}/);
-  assert.match(setup, /timeout-minutes: 6/); assert.match(setup, /control\/scripts\/canonical-cross-toolchain\.mjs/);
-  const valid = fixture(); await valid.verify();
-  for (const change of [
-    f => { delete f.receipt.cross_toolchain; },
-    f => { f.receipt.cross_toolchain.reported_target = "arm64-apple-darwin"; },
-    f => { f.receipt.cross_toolchain.smoke.cpp.machine = 183; },
-    f => { f.receipt.cross_toolchain.tools.cc.sha256 = "0".repeat(64); },
-    f => { delete f.receipt.cache_context.cross_toolchain_sha256; const { context_sha256, ...body } = f.receipt.cache_context; f.receipt.cache_context.context_sha256 = sha256(JSON.stringify(body)); },
-    f => { f.jobs.jobs[0].steps = f.jobs.jobs[0].steps.filter(step => step.name !== "Prepare real canonical cross toolchain"); },
-    f => { f.alteredControl = `${DISPATCHER}:scripts/canonical-cross-toolchain.mjs`; },
-  ]) { const f = fixture(); change(f); await assert.rejects(f.verify); }
-  const consumer = fixture("consumer-assertions");
-  consumer.receipt.cache_context.cross_toolchain_sha256 = identityDigest(crossIdentity());
-  const { context_sha256, ...data } = consumer.receipt.cache_context;
-  consumer.receipt.cache_context.context_sha256 = sha256(JSON.stringify(data));
-  await assert.rejects(consumer.verify, /compiler cache identity\/profile/);
-});
+
 test("original proc macro invocation distinguishes rebuilt no-strip from stale or stripped evidence", () => {
   const command = "   Running `rustc --crate-name bytemuck_derive src/lib.rs --crate-type proc-macro -C prefer-dynamic";
   const clean = policy.invocationEvidence(command + " --out-dir /target/debug/deps`", () => true).join("\n");
@@ -558,41 +498,9 @@ test("self-hosted manual job uses provisioned Python 3.12, not the hosted toolca
   assert.match(body, /echo "\$shim" >> "\$GITHUB_PATH"/);
   assert.ok(body.indexOf("Require exact host Python 3.12") < body.indexOf("Run exact remote verification"));
 });
-test("native runner classifies all selected adapter and NAX units without running a device", () => {
-  assert.equal(unitKind(path.join(os.tmpdir(), "deps", "memory_mlx_adapter-abc")), "adapter-bin");
-  assert.equal(unitKind(path.join(os.tmpdir(), "deps", "sceneworks_memory_adapter-abc")), "adapter-library");
-  assert.equal(unitKind(path.join(os.tmpdir(), "deps", "nax_guard-abc")), "nax-gpu");
-  assert.equal(unitKind(path.join(os.tmpdir(), "deps", "sceneworks_worker-abc")), null);
-  assert.equal(unitKind(path.join(os.tmpdir(), "memory_mlx_adapter-abc")), null);
-  validateUnits(unitLedger());
-});
-test("synthetic CPU-only runner forwards exits and accumulates one ledger", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-unit-synthetic-"));
-  try {
-    mkdirSync(path.join(root, "deps")); const ledger = path.join(root, "ledger.json");
-    writeFileSync(ledger, JSON.stringify({ limit_seconds: 300, rss_limit_bytes: 8 * 1024 ** 3, used_seconds: 0, runs: [] }));
-    const exe = fixtureNode(root, "memory_mlx_adapter-fixture");
-    const env = { ...process.env, REMOTE_MACOS_UNIT_LEDGER: ledger, REMOTE_MACOS_ALLOW_NAX_UNIT: "false" }; delete env.NODE_TEST_CONTEXT;
-    const argumentsFor = code => [exe, "-e", `setTimeout(() => process.exit(${code}), 300)`];
-    assert.equal(await unitRunner(argumentsFor(7), env), 7); const first = JSON.parse(readFileSync(ledger));
-    assert.equal(await unitRunner(argumentsFor(0), env), 0); const second = JSON.parse(readFileSync(ledger));
-    assert.ok(second.used_seconds > first.used_seconds && second.runs.length === 2);
-    const exhausted = { ...second, used_seconds: 300 }; writeFileSync(ledger, JSON.stringify(exhausted)); await assert.rejects(() => unitRunner(argumentsFor(0), env), /budget/);
-    await assert.rejects(() => unitRunner([path.join(root, "deps", "nax_guard-fixture")], env), /not admitted/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
-test("synthetic NAX-class CPU fixture drains safely on a budget violation and cannot pass", async () => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "remote-macos-unit-drain-synthetic-"));
-  try {
-    mkdirSync(path.join(root, "deps")); const ledger = path.join(root, "ledger.json"), marker = path.join(root, "drained");
-    writeFileSync(ledger, JSON.stringify({ limit_seconds: 300, rss_limit_bytes: 8 * 1024 ** 3, used_seconds: 299.99, runs: [] }));
-    const exe = fixtureNode(root, "nax_guard-synthetic-not-metal");
-    const env = { ...process.env, REMOTE_MACOS_UNIT_LEDGER: ledger, REMOTE_MACOS_ALLOW_NAX_UNIT: "true" }; delete env.NODE_TEST_CONTEXT;
-    assert.equal(await unitRunner([exe, "-e", `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'drained'), 300)`], env), 124);
-    assert.equal(readFileSync(marker, "utf8"), "drained");
-    assert.match(JSON.parse(readFileSync(ledger)).runs[0].violation, /time ceiling/);
-  } finally { rmSync(root, { recursive: true, force: true }); }
-});
+
+
+
 
 if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutations make their original tests red", async t => {
   const controller = readFileSync(path.join(ROOT, CONTROLLER), "utf8");
@@ -601,10 +509,6 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
     ["RV-registry-env-leak", "facts transport binds the exact authoritative target writer as generation only", 'delete runEnv.REGEN_FIXTURE;', 'void runEnv.REGEN_FIXTURE;'],
     ["RV-registry-generation-proof", "facts transport binds the exact authoritative target writer as generation only", 'equal(record, { purpose: "generation-only", generator: TARGET_REGISTRY_WRITER, passed: 1, failed: 0, ignored: 0, exit_code: 0 })', 'true'],
     ["RV-registry-wire", "facts transport binds the exact authoritative target writer as generation only", 'export function validateTargetRegistry(value) {', 'export function validateTargetRegistry(value) { return;'],
-    ["RV-cross-helper-control", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", '[WORKFLOW, CONTROLLER, CROSS_TOOLCHAIN_HELPER,', '[WORKFLOW, CONTROLLER,'],
-    ["RV-cross-identity-binding", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", 'receipt.cache_context.cross_toolchain_sha256 === identityDigest(receipt.cross_toolchain)', 'true'],
-    ["RV-cross-steps", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", 'requiredSteps.push("Prepare real canonical cross toolchain", "Require real canonical cross checks")', 'void context.profile'],
-    ["RV-cross-profile", "canonical compiler proof binds helper source, real setup steps, identity and profile cache", 'profile === "canonical-preflight" ? HASH.test(context.cross_toolchain_sha256 ?? "") : !Object.hasOwn(context, "cross_toolchain_sha256")', 'true'],
     ["RV-incremental-runtime", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'runEnv.CARGO_INCREMENTAL = cacheFlags(profile).incremental;', 'void profile;'],
     ["RV-incremental-scope", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'incremental: profile === "consumer-assertions" ? "1" : "0"', 'incremental: "1"'],
     ["RV-incremental-recipe", "incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", 'equal(context.build_flags, cacheFlags(profile))', 'true'],
@@ -618,16 +522,12 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
     ["RV-cache-flags", "cache context rejects changed compiler flags even with a self-consistent data hash", 'equal(context.build_flags, cacheFlags(profile))', 'true'],
     ["RV-cache-exclusion", "dedicated target cache lease prevents overlap and never steals or releases another owner", 'mkdirSync(lease);', 'mkdirSync(lease, { recursive: true });'],
     ["RV-consumer-proof", "consumer evidence rejects survivor", 'validateAssertionReceipt(JSON.parse(files["assertions.json"].toString()), spec, context.source_sha, controls[ASSERTION_DRIVER]);', 'void spec;'],
-    ["RV-no-currency-gate", "provenance-only drift is not a canonical currency gate", 'pin === undefined || revision === pin', 'revision === pin'],
+    ["RV-no-currency-gate", "provenance-only drift does not invalidate capability semantics", 'pin === undefined || revision === pin', 'revision === pin'],
     ["RV-run-authority", "fault rejects run outcome", 'run.conclusion === "success"', 'true'],
-    ["RV-scope", "fault rejects receipt scope", 'equal(receipt.changed_files, context.changed_files) && equal(receipt.selected_steps, context.selected_steps)', 'true'],
+    ["RV-scope", "fault rejects receipt scope", 'equal(receipt.changed_files, context.changed_files)', 'true'],
     ["RV-archive-digest", "archive digest rejects substituted bytes", 'digest === `sha256:${sha256(bytes)}`', 'true'],
     ["RV-archive-members", "archive rejects excess members before reading their data", 'assert len(z.infolist())<=64, "too many artifact members"', 'pass'],
     ["RV-primary-machine", "machine rejects primary runner", 'machine.runner_name === "nax-macos-2"', 'true'],
-    ["RV-host-scope", "fault rejects Linux consumer scope", 'receipt.selection_platform === context.selection_platform && (context.profile !== "canonical-preflight" || context.selection_platform === "darwin")', 'true'],
-    ["RV-fresh-stamp", "old stamp cannot stand in for a new canonical execution", '!existsSync(path.join(common, "sceneworks-preflight", sha))', 'true'],
-    ["RV-native-budget", "synthetic CPU-only runner forwards exits and accumulates one ledger", 'ledger.used_seconds < 300', 'true'],
-    ["RV-native-safe-drain", "synthetic NAX-class CPU fixture drains safely on a budget violation and cannot pass", 'entry.violation && kind !== "nax-gpu" && !stopping', 'entry.violation && !stopping'],
   ];
   for (const [name, target, old, replacement] of cases) await t.test(name, () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-source-mutation-"));
@@ -636,7 +536,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       mkdirSync(path.join(scratch, "scripts/lib"), { recursive: true });
       const mutated = path.join(scratch, CONTROLLER);
       writeFileSync(mutated, controller.replace(old, replacement)); utimesSync(mutated, new Date(), new Date());
-      for (const file of [CROSS_TOOLCHAIN_HELPER, "scripts/preflight.mjs", "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
+      for (const file of [UNIT_SANDBOX, "scripts/lib/jsonc.mjs", ASSERTION_DRIVER, REGISTRY_PATH]) writeFileSync(path.join(scratch, file), readFileSync(path.join(ROOT, file)));
       const childEnv = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_CONTROLLER_UNDER_TEST: mutated };
       // A new test-runner process must not inherit the outer worker's private IPC protocol.
       delete childEnv.NODE_TEST_CONTEXT;
@@ -649,22 +549,7 @@ if (!process.env.REMOTE_MACOS_MUTATION_CHILD) test("named source bypass mutation
       }
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   });
-  await t.test("RV-cross-workflow-scope", () => {
-    const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-bootstrap-scope-"));
-    try {
-      const old = "      - name: Prepare real canonical cross toolchain\n        if: ${{ inputs.verification_profile == 'canonical-preflight' }}\n";
-      assert.equal(workflow.split(old).length - 1, 1);
-      const modified = path.join(scratch, "workflow.yml");
-      writeFileSync(modified, workflow.replace(old, "      - name: Prepare real canonical cross toolchain\n"));
-      const env = { ...process.env, REMOTE_MACOS_MUTATION_CHILD: "1", REMOTE_MACOS_WORKFLOW_UNDER_TEST: modified }; delete env.NODE_TEST_CONTEXT;
-      const args = nestedTestArgs("canonical compiler proof binds helper source, real setup steps, identity and profile cache");
-      const red = spawnSync(process.execPath, args, { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });
-      assert.notEqual(red.status, 0, red.stdout + red.stderr); assert.match(red.stdout, /(?:ℹ|#) fail 1/);
-      writeFileSync(modified, workflow);
-      const green = spawnSync(process.execPath, args, { cwd: ROOT, env, encoding: "utf8", timeout: 10000 });
-      assert.equal(green.status, 0, green.stdout + green.stderr);
-    } finally { rmSync(scratch, { recursive: true, force: true }); }
-  });
+
   await t.test("RV-hosted-python-installer", () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "remote-macos-workflow-mutation-"));
     try {

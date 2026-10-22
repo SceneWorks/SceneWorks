@@ -836,7 +836,7 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
-          cargo test -p sceneworks-worker --features backend-candle %capability_facts_test_args%
+          node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --features backend-candle %capability_facts_test_args%
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
       # compile) and typechecks the full graph, so a candle sidecar build break is
@@ -880,7 +880,7 @@ jobs:
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
-          cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
+          node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

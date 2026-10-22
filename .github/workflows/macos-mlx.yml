@@ -122,7 +122,7 @@ on:
         type: choice
         required: false
         default: legacy
-        options: [legacy, facts-and-projections, consumer-assertions, canonical-preflight]
+        options: [legacy, facts-and-projections, consumer-assertions]
       source_sha:
         description: "Exact SceneWorks commit for explicit verification profiles"
         type: string
@@ -136,11 +136,6 @@ on:
         type: string
         required: false
         default: main
-      allow_nax_unit:
-        description: "Separately admitted weights-free NAX GPU unit for canonical preflight, never a campaign"
-        type: boolean
-        required: false
-        default: false
       run_memory_calibration:
         description: "Build and run the authoritative MLX memory-strategy adapter"
         required: false
@@ -444,13 +439,13 @@ jobs:
       # nothing. Without the selector this runs the lib tests AND both bins whose required-features
       # are satisfied (`memory-candle-adapter` needs `candle`, so it stays out).
       - name: Test the MLX memory adapter (lib + memory-mlx-adapter)
-        run: cargo test -p sceneworks-memory-adapter --features mlx
+        run: node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx
       # The whole workspace suite MINUS the one test that needs matrix-unit silicon.
       # `nax_16bit_sdpa_is_correct` runs on `nax-worker` below and nowhere else; the
       # contract test in scripts/platform-review-contracts.test.mjs pins both halves so
       # this skip cannot quietly become a hole.
       - name: Workspace tests (excluding the NAX guard, which needs M5)
-        run: cargo test -- --skip nax_16bit_sdpa_is_correct
+        run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct
 
       # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
       # hosted half rather than the scarce M5/NAX pool. `always()` preserves a fresh native artifact
@@ -654,7 +649,7 @@ jobs:
       # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
       # would re-dark every non-worker crate.
       - name: NAX 16-bit SDPA guard (needs M5 matrix units)
-        run: cargo test -p sceneworks-worker --test nax_guard
+        run: node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --test nax_guard
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -1015,7 +1010,6 @@ jobs:
       VERIFICATION_SOURCE_REF: ${{ inputs.source_ref }}
       VERIFICATION_BASE_REF: ${{ inputs.base_ref }}
       VERIFICATION_INFERENCE_SHA: ${{ inputs.inference_revision }}
-      VERIFICATION_ALLOW_NAX_UNIT: ${{ inputs.allow_nax_unit }}
       VERIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
       VERIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
       VERIFICATION_LEGACY_INPUTS: ${{ inputs.run_memory_calibration || inputs.run_five_rung_reference || inputs.provision_qwen_snapshot || inputs.provision_z_image_snapshot }}
@@ -1070,20 +1064,6 @@ jobs:
         with:
           toolchain: "1.97.1"
           components: clippy,rustfmt
-      - name: Prepare real canonical cross toolchain
-        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
-        timeout-minutes: 6
-        run: node "$GITHUB_WORKSPACE/control/scripts/canonical-cross-toolchain.mjs"
-      - name: Require real canonical cross checks
-        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
-        run: |
-          # A real ARM64-hosted GNU cross compiler, already C/C++ link-smoked, is required.
-          # Accept its real long/short prefix via job-scoped target variables, never a dummy shim.
-          test -x "$CC_x86_64_unknown_linux_gnu"
-          test -x "$CXX_x86_64_unknown_linux_gnu"
-          "$CC_x86_64_unknown_linux_gnu" --version
-          "$CC_x86_64_unknown_linux_gnu" -dumpmachine | grep -Ex 'x86_64(-unknown)?-linux-gnu'
-          rustup target add x86_64-unknown-linux-gnu
       - name: Fetch exact prebuilt MLX or build its exact source
         working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
         run: |
@@ -1103,35 +1083,6 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm ci --prefix apps/web
-      - name: Prepare exact source fixtures for canonical Node checks
-        if: ${{ inputs.verification_profile == 'canonical-preflight' }}
-        working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}
-        run: |
-          # The same source-only prerequisites as check.yml's parity-scaffold job. These fetch
-          # retained source trees, NOT weights, measurements, attestation renewals or campaigns.
-          inference_root="$RUNNER_TEMP/macos-verification-inference-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          terminal_root="$RUNNER_TEMP/macos-verification-terminal-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          git init -q "$inference_root"
-          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference
-          git -C "$inference_root" fetch -q --depth=1 origin "$VERIFICATION_INFERENCE_SHA"
-          revisions="$RUNNER_TEMP/macos-verification-revisions-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.txt"
-          node scripts/anchor-loader-closure.mjs --anchor-revisions > "$revisions"
-          while read -r revision; do
-            [ -n "$revision" ] || continue
-            [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
-            git -C "$inference_root" fetch -q --depth=1 origin "$revision"
-          done < "$revisions"
-          git -C "$inference_root" checkout -q --detach "$VERIFICATION_INFERENCE_SHA"
-          git init -q "$terminal_root"
-          git -C "$terminal_root" remote add origin https://github.com/SceneWorks/inference
-          git -C "$terminal_root" fetch -q --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
-          git -C "$terminal_root" checkout -q --detach FETCH_HEAD
-          test "$(git -C "$terminal_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
-          {
-            echo "INFERENCE_REPO=$inference_root"
-            echo "SCENEWORKS_INFERENCE_REPO=$inference_root"
-            echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$terminal_root"
-          } >> "$GITHUB_ENV"
       - name: Run exact remote verification
         run: node "$GITHUB_WORKSPACE/control/scripts/remote-macos-verification.mjs" run "$VERIFICATION_CANDIDATE_PATH" "$VERIFICATION_OUTPUT"
       - name: Upload remote verification artifact
