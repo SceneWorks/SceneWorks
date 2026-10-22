@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d6b20c0d9c84d8a7b529c49a2e18cd0d528655d9dc31d5b51e071629ac292ced",
+    "sceneWorksRevision": "source-tree:8ca7a0ef29da8d1d6b9d1813987abd510b8f86190a0c9ae72accb0a186db6f18",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -69,7 +69,7 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "5881727d3c5fa572bfab418f1e5b2a07b8e7348872bd714778296f0508064431"
+        "sha256": "b1eedce295e8f7a0995ec2f55d0a73d47ffb2df9ff7be9d335626054d7aabd52"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
@@ -77,7 +77,7 @@
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "8fd41a33804797c9e173fa2b6286c0d1232fada940fe112db2d98f5866f8da23"
+        "sha256": "f938cbe2ab13b2503dd0733b00625419339cea4bd1a29190aad2d055fbe4bfff"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -138,10 +138,10 @@
       "video": 11
     },
     "cells": 9810,
-    "publishedCells": 3986,
-    "elidedCells": 5824,
+    "publishedCells": 3988,
+    "elidedCells": 5822,
     "elidedByState": {
-      "Implemented": 1240,
+      "Implemented": 1238,
       "Missing": 4584
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
@@ -174,9 +174,9 @@
         "reason": "a utility-modality entry with its own engine memory-strategy contract (a composed, resident-only route registered by mlx-gen-iris and candle-gen-iris): outside the image/video matrix universe by modality, and anchored — planned, armed and closed over on both lanes"
       }
     ],
-    "anchors": 258,
-    "analyticOnlyCells": 105,
-    "anchoredCells": 3986,
+    "anchors": 259,
+    "analyticOnlyCells": 104,
+    "anchoredCells": 3988,
     "staleAnchors": 258,
     "attestedAnchors": 0,
     "fullModels": 0
@@ -9358,6 +9358,24 @@
       "current": false,
       "currencyAttestation": null,
       "cells": 18
+    },
+    {
+      "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+      "modelId": "supra2_img",
+      "backend": "mlx",
+      "tier": "bf16",
+      "provider": "supra2_img",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "frames": 1,
+        "fps": null
+      },
+      "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
+      "current": true,
+      "currencyAttestation": null,
+      "cells": 2
     },
     {
       "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
@@ -19473,11 +19491,11 @@
       "backend": "mlx",
       "rung": "resident",
       "coordinates": 2,
-      "published": 0,
-      "elided": 2,
+      "published": 2,
+      "elided": 0,
       "implemented": 2,
       "states": {
-        "Implemented": 2
+        "Anchored": 2
       }
     },
     {
@@ -229533,6 +229551,94 @@
       }
     },
     {
+      "id": "supra2_img:supra2_img:mlx:bf16:text_to_image:lora:resident",
+      "modelId": "supra2_img",
+      "resolvedRoute": "supra2_img",
+      "provider": "supra2_img",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "256x256",
+        "resolutions": [
+          "256x256"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 24212,
+      "owningModelStory": 24213,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc"
+          }
+        ]
+      }
+    },
+    {
+      "id": "supra2_img:supra2_img:mlx:bf16:text_to_image:none:resident",
+      "modelId": "supra2_img",
+      "resolvedRoute": "supra2_img",
+      "provider": "supra2_img",
+      "backend": "mlx",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "rung": "resident",
+      "geometryEnvelope": {
+        "defaultResolution": "256x256",
+        "resolutions": [
+          "256x256"
+        ]
+      },
+      "strategyParameters": {},
+      "implementation": "implemented",
+      "anchor": {
+        "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+        "tier": "bf16",
+        "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+        "current": true,
+        "currencyAttestation": null,
+        "derivable": true
+      },
+      "derivationDefined": true,
+      "state": "Anchored",
+      "owningFamilyStory": 24212,
+      "owningModelStory": 24213,
+      "evidence": {
+        "staticImplementation": [
+          {
+            "source": "crates/sceneworks-worker/src/engines.rs#MODEL_TABLE"
+          }
+        ],
+        "structural": [],
+        "anchor": [
+          {
+            "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc"
+          }
+        ]
+      }
+    },
+    {
       "id": "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:lora:resident",
       "modelId": "wan_2_2",
       "resolvedRoute": "wan2_2_ti2v_5b",
@@ -253750,7 +253856,10 @@
       "sensenova_u1_8b_infographic_v3_fast:sensenova_u1_8b_fast:mlx:q8:text_to_image:none:resident",
       "sensenova_u1_8b_infographic_v3_fast:sensenova_u1_8b_fast:mlx:q8:text_to_image:none:staged_residency"
     ],
-    "supra2_img": [],
+    "supra2_img": [
+      "supra2_img:supra2_img:mlx:bf16:text_to_image:lora:resident",
+      "supra2_img:supra2_img:mlx:bf16:text_to_image:none:resident"
+    ],
     "svd": [],
     "wan_2_2": [
       "wan_2_2:wan2_2_ti2v_5b:candle:bf16:extend_clip:lora:resident",
