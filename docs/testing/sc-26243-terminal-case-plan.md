@@ -362,6 +362,34 @@ before EACH actual native `Generator.generate`, with `kind:"resource_anchor"` or
 a self-reported one-call flag is insufficient. This contract is **not** a claim
 that the unverified native harness already enforces it.
 
+**Native-boundary verification (zero budget).** A resource row becomes `READY` only
+through a receipt from the SEALED resource-adapter binary's hidden CPU self-test
+(`scripts/flux3-native-boundary-self-test.mjs`, action
+`flux3_native_boundary_self_test`). That mode is reachable only with
+`SCENEWORKS_FLUX3_BOUNDARY_SELF_TEST=1` and `CUDA_VISIBLE_DEVICES=-1`, and it is refused
+whenever a production invocation, ledger transport, model root or GPU selection is
+present. The production launcher strips every parent `SCENEWORKS_*` variable and
+always sets the invocation. The self-test runs the production `plan`,
+`render_guarded` loop and reservation identity check against a counting generator and
+a scripted single-use ledger: no weights, device, provider or campaign permit. Per
+resource invocation it proves one reservation strictly before exactly one generate,
+and that reused, missing and mismatched permits refuse with zero generates. It binds
+the executable SHA and sealed build receipt (a mismatch refuses) and the plan's fixed
+`requestSha256`. The planner marks rows `READY` only on a matching receipt, with
+`nativeBoundaryReceiptSha256`, `parentNativeBoundaryVerificationId` and the proving
+binary, which approval requires to equal the approved sealed resource build.
+
+**Deferred backend addendum.** A backend whose host is not yet provisioned (MLX on the
+secondary Mac) may be listed in `deferredInputSpecBackends`. Its input specification,
+API/resource sealed-build bindings and native-boundary self-test receipt are bound
+later by ONE parent-recorded `flux3-terminal-plan-input-spec-addendum` chained to the
+same `approvedPlanSha256` and `ledgerId`. The addendum carries exactly its binding
+fields, so it cannot change the plan, a bound backend's specification or builds, the
+ledger or any count. Its resource rows are `READY_ON_ADDENDUM` with their
+`requestSha256` fixed in the plan. Every permit of a deferred backend, and in
+particular those rows, is refused until a valid addendum exists. An addendum receipt
+for the wrong binary, digest or plan is refused.
+
 The synchronous adapter-child permit CLI must first call shared
 `verifyResourceProducerHardware(admission, context)`, with exact `adapterPid`,
 `caseId`, `invocationId`, normalized `requestSha256`, `approvedPlanSha256`,

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { validateNativeBoundaryReceipt } from './lib/flux3-native-boundary.mjs';
 export const GLOBAL_GENERATION_CEILING = 48;
 export const planHash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sha = /^[a-f0-9]{64}$/, revision = /^[a-f0-9]{40}$/;
@@ -13,7 +14,16 @@ export function validateApprovedPlan(approval) {
   assert(approval.approvalId && approval.userPlanApprovalId && approval.approvedBy, 'parent-recorded user plan approval identity required');
   assert(revision.test(approval.sourceSha ?? '') && revision.test(approval.inferenceMainSha ?? ''), 'approved final source/MAIN identities required');
   assert(/^[a-zA-Z0-9_-]{12,100}$/.test(approval.ledgerId ?? ''), 'stable non-resettable ledger identity required');
-  for (const backend of ['mlx', 'candle']) { assert(/^(?:[a-zA-Z]:[\\/]|\/|\\\\)/.test(approval.ledgerRoots?.[backend] ?? ''), 'fixed absolute per-backend ledger roots required'); assert(sha.test(approval.inputSpecSha256?.[backend] ?? ''), 'both backend input specifications must be bound before execution'); }
+  // A backend whose inputs cannot exist yet (e.g. a second host still to be provisioned) may be
+  // DEFERRED: its spec is absent here and only a parent-recorded addendum chained to this exact
+  // approval can bind it later. At least one backend is bound at approval time.
+  const deferred = approval.deferredInputSpecBackends ?? [];
+  assert(Array.isArray(deferred) && deferred.every(b => ['mlx', 'candle'].includes(b)) && new Set(deferred).size === deferred.length && deferred.length < 2, 'deferred input specifications must name at most one known backend');
+  for (const backend of ['mlx', 'candle']) {
+    assert(/^(?:[a-zA-Z]:[\\/]|\/|\\\\)/.test(approval.ledgerRoots?.[backend] ?? ''), 'fixed absolute per-backend ledger roots required');
+    if (deferred.includes(backend)) assert(!Object.hasOwn(approval.inputSpecSha256 ?? {}, backend), `deferred ${backend} input specification cannot also be bound in the approval`);
+    else assert(sha.test(approval.inputSpecSha256?.[backend] ?? ''), 'every non-deferred backend input specification must be bound before execution');
+  }
   assert.notEqual(approval.ledgerRoots.mlx, approval.ledgerRoots.candle, 'backend ledgers have distinct fixed roots, never independent duplicate quotas');
   const plan = approval.plan; assert(plan?.kind === 'flux3-installed-product-representative-plan' && plan.diagnosticOnly !== true, 'diagnostic catalog is never an execution plan');
   const invocations = plan.generationInvocations; assert(Array.isArray(invocations) && invocations.length > 0 && invocations.length <= GLOBAL_GENERATION_CEILING, 'global expanded physical generation count must be 1..48');
@@ -39,7 +49,60 @@ export function validateApprovedPlan(approval) {
     assert(reload >= 0 && reload < index, `adapter invocation ${i.invocationId} must run strictly after its LoRA's training lifecycle`);
     assert.equal(invocations[reload].modelId, i.modelId, `adapter invocation ${i.invocationId} checkpoint differs from the trained LoRA's`);
   });
+  // Resource rows: BLOCKED (unreservable), READY (proved in this plan against the approval's own
+  // sealed resource build) or READY_ON_ADDENDUM (a deferred backend proved only by its addendum).
+  for (const row of plan.resourceCases ?? []) {
+    assert(['BLOCKED', 'READY', 'READY_ON_ADDENDUM'].includes(row.status), `unknown resource row status ${row.status}`);
+    if (row.status === 'BLOCKED') continue;
+    const rowInvocations = invocations.filter(i => i.caseId === row.caseId && i.backend === row.backend);
+    assert(rowInvocations.length && rowInvocations.every(i => sha.test(i.requestSha256 ?? '')), `${row.caseId} resource request must be hash-bound before it can be READY`);
+    if (row.status === 'READY') {
+      assert(!deferred.includes(row.backend), `${row.caseId}: a deferred backend is READY only by addendum`);
+      assert(row.parentNativeBoundaryVerificationId && sha.test(row.nativeBoundaryReceiptSha256 ?? ''), `${row.caseId}: READY requires the native-boundary verification receipt`);
+      assert.equal(row.nativeBoundaryBinarySha256, approval.resourceBuildReceipts?.[row.backend]?.binarySha256, `${row.caseId}: native-boundary receipt came from a binary other than the approved sealed resource build`);
+    } else assert(deferred.includes(row.backend), `${row.caseId}: READY_ON_ADDENDUM is only for a deferred backend`);
+  }
   return { approvedPlanSha256: planHash(approval), generationCount: invocations.length, backendQuotas: plan.budget.byBackend, trainingLifecycles: training.length };
+}
+const ADDENDUM_KEYS = ['schemaVersion', 'kind', 'approvedPlanSha256', 'ledgerId', 'backend', 'inputSpecSha256', 'buildReceipt', 'resourceBuildReceipt', 'nativeBoundaryReceipt', 'parentNativeBoundaryVerificationId', 'addendumId', 'userApprovalId', 'approvedBy'].sort();
+/** Validate a parent-recorded input-spec addendum. It can ONLY bind a deferred backend's input
+ *  specification for this exact approval: it never changes the plan, any bound spec, the ledger
+ *  identity or the counts, and an addendum for any other approval is refused. */
+export function validateInputSpecAddendum(approval, addendum) {
+  const base = validateApprovedPlan(approval);
+  assert(addendum && typeof addendum === 'object' && JSON.stringify(Object.keys(addendum).sort()) === JSON.stringify(ADDENDUM_KEYS), 'addendum carries exactly its binding fields, nothing that could amend the plan, ledger or counts');
+  assert(addendum.schemaVersion === 1 && addendum.kind === 'flux3-terminal-plan-input-spec-addendum', 'explicit input-spec addendum required');
+  assert.equal(addendum.approvedPlanSha256, base.approvedPlanSha256, 'addendum is chained to a different approved plan');
+  assert.equal(addendum.ledgerId, approval.ledgerId, 'addendum ledger identity differs from the approval');
+  assert((approval.deferredInputSpecBackends ?? []).includes(addendum.backend), 'only a deferred backend input specification can be bound by addendum');
+  assert(sha.test(addendum.inputSpecSha256 ?? ''), 'addendum must bind an input specification digest');
+  for (const key of ['addendumId', 'userApprovalId', 'approvedBy', 'parentNativeBoundaryVerificationId']) assert(typeof addendum[key] === 'string' && addendum[key].length > 0, `addendum ${key} required`);
+  // The deferred host's own sealed builds, bound like the approval's bindings for a non-deferred
+  // backend; never a replacement for build bindings the approval already carries.
+  for (const key of ['buildReceipt', 'resourceBuildReceipt']) assert(addendum[key] && sha.test(addendum[key].receiptSha256 ?? '') && sha.test(addendum[key].binarySha256 ?? ''), `addendum ${key} must bind a sealed build receipt and binary`);
+  assert(!approval.buildReceipts?.[addendum.backend] && !approval.resourceBuildReceipts?.[addendum.backend], 'an addendum cannot replace build bindings the approval already carries');
+  // Its READY_ON_ADDENDUM resource rows become reservable only with a valid self-test receipt from
+  // exactly this sealed resource binary, proving exactly the plan's fixed request digests.
+  const invocations = approval.plan.generationInvocations.filter(i => i.backend === addendum.backend && i.kind.startsWith('resource_')
+    && approval.plan.resourceCases.find(r => r.caseId === i.caseId && r.backend === i.backend)?.status === 'READY_ON_ADDENDUM');
+  const nativeBoundaryReceiptSha256 = invocations.length ? validateNativeBoundaryReceipt(addendum.nativeBoundaryReceipt, { backend: addendum.backend, invocations,
+    binarySha256: addendum.resourceBuildReceipt.binarySha256, buildReceiptSha256: addendum.resourceBuildReceipt.receiptSha256,
+    sourceSha: approval.sourceSha, inferenceMainSha: approval.inferenceMainSha }) : null;
+  return { backend: addendum.backend, inputSpecSha256: addendum.inputSpecSha256, approvedPlanSha256: base.approvedPlanSha256, nativeBoundaryReceiptSha256,
+    buildReceipt: addendum.buildReceipt, resourceBuildReceipt: addendum.resourceBuildReceipt };
+}
+/** The input-spec digest a backend may run with. A deferred backend stays unusable (BLOCKED)
+ *  until its addendum exists; the approval's own hash and ledgers are unchanged by it. */
+export function boundInputSpecSha256(approval, backend, addendum) {
+  assert(['mlx', 'candle'].includes(backend));
+  // Callers validate the approval itself; the addendum path re-validates it in full below.
+  if (!(approval.deferredInputSpecBackends ?? []).includes(backend)) {
+    assert(addendum === undefined || addendum === null, `${backend} input specification is already bound by the approval; no addendum may replace it`);
+    return approval.inputSpecSha256[backend];
+  }
+  if (!addendum) throw new Error(`BLOCKED: ${backend} input specification is deferred; its permits stay unusable until a parent-recorded addendum binds it`);
+  const bound = validateInputSpecAddendum(approval, addendum); assert.equal(bound.backend, backend, 'addendum binds a different backend');
+  return bound.inputSpecSha256;
 }
 function location(approval, backend, ledgerRoot) {
   validateApprovedPlan(approval); assert(['mlx', 'candle'].includes(backend));
@@ -64,7 +127,7 @@ async function lock(root, callback) {
   let handle; try { handle = await open(path.join(root, 'consume.lock'), 'wx'); } catch { throw new Error('BLOCKED: existing stable ledger missing/busy; no initialization/reset/stale-lock recovery is permitted at runtime'); }
   try { return await callback(); } finally { await handle.close(); await unlink(path.join(root, 'consume.lock')); }
 }
-function approvedEvent(approval, event) {
+function approvedEvent(approval, event, addendum) {
   if (event.kind === 'training_start' || event.kind === 'training_resume') {
     const training = approval.plan.trainingLifecycles.find(t => t.backend === event.backend && t.caseId === event.caseId && (event.kind === 'training_start' ? t.startId : t.resumeId) === event.invocationId); assert(training, 'unplanned training start/resume'); return false;
   }
@@ -72,13 +135,16 @@ function approvedEvent(approval, event) {
   assert(invocation && invocation.backend === event.backend && invocation.caseId === event.caseId && invocation.kind === event.kind, 'invocation absent from this immutable backend quota; no spare allocation or automatic retry');
   if (invocation.kind.startsWith('resource_')) {
     const resource = approval.plan.resourceCases.find(c => c.caseId === invocation.caseId && c.backend === invocation.backend);
-    assert(resource?.status === 'READY' && resource.parentNativeBoundaryVerificationId && sha.test(resource.nativeBoundaryReceiptSha256 ?? ''), 'BLOCKED: native inner-generate boundary is unverified; a contract flag is not proof. Authorized owner/coordinator must bind the real single-call verification receipt before approving this immutable plan.');
+    if (resource?.status === 'READY_ON_ADDENDUM') {
+      assert(addendum, 'BLOCKED: this resource row is reservable only after its backend addendum binds a validated native-boundary self-test receipt');
+      assert.equal(validateInputSpecAddendum(approval, addendum).backend, invocation.backend, 'BLOCKED: addendum binds a different backend');
+    } else assert(resource?.status === 'READY' && resource.parentNativeBoundaryVerificationId && sha.test(resource.nativeBoundaryReceiptSha256 ?? ''), 'BLOCKED: native inner-generate boundary is unverified; a contract flag is not proof. Authorized owner/coordinator must bind the real single-call verification receipt before approving this immutable plan.');
     assert(sha.test(invocation.requestSha256 ?? ''), 'resource request must be normalized/hash-bound in the approved plan');
   }
   if (invocation.requestSha256) assert.equal(event.requestSha256, invocation.requestSha256, 'resource permit must bind exact normalized approved request');
   return true;
 }
-export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt?.manifest?.backend) {
+export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt?.manifest?.backend, inputSpecAddendum) {
   validateApprovedPlan(approval); assert(['mlx', 'candle'].includes(expectedBackend), 'complete ledger manifest/backend required');
   const { manifest, state, events } = receipt ?? {}; assert.deepEqual(manifest, expectedManifest(approval, expectedBackend), 'complete ledger manifest/plan/backend identity mismatch'); assert(Array.isArray(events));
   let head = planHash(manifest), generations = 0; const ids = [];
@@ -87,25 +153,25 @@ export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt
     assert.deepEqual(Object.keys(record).sort(), ['sequence','previousSha256','approvedPlanSha256','ledgerId','backend','caseId','invocationId','kind','requestSha256','reservedAt','controllerPid'].sort());
     assert.equal(eventSha256, planHash(record)); assert.equal(record.sequence, index + 1); assert.equal(record.previousSha256, head); assert.equal(record.ledgerId, approval.ledgerId); assert.equal(record.approvedPlanSha256, planHash(approval)); assert.equal(record.backend, expectedBackend); assert(sha.test(record.requestSha256)); assert(Number.isInteger(record.controllerPid) && record.controllerPid > 0 && Number.isFinite(Date.parse(record.reservedAt)));
     if (record.kind === 'training_resume') { const training = approval.plan.trainingLifecycles.find(t => t.resumeId === record.invocationId); assert(training && ids.includes(training.startId), 'resume precedes its initial training start'); }
-    if (approvedEvent(approval, record)) generations++; assert(!ids.includes(record.invocationId), 'single-use permit reused'); ids.push(record.invocationId); head = eventSha256;
+    if (approvedEvent(approval, record, inputSpecAddendum)) generations++; assert(!ids.includes(record.invocationId), 'single-use permit reused'); ids.push(record.invocationId); head = eventSha256;
   }
   assert(generations <= manifest.permitIds.length && generations <= GLOBAL_GENERATION_CEILING);
   assert.deepEqual(state, { sequence: events.length, generationCount: generations, consumedIds: ids, headSha256: head }, 'ledger crash/tamper mismatch; coordinator must reconcile, never reuse a reservation');
   return { manifest, state, events };
 }
-async function audited(approval, backend, root) {
+async function audited(approval, backend, root, inputSpecAddendum) {
   const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')), state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')), files = (await readdir(path.join(root, 'events'))).sort(), events = [];
   for (const [index, file] of files.entries()) { assert.equal(file, `${String(index + 1).padStart(6, '0')}.json`, 'ledger journal missing/foreign event'); events.push(JSON.parse(await readFile(path.join(root, 'events', file), 'utf8'))); }
-  return verifyLedgerReceipt(approval, { manifest, state, events }, backend);
+  return verifyLedgerReceipt(approval, { manifest, state, events }, backend, inputSpecAddendum);
 }
-export async function auditLedger({ approval, backend, ledgerRoot }) { const root = location(approval, backend, ledgerRoot); return lock(root, () => audited(approval, backend, root)); }
-export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256 }) {
-  const root = location(approval, backend, ledgerRoot); assert.equal(ledgerId, approval.ledgerId); assert.equal(approvedPlanSha256, planHash(approval)); assert(sha.test(requestSha256 ?? ''), 'actual request digest required before each inner generation start');
+export async function auditLedger({ approval, backend, ledgerRoot, inputSpecAddendum }) { const root = location(approval, backend, ledgerRoot); return lock(root, () => audited(approval, backend, root, inputSpecAddendum)); }
+export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256, inputSpecAddendum }) {
+  const root = location(approval, backend, ledgerRoot); boundInputSpecSha256(approval, backend, inputSpecAddendum); // deferred backend: no permit before its addendum assert.equal(ledgerId, approval.ledgerId); assert.equal(approvedPlanSha256, planHash(approval)); assert(sha.test(requestSha256 ?? ''), 'actual request digest required before each inner generation start');
   return lock(root, async () => {
-    const { state } = await audited(approval, backend, root); assert(!state.consumedIds.includes(invocationId), 'permit already consumed; failed/canceled attempts count and cannot auto-resubmit');
+    const { state } = await audited(approval, backend, root, inputSpecAddendum); assert(!state.consumedIds.includes(invocationId), 'permit already consumed; failed/canceled attempts count and cannot auto-resubmit');
     if (kind === 'training_resume') { const training = approval.plan.trainingLifecycles.find(t => t.resumeId === invocationId); assert(training && state.consumedIds.includes(training.startId), 'planned resume requires the already-consumed initial training start'); }
     const record = { sequence: state.sequence + 1, previousSha256: state.headSha256, approvedPlanSha256, ledgerId, backend, caseId, invocationId, kind, requestSha256, reservedAt: new Date().toISOString(), controllerPid: process.pid };
-    const generation = approvedEvent(approval, record), event = { ...record, eventSha256: planHash(record) };
+    const generation = approvedEvent(approval, record, inputSpecAddendum), event = { ...record, eventSha256: planHash(record) };
     // Journal first. A crash before state publication is a fail-closed reconciliation blocker.
     await durableNew(path.join(root, 'events', `${String(record.sequence).padStart(6, '0')}.json`), event);
     const next = { sequence: record.sequence, generationCount: state.generationCount + Number(generation), consumedIds: [...state.consumedIds, invocationId], headSha256: event.eventSha256 };
@@ -113,14 +179,14 @@ export async function reserveInvocation({ approval, ledgerRoot, ledgerId, approv
     return event;
   });
 }
-export function aggregateLedgerReceipts(approval, receipts, closure) {
+export function aggregateLedgerReceipts(approval, receipts, closure, inputSpecAddenda = {}) {
   validateApprovedPlan(approval); const ids = new Set(), ledgers = new Set(); let generationCount = 0;
   assert(closure?.kind === 'flux3-terminal-finalized-ledger-heads' && closure.coordinatorClosureId && closure.producersStopped === true && sha.test(closure.collectionManifestSha256 ?? ''), 'trusted coordinator closure from stopped producers/sealed collected artifacts required; receipts cannot attest their own freshness');
   assert.equal(closure.ledgerId, approval.ledgerId); assert.equal(closure.approvedPlanSha256, planHash(approval));
   const expectedHeads = closure.backends;
   assert(expectedHeads && Object.keys(expectedHeads).sort().join(',') === 'candle,mlx', 'trusted latest coordinator-audited heads for BOTH backend ledgers required');
   for (const candidate of receipts) {
-    const receipt = verifyLedgerReceipt(approval, candidate), key = `${receipt.manifest.ledgerId}:${receipt.manifest.backend}`; assert(!ledgers.has(key), 'duplicate ledger/backend receipt; use one complete latest receipt per backend'); ledgers.add(key);
+    const receipt = verifyLedgerReceipt(approval, candidate, candidate?.manifest?.backend, inputSpecAddenda[candidate?.manifest?.backend]), key = `${receipt.manifest.ledgerId}:${receipt.manifest.backend}`; assert(!ledgers.has(key), 'duplicate ledger/backend receipt; use one complete latest receipt per backend'); ledgers.add(key);
     assert.deepEqual({ sequence: receipt.state.sequence, headSha256: receipt.state.headSha256 }, expectedHeads[receipt.manifest.backend], 'replayed/stale receipt differs from trusted latest coordinator-audited head');
     for (const event of receipt.events) { assert(!ids.has(event.invocationId), 'duplicate receipt/permit across backend sessions'); ids.add(event.invocationId); }
     generationCount += receipt.state.generationCount;

@@ -19,7 +19,7 @@ export async function reserveResourceInvocation(input, dependencies = {}) {
   const context = { adapterPid, caseId, invocationId, requestSha256, approvedPlanSha256, sourceSha, binarySha256 };
   const hardwareObservation = await verifyHardware(admission, context);
   for (const key of Object.keys(context)) if (hardwareObservation?.[key] !== context[key]) throw new Error(`BLOCKED: observed hardware ${key} binding mismatch`);
-  const event = await reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256 });
+  const event = await reserveInvocation({ approval, ledgerRoot, ledgerId, approvedPlanSha256, invocationId, backend, caseId, kind, requestSha256, inputSpecAddendum: admission.inputSpecAddendum });
   return { ...event, hardwareObservation };
 }
 

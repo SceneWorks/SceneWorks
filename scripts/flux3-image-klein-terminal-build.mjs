@@ -70,7 +70,13 @@ export async function produceTerminalBuild(a, dependencies = {}) {
   const receiptPath = path.join(directory, 'producer-receipt.json'); await io.writeFile(receiptPath, JSON.stringify(receipt) + '\n', { flag: 'wx' }); return { receiptPath, receiptSha256: hash(JSON.stringify(receipt) + '\n'), receipt };
 }
 export async function verifyTerminalBuild(a, { sourceRoot = rootDefault, role = 'api-worker' } = {}) {
-  const binding = (role === 'api-worker' ? a.approvedPlan?.buildReceipts : a.approvedPlan?.resourceBuildReceipts)?.[a.backend];
+  let binding = (role === 'api-worker' ? a.approvedPlan?.buildReceipts : a.approvedPlan?.resourceBuildReceipts)?.[a.backend];
+  // A deferred backend's sealed builds are bound ONLY by its validated parent-recorded addendum.
+  if (!binding && (a.approvedPlan?.deferredInputSpecBackends ?? []).includes(a.backend) && a.inputSpecAddendum) {
+    const { validateInputSpecAddendum } = await import('./flux3-image-klein-terminal-budget.mjs');
+    const bound = validateInputSpecAddendum(a.approvedPlan, a.inputSpecAddendum); assert.equal(bound.backend, a.backend, 'addendum binds a different backend');
+    binding = role === 'api-worker' ? bound.buildReceipt : bound.resourceBuildReceipt;
+  }
   return verifyBoundBuild(a, sourceRoot, role, binding);
 }
 // Separate preparation authority, never a no-plan option on generation execution.

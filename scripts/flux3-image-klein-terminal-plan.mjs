@@ -4,7 +4,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripJsoncComments } from './lib/jsonc.mjs';
-import { validateFlux3AnchorPrerequisites } from './lib/flux3-resource-contract.mjs';
+import { validateFlux3AnchorPrerequisites, flux3AnchorRequestDigest, resourceCaseDigest } from './lib/flux3-resource-contract.mjs';
+import { validateNativeBoundaryReceipt } from './lib/flux3-native-boundary.mjs';
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const digestPattern = /^[a-f0-9]{64}$/;
 export const shaPattern = /^[a-f0-9]{40}$/;
@@ -97,7 +98,13 @@ export function terminalCatalog(sources) {
     policy: { downloads: 'never automatic; explicit per-repository approved provision cells only', captures: false, resourceAnchorsAreImageProof: false, visualProof: 'human/oracle inspection; HTTP completion is insufficient', training: 'dryRun:false, real bounded job only' } };
 }
 // Small representative CODE default, not permission to execute. Full catalog is diagnostic only.
-export function terminalPlan(sources) {
+/** `options` (all optional; the shipped default keeps every resource row BLOCKED):
+ *  - resourceBindings[backend]: the bound PUP-edit supplemental resource case (hash-only inputs);
+ *  - nativeBoundary[backend]: { receipt, parentNativeBoundaryVerificationId, binarySha256,
+ *    buildReceiptSha256, sourceSha, inferenceMainSha } from the sealed adapter's zero-budget self-test;
+ *  - addendumBackends: backends whose resource rows become READY_ON_ADDENDUM (proved later by the
+ *    parent-recorded input-spec addendum, never reservable before it). */
+export function terminalPlan(sources, { resourceBindings = {}, nativeBoundary = {}, addendumBackends = [] } = {}) {
   const catalog = terminalCatalog(sources), cases = [], resources = [], trainingLifecycles = [];
   const pick = (backend, checkpoint, scenario, { tier = 'bf16', options = {}, name = scenario } = {}) => {
     const source = catalog.cases.find(c => c.caseId === `${backend}.${checkpoint}.${scenario}.bf16`); assert(source);
@@ -140,6 +147,30 @@ export function terminalPlan(sources) {
     const source = cases.find(c => c.caseId === invocation.caseId) ?? resources.find(c => c.caseId === invocation.caseId), bindings = Array.from({ length: source.options.references ?? 0 }, (_, index) => ({ role: 'reference', index, binding: `reference-${index}`, instanceId: `slot-${index}` }));
     const image = { ...source, inputBindings: bindings, options: source.kind === 'training' ? { loraScale: 0.75 } : source.options };
     invocation.requestTemplate = imageRequest(image, targetRegistry(sources).find(t => t.backend === source.backend && t.modelId === source.modelId), '$OWNED_PROJECT', Object.fromEntries(bindings.map(b => [b.binding, { assetId: `$${b.binding}` }])), { id: '$BOUND_ADAPTER', name: '$BOUND_ADAPTER' });
+  }
+  // Fix every resource request digest: anchors are fully determined by the plan; the supplemental
+  // PUP-edit case only once its hash-only input binding is supplied.
+  for (const invocation of generationInvocations.filter(i => i.kind.startsWith('resource_'))) {
+    const row = resources.find(c => c.caseId === invocation.caseId);
+    if (invocation.kind === 'resource_anchor') invocation.requestSha256 = flux3AnchorRequestDigest(invocation.backend, invocation.modelId, invocation.tier);
+    else if (resourceBindings[invocation.backend]) {
+      const bound = resourceBindings[invocation.backend];
+      assert.equal(bound.caseId, invocation.caseId, 'supplemental binding must be this resource case');
+      row.resourceCase = structuredClone(bound); invocation.requestSha256 = resourceCaseDigest(bound);
+    }
+  }
+  for (const backend of ['mlx', 'candle']) {
+    const invocations = generationInvocations.filter(i => i.backend === backend && i.kind.startsWith('resource_'));
+    if (!invocations.every(i => i.requestSha256)) continue; // an unbound request stays BLOCKED
+    const boundary = nativeBoundary[backend];
+    if (boundary) {
+      assert(!addendumBackends.includes(backend), `${backend} resource readiness is proved either in the plan or by its addendum, not both`);
+      const receiptSha256 = validateNativeBoundaryReceipt(boundary.receipt, { backend, invocations, binarySha256: boundary.binarySha256, buildReceiptSha256: boundary.buildReceiptSha256, sourceSha: boundary.sourceSha, inferenceMainSha: boundary.inferenceMainSha });
+      assert(typeof boundary.parentNativeBoundaryVerificationId === 'string' && boundary.parentNativeBoundaryVerificationId, 'parent native-boundary verification ID required');
+      for (const row of resources.filter(r => r.backend === backend)) Object.assign(row, { status: 'READY', blocker: null, parentNativeBoundaryVerificationId: boundary.parentNativeBoundaryVerificationId, nativeBoundaryReceiptSha256: receiptSha256, nativeBoundaryBinarySha256: boundary.binarySha256 });
+    } else if (addendumBackends.includes(backend)) {
+      for (const row of resources.filter(r => r.backend === backend)) Object.assign(row, { status: 'READY_ON_ADDENDUM', blocker: 'Reservable only after the parent-recorded input-spec addendum binds this backend validated sealed-binary native-boundary self-test receipt.' });
+    }
   }
   assert.equal(generationInvocations.filter(i => i.kind === 'product_generation').length, 26); assert.equal(resources.length, 12);
   return { schemaVersion: 1, kind: 'flux3-installed-product-representative-plan', status: 'NOT_RUN', phases: PHASES, cases, resourceCases: resources, trainingLifecycles, generationInvocations,
