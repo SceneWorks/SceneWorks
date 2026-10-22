@@ -7958,8 +7958,8 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: hires_fix_target_dimension(request.width, upscale_by),
-        height: hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
@@ -11029,6 +11029,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
+        // Iris-3B (sc-25680): the off-Mac sibling of the `mlx_iris` label.
+        "iris_3b" => "candle_iris",
+        // Bernini's production stream stamps this via its own route; the request-only fallback
+        // (`adapter_id`) reaches it through here.
+        "bernini_image" => CANDLE_BERNINI_IMAGE_ADAPTER,
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -15673,6 +15678,22 @@ mod candle_label_tests {
         assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("iris_3b"), "candle_iris");
+        assert_eq!(candle_adapter_label("bernini_image"), "candle_bernini");
+        // Only the SDXL-engine ids may fall through to `candle_sdxl`; any other candle-routed model
+        // landing there is missing from the map and would stamp the wrong provenance.
+        const SDXL_ENGINE_IDS: &[&str] = &[
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ];
+        for model in sceneworks_core::jobs_store::candle_routed_image_models() {
+            if !SDXL_ENGINE_IDS.contains(model) {
+                assert_ne!(candle_adapter_label(model), CANDLE_ADAPTER, "{model}");
+            }
+        }
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
         for model in [
             "z_image_turbo",

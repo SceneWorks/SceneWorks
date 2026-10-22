@@ -986,6 +986,25 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &manifest_entry,
             )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            // Hires.fix (sc-26644): the same shared core gate `create_image_job` runs, applied to
+            // the merged object the queue transaction will persist — a retry/duplicate's
+            // `payload_changes` (a shallow merge) could otherwise carry a `hiresFix` block to a
+            // model that refuses it, or switch the model out from under a stored block, and only
+            // fail at the worker instead of being refused at this creation boundary.
+            {
+                let request = sceneworks_core::image_request::ImageRequest::from_payload(&merged);
+                let family = merged
+                    .get("modelManifestEntry")
+                    .and_then(|entry| entry.get("family"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if let Some(message) =
+                    sceneworks_core::image_request::hires_fix_request_error(&request, family)
+                {
+                    return Err(ApiError::bad_request(message));
+                }
+            }
             validate_merged_job_loras(
                 state,
                 project_id.as_deref(),

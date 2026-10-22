@@ -23,9 +23,9 @@ use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
-    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
+    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
+    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};

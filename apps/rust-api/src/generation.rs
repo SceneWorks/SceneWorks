@@ -239,6 +239,27 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // Hires.fix (sc-26644): the shared core gate the worker re-applies before any model load
+        // (`image_request::hires_fix_request_error`). The typed DTO used to silently drop the web's
+        // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
+        // a POST for a model that should refuse it returned 201 and failed later (or rendered
+        // without the pass). Judged against the FINAL payload (post-preset, with the resolved
+        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
+        // and the worker parse the request exactly the same way. Read after the width/height/count
+        // defaults because the 4096-target check needs the resolved geometry.
+        {
+            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let family = entry
+                .get("family")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if let Some(message) =
+                sceneworks_core::image_request::hires_fix_request_error(&request, family)
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
         // worker silently falls back from, so it is refused here, naming the menu.
         if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {

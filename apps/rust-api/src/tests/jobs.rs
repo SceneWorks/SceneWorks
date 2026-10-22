@@ -12258,6 +12258,155 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
     );
 }
 
+/// sc-26644: the typed `ImageJobRequest` DTO had no `hiresFix` field, so serde silently dropped the
+/// web client's top-level `hiresFix` before a job existed — the worker's `parse_hires_fix` never saw
+/// the block (the second pass never ran) and its refusals never fired (a POST for a model that
+/// should refuse it returned 201). Three halves asserted, the same shape as the floor/menu gates:
+/// a capable model is admitted and the block travels VERBATIM to the job payload; a model that
+/// neither is SDXL nor advertises `ui.img2img` is refused at enqueue with a 400 naming the model;
+/// and a request with no `hiresFix` block creates a payload without the key.
+#[tokio::test]
+async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img2img_image",
+              "name": "Img2Img",
+              "family": "krea_2",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img2img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Img2Img", "img2img": true }
+            },
+            {
+              "id": "plain_image",
+              "name": "Plain",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Plain" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Hires Fix Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A capable model: admitted, and the block travels VERBATIM to the job payload — the DTO
+    // forwards it rather than re-shaping it, so the worker parses the same request the web sent.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "img2img_image",
+            "prompt": "a lighthouse",
+            "hiresFix": {
+                "enabled": true,
+                "steps": 12,
+                "denoisingStrength": 0.6,
+                "upscaleBy": 1.5
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an img2img-capable model must admit Hires.fix: {body}"
+    );
+    assert_eq!(body["payload"]["hiresFix"]["enabled"], true);
+    assert_eq!(body["payload"]["hiresFix"]["steps"], 12);
+    assert_eq!(body["payload"]["hiresFix"]["denoisingStrength"], 0.6);
+    assert_eq!(body["payload"]["hiresFix"]["upscaleBy"], 1.5);
+    assert!(
+        body["payload"]["hiresFix"].get("cfgScale").is_none(),
+        "an omitted optional control is not minted: {body}"
+    );
+
+    // A model that neither is SDXL nor advertises `ui.img2img`: refused at enqueue, naming the
+    // model and the missing capability — the 201-instead-of-refusal the drop produced.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "plain_image",
+            "prompt": "a lighthouse",
+            "hiresFix": { "enabled": true }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-img2img model must refuse Hires.fix at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("plain_image"), "names the model: {detail}");
+    assert!(
+        detail.contains("img2img-capable"),
+        "names the missing capability: {detail}"
+    );
+
+    // An absent block: the payload carries no `hiresFix` key, so every model without the toggle is
+    // byte-for-byte unchanged.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "plain_image",
+            "prompt": "a lighthouse"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "no block, no gate: {body}");
+    assert!(
+        body["payload"].get("hiresFix").is_none(),
+        "an omitted hiresFix is not minted into the payload: {body}"
+    );
+}
+
 /// sc-24114: the declared sampler / scheduler MENU is enforced at image enqueue. Qwen-Image 2.1's
 /// providers publish a curated solver menu and honour it; a name on no lane's menu would be silently
 /// dropped back to the engine default by the worker, so it is a 400 naming the menu. A member is
