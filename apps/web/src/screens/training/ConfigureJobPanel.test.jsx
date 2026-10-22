@@ -2,6 +2,7 @@ import React, { act } from "react";
 import workerReport from "../../training/irisDatasetReport.fixture.json";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setInput } from "../../testUtils/dom.js";
 
 import {
   configDraftFromTarget,
@@ -1037,6 +1038,55 @@ describe("ConfigureJobPanel resolution buckets", () => {
       ["resolutionBuckets", [...rows([512, 16], [1024, 1]), { resolution: String(VALID_DRAFT.resolution), repeats: "1" }]],
       ["resolutionBuckets", null],
     ]);
+  });
+
+  it("seeds and edits true MOSS rectangles without inventing module aliases", () => {
+    const calls = [];
+    const moss = { ...bucketTarget, id: "moss_image_base_lora", kernel: "moss_image_lora" };
+    const draft = {
+      ...VALID_DRAFT,
+      loraTargetModules: "q\nlayers.0.proj.ffn_up_gate",
+      resolutionBuckets: [{ width: "768", height: "1024", repeats: "1" }],
+    };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: moss,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: moss }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(container.querySelector('[aria-label="MOSS target modules"]').value).toBe("q\nlayers.0.proj.ffn_up_gate");
+    const dimensions = container.querySelector('[aria-label="Bucket 1 dimensions"]');
+    expect(dimensions.value).toBe("768x1024");
+    act(() => setInput(dimensions, "1024x768"));
+    act(() => [...editor().querySelectorAll("button")].find((button) => button.textContent === "Use square buckets").click());
+    act(() => toggle().click());
+    expect(calls).toEqual([
+      ["resolutionBuckets", [{ width: "1024", height: "768", repeats: "1" }]],
+      ["resolutionBuckets", [{ resolution: "768", repeats: "1" }]],
+      ["resolutionBuckets", null],
+    ]);
+
+    const seedCalls = [];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: moss,
+          configDraft: { ...VALID_DRAFT, resolution: "768" },
+          updateConfigDraft: (field, value) => seedCalls.push([field, value]),
+        })}
+      />,
+    );
+    act(() => toggle().click());
+    expect(seedCalls).toEqual([["resolutionBuckets", [
+      { width: "512", height: "512", repeats: "1" },
+      { width: "768", height: "768", repeats: "1" },
+    ]]]);
   });
 
   it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {

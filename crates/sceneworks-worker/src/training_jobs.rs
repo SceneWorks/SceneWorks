@@ -851,6 +851,10 @@ fn preflight_training_run(
 }
 
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
+    // Keep the f64 JSON contract and native f32 execution boundary explicit: values
+    // that would overflow or underflow during conversion refuse before a request is built.
+    sceneworks_core::training::training_alpha_f32(&plan.config.alpha)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -2477,7 +2481,8 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         .unwrap_or_default();
     TrainingConfig {
         rank: config.rank,
-        alpha: config.alpha as f32,
+        alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
+            .expect("training target preflight validates alpha before native mapping"),
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
         steps: config.steps,
         batch_size: config.batch_size,
@@ -7902,7 +7907,7 @@ mod tests {
                     value["target"]["family"] = json!(target.family);
                     value["config"] = serde_json::to_value(&target.defaults).unwrap();
                     value["config"]["rank"] = json!(2);
-                    value["config"]["alpha"] = json!(3);
+                    value["config"]["alpha"] = json!(0.5);
                     value["config"]["triggerWord"] = json!("sksmoss");
                     value["config"]["advanced"]["networkType"] = json!(network);
                     value["config"]["advanced"]["mixedPrecision"] = json!(dtype);
@@ -7952,7 +7957,7 @@ mod tests {
                             NetworkType::Lokr
                         }
                     );
-                    assert_eq!((request.config.rank, request.config.alpha), (2, 3.));
+                    assert_eq!((request.config.rank, request.config.alpha), (2, 0.5));
                     assert_eq!(request.config.lora_target_modules, vec!["q", "ffn_up_gate"]);
                     assert_eq!(request.config.decompose_factor, 4);
                     assert_eq!(
@@ -8781,7 +8786,7 @@ mod tests {
         let plan = parse(value);
         let cfg = map_training_config(&plan.config);
         assert_eq!(cfg.rank, 16);
-        assert_eq!(cfg.alpha as u32, 32);
+        assert_eq!(cfg.alpha, 32.0, "legacy integral alpha must map exactly");
         assert_eq!(cfg.steps, 1000);
         assert_eq!(cfg.gradient_accumulation, 2);
         assert_eq!(cfg.seed, 42);

@@ -1501,7 +1501,7 @@ mod job_tests {
             config.resolution = 512;
             config.batch_size = 2;
             config.rank = 8;
-            config.alpha = 4;
+            config.alpha = sceneworks_core::contracts::ContractNumber::from(4);
             let advanced = &mut config.advanced;
             advanced.insert("networkType".into(), json!("lokr"));
             advanced.insert("decomposeFactor".into(), json!(4));
@@ -2652,7 +2652,7 @@ mod job_tests {
             task_dataset(&data, "restoration", 2, true),
             |c| {
                 c.rank = 8;
-                c.alpha = 4;
+                c.alpha = sceneworks_core::contracts::ContractNumber::from(4);
                 c.gradient_accumulation = 2;
                 c.steps = 40;
                 c.save_every = 8;

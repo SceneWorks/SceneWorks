@@ -318,7 +318,7 @@ pub fn iris_restore_target() -> TrainingTarget {
         defaults: TrainingConfig {
             // Read only by the LoRA / LoKr arm.
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(1e-5).expect("1e-5 is finite"),
             // MICRO-batches: one step = a generator window + a critic window (2 × accumulation).
             steps: 10_000,

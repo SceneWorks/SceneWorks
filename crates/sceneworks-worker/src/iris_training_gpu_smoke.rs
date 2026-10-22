@@ -340,7 +340,7 @@ async fn run_iris_training_smoke(ranks: u64) {
         .expect("the Iris target is registered");
     let mut config = target.defaults.clone();
     config.rank = 4;
-    config.alpha = 4;
+    config.alpha = sceneworks_core::contracts::ContractNumber::from(4);
     config.steps = TRAIN_STEPS;
     config.save_every = TRAIN_STEPS / 2;
     config.resolution = RESOLUTION;
@@ -1010,7 +1010,7 @@ pub(crate) fn restore_smoke_config(full: bool) -> sceneworks_core::training::Tra
     config.resolution = RESTORE_SMOKE_CROP;
     if !full {
         config.rank = 8;
-        config.alpha = 8;
+        config.alpha = sceneworks_core::contracts::ContractNumber::from(8);
         config.advanced.insert("networkType".into(), json!("lora"));
     }
     config
@@ -1546,7 +1546,7 @@ impl CancelResumeArm {
             Self::LoKr => {
                 let mut config = sceneworks_core::training::iris::iris_generation_target().defaults;
                 config.rank = 4;
-                config.alpha = 4;
+                config.alpha = sceneworks_core::contracts::ContractNumber::from(4);
                 config.advanced.insert("networkType".into(), json!("lokr"));
                 config.advanced.insert("decomposeFactor".into(), json!(4));
                 config
@@ -2078,7 +2078,7 @@ fn kill_process(pid: u64) {
 pub(crate) fn two_card_config(strategy: &str) -> sceneworks_core::training::TrainingConfig {
     let mut config = sceneworks_core::training::iris::iris_generation_target().defaults;
     config.rank = 4;
-    config.alpha = 4;
+    config.alpha = sceneworks_core::contracts::ContractNumber::from(4);
     config.steps = TWO_CARD_STEPS;
     config.save_every = 2;
     config.resolution = RESOLUTION;

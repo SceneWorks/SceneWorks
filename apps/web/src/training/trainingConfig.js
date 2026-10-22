@@ -300,8 +300,12 @@ function sameBucketRows(left, right) {
     Array.isArray(left) &&
     Array.isArray(right) &&
     left.length === right.length &&
+    // Only the legacy square ladder follows a changed base resolution. Rectangular
+    // rows are explicit user geometry and must remain untouched.
     left.every(
       (row, index) =>
+        Object.hasOwn(row ?? {}, "resolution") &&
+        Object.hasOwn(right[index] ?? {}, "resolution") &&
         numberFromDraft(row?.resolution) === numberFromDraft(right[index]?.resolution) &&
         numberFromDraft(row?.repeats) === numberFromDraft(right[index]?.repeats),
     )
@@ -324,8 +328,32 @@ export function draftWithResolution(configDraft, target, resolution) {
 // Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
 export function resolutionBucketsDraft(value) {
   return Array.isArray(value)
-    ? value.map((row) => ({ resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }))
+    ? value.map((row) => (
+        Object.hasOwn(row ?? {}, "resolution")
+          ? { resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }
+          : {
+              width: numericDraft(row?.width),
+              height: numericDraft(row?.height),
+              repeats: numericDraft(row?.repeats),
+            }
+      ))
     : null;
+}
+
+// MOSS target-module paths are native identifiers, not normalized labels: case and
+// dot segments are retained exactly. An empty list explicitly delegates to the
+// native "all projections" default.
+export function loraTargetModulesDraft(value) {
+  return Array.isArray(value)
+    ? value.filter((module) => typeof module === "string").join("\n")
+    : "";
+}
+
+export function loraTargetModulesSnapshot(value) {
+  return String(value ?? "")
+    .split("\n")
+    .map((module) => module.trim())
+    .filter(Boolean);
 }
 
 // The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
@@ -335,7 +363,11 @@ export function seedResolutionBuckets(target, resolution) {
   const current = numberFromDraft(resolution);
   const offered = targetResolutions(target).filter((value) => current === null || value <= current);
   const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
-  return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
+  return resolutions.map((value) => (
+    target?.kernel === "moss_image_lora"
+      ? { width: String(value), height: String(value), repeats: "1" }
+      : { resolution: String(value), repeats: "1" }
+  ));
 }
 
 // Whether the target's trainer honors weight noise / gradient noise — the targets endpoint's
@@ -756,6 +788,9 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     // LoKr block-decomposition factor; -1 = auto. Only consumed when networkType
     // is lokr (the worker ignores it otherwise).
     decomposeFactor: numericDraft(advanced.decomposeFactor ?? -1),
+    // Line-separated literal native target paths. Empty means the native all-projection
+    // default; no aliases or case folding occur in the Studio.
+    loraTargetModules: loraTargetModulesDraft(advanced.loraTargetModules),
     optimizer: asText(defaults.optimizer),
     learningRate: numericDraft(defaults.learningRate),
     weightDecay: numericDraft(advanced.weightDecay),
@@ -846,17 +881,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   };
 }
 
-// Resolution buckets: optional (null = off), but when on the list must hold 1..max rows, each an
-// on-stride resolution the target trains at (not repeated) with a whole repeat count in
-// 1..resolutionBucketRepeatsMax — the API's exact rules (E6), so the button never enables a job
-// the API would refuse.
+// Resolution buckets are optional (null = off). The persisted list is exactly one
+// form: legacy square `{resolution,repeats}` rows or rectangular `{width,height,repeats}` rows.
+// Rectangles intentionally have no UI-invented resolution ceiling; native admission owns fit.
 function validateResolutionBuckets(rows, target, issues) {
-  if (!Array.isArray(rows)) {
-    return;
-  }
+  if (!Array.isArray(rows)) return;
   const field = "resolutionBuckets";
-  // A list carried over from another target (or a preset) on a target that cannot honor it would be
-  // refused by the API — block it here with the same reason.
   if (!targetSupportsResolutionBuckets(target)) {
     issues.push(issue.error(field, "This target does not support multi-resolution buckets — turn them off or pick a supporting target"));
     return;
@@ -869,26 +899,36 @@ function validateResolutionBuckets(rows, target, issues) {
     issues.push(issue.error(field, `At most ${resolutionBucketsMax} resolution buckets`));
   }
   const offered = targetResolutions(target);
+  let form = null;
   const seen = new Set();
   rows.forEach((row, index) => {
     const n = index + 1;
-    const resolution = numberFromDraft(row?.resolution);
-    const repeats = numberFromDraft(row?.repeats);
-    if (
-      resolution === null ||
-      !Number.isInteger(resolution) ||
-      resolution <= 0 ||
-      resolution % resolutionBucketStride !== 0
-    ) {
-      issues.push(issue.error(field, `Bucket ${n}: resolution must be a positive multiple of ${resolutionBucketStride}`));
-    } else if (offered.length && !offered.includes(resolution)) {
+    const square = Object.hasOwn(row ?? {}, "resolution") && !Object.hasOwn(row ?? {}, "width") && !Object.hasOwn(row ?? {}, "height");
+    const rectangular = !Object.hasOwn(row ?? {}, "resolution") && Object.hasOwn(row ?? {}, "width") && Object.hasOwn(row ?? {}, "height");
+    if (!square && !rectangular) {
+      issues.push(issue.error(field, `Bucket ${n}: use resolution or width and height`));
+      return;
+    }
+    const nextForm = square ? "square" : "rectangular";
+    if (form && form !== nextForm) {
+      issues.push(issue.error(field, "Use square or rectangular buckets, not both"));
+      return;
+    }
+    form = nextForm;
+    const dimensions = square ? ["resolution"] : ["width", "height"];
+    const values = dimensions.map((key) => numberFromDraft(row?.[key]));
+    if (values.some((value) => value === null || !Number.isInteger(value) || value <= 0 || value % resolutionBucketStride !== 0)) {
+      issues.push(issue.error(field, `Bucket ${n}: ${square ? "resolution" : "width and height"} must be positive ${resolutionBucketStride}px multiples`));
+    } else if (square && offered.length && !offered.includes(values[0])) {
       issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
-    } else if (seen.has(resolution)) {
-      issues.push(issue.error(field, `Bucket ${n}: resolution ${resolution} is already listed`));
+    } else {
+      const key = square ? String(values[0]) : `${values[0]}x${values[1]}`;
+      if (seen.has(key)) {
+        issues.push(issue.error(field, `Bucket ${n}: geometry ${key} is already listed`));
+      }
+      seen.add(key);
     }
-    if (resolution !== null) {
-      seen.add(resolution);
-    }
+    const repeats = numberFromDraft(row?.repeats);
     if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
       issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
     }
@@ -1284,6 +1324,11 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     networkType,
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
+    // MOSS defaults already persist [] (all modules) and both required caches.
+    // Only a nonblank edit replaces that literal native module list.
+    ...(selectedTarget?.kernel === "moss_image_lora" && configDraft.loraTargetModules.trim()
+      ? { loraTargetModules: loraTargetModulesSnapshot(configDraft.loraTargetModules) }
+      : {}),
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
@@ -1295,11 +1340,21 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       ? numberFromDraft(configDraft.gradientNoiseGamma)
       : undefined,
     // Omitted when off (null draft); an empty "on" list is sent as [] and refused by both sides.
+    // Preserve the selected wire form—square rows are never silently expanded into
+    // rectangles, and rectangular width/height never collapse into a square edge.
     resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
-      ? configDraft.resolutionBuckets.map((row) => ({
-          resolution: numberFromDraft(row?.resolution),
-          repeats: numberFromDraft(row?.repeats),
-        }))
+      ? configDraft.resolutionBuckets.map((row) => (
+          Object.hasOwn(row ?? {}, "resolution")
+            ? {
+                resolution: numberFromDraft(row?.resolution),
+                repeats: numberFromDraft(row?.repeats),
+              }
+            : {
+                width: numberFromDraft(row?.width),
+                height: numberFromDraft(row?.height),
+                repeats: numberFromDraft(row?.repeats),
+              }
+        ))
       : undefined,
     ...auxLossesSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.

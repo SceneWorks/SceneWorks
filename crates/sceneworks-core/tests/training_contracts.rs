@@ -1293,7 +1293,7 @@ fn builtin_presets_expose_sdxl_character_default() {
         .find(|preset| preset.id == "sdxl_lora.style.adamw8bit.balanced")
         .expect("sdxl style preset present");
     assert_eq!(style.config.rank, 32);
-    assert_eq!(style.config.alpha, 16);
+    assert_eq!(style.config.alpha, serde_json::Number::from(16));
 }
 
 #[test]
@@ -2066,7 +2066,7 @@ fn build_plan_for_target(
 fn set_training_numeric_field(config: &mut TrainingConfig, field: &str, value: u32) {
     match field {
         "rank" => config.rank = value,
-        "alpha" => config.alpha = value,
+        "alpha" => config.alpha = serde_json::Number::from(value),
         "steps" => config.steps = value,
         "batchSize" => config.batch_size = value,
         "resolutions" => config.resolution = value,
@@ -4277,6 +4277,56 @@ fn null_technique_keys_mean_absent() {
     }
     assert_eq!(parse_resolution_buckets(advanced).unwrap(), None);
     assert_eq!(subject_mask_loss_weights(advanced).unwrap(), None);
+}
+
+/// The product accepts exactly one bucket wire form: legacy squares retain their semantics while
+/// rectangles preserve ordered WxH geometry. Mutation: accept mixed/duplicate/fractional rows or
+/// collapse portrait into landscape ⇒ red.
+#[test]
+fn rectangular_resolution_buckets_are_strict_and_ordered() {
+    use sceneworks_core::training::{
+        parse_resolution_bucket_config, AspectRatioBucketSpec, ResolutionBucketConfig,
+    };
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("bucket target");
+    let mut config = target.defaults.clone();
+    config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([
+            {"width": 768, "height": 1024, "repeats": 2},
+            {"width": 1024, "height": 768, "repeats": 1}
+        ]),
+    );
+    assert_eq!(
+        parse_resolution_bucket_config(&config.advanced).unwrap(),
+        Some(ResolutionBucketConfig::AspectRatio(vec![
+            AspectRatioBucketSpec {
+                width: 768,
+                height: 1024,
+                repeats: 2
+            },
+            AspectRatioBucketSpec {
+                width: 1024,
+                height: 768,
+                repeats: 1
+            },
+        ])),
+    );
+    validate_training_config_for_target(target, &config).expect("rectangular bucket config");
+
+    for rows in [
+        json!([{"resolution": 768, "repeats": 1}, {"width": 768, "height": 1024, "repeats": 1}]),
+        json!([{"width": 768, "repeats": 1}]),
+        json!([{"width": 768.5, "height": 1024, "repeats": 1}]),
+        json!([{"width": 768, "height": 1024, "repeats": 1}, {"width": 768, "height": 1024, "repeats": 2}]),
+    ] {
+        config.advanced.insert("resolutionBuckets".to_owned(), rows);
+        assert!(parse_resolution_bucket_config(&config.advanced).is_err());
+    }
 }
 
 /// sc-25213: every preset's de-distill adapter selection (the presets ship `v2-default`) and both
