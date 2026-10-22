@@ -152,7 +152,7 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
   assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
-  assert.deepEqual(jobs, ["flux3-app-lifecycle", "flux3-terminal-host", "qwen-app-lifecycle", "iris-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["flux3-app-lifecycle", "flux3-terminal-host", "flux3-terminal-queue", "qwen-app-lifecycle", "iris-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const runs = (profile, backend) => jobs.filter((job) => {
     const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
     assert.ok(condition, `missing ${job} dispatch predicate`);
@@ -165,6 +165,7 @@ function assertDispatcherIsolation(workflow) {
     assert.deepEqual(runs("flux3-image-klein-app-lifecycle", backend), ["flux3-app-lifecycle"], "FLUX3 proof must skip all catalog mutation steps");
     assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
     assert.deepEqual(runs("flux3-image-klein-terminal-host", backend), ["flux3-terminal-host"], "FLUX3 terminal host step must skip all catalog mutation steps");
+    assert.deepEqual(runs("flux3-image-klein-terminal-queue", backend), ["flux3-terminal-queue"], "FLUX3 queue must skip all catalog mutation steps");
     assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
     assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
     assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");

@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, readdir, rename } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { preparationPlan, validatePreparationApproval, preparationEnvironment, preparationTransport, assertPreparationWorkers, redactPreparation, discoverPreparationInventory, runPreparation, advancePreparationClaimClock, waitPreparationDownload, PREPARATION_PROGRESS_LEASE_MS, boundedPreparationLog, safeDownloadDir, safeRepoDirName, readmeCardLicense } from './flux3-image-klein-preparation.mjs';
+import { preparationPlan, validatePreparationApproval, preparationEnvironment, preparationTransport, assertPreparationWorkers, redactPreparation, discoverPreparationInventory, runPreparation, advancePreparationClaimClock, waitPreparationDownload, PREPARATION_PROGRESS_LEASE_MS, boundedPreparationLog, safeDownloadDir, safeRepoDirName, readmeCardLicense, validatePreparationRuntimeIdentity, PreparationFailure, safePreparationFailure, parseSafePreparationFailure } from './flux3-image-klein-preparation.mjs';
 import { loadProductTargets, ROOT } from './flux3-image-klein-terminal-plan.mjs';
 import { verifyPreparationBuild, verifyTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
 import { assertClaimedWithin } from './flux3-image-klein-app-lifecycle.mjs';
@@ -310,5 +310,52 @@ test('bounded per-pipe lines redact split tokens/URLs and omit oversize lines wi
   assert(!retained.includes('hf_dummySecretOnly')); assert(!retained.includes('dummy-query-secret'));
 });
 test('wrong parent CUDA selection refuses before credentials, build verification, launch or network', async t => {
-  const f = await fixture(t); f.deps.env.CUDA_VISIBLE_DEVICES = '1'; await assert.rejects(runPreparation(f.a, f.p, f.tinySources, f.deps), /parent CUDA_VISIBLE_DEVICES=-1/); assert.equal(f.observed.credentialReads, 0); assert.equal(f.observed.buildChecks, 0); assert.equal(f.observed.spawns.length, 0); assert.equal(f.observed.requests.length, 0);
+  const f = await fixture(t); f.deps.env.CUDA_VISIBLE_DEVICES = '1'; await assert.rejects(runPreparation(f.a, f.p, f.tinySources, f.deps), /PREP_RUNNER_IDENTITY_MISMATCH/); assert.equal(f.observed.credentialReads, 0); assert.equal(f.observed.buildChecks, 0); assert.equal(f.observed.spawns.length, 0); assert.equal(f.observed.requests.length, 0);
+});
+
+test('Mac named-runner alias can differ from OS hostname while actual runner/target/label are bound before side effects', async t => {
+  const f = await fixture(t), p = preparationPlan({ ...f.p.request, backend: 'mlx' }, f.tinySources);
+  Object.assign(f.a, { backend: 'mlx', preparationPlanSha256: p.planSha256, runner: 'nax-macos-2', runnerTarget: 'secondary', runnerLabel: 'rw-mage' });
+  f.deps.platform = 'darwin'; f.deps.env.RUNNER_NAME = 'nax-macos-2'; f.deps.host = () => 'Michael-MBP.local';
+  const result = await runPreparation(f.a, p, f.tinySources, f.deps);
+  assert.equal(result.status, 'OBSERVED'); assert.equal(f.observed.credentialReads, 1); assert.equal(f.observed.spawns.length, 1);
+  const report = JSON.parse(await readFile(result.file, 'utf8')); assert.equal(report.runner, 'nax-macos-2');
+});
+test('Mac wrong/missing actual Runner identity, target, label or alias refuse before build/credentials/network/spawn', async t => {
+  for (const mutation of [
+    (a,d) => { d.env.RUNNER_NAME = 'nax-macos'; }, (a,d) => { delete d.env.RUNNER_NAME; },
+    a => { a.runnerTarget = 'primary'; }, a => { delete a.runnerTarget; }, a => { a.runnerLabel = 'nax'; },
+    a => { a.runner = 'Michael-MBP'; }, a => { a.physicalHostName = 'a-different-approved-host'; },
+  ]) {
+    const f = await fixture(t), p = preparationPlan({ ...f.p.request, backend: 'mlx' }, f.tinySources);
+    Object.assign(f.a, { backend: 'mlx', preparationPlanSha256: p.planSha256, runner: 'nax-macos-2', runnerTarget: 'secondary', runnerLabel: 'rw-mage' });
+    Object.assign(f.deps, { platform: 'darwin', host: () => 'Michael-MBP.local' }); f.deps.env.RUNNER_NAME = 'nax-macos-2'; mutation(f.a,f.deps);
+    await assert.rejects(runPreparation(f.a,p,f.tinySources,f.deps), /PREP_RUNNER_IDENTITY_MISMATCH/);
+    assert.equal(f.observed.credentialReads,0); assert.equal(f.observed.buildChecks,0); assert.equal(f.observed.spawns.length,0); assert.equal(f.observed.requests.length,0);
+  }
+});
+test('Windows preparation still binds the local OS hostname rather than GitHub Runner name', () => {
+  const a = { backend:'candle',runner:'local-windows-host',runnerAccount:'account' }, io = { platform:'win32',env:{RUNNER_NAME:'different-ci-label'},account:()=> 'account',host:()=> 'local-windows-host' };
+  validatePreparationRuntimeIdentity(a,io); assert.throws(()=>validatePreparationRuntimeIdentity({...a,runner:'different-ci-label'},io),/PREP_RUNNER_IDENTITY_MISMATCH/);
+});
+test('safe preparation errors expose only allowlisted code/phase; hostile/extra/raw/oversized log text never echoes', () => {
+  const secret = 'DECLARED-PRIVATE-TEXT-DO-NOT-ECHO', good = safePreparationFailure(new PreparationFailure('runtime_identity'));
+  assert.deepEqual(good,{schemaVersion:1,kind:'flux3-preparation-safe-error',phase:'runtime_identity',code:'PREP_RUNNER_IDENTITY_MISMATCH'});
+  assert.deepEqual(parseSafePreparationFailure(JSON.stringify(good)),good);
+  for(const text of [secret,JSON.stringify({...good,message:secret}),JSON.stringify({...good,code:secret}),JSON.stringify({...good,phase:secret}),JSON.stringify({...good,schemaVersion:'1'}),'x'.repeat(4097)]) {
+    const safe = parseSafePreparationFailure(text); assert.equal(safe.code,'PREP_UNKNOWN_FAILURE'); assert(!JSON.stringify(safe).includes(secret)); assert.deepEqual(Object.keys(safe).sort(),['code','kind','phase','schemaVersion']);
+  }
+  assert(!JSON.stringify(safePreparationFailure(new Error(secret),'authorization')).includes(secret));
+  const file = readFile(new URL('./flux3-terminal-host.mjs',import.meta.url),'utf8');
+  return file.then(text=>{assert.match(text,/Math\.min\(size, 4096\)/);assert.match(text,/say\(parseSafePreparationFailure/);assert.match(text,/runnerTarget: dispatch\.runnerTarget, runnerLabel: dispatch\.runnerLabel/);});
+});
+
+test('prepare CLI emits only the safe phase/code envelope on malformed private input, never exception text or paths', async t => {
+  const dir=await mkdtemp(path.join(tmpdir(),'flux3-safe-cli-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const input=path.join(dir,'private-admission.json'), marker='DECLARED_PRIVATE_ERROR_TEXT_NOT_LOGGED';await writeFile(input,marker);
+  const {execFile}=await import('node:child_process'), {promisify}=await import('node:util');
+  await assert.rejects(promisify(execFile)(process.execPath,[path.join(ROOT,'scripts/flux3-image-klein-terminal-driver.mjs'),'prepare','run',input,path.join(dir,'plan.json')],{env:{CUDA_VISIBLE_DEVICES:'-1',PATH:process.env.PATH,SystemRoot:process.env.SystemRoot},timeout:30000}), error=>{
+    const value=JSON.parse(error.stdout.trim());assert.deepEqual(value,{schemaVersion:1,kind:'flux3-preparation-safe-error',phase:'admission',code:'PREP_UNKNOWN_FAILURE'});
+    assert(!error.stdout.includes(marker)&&!error.stdout.includes(input));assert(!error.stderr.includes(marker)&&!error.stderr.includes(input));return error.code===1;
+  });
 });

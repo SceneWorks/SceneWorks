@@ -75,7 +75,7 @@ export function assessForeignGraphics(foreignPids, memoryByPid, { processLimit =
 }
 export async function observeProcessTable(checked, platform) {
   if (platform === 'win32') {
-    const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}},@{n="executable";e={$_.ExecutablePath}},@{n="startedAt";e={$_.CreationDate.ToUniversalTime().ToString("o")}} | ConvertTo-Json -Compress';
+    const script = 'Get-CimInstance Win32_Process | Select-Object @{n="pid";e={$_.ProcessId}},@{n="ppid";e={$_.ParentProcessId}},@{n="command";e={$_.Name}},@{n="executable";e={$_.ExecutablePath}},@{n="startedAt";e={$_.CreationDate.ToUniversalTime().ToString("o")}},@{n="sessionId";e={$_.SessionId}} | ConvertTo-Json -Compress';
     const value = JSON.parse((await checked('powershell.exe', ['-NoProfile','-Command',script], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout); return Array.isArray(value) ? value : [value];
   }
   const text = (await checked('ps', ['-axo','pid=,ppid=,lstart=,comm='], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 })).stdout;
@@ -90,7 +90,16 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
   const table = await (processTable ? processTable() : observeProcessTable(checked, platform)); assert(Array.isArray(table) && table.some(p => p.pid === controllerPid), 'cannot prove controller process ancestry');
   const ancestors = processAncestors(table, controllerPid), runners = table.filter(p => /^Runner\.Worker(?:\.exe)?$/i.test(path.basename(p.command)));
-  assert(runners.every(p => ancestors.has(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job is allowed');
+  // A queued campaign may admit exactly three companions, but only after the signed four-slot
+  // proof revalidates API job identity, live heartbeats and actual PID/start-time/executable ancestry.
+  // Never use ownPids as a Runner.Worker allowlist. Local and Mac guards are unchanged.
+  let companions = [];
+  if (a.queueReservation) {
+    assert(platform === 'win32' && a.backend === 'candle', 'queue reservations are Windows Candle only');
+    const { verifyQueueReservation } = await import('./flux3-terminal-queue.mjs');
+    companions = await verifyQueueReservation(a, table, controllerPid, now);
+  }
+  assert(runners.every(p => ancestors.has(p.pid) || companions.includes(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job or verified queue companions are allowed');
   if (a.backend === 'mlx') {
     assert(platform === 'darwin' && arch === 'arm64', 'physical Apple Silicon Mac required');
     const mac = MAC_RUNNERS[a.runner]; assert(mac, 'only a known physical Mac runner admitted');
