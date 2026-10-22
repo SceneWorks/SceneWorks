@@ -1,6 +1,26 @@
 //! rust-api catalog tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// Retain this guard across the complete fixture, including awaited catalog mutations.
+fn catalog_fixture_cache_root(
+    settings: &Settings,
+) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::model_source_library(&settings.data_dir).root(),
+        hub.as_path()
+    );
+    guard
+}
+
 #[test]
 fn merge_model_manifest_entry_deep_merges_nested_blocks() {
     // The worker reads the merged manifest entry from the job payload now
@@ -1217,6 +1237,8 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     // repo/file the worker fetches into the HF cache; a non-HF source or already-installed
     // LoRA is rejected, and an unknown id is 404.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -1260,7 +1282,7 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     )
     .expect("builtin loras writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, job) = request(
         app.clone(),
         "POST",
@@ -1292,9 +1314,14 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     // detail, so the code is load-bearing contract, not decoration: a client rendering a
     // pre-download catalog snapshot would otherwise show "Not Installed" next to an error
     // saying it IS installed. Guarded here so the code can't be dropped or renamed silently.
-    let repo_dir =
-        huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
-            .expect("repo cache path");
+    let repo_dir = huggingface_repo_cache_path(&settings.data_dir, "Test/lora-install-probe")
+        .expect("repo cache path");
+    assert_eq!(
+        repo_dir,
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--Test--lora-install-probe")
+    );
     let revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
     std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
@@ -1321,6 +1348,14 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
 async fn model_and_lora_routes_match_manifest_behavior() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    assert_eq!(
+        huggingface_repo_cache_path(&settings.data_dir, "owner/model").unwrap(),
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--owner--model"),
+    );
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -1440,7 +1475,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
     write_test_safetensors(&lora_dir.join("style.safetensors"));
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models[0]["name"], "User Model");
@@ -1719,7 +1754,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["manifestEntry"]["scope"], "global");
     assert!(job["payload"].get("sourcePath").is_none());
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, url_job) = request(
         app,
         "POST",
@@ -1749,7 +1784,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
     assert_eq!(url_job["payload"]["manifestEntry"]["family"], "z-image");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let upload_bytes = test_safetensors_bytes();
     let (status, upload_job) = request_multipart_lora_upload(
         app,
@@ -1789,7 +1824,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     );
 
     TEST_MAX_LORA_UPLOAD_BYTES.with(|cap| cap.set(4));
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request_multipart_lora_upload(
         app,
         &[("name", "Too Large"), ("scope", "global")],
@@ -1808,7 +1843,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     std::fs::create_dir_all(&lora_source_dir).expect("lora source dir creates");
     let lora_source = lora_source_dir.join("safe-local.safetensors");
     write_test_safetensors(&lora_source);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, source_path_job) = request(
         app,
         "POST",
@@ -1827,7 +1862,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
 
     let outside_source = temp_dir.path().join("outside.safetensors");
     write_test_safetensors(&outside_source);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request(
         app,
         "POST",
@@ -1844,7 +1879,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
             "LoRA sourcePath must be inside app-managed data/loras, project/loras, or staged upload folders"
         );
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (bad_status, bad_error) = request(
         app.clone(),
         "POST",
@@ -1951,7 +1986,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // rejected with both values surfaced in the error message.
     let mismatch_path = detect_dir.join("qwen-as-wan.safetensors");
     write_test_safetensors_with_keys(&mismatch_path, &qwen_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, mismatch_error) = request(
         app,
         "POST",
@@ -1974,7 +2009,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Z-Image; sparse Qwen LoRAs can target only early blocks.
     let auto_path = detect_dir.join("low-mmdit-no-autofill.safetensors");
     write_test_safetensors_with_keys(&auto_path, &z_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, auto_job) = request(
         app,
         "POST",
@@ -1992,7 +2027,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // user-supplied family is kept.
     let match_path = detect_dir.join("z-match.safetensors");
     write_test_safetensors_with_keys(&match_path, &z_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, match_job) = request(
         app,
         "POST",
@@ -2010,7 +2045,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Wan-shaped tensors are detected and accepted when the user agrees.
     let wan_match_path = detect_dir.join("wan-match.safetensors");
     write_test_safetensors_with_keys(&wan_match_path, &wan_video_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, wan_job) = request(
         app,
         "POST",
@@ -2029,7 +2064,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // accepted unchanged — the user-supplied label survives.
     let inconclusive_path = detect_dir.join("inconclusive.safetensors");
     write_test_safetensors(&inconclusive_path);
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, inconclusive_job) = request(
         app,
         "POST",
@@ -2050,7 +2085,7 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // Confident Qwen-Image detection (block count > 40) auto-fills.
     let qwen_path = detect_dir.join("qwen-autofill.safetensors");
     write_test_safetensors_with_keys(&qwen_path, &qwen_image_tensor_keys());
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, qwen_job) = request(
         app,
         "POST",
@@ -5719,6 +5754,14 @@ async fn deleting_a_global_lora_sweeps_its_project_parked_preview_samples() {
 #[tokio::test]
 async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    assert_eq!(
+        huggingface_repo_cache_path(&settings.data_dir, "partial/model").unwrap(),
+        settings
+            .data_dir
+            .join("cache/huggingface/hub/models--partial--model"),
+    );
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     std::fs::write(
@@ -5777,8 +5820,7 @@ async fn partial_model_trash_failure_invalidates_warm_install_and_variant_state(
     std::fs::write(failing_dir.join("weights.safetensors"), "weights")
         .expect("failing source writes");
 
-    let (app, state) =
-        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let (app, state) = create_app_with_state(settings.clone()).expect("app and state create");
     *state.model_size_estimate_disabled_override.lock() = Some(true);
     crate::test_reset_catalog_build_counters();
     let (status, warm) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
@@ -7885,7 +7927,9 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let data_dir = temp_dir.path().join("data");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    let data_dir = settings.data_dir.clone();
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     let model_dir = data_dir.join("models/imports/cached_model");
@@ -7898,12 +7942,20 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
     let library = sceneworks_core::hf_home::model_source_library(&data_dir)
         .root()
         .to_owned();
+    assert_eq!(library, data_dir.join("cache/huggingface/hub"));
     let snapshot = ArtifactSourceLibrary::new(&library)
         .expect("library root")
         .repository_root("owner/cached-model")
         .expect("repository root")
         .join("snapshots")
         .join(&revision);
+    assert_eq!(
+        snapshot,
+        library
+            .join("models--owner--cached-model")
+            .join("snapshots")
+            .join(&revision)
+    );
     std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
     std::fs::write(snapshot.join("model.safetensors"), b"weights").expect("weights write");
     let identity =
@@ -7979,7 +8031,7 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, body) = request(
         app,
         "DELETE",
@@ -8021,7 +8073,9 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
 
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let data_dir = temp_dir.path().join("data");
+    let settings = test_settings(&temp_dir);
+    let _cache_root = catalog_fixture_cache_root(&settings);
+    let data_dir = settings.data_dir.clone();
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
 
@@ -8029,12 +8083,20 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
     let library = sceneworks_core::hf_home::model_source_library(&data_dir)
         .root()
         .to_owned();
+    assert_eq!(library, data_dir.join("cache/huggingface/hub"));
     let snapshot = ArtifactSourceLibrary::new(&library)
         .expect("library root")
         .repository_root("owner/tiered-model")
         .expect("repository root")
         .join("snapshots")
         .join(&revision);
+    assert_eq!(
+        snapshot,
+        library
+            .join("models--owner--tiered-model")
+            .join("snapshots")
+            .join(&revision)
+    );
     std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
     std::fs::write(snapshot.join("q8.safetensors"), b"q8-weights").expect("q8 writes");
     std::fs::write(snapshot.join("q4.safetensors"), b"q4-weights").expect("q4 writes");
@@ -8115,7 +8177,7 @@ async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
     )
     .expect("user models writes");
 
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let app = create_app(settings.clone()).expect("app creates");
     let (status, _body) = request(
         app,
         "DELETE",

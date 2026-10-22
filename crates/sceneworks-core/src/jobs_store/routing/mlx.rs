@@ -1144,6 +1144,9 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
         return false;
     }
+    if kernel == "moss_image_lora" {
+        return super::catalog::moss_training_plan_is_supported(plan);
+    }
     // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;

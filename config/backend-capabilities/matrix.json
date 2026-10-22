@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 139,
     "importedFamilyCount": 4,
-    "cellCount": 1078,
+    "cellCount": 1082,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -15,21 +15,21 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "6a4fb8bb8511613540e3be5ac8be4040226046a99b430bfd8e490d323e80c7a9",
-    "descriptorCandleFacts": "173c2baaf23aedd660d7b710b5334a783be5775020759bd3b9d2879fbe7406cf",
-    "descriptorCandleRuntime": "1111fc66da9d24aabdb24ab042a21212a6965a967fb936aba65fcf419bdf3281",
-    "descriptorMlxFacts": "2b0429ca7a70927f431491167fca3d286c2d32bdbec41a36c200405fd4e607af",
-    "descriptorMlxRuntime": "0aef06d6dfd337a60b868ab0ce571a7bc24596761494dba969cd3ef9f76a1ef1",
-    "descriptorPreviewFacts": "f56fc1a517641838466ab695aea26fae855a8cc21b2cb4fbdaf8f4637717376f",
+    "descriptorAudioFacts": "d9bda6f24be84829ff33ce643a93b1b93ef5a1925023ee7ce5113b4437aedd40",
+    "descriptorCandleFacts": "96f98655ef8d8e8ecd78e90152ff8c5348a9dc3e7d5eb4748dff2c934202d51b",
+    "descriptorCandleRuntime": "10b113d5a725f816c25ac46c11b281f58d70cb4b381b40466b4c38790d7b4121",
+    "descriptorMlxFacts": "0874675b65582cb87eac40184249ac2ae6aecd2a0b66e90cb4f06721e410c8ac",
+    "descriptorMlxRuntime": "df843ac9808c1b3cdbe9ca9f4db79be892da6a4d5bf5291edb246126c7548791",
+    "descriptorPreviewFacts": "cba6d3e9e9f4b9d5aa9935227ee32bdaad2745d0a1e8ee081574b39d31d6fc1d",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "a370752e7764acfdf2f0e7fe94a11650191d520056e7f46b06a29f2947e056ad",
-    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
-    "routerCandle": "aefaabbd6210aef7c91775ef9ea22464189ca3576497531467f1278cc98f1910",
-    "routerCatalog": "7c15b7eaa510e9ac9ba0ef8c4fad44e5a46c54ffc4179e3a9a39edc658586022",
+    "manifest": "dcfbb92b5d51346f9d0229497550d14d297bbd3afda04b898871704257f2f21f",
+    "modelImportDefaults": "57da46d39740f65681568d298e1c5acbbc1cdfc43a4e79fe2c0c39f2b7196df2",
+    "routerCandle": "c7d7f2061fa0d4c7a47e953d6cf28f7e4dee43c0440626fb4f6574c4c7312fa4",
+    "routerCatalog": "0dacfde9632ab57897fc47a9fc6a3eaa0c44571c1839d231da0498150c9be8b1",
     "routerGaps": "e553137bed2fb2880a66f8a9df72b326247708ab7e4d94776d4be68de8bdd6ad",
-    "routerMlx": "ccd9a5a746a0752a90691a9bc88594b288d5fc50670604397a51fbcf1aeb8a23",
+    "routerMlx": "dd533ef5670172cb32301307fd0b06d869ea54a2cef933e9f146348ebae50760",
     "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
-    "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
+    "trainingCatalog": "9753b5b0a9308b3981e161abc8b37b2a9a9ce16b73527548791d04d53fc36be6",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
     "webImageAdvanced": "c99975b860ed59b20e1ec7a039f7a44c602efd65350bd8fbc250cddff1fbf9a1",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "14208b1a60b21fea666670e1df66e2c51318f1f3955526ac102ca8a01ee7f7d1",
+    "workerTrainingDispatch": "21ce183c7a3517e00a53eef3f378393fd54c00a0a84e702ce886013fd4c5faae",
     "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -4156,13 +4156,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4200,13 +4200,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -8681,6 +8681,50 @@
       "target": "mage_flow_base_lora",
       "baseModel": "mage_flow_base",
       "kernel": "mage_flow_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "moss_image_base_lora",
+      "baseModel": "moss_image_base",
+      "kernel": "moss_image_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "moss_image_base_lora",
+      "baseModel": "moss_image_base",
+      "kernel": "moss_image_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "moss_image_sft_lora",
+      "baseModel": "moss_image_sft",
+      "kernel": "moss_image_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "moss_image_sft_lora",
+      "baseModel": "moss_image_sft",
+      "kernel": "moss_image_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",

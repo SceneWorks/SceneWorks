@@ -131,7 +131,6 @@ pub fn native_request(
         "maskAssetId",
         "characterId",
         "characterLookId",
-        "loras",
     ] {
         if payload.get(key).is_some_and(meaningful) {
             return Err(format!(
@@ -405,7 +404,6 @@ mod tests {
             ("width", json!(0)),
             ("count", json!(9)),
             ("referenceAssetId", json!("ref")),
-            ("loras", json!([{"id":"style"}])),
             ("mode", json!("edit_image")),
         ] {
             let mut p = body(json!({}));

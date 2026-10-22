@@ -864,6 +864,46 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         ))
     })?;
     let advanced = &plan.config.advanced;
+    if plan.target.kernel == "moss_image_lora" {
+        if let Some(options) = advanced.get("modelOptions") {
+            let options = options.as_object().ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS modelOptions must be an object".into())
+            })?;
+            if options
+                .iter()
+                .any(|(k, v)| k != "vae_posterior" || v.as_str() != Some("posterior_mean_v1"))
+            {
+                return Err(WorkerError::InvalidPayload(
+                    "MOSS modelOptions accepts only vae_posterior=posterior_mean_v1".into(),
+                ));
+            }
+        }
+        if let Some(modules) = advanced.get("loraTargetModules") {
+            let modules = modules.as_array().ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS loraTargetModules must be an array".into())
+            })?;
+            if modules.iter().any(|module| !module.is_string()) {
+                return Err(WorkerError::InvalidPayload(
+                    "MOSS loraTargetModules must contain only strings".into(),
+                ));
+            }
+        }
+        if let Some(factor) = advanced.get("decomposeFactor") {
+            let factor = factor.as_i64().ok_or_else(|| {
+                WorkerError::InvalidPayload("MOSS decomposeFactor must be an integer".into())
+            })?;
+            if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
+                return Err(WorkerError::InvalidPayload(
+                    "MOSS decomposeFactor must be -1 or a positive i32".into(),
+                ));
+            }
+        }
+        for key in ["cacheLatents", "cacheTextEmbeddings"] {
+            if advanced.get(key).is_some_and(|v| v != &Value::Bool(true)) {
+                return Err(WorkerError::InvalidPayload(format!("MOSS {key} must be true; native training freezes and caches the VAE/text encoder")));
+            }
+        }
+    }
     let base_model = plan.target.base_model.as_str();
     let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
     let supported = match network_type.as_str() {
@@ -2192,6 +2232,11 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
 /// Pure production mapping used by both dispatch and matching-platform capability facts.
 pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
     match kernel {
+        "moss_image_lora" => match base_model {
+            "moss_image_base" => Some("moss_image_base"),
+            "moss_image_sft" => Some("moss_image_sft"),
+            _ => None,
+        },
         "z_image_lora" => Some("z_image_turbo"),
         "sdxl_lora" => Some("sdxl"),
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
@@ -2361,18 +2406,20 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
-/// The `LoadSpec.precision` a trainer is loaded with. Generally it tracks `train_dtype` (the MLX
-/// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
-/// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
-/// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
-/// load at Bf16 or it dies at load. The engine id is shared by the MLX and Candle (sc-24160) 2.1
-/// trainers, so the one rule covers both native backends.
+/// Source-load precision, separate from the requested training compute dtype. Qwen Image 2.1
+/// and MOSS Base/SFT authenticate their official BF16 source and use `TrainingConfig.train_dtype`
+/// for FP32 compute after loading; sending Fp32 to those factories rejects an otherwise valid run.
+/// Other trainers (e.g. Lens) still load directly at their requested compute precision.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
-    if engine_id != "qwen_image_2_1" && train_dtype.trim().eq_ignore_ascii_case("f32") {
+    if !matches!(
+        engine_id,
+        "qwen_image_2_1" | "moss_image_base" | "moss_image_sft"
+    ) && train_dtype.trim().eq_ignore_ascii_case("f32")
+    {
         Precision::Fp32
     } else {
         Precision::Bf16
@@ -2643,30 +2690,51 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// macOS MLX path (bf16 alone fits) yet a guaranteed OOM on candle for these families — and a thin /
 /// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
 /// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B run impossible to configure
-/// into a dense-backward OOM. On macOS this is the identity (the MLX path tolerates a dense bf16
-/// backward), so the mapped config passes through unchanged.
-#[cfg(target_os = "macos")]
-fn finalize_training_config(config: TrainingConfig, _plan: &TrainingPlan) -> TrainingConfig {
-    config
-}
-
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// into a dense-backward OOM. Those safety overrides are Candle-only. Both backends receive the
+/// same strict MOSS options bag and adapter-training sampler default.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 fn finalize_training_config(mut config: TrainingConfig, plan: &TrainingPlan) -> TrainingConfig {
-    if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
-        tracing::info!(
-            event = "candle_training_force_gradient_checkpointing",
-            kernel = %plan.target.kernel,
-            base_model = %plan.target.base_model,
-            "candle big-DiT training family requires gradient checkpointing; overriding the plan's \
-             gradientCheckpointing=false to avoid a dense-backward CUDA OOM"
-        );
-        config.gradient_checkpointing = true;
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if candle_requires_gradient_checkpointing(plan) && !config.gradient_checkpointing {
+            tracing::info!(
+                event = "candle_training_force_gradient_checkpointing",
+                kernel = %plan.target.kernel,
+                base_model = %plan.target.base_model,
+                "candle big-DiT training family requires gradient checkpointing; overriding the plan's \
+                 gradientCheckpointing=false to avoid a dense-backward CUDA OOM"
+            );
+            config.gradient_checkpointing = true;
+        }
+        // The Candle LTX trainer intentionally uses f32; the shared MLX default stays bf16.
+        if plan.target.kernel == "ltx_mlx_lora" {
+            config.train_dtype = "f32".to_owned();
+        }
     }
-    // The candle LTX trainer intentionally runs f32: bf16 was measured to decorrelate gradients
-    // through the deep distilled DiT. Keep the shared target's bf16 default for MLX, but normalize
-    // the off-Mac config before validation.
-    if plan.target.kernel == "ltx_mlx_lora" {
-        config.train_dtype = "f32".to_owned();
+    if plan.target.kernel == "moss_image_lora" {
+        if plan
+            .config
+            .advanced
+            .get("timestepType")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            config.timestep_type = "moss_stage3_v1".to_owned();
+        }
+        config.model_options = plan
+            .config
+            .advanced
+            .get("modelOptions")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        config
+            .model_options
+            .entry("vae_posterior".to_owned())
+            .or_insert_with(|| json!("posterior_mean_v1"));
     }
     config
 }
@@ -7758,6 +7826,199 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn moss_shared_finalization_defaults_strict_options_and_preserves_explicit_sampler() {
+        let dir = tempfile::tempdir().unwrap();
+        let targets = sceneworks_core::training::builtin_training_targets();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.base_model == base)
+                .unwrap();
+            let mut value = plan_json(dir.path(), &target.kernel, base, "lora", &["item.png"]);
+            value["target"]["targetId"] = json!(target.id);
+            value["target"]["family"] = json!(target.family);
+            value["config"] = serde_json::to_value(&target.defaults).unwrap();
+            let advanced = value["config"]["advanced"].as_object_mut().unwrap();
+            advanced.remove("timestepType");
+            advanced.remove("modelOptions");
+            let config = engine_training_config(&parse(value.clone()));
+            assert_eq!(config.timestep_type, "moss_stage3_v1");
+            assert_eq!(
+                json!(config.model_options),
+                json!({"vae_posterior":"posterior_mean_v1"})
+            );
+            assert!(config.lora_target_modules.is_empty());
+            assert_eq!(config.decompose_factor, -1);
+            for blank in ["", "   "] {
+                let mut unspecified = value.clone();
+                unspecified["config"]["advanced"]["timestepType"] = json!(blank);
+                let config = engine_training_config(&parse(unspecified));
+                assert_eq!(config.timestep_type, "moss_stage3_v1", "{base}: {blank:?}");
+            }
+            value["config"]["advanced"]["timestepType"] = json!("uniform");
+            value["config"]["advanced"]["modelOptions"] =
+                json!({"vae_posterior":"posterior_mean_v1"});
+            let config = engine_training_config(&parse(value));
+            assert_eq!(config.timestep_type, "uniform");
+            assert_eq!(
+                json!(config.model_options),
+                json!({"vae_posterior":"posterior_mean_v1"})
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_native_requests_keep_official_bf16_source_and_requested_compute_for_both_methods() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = Settings::for_test(dir.path().to_path_buf());
+        let root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("moss.png");
+        image::RgbImage::from_pixel(16, 16, image::Rgb([9, 17, 31]))
+            .save(&image)
+            .unwrap();
+        let targets = sceneworks_core::training::builtin_training_targets();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|t| t.base_model == base && t.kernel == "moss_image_lora")
+                .expect("MOSS target");
+            for network in ["lora", "lokr"] {
+                for dtype in ["bf16", "f32"] {
+                    let mut value = plan_json(
+                        dir.path(),
+                        &target.kernel,
+                        base,
+                        network,
+                        &[image.to_str().unwrap()],
+                    );
+                    value["target"]["targetId"] = json!(target.id);
+                    value["target"]["family"] = json!(target.family);
+                    value["config"] = serde_json::to_value(&target.defaults).unwrap();
+                    value["config"]["rank"] = json!(2);
+                    value["config"]["alpha"] = json!(3);
+                    value["config"]["triggerWord"] = json!("sksmoss");
+                    value["config"]["advanced"]["networkType"] = json!(network);
+                    value["config"]["advanced"]["mixedPrecision"] = json!(dtype);
+                    value["config"]["advanced"]["loraTargetModules"] = json!(["q", "ffn_up_gate"]);
+                    value["config"]["advanced"]["decomposeFactor"] = json!(4);
+                    value["dataset"]["items"][0]["caption"] =
+                        json!("日本語 caption {\"layout\":\"left\"}");
+                    value["output"]["triggerWords"] = json!(["sksmoss"]);
+                    for (field, invalid, expected) in [
+                        ("loraTargetModules", json!("q"), "must be an array"),
+                        ("loraTargetModules", json!(["q", 7]), "only strings"),
+                        ("decomposeFactor", json!(4_294_967_295_i64), "positive i32"),
+                        ("decomposeFactor", json!(0), "positive i32"),
+                        ("decomposeFactor", json!("4"), "must be an integer"),
+                    ] {
+                        let mut refused = value.clone();
+                        refused["config"]["advanced"][field] = invalid;
+                        let error = validate_training_target_config(&parse(refused))
+                            .expect_err("invalid MOSS mapping input must fail before loading");
+                        assert!(
+                            matches!(&error, WorkerError::InvalidPayload(message) if message.contains(field) && message.contains(expected)),
+                            "{base}/{network}/{dtype}/{field}: {error:?}"
+                        );
+                    }
+                    let plan = parse(value);
+                    let engine = validate_training_target_config(&plan)
+                        .expect("actual registered MOSS trainer accepts offered method");
+                    assert_eq!(engine, base);
+                    let request = training_request_from_plan(
+                        &settings,
+                        &plan,
+                        &mut PreparedTrainingInputs::default(),
+                        false,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        request.config.train_dtype, dtype,
+                        "compute choice was demoted"
+                    );
+                    assert_eq!(request.config.timestep_type, "moss_stage3_v1");
+                    assert_eq!(request.config.trigger_word.as_deref(), Some("sksmoss"));
+                    assert_eq!(
+                        request.config.network_type,
+                        if network == "lora" {
+                            NetworkType::Lora
+                        } else {
+                            NetworkType::Lokr
+                        }
+                    );
+                    assert_eq!((request.config.rank, request.config.alpha), (2, 3.));
+                    assert_eq!(request.config.lora_target_modules, vec!["q", "ffn_up_gate"]);
+                    assert_eq!(request.config.decompose_factor, 4);
+                    assert_eq!(
+                        request.config.model_options.get("vae_posterior"),
+                        Some(&json!("posterior_mean_v1"))
+                    );
+                    assert_eq!(
+                        request.config.model_options.len(),
+                        1,
+                        "common controls leaked into strict MOSS options"
+                    );
+                    assert_eq!(
+                        request.items[0].image_path,
+                        std::fs::canonicalize(&image).unwrap()
+                    );
+                    assert_eq!(
+                        request.items[0].caption,
+                        "日本語 caption {\"layout\":\"left\"}"
+                    );
+                    assert_eq!(request.trigger_words, vec!["sksmoss"]);
+                    let source = dir.path().join("models").join(base);
+                    let shared = dir.path().join("models").join("moss-shared");
+                    let inputs = TrainerLoadInputs {
+                        weights_dir: source.clone(),
+                        text_encoder: None,
+                        components: std::collections::BTreeMap::from([(
+                            "moss-shared-snapshot".into(),
+                            WeightsSource::Dir(shared.clone()),
+                        )]),
+                    };
+                    let spec = inputs.load_spec(engine, &request.config.train_dtype);
+                    assert!(
+                        matches!(spec.precision, Precision::Bf16),
+                        "{base}/{network}/{dtype}: official source precision changed"
+                    );
+                    assert!(matches!(&spec.weights,WeightsSource::Dir(path) if path==&source));
+                    assert!(
+                        matches!(spec.components.get("moss-shared-snapshot"),Some(WeightsSource::Dir(path)) if path==&shared)
+                    );
+                    assert!(spec.quantize.is_none());
+                    assert!(spec.text_encoder.is_none());
+                    let output = TrainingOutput {
+                        adapter_path: PathBuf::from(&plan.output.output_dir)
+                            .join(&plan.output.file_name),
+                        steps: 3,
+                        final_loss: 0.25,
+                    };
+                    let backend = crate::inference_runtime::trainer_descriptor(engine)
+                        .expect("actual selected native trainer")
+                        .backend;
+                    let result = training_result(&plan, &output, &[], &[], &[], 0, 0., backend);
+                    assert_eq!(result["backend"], json!(backend));
+                    assert_eq!(result["baseModel"], json!(base));
+                    assert_eq!(result["networkType"], json!(network));
+                    assert_eq!(result["triggerWords"], json!(["sksmoss"]));
+                    assert_eq!(result["datasetItemCount"], json!(1));
+                }
+            }
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
         // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
         // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
@@ -7770,7 +8031,7 @@ mod tests {
                 "{dtype}"
             );
         }
-        // Every other trainer keeps tracking train_dtype.
+        // Trainers without a fixed BF16 source contract keep tracking train_dtype.
         assert!(matches!(
             training_load_precision("lens", "f32"),
             Precision::Fp32

@@ -1166,8 +1166,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
     // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
     // (`iris_mlx_eligible`).
-    ModelCaps::new("moss_image_base", true, true, false, false, false),
-    ModelCaps::new("moss_image_sft", true, true, false, false, false),
+    ModelCaps::new("moss_image_base", true, true, false, true, false),
+    ModelCaps::new("moss_image_sft", true, true, false, true, false),
     ModelCaps::new("iris_3b", true, true, false, true, false),
 ];
 
@@ -2197,6 +2197,7 @@ pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
 /// rather than restating it: a kernel that is routed here but has no trainer mapping is claimed by
 /// the mlx worker and then immediately failed, which is exactly how `mage_flow_lora` shipped broken.
 pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2231,6 +2232,7 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
 /// like `krea_lora` — it is also in [`MLX_ONLY_TRAINING_KERNELS`] but NOT
 /// [`MLX_ROUTED_TRAINING_KERNELS`] (the MLX control lane is B5/sc-10177).
 pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "z_image_lora",
     "sdxl_lora",
     "kolors_lora",
@@ -2261,6 +2263,34 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
     CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
 }
 
+/// Both native MOSS lanes train adapters for the exact selected Base/SFT checkpoint only.
+pub(crate) fn moss_training_plan_is_supported(plan: &Map<String, Value>) -> bool {
+    let base = plan
+        .get("target")
+        .and_then(Value::as_object)
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str);
+    if !matches!(base, Some("moss_image_base" | "moss_image_sft")) {
+        return false;
+    }
+    let advanced = match plan.get("config") {
+        None => None,
+        Some(Value::Object(config)) => match config.get("advanced") {
+            None => None,
+            Some(Value::Object(advanced)) => Some(advanced),
+            _ => return false,
+        },
+        _ => return false,
+    };
+    let method = match advanced.and_then(|advanced| advanced.get("networkType")) {
+        None => "lora",
+        Some(Value::String(value)) if value.trim().is_empty() => "lora",
+        Some(Value::String(value)) => value.trim(),
+        _ => return false,
+    };
+    method.eq_ignore_ascii_case("lora") || method.eq_ignore_ascii_case("lokr")
+}
+
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
@@ -2269,6 +2299,7 @@ pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
 /// [`CANDLE_ROUTED_TRAINING_KERNELS`], while a generic worker remains refused. `krea_control` is the
 /// intentional Candle-only exception; the historical constant name remains for compatibility.
 pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+    "moss_image_lora",
     "ltx_mlx_lora",
     "krea_lora",
     "sd3_lora",
@@ -2581,6 +2612,8 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "moss_image_base",
+        "moss_image_sft",
         // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
         "iris_3b",
     ];
@@ -2629,6 +2662,7 @@ mod tests {
     ];
 
     const EXPECTED_MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -2652,6 +2686,7 @@ mod tests {
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "z_image_lora",
         "sdxl_lora",
         "kolors_lora",
@@ -2673,6 +2708,7 @@ mod tests {
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
+        "moss_image_lora",
         "ltx_mlx_lora",
         "krea_lora",
         "sd3_lora",
@@ -3560,7 +3596,7 @@ mod tests {
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds, and
     /// the exact bytes the web LoRA picker reads `loraCompatibility` out of.
-    fn builtin_image_models() -> Vec<serde_json::Value> {
+    pub(super) fn builtin_image_models() -> Vec<serde_json::Value> {
         let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -4233,5 +4269,131 @@ mod tests {
              queues FOREVER with no error and an idle worker (sc-15328). Either make a lane claim \
              it, or stop advertising `loraCompatibility` on the model: {stranded:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod moss_native_training_routing_tests {
+    use super::*;
+    use crate::contracts::{JobSnapshot, JobType};
+    use crate::jobs_store::routing::{candle, mlx};
+
+    fn job(plan: Value) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id":"moss-routing", "type":"lora_train", "status":"queued",
+            "payload":{"plan":plan}, "result":{}, "requestedGpu":"auto",
+            "progress":0, "stage":"queued", "message":"", "attempts":0,
+            "cancelRequested":false, "createdAt":"", "updatedAt":""
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic() {
+        let candle_worker: crate::contracts::WorkerSnapshot = serde_json::from_value(json!({
+            "id":"moss-candle", "gpuId":"0", "gpuName":null, "status":"idle",
+            "currentJobId":null, "capabilities":["image_generate", "candle"],
+            "loadedModels":[], "registeredAt":"", "lastSeenAt":""
+        }))
+        .unwrap();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let entry = super::tests::builtin_image_models()
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base))
+                .unwrap()
+                .clone();
+            for method in ["lora", "lokr"] {
+                let mut generation = job(json!({}));
+                generation.job_type = JobType::ImageGenerate;
+                generation.payload = json!({
+                    "model":base, "mode":"text_to_image", "prompt":"a ceramic cup",
+                    "width":64, "height":64, "modelManifestEntry":entry,
+                    "loras":[{"id":"trained-moss", "networkType":method, "weight":0.65}],
+                    "advanced":{"mossImage":{"acceleration":"off"}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                let entry = generation.payload["modelManifestEntry"]
+                    .as_object()
+                    .unwrap();
+                assert!(
+                    crate::moss_image::native_request(&generation.payload, entry)
+                        .unwrap()
+                        .is_some()
+                );
+                assert!(
+                    candle::image_job_is_candle_eligible(&generation),
+                    "{base}/{method}"
+                );
+                assert!(crate::jobs_store::worker_supports_job(
+                    &candle_worker,
+                    &generation
+                ));
+                assert_eq!(generation.payload["loras"][0]["networkType"], method);
+                assert_eq!(generation.payload["loras"][0]["weight"], 0.65);
+                // Admission of custom adapters must not enable packed weights or conditioning.
+                for field in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+                    let mut invalid = generation.clone();
+                    invalid
+                        .payload
+                        .insert(field.into(), json!("unsupported-asset"));
+                    assert!(!candle::image_job_is_candle_eligible(&invalid));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &invalid
+                    ));
+                }
+                let mut edit = generation.clone();
+                edit.payload.insert("mode".into(), json!("edit_image"));
+                assert!(!candle::image_job_is_candle_eligible(&edit));
+                for bits in [4, 8] {
+                    let mut packed = generation.clone();
+                    packed.payload.get_mut("advanced").unwrap()["mlxQuantize"] = json!(bits);
+                    assert!(!candle::image_job_is_candle_eligible(&packed));
+                    assert!(!crate::jobs_store::worker_supports_job(
+                        &candle_worker,
+                        &packed
+                    ));
+                }
+            }
+        }
+        let targets: Vec<_> = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .filter(|target| target.kernel == "moss_image_lora")
+            .collect();
+        assert!(["moss_image_base", "moss_image_sft"]
+            .iter()
+            .all(|base| targets.iter().any(|target| target.base_model == *base)));
+        for target in targets {
+            let plan = json!({"target":{"kernel":target.kernel,"baseModel":target.base_model},
+                "config":target.defaults});
+            for method in ["lora", "lokr", " LoKR ", ""] {
+                let mut selected = plan.clone();
+                selected["config"]["advanced"]["networkType"] = json!(method);
+                let selected = job(selected);
+                assert!(mlx::training_job_is_mlx_eligible(&selected));
+                assert!(candle::training_job_is_candle_eligible(&selected));
+                assert!(mlx::training_kernel_is_mlx_only(&selected));
+            }
+            for method in [json!("full"), json!("control"), json!("unknown"), json!(42)] {
+                let mut invalid = plan.clone();
+                invalid["config"]["advanced"]["networkType"] = method;
+                let invalid = job(invalid);
+                assert!(!mlx::training_job_is_mlx_eligible(&invalid));
+                assert!(!candle::training_job_is_candle_eligible(&invalid));
+                assert!(mlx::training_kernel_is_mlx_only(&invalid));
+            }
+            let mut foreign = plan.clone();
+            foreign["target"]["baseModel"] = json!("qwen_image_2_1");
+            let foreign = job(foreign);
+            assert!(!mlx::training_job_is_mlx_eligible(&foreign));
+            assert!(!candle::training_job_is_candle_eligible(&foreign));
+            let mut control = job(plan);
+            control.job_type = JobType::ControlTraining;
+            assert!(!mlx::training_job_is_mlx_eligible(&control));
+            assert!(!candle::training_job_is_candle_eligible(&control));
+        }
     }
 }

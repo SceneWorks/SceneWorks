@@ -158,6 +158,8 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
+            "moss_image_base_lora",
+            "moss_image_sft_lora",
             // Qwen Image 2.1 (sc-24159): the native MLX trainer builds LoRA and LoKr over the 2.1
             // adapter host, which applies both at inference (sc-24156).
             "qwen_image_2_1_lora",
@@ -3186,11 +3188,13 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    // The Iris-3B trainers declare no epic 2123 technique.
+    // MOSS and Iris do not advertise this auxiliary loss; keep submit-time refusals explicit.
     assert_eq!(
         unsupported,
         [
             "krea_2_control",
+            "moss_image_base_lora",
+            "moss_image_sft_lora",
             "iris_3b_generation",
             "iris_3b_depth",
             "iris_3b_restore"
@@ -3787,11 +3791,13 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .filter(|target| !supports(target))
             .map(|target| target.id.as_str())
             .collect();
-        // The Iris-3B trainers declare no epic 2123 technique.
+        // MOSS and Iris do not advertise these face losses; retain every refusal assertion.
         assert_eq!(
             unsupported,
             [
                 "krea_2_control",
+                "moss_image_base_lora",
+                "moss_image_sft_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
                 "iris_3b_restore"

@@ -57,11 +57,12 @@ fn moss_owned_weight_bytes(generator: &dyn Generator, measured_load_delta: u64) 
     // census describes only this serialized cache entry's actually retained weights.
     measured_load_delta.max(generator.moss_image_owned_weight_bytes().unwrap_or(0))
 }
-fn moss_pin_spec(
+fn moss_pin_spec_with_adapters(
     spec: &mut LoadSpec,
     entry: &JsonObject,
     settings: &Settings,
     mode: gen_core::moss_image::MossImageAcceleration,
+    adapter_pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
 ) -> WorkerResult<()> {
     let mut pins = Vec::new();
     for download in entry
@@ -98,7 +99,20 @@ fn moss_pin_spec(
             pins.push(pin);
         }
     }
-    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "MOSS component preparation")
+    crate::paths::prepare_load_spec_with_file_pins(
+        spec,
+        pins.into_iter().chain(adapter_pins),
+        "MOSS component preparation",
+    )
+}
+#[cfg(test)]
+fn moss_pin_spec(
+    spec: &mut LoadSpec,
+    entry: &JsonObject,
+    settings: &Settings,
+    mode: gen_core::moss_image::MossImageAcceleration,
+) -> WorkerResult<()> {
+    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new())
 }
 /// Generation and the actual provider receipt are read while the serialized cache transaction
 /// still owns the generator. Failures/cancellation cannot publish a prior successful receipt.
@@ -209,7 +223,15 @@ async fn generate_moss_stream_using(
             spec = spec.with_component(id, source);
         }
     }
-    moss_pin_spec(&mut spec, &entry, settings, resolved.acceleration)?;
+    let prepared_adapters = resolve_prepared_adapters(request, settings)?;
+    spec = spec.with_adapters(prepared_adapters.specs);
+    moss_pin_spec_with_adapters(
+        &mut spec,
+        &entry,
+        settings,
+        resolved.acceleration,
+        prepared_adapters.pins,
+    )?;
     #[cfg(target_os = "macos")]
     let peak = {
         let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
