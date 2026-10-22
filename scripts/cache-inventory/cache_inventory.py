@@ -61,6 +61,13 @@ MINIMAX_REPO = "models--SceneWorks--minimax-h3-mlx"
 ADAPTER_REPO = "models--ostris--zimage_turbo_training_adapter"
 SOLO_REPO = "models--Org--solo-model"
 PAIR_REPO = "models--SceneWorks--whole-repo-pair"
+# catalog.rs fixtures (f8c46): literal repos and the literal revisions the tests write.
+LORA_PROBE_REPO = "models--Test--lora-install-probe"
+LORA_PROBE_REVISION = "0123456789abcdef0123456789abcdef01234567"
+OWNER_MODEL_REPO = "models--owner--model"
+PARTIAL_MODEL_REPO = "models--partial--model"
+CACHED_MODEL_REPO = "models--owner--cached-model"
+TIERED_MODEL_REPO = "models--owner--tiered-model"
 
 
 def _repo_tree(repo, dirs, blobs, links):
@@ -124,6 +131,41 @@ def _build_groups():
             "f8c46_unscoped_whole_repo_pair",
             _repo_tree(PAIR_REPO, [], ["dit"], ["model.safetensors"]),
         ),
+        # apps/rust-api/src/tests/catalog.rs at f8c46. These write plain files/dirs (no blobs/).
+        (
+            "f8c46_catalog_lora_install_probe",
+            (
+                LORA_PROBE_REPO,
+                f"{LORA_PROBE_REPO}/refs",
+                f"{LORA_PROBE_REPO}/refs/main",  # WRITTEN with the revision literal; lstat only
+                f"{LORA_PROBE_REPO}/snapshots",
+                f"{LORA_PROBE_REPO}/snapshots/{LORA_PROBE_REVISION}",
+                f"{LORA_PROBE_REPO}/snapshots/{LORA_PROBE_REVISION}/cached.safetensors",
+            ),
+        ),
+        # DELETE base-model?permanent=true resolves default download owner/model; nothing written.
+        ("f8c46_catalog_overlay_delete_owner_model", (OWNER_MODEL_REPO,)),
+        # DELETE partial_model resolves partial/model; nothing written into the cache.
+        ("f8c46_catalog_partial_trash_model", (PARTIAL_MODEL_REPO,)),
+        (
+            "f8c46_catalog_resolved_cache_cached_model",
+            (
+                CACHED_MODEL_REPO,
+                f"{CACHED_MODEL_REPO}/snapshots",
+                f"{CACHED_MODEL_REPO}/snapshots/{'a' * 40}",
+                f"{CACHED_MODEL_REPO}/snapshots/{'a' * 40}/model.safetensors",
+            ),
+        ),
+        (
+            "f8c46_catalog_resolved_cache_tiered_model",
+            (
+                TIERED_MODEL_REPO,
+                f"{TIERED_MODEL_REPO}/snapshots",
+                f"{TIERED_MODEL_REPO}/snapshots/{'b' * 40}",
+                f"{TIERED_MODEL_REPO}/snapshots/{'b' * 40}/q8.safetensors",
+                f"{TIERED_MODEL_REPO}/snapshots/{'b' * 40}/q4.safetensors",
+            ),
+        ),
     )
 
 
@@ -131,7 +173,7 @@ GROUPS = _build_groups()
 ALLOWLIST = tuple(path for _, paths in GROUPS for path in paths)
 GROUP_OF = {path: name for name, paths in GROUPS for path in paths}
 GROUP_COUNTS = {name: len(paths) for name, paths in GROUPS}
-assert len(ALLOWLIST) == len(set(ALLOWLIST)) == 84, len(ALLOWLIST)
+assert len(ALLOWLIST) == len(set(ALLOWLIST)) == 101, len(ALLOWLIST)
 assert GROUP_COUNTS["f203_iris_qwen"] == 28
 MAX_REPORT_BYTES = 32 * 1024
 
@@ -145,7 +187,8 @@ LIMITATIONS = (
     "against a real non-'rev' snapshot of the same repos is outside this allowlist.",
     "Provenance: groups f203_* come from the f203ec37 Iris/Qwen tests and f8c46_* from the f8c46 "
     "variant_delete_tests fixtures (minimax shared repo, zimage adapter, solo model, whole-repo "
-    "pair). Behavior is source-derived; nothing proves the old test processes used this root.",
+    "pair) plus the five catalog.rs tests (lora probe, overlay delete, partial trash, two resolved-cache "
+    "deletes). Behavior is source-derived; nothing proves the old test processes used this root.",
     "The zimage adapter and minimax repo names are real Hugging Face repos: real revisions or "
     "files in them are NOT inventoried, so real-install state and pre-state are unknown.",
     "Without HF_HUB_CACHE, HUGGINGFACE_HUB_CACHE or HF_HOME the old tests resolve to a temporary "

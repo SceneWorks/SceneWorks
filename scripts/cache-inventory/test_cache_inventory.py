@@ -65,16 +65,18 @@ class Fixture(unittest.TestCase):
 
 class AllowlistTests(unittest.TestCase):
     def test_allowlist_is_finite_relative_and_fixture_scoped(self):
-        self.assertEqual(len(ci.ALLOWLIST), 84)
-        self.assertEqual(len(set(ci.ALLOWLIST)), 84)
-        repos = {IRIS, QWEN, ci.MINIMAX_REPO, ci.ADAPTER_REPO, ci.SOLO_REPO, ci.PAIR_REPO}
+        self.assertEqual(len(ci.ALLOWLIST), 101)
+        self.assertEqual(len(set(ci.ALLOWLIST)), 101)
+        repos = {IRIS, QWEN, ci.MINIMAX_REPO, ci.ADAPTER_REPO, ci.SOLO_REPO, ci.PAIR_REPO,
+                 ci.LORA_PROBE_REPO, ci.OWNER_MODEL_REPO, ci.PARTIAL_MODEL_REPO,
+                 ci.CACHED_MODEL_REPO, ci.TIERED_MODEL_REPO}
         for rel in ci.ALLOWLIST:
             self.assertFalse(os.path.isabs(rel))
             self.assertNotIn("..", rel.split("/"))
             self.assertIn(rel.split("/")[0], repos, rel)
             # only literal fixture revision "rev" ever appears under snapshots/
             parts = rel.split("/")
-            if len(parts) > 2 and parts[1] == "snapshots":
+            if len(parts) > 2 and parts[1] == "snapshots" and not ci.GROUP_OF[rel].startswith("f8c46_catalog_"):
                 self.assertEqual(parts[2], "rev", rel)
         self.assertEqual({rel.split("/")[0] for rel in ci.ALLOWLIST}, repos)
         self.assertEqual(
@@ -85,6 +87,11 @@ class AllowlistTests(unittest.TestCase):
                 "f8c46_zimage_training_adapter": 8,
                 "f8c46_exclusive_solo_model": 10,
                 "f8c46_unscoped_whole_repo_pair": 6,
+                "f8c46_catalog_lora_install_probe": 6,
+                "f8c46_catalog_overlay_delete_owner_model": 1,
+                "f8c46_catalog_partial_trash_model": 1,
+                "f8c46_catalog_resolved_cache_cached_model": 4,
+                "f8c46_catalog_resolved_cache_tiered_model": 5,
             },
         )
         # f203 behavior is preserved verbatim
@@ -92,6 +99,18 @@ class AllowlistTests(unittest.TestCase):
         self.assertIn(f"{IRIS}/snapshots/rev/upscaler/empty_prompt.safetensors", ci.ALLOWLIST)
         self.assertNotIn(f"{IRIS}/blobs/blob7", ci.ALLOWLIST)
         self.assertEqual(list(ci.ALLOWLIST[:28]), list(ci.GROUPS[0][1]))
+
+    def test_catalog_fixture_literals(self):
+        probe = ci.LORA_PROBE_REPO
+        self.assertIn(f"{probe}/refs/main", ci.ALLOWLIST)
+        self.assertIn(f"{probe}/snapshots/0123456789abcdef0123456789abcdef01234567/cached.safetensors", ci.ALLOWLIST)
+        self.assertIn(f"{ci.CACHED_MODEL_REPO}/snapshots/{'a' * 40}/model.safetensors", ci.ALLOWLIST)
+        for name in ("q8.safetensors", "q4.safetensors"):
+            self.assertIn(f"{ci.TIERED_MODEL_REPO}/snapshots/{'b' * 40}/{name}", ci.ALLOWLIST)
+        self.assertIn(ci.OWNER_MODEL_REPO, ci.ALLOWLIST)
+        self.assertIn(ci.PARTIAL_MODEL_REPO, ci.ALLOWLIST)
+        # refs/main is lstat-only: no read of its content ever happens
+        self.assertNotIn("alternate-model", " ".join(ci.ALLOWLIST))
 
     def test_f8c46_fixture_names_match_the_source_seed_helpers(self):
         m = ci.MINIMAX_REPO
@@ -111,7 +130,7 @@ class AllowlistTests(unittest.TestCase):
         self.assertIn(f"{ci.SOLO_REPO}/blobs/readme", ci.ALLOWLIST)
         self.assertIn(f"{ci.PAIR_REPO}/blobs/dit", ci.ALLOWLIST)
         # q8 is not seeded by the four named tests
-        self.assertFalse([p for p in ci.ALLOWLIST if "q8" in p])
+        self.assertFalse([p for p in ci.ALLOWLIST if "q8" in p and p.startswith(ci.MINIMAX_REPO)])
 
 
 class ResolverTests(unittest.TestCase):
@@ -154,7 +173,7 @@ class InspectTests(Fixture):
         self.seed_iris()
         report = ci.build_report(self.env(), home=str(self.base))
         self.assertEqual(report["root_status"], "RESOLVED")
-        self.assertEqual(len(report["entries"]), 84)
+        self.assertEqual(len(report["entries"]), 101)
         got = self.entries(report)
         self.assertEqual(got[f"{IRIS}/blobs/blob0"]["status"], "present")
         self.assertEqual(got[f"{IRIS}/blobs/blob0"]["size"], 10)
@@ -270,7 +289,7 @@ class InspectTests(Fixture):
         root = str(self.root)
         # realpath() of the root lstat()s only the root's own ancestors; everything else must sit on
         # an allowlisted path.
-        self.assertLessEqual(len(calls), 20 + 84 * 5)
+        self.assertLessEqual(len(calls), 20 + 101 * 5)
         allowed = {os.path.join(root, rel) for rel in ci.ALLOWLIST}
         for call in calls:
             if root.startswith(call + os.sep) or call == root:
@@ -367,7 +386,7 @@ class PrivacyTests(Fixture):
         raw = (out / "cache-inventory.json").read_bytes()
         self.assertLess(len(raw), ci.MAX_REPORT_BYTES)
         report = json.loads(raw.decode("utf-8"))
-        self.assertEqual(sum(g.get("present", 0) for g in report["groups"].values()), 84)
+        self.assertEqual(sum(g.get("present", 0) for g in report["groups"].values()), 101)
         self.assertEqual({e["group"] for e in report["entries"]}, set(ci.GROUP_COUNTS))
 
     def test_oversized_report_becomes_an_error_artifact(self):
@@ -401,7 +420,7 @@ class MainTests(Fixture):
         report = json.loads(text)
         self.assertEqual(report["diagnosed_failed_run_id"], "39687007308")
         self.assertEqual(report["diagnostic"]["run_id"], "7")
-        self.assertEqual(report["allowlist_count"], 84)
+        self.assertEqual(report["allowlist_count"], 101)
         self.assertNotIn("sekrit-token", text)
         self.assertNotIn("PATH", report["resolver"])
         self.assertEqual(sorted(p.name for p in out.iterdir()), ["cache-inventory.json"])
