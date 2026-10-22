@@ -79,7 +79,7 @@ pub(crate) async fn explain_failed_load(
     error: WorkerError,
 ) -> WorkerError {
     let data_dir = settings.data_dir.clone();
-    explain_failed_load_with(payload, error, move |converter, bundle| {
+    explain_failed_load_with(settings, payload, error, move |converter, bundle| {
         converted_artifacts::diagnose_install(converter, bundle, |repo, revision| {
             crate::model_jobs::huggingface_pinned_snapshot_dir(&data_dir, repo, revision)
         })
@@ -91,6 +91,7 @@ pub(crate) async fn explain_failed_load(
 /// off the async runtime) — the seam the tests drive, since a passing co-requisite needs the real
 /// pinned bytes.
 async fn explain_failed_load_with(
+    settings: &Settings,
     payload: &JsonObject,
     error: WorkerError,
     diagnose: impl FnOnce(&str, &std::path::Path) -> Option<InstallFault> + Send + 'static,
@@ -98,15 +99,24 @@ async fn explain_failed_load_with(
     if !is_engine_load_failure(&error) {
         return error;
     }
-    let Some((name, converter, bundle)) = contract_install(payload) else {
+    let Some((name, converter)) = contract_install(payload) else {
+        return error;
+    };
+    let Some(bundle) = loaded_bundle_dir(settings, payload) else {
         return error;
     };
     let diagnosis = tokio::task::spawn_blocking(move || {
+        // What sits at the bundle path NOW: the marker below lands only if a "Convert again"
+        // has not promoted a fresh bundle over this one while it was being hashed.
+        let verified = converted_artifacts::bundle_identity(&bundle);
         let fault = diagnose(&converter, &bundle);
-        if let Some(InstallFault::Converted { problem }) = &fault {
+        if let (Some(InstallFault::Converted { problem }), Some(verified)) = (&fault, &verified) {
             // Best effort: the actionable message below stands even if the record cannot be
-            // written (a read-only bundle dir); the next failed load diagnoses again.
-            let _ = converted_artifacts::record_verification_failure(&bundle, problem);
+            // written (a read-only bundle dir, or a bundle replaced meanwhile); the next failed
+            // load diagnoses again.
+            let _ = converted_artifacts::record_verification_failure_if_unchanged(
+                &bundle, verified, problem,
+            );
         }
         fault
     })
@@ -158,9 +168,29 @@ fn is_engine_load_failure(error: &WorkerError) -> bool {
     }
 }
 
-/// `(display name, converter, converted dir)` for a job whose model is convert-at-install with an
-/// engine pin contract and an injected `modelPath`.
-fn contract_install(payload: &JsonObject) -> Option<(String, String, PathBuf)> {
+/// The bundle the job's load read: its `modelPath` through the SAME confined resolution the image
+/// lane loads from ([`crate::image_jobs::resolve_model_path_dir`] — `advanced.modelPath` first,
+/// then the injected entry path, refused outside the data dir). `None` when the job names no
+/// `modelPath` or it does not resolve (the load refused it before any engine load), so nothing
+/// outside the data dir is ever hashed or marked.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn loaded_bundle_dir(settings: &Settings, payload: &JsonObject) -> Option<PathBuf> {
+    let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
+    crate::image_jobs::resolve_model_path_dir(&request, settings)
+        .ok()
+        .flatten()
+}
+
+/// A build with no image engine linked loads no bundle (its image jobs stop at the stub gap, never
+/// at an engine load), so there is nothing to diagnose.
+#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+fn loaded_bundle_dir(_settings: &Settings, _payload: &JsonObject) -> Option<PathBuf> {
+    None
+}
+
+/// `(display name, converter)` for a job whose model is convert-at-install with an engine pin
+/// contract.
+fn contract_install(payload: &JsonObject) -> Option<(String, String)> {
     let entry = payload
         .get("modelManifestEntry")
         .and_then(Value::as_object)?;
@@ -172,11 +202,6 @@ fn contract_install(payload: &JsonObject) -> Option<(String, String, PathBuf)> {
     if !converted_artifacts::CONTRACT_CONVERTERS.contains(&converter) {
         return None;
     }
-    let bundle = entry
-        .get("modelPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())?;
     let model_id = payload
         .get("model")
         .and_then(Value::as_str)
@@ -184,7 +209,6 @@ fn contract_install(payload: &JsonObject) -> Option<(String, String, PathBuf)> {
     Some((
         model_display_name(entry, model_id).to_owned(),
         converter.to_owned(),
-        PathBuf::from(bundle),
     ))
 }
 
@@ -201,6 +225,32 @@ pub(crate) async fn explain_job_result(
 }
 
 #[cfg(test)]
+mod entry_point_tests {
+    /// Tripwire: the production image-job entry point (whose dispatch needs a live API and GPU)
+    /// routes every result through the explanation seam the `tests` module below exercises.
+    #[test]
+    fn the_image_job_entry_point_explains_its_failures() {
+        let source = include_str!("image_jobs.rs");
+        let body = source
+            .split_once("pub(crate) async fn run_image_generate_job(")
+            .expect("entry point present")
+            .1
+            .split_once("\nasync fn run_image_generate_job_unexplained(")
+            .expect("the unexplained body follows")
+            .0;
+        assert!(
+            body.contains("run_image_generate_job_unexplained(api, settings, job).await")
+                && body.contains(
+                    "crate::converted_install::explain_job_result(settings, &job.payload, result)"
+                ),
+            "{body}"
+        );
+    }
+}
+
+// The diagnosis resolves the bundle through the image lane's loader (`resolve_model_path_dir`),
+// which only a build with an image engine links; a build without one never reaches an engine load.
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -272,6 +322,7 @@ mod tests {
             "a same-size corruption passes the cheap check"
         );
         let error = explain_failed_load_with(
+            &settings_at(data.path()),
             &payload(&bundle),
             WorkerError::InvalidPayload(
                 "mlx supra2_img load failed: unsupported: supra2: bundle file ...".to_owned(),
@@ -325,27 +376,6 @@ mod tests {
             "{message}"
         );
         assert!(converted_artifacts::recorded_verification_failure(&bundle).is_none());
-    }
-
-    /// Tripwire: the production image-job entry point (whose dispatch needs a live API and GPU)
-    /// routes every result through the explanation seam the tests above exercise.
-    #[test]
-    fn the_image_job_entry_point_explains_its_failures() {
-        let source = include_str!("image_jobs.rs");
-        let body = source
-            .split_once("pub(crate) async fn run_image_generate_job(")
-            .expect("entry point present")
-            .1
-            .split_once("\nasync fn run_image_generate_job_unexplained(")
-            .expect("the unexplained body follows")
-            .0;
-        assert!(
-            body.contains("run_image_generate_job_unexplained(api, settings, job).await")
-                && body.contains(
-                    "crate::converted_install::explain_job_result(settings, &job.payload, result)"
-                ),
-            "{body}"
-        );
     }
 
     /// A missing component is named too; a cancel, an unrelated model and a model without a
@@ -404,6 +434,98 @@ mod tests {
         assert_eq!(untouched.to_string(), LOAD_FAILURE);
     }
 
+    /// A diagnosis that reports the converted bundle damaged and records which dir it judged.
+    fn judged_damaged(
+        judged: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    ) -> impl FnOnce(&str, &std::path::Path) -> Option<InstallFault> + Send + 'static {
+        move |_, bundle| {
+            judged.lock().unwrap().push(bundle.to_path_buf());
+            Some(InstallFault::Converted {
+                problem: "denoiser.safetensors does not match its manifest".to_owned(),
+            })
+        }
+    }
+
+    /// sc-24217 pre-merge review: the diagnosis judges — and marks — the bundle the LOAD read,
+    /// through the load's own confined resolution: `advanced.modelPath` wins over the injected
+    /// entry path exactly as `resolve_weights_dir` does, and a path outside the data dir is never
+    /// hashed or marked.
+    ///
+    /// *Mutations that red this:* read the bundle off `modelManifestEntry.modelPath` again (the
+    /// installed bundle is judged and marked instead); drop the confinement (the outside dir is
+    /// judged and marked).
+    #[tokio::test]
+    async fn the_diagnosis_judges_the_bundle_the_load_resolved() {
+        let data = tempfile::tempdir().unwrap();
+        let settings = settings_at(data.path());
+        let installed = data.path().join("models/mlx/supra2_img");
+        let other = data.path().join("models/mlx/supra2_other");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let mut aimed = payload(&installed);
+        aimed.insert("advanced".to_owned(), json!({ "modelPath": other }));
+        let judged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error = explain_failed_load_with(
+            &settings,
+            &aimed,
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+            judged_damaged(judged.clone()),
+        )
+        .await;
+        assert!(error.to_string().contains("run Convert again"), "{error}");
+        // The confined resolver canonicalizes (macOS temp dirs live under `/private`).
+        assert_eq!(*judged.lock().unwrap(), vec![other.canonicalize().unwrap()]);
+        assert!(converted_artifacts::recorded_verification_failure(&other).is_some());
+        assert!(converted_artifacts::recorded_verification_failure(&installed).is_none());
+
+        let outside = tempfile::tempdir().unwrap();
+        let judged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let error = explain_failed_load_with(
+            &settings,
+            &payload(outside.path()),
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+            judged_damaged(judged.clone()),
+        )
+        .await;
+        assert_eq!(error.to_string(), LOAD_FAILURE);
+        assert!(judged.lock().unwrap().is_empty(), "never hashed");
+        assert!(converted_artifacts::recorded_verification_failure(outside.path()).is_none());
+    }
+
+    /// sc-24217 pre-merge review: a "Convert again" that promotes a fresh bundle while a failed
+    /// job's diagnosis is hashing the old one leaves the fresh bundle unmarked (the catalog keeps
+    /// reading it as converted); the failed job still gets the actionable message.
+    ///
+    /// *Mutation that reds this:* record through the unguarded `record_verification_failure`.
+    #[tokio::test]
+    async fn a_bundle_replaced_during_the_diagnosis_is_not_marked() {
+        let data = tempfile::tempdir().unwrap();
+        let settings = settings_at(data.path());
+        let bundle = data.path().join("models/mlx/supra2_img");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let root = data.path().to_path_buf();
+        let promoted = bundle.clone();
+        let error = explain_failed_load_with(
+            &settings,
+            &payload(&bundle),
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+            move |_, _| {
+                // The convert job's promotion, mid-hash: a fresh dir renamed over the old one.
+                let fresh = root.join("models/mlx/.supra2_img.converting");
+                std::fs::create_dir_all(&fresh).unwrap();
+                std::fs::rename(&promoted, root.join("models/mlx/.supra2_img.old")).unwrap();
+                std::fs::rename(&fresh, &promoted).unwrap();
+                Some(InstallFault::Converted {
+                    problem: "denoiser.safetensors does not match its manifest".to_owned(),
+                })
+            },
+        )
+        .await;
+        assert!(error.to_string().contains("run Convert again"), "{error}");
+        assert!(converted_artifacts::recorded_verification_failure(&bundle).is_none());
+        assert_eq!(std::fs::read_dir(&bundle).unwrap().count(), 0);
+    }
+
     /// A raw engine load error, as `generator_cache` wraps it for the MLX arm.
     const LOAD_FAILURE: &str = "supra2_img load failed: backend op failed: safetensors header";
 
@@ -420,6 +542,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let settings = settings_at(data.path());
         let diagnose = |calls: std::sync::Arc<AtomicUsize>| {
             move |_: &str, _: &std::path::Path| {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -454,8 +578,13 @@ mod tests {
         ] {
             let calls = std::sync::Arc::new(AtomicUsize::new(0));
             let before = error.to_string();
-            let after =
-                explain_failed_load_with(&payload(&bundle), error, diagnose(calls.clone())).await;
+            let after = explain_failed_load_with(
+                &settings,
+                &payload(&bundle),
+                error,
+                diagnose(calls.clone()),
+            )
+            .await;
             assert_eq!(after.to_string(), before, "returned untouched");
             assert_eq!(calls.load(Ordering::SeqCst), 0, "not diagnosed: {before}");
         }
@@ -472,8 +601,13 @@ mod tests {
         ] {
             let calls = std::sync::Arc::new(AtomicUsize::new(0));
             let before = error.to_string();
-            let after =
-                explain_failed_load_with(&payload(&bundle), error, diagnose(calls.clone())).await;
+            let after = explain_failed_load_with(
+                &settings,
+                &payload(&bundle),
+                error,
+                diagnose(calls.clone()),
+            )
+            .await;
             assert_eq!(calls.load(Ordering::SeqCst), 1, "diagnosed: {before}");
             assert!(
                 after.to_string().contains("run Convert again"),

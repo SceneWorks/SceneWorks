@@ -4,11 +4,13 @@
 
 Quick, small text-to-image sketches. Supra2-IMG is a compact 104-million-parameter rectified-flow
 diffusion transformer that renders at exactly **256×256**, so it is fast and light on memory, but
-it is not a detail or text-rendering model. Native MLX on Apple Silicon.
+it is not a detail or text-rendering model. Runs with MLX on Apple Silicon and with Candle/CUDA
+on Windows and Linux NVIDIA GPUs.
 
 ## How It Works
 
-The install is three pinned upstream pieces, downloaded together and then converted on your Mac:
+The install is three pinned upstream pieces, downloaded together; the denoiser is then converted
+on your own machine (Mac, Windows or Linux):
 
 - **Supra2-IMG denoiser** (SupraLabs, Apache-2.0) — the DiT checkpoint, converted once at install
   into a native bundle and checked against its pinned checksum.

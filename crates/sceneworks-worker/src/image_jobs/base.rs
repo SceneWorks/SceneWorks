@@ -1862,6 +1862,21 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// The confined directory a job's `modelPath` (the request's `advanced.modelPath`, else the entry's
+/// injected one — [`model_path_override`]) names, through the app-managed resolver that refuses a
+/// path outside the data dir. The ONE resolution the load ([`resolve_weights_dir`]) and the
+/// failed-load diagnosis (`converted_install::explain_failed_load`) share, so a diagnosis judges —
+/// and marks — exactly the bundle the load read. `Ok(None)` when the job names no `modelPath`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn resolve_model_path_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    model_path_override(request)
+        .map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath"))
+        .transpose()
+}
+
 /// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
 /// a local artifact yet (sc-20529).
 ///
@@ -2041,8 +2056,7 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = model_path_override(request) {
-        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+    if let Some(dir) = resolve_model_path_dir(request, settings)? {
         converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
@@ -5460,6 +5474,20 @@ fn mlx_raw_settings(
     quant_bits: Option<i64>,
     guidance: Option<f32>,
 ) -> JsonObject {
+    mlx_raw_settings_for_bundle(request, None, repo, steps, quant_bits, guidance)
+}
+
+/// [`mlx_raw_settings`] for a render whose weights LOADED from `bundle` (the generic lane's resolved
+/// `weights_dir`): Supra2's unconditional-context record is read off that bundle's manifest, never
+/// re-resolved from the request (sc-24217 pre-merge review).
+fn mlx_raw_settings_for_bundle(
+    request: &ImageRequest,
+    bundle: Option<&Path>,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
@@ -5479,7 +5507,7 @@ fn mlx_raw_settings(
         );
         raw.insert(
             sceneworks_core::supra2::UNCONDITIONAL_KEY.to_owned(),
-            sceneworks_core::supra2::unconditional_source(&request.model_manifest_entry, guidance),
+            sceneworks_core::supra2::unconditional_source(bundle, guidance),
         );
         raw.insert(
             sceneworks_core::supra2::BACKEND_KEY.to_owned(),
@@ -10683,8 +10711,9 @@ async fn generate_stream_using(
     } else {
         (quant, quant_bits)
     };
-    let raw_settings = mlx_raw_settings(
+    let raw_settings = mlx_raw_settings_for_bundle(
         request,
+        Some(&weights_dir),
         &repo,
         steps,
         quant_bits,
@@ -13396,8 +13425,14 @@ async fn generate_candle_stream_using(
         model.supports_quant(),
         convrot.is_some() || is_anima_model(&request.model),
     );
-    let mut raw_settings =
-        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let mut raw_settings = mlx_raw_settings_for_bundle(
+        request,
+        Some(&weights_dir),
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(true_cfg),
+    );
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:
