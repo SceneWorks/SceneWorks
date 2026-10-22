@@ -73,6 +73,7 @@ on:
           - catalog
           - qwen-image-2-1-app-lifecycle
           - flux3-image-klein-app-lifecycle
+          - flux3-image-klein-terminal-host
           - iris-mlx-real-weights
         default: catalog
       inference_sha:
@@ -96,6 +97,30 @@ on:
           - secondary
           - primary
         default: secondary
+      flux3_terminal_host:
+        description: "FLUX3 terminal host step only (sc-26243): nax-macos (dataset host) | nax-macos-2. The default none is refused, so an empty value never picks a Mac."
+        required: false
+        type: choice
+        options:
+          - none
+          - nax-macos
+          - nax-macos-2
+        default: none
+      flux3_terminal_step:
+        description: "FLUX3 terminal host step only: prepare | self-test | run (run is refused until that host lane's addendum is recorded). The default none is refused."
+        required: false
+        type: choice
+        options:
+          - none
+          - prepare
+          - self-test
+          - run
+        default: none
+      flux3_terminal_control_sha256:
+        description: "FLUX3 terminal host step only: sha256 of $HOME/sc26243-run/control/<host>/<step>.json on that Mac. The default none is refused."
+        required: false
+        type: string
+        default: none
       iris_smoke_filter:
         description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
         required: false
@@ -257,6 +282,19 @@ jobs:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       runner_target: ${{ inputs.flux3_app_runner_target }}
+  flux3-terminal-host:
+    if: ${{ inputs.profile == 'flux3-image-klein-terminal-host' }}
+    permissions:
+      contents: read
+    # One coordinator-approved MLX terminal step on one named Mac. No artifact upload, catalog
+    # walk, measurement publication, pin edit or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-terminal-host.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      host: ${{ inputs.flux3_terminal_host }}
+      step: ${{ inputs.flux3_terminal_step }}
+      control_sha256: ${{ inputs.flux3_terminal_control_sha256 }}
   qwen-app-lifecycle:
     if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     permissions:

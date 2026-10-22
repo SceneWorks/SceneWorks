@@ -329,7 +329,7 @@ export async function runPreparation(a, plan, sources, dependencies = {}) {
   const io = { root: ROOT, env: process.env, platform: process.platform, account: () => userInfo().username, host: hostname, git: async (root, ...args) => (await exec('git', args, { cwd: root, timeout: 30_000 })).stdout.trim(), verifyBuild: verifyPreparationBuild, statfs, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, spawn, fetch, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...dependencies };
   assert.equal(io.env.CUDA_VISIBLE_DEVICES, '-1', 'CPU preparation requires explicit parent CUDA_VISIBLE_DEVICES=-1');
   assert.equal(a.runnerAccount, io.account()); assert.equal(a.runner, io.host().split('.')[0]);
-  assert.equal(io.platform, a.backend === 'candle' ? 'win32' : 'darwin'); if (io.platform === 'darwin') assert.equal(a.runner, 'nax-macos-2');
+  assert.equal(io.platform, a.backend === 'candle' ? 'win32' : 'darwin'); if (io.platform === 'darwin') assert(['nax-macos', 'nax-macos-2'].includes(a.runner), 'only a known physical Mac runner prepares MLX');
   assert.equal(await io.git(io.root, 'rev-parse', 'HEAD'), a.sourceSha); assert.equal(await io.git(io.root, 'status', '--porcelain'), '');
   assert.equal(await io.git(a.inferenceRepository, 'rev-parse', 'refs/remotes/origin/main'), a.inferenceMainTipSha); await io.git(a.inferenceRepository, 'merge-base', '--is-ancestor', a.inferenceMainSha, 'refs/remotes/origin/main');
   assertPins(await Promise.all(['Cargo.toml', 'crates/sceneworks-worker/Cargo.toml', 'crates/sceneworks-memory-adapter/Cargo.toml'].map(f => readFile(path.join(io.root, f), 'utf8'))), await readFile(path.join(io.root, 'Cargo.lock'), 'utf8'), a.inferenceMainSha);
