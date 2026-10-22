@@ -111,6 +111,24 @@ describe("ImageStudio Save as Preset", () => {
     await act(async () => {}); // flush mount effects (pose loaders, etc.)
   }
 
+  it("previews and submits ratio batches at the largest closest model bucket", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true,
+      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt",
+    }));
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `ratio-${sequence++}` }));
+    await render(baseContext({ createImageJob, imageModels: [{ ...Z_IMAGE, limits: {
+      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080"],
+    } }] }));
+    expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1600×1280");
+    expect(container.querySelector(".batch-preview-text")?.textContent).toBe("first prompt");
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(createImageJob).toHaveBeenCalledTimes(3);
+    expect(createImageJob.mock.calls.map(([payload]) => [payload.prompt, payload.width, payload.height]))
+      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216]]);
+  });
+
   // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
   // the Purpose zone is one elevated card. It shipped detached in sc-10476 and was
   // pulled back in by sc-10490 — assert the nesting so it cannot drift again.
