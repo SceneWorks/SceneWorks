@@ -1145,7 +1145,6 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
     provision_qwen_snapshot: false,
     provision_z_image_snapshot: false,
   };
-  const evaluate = (event, inputs = {}) => Boolean(evaluateWorkflow(expression, event, inputs));
   const validate = (candidate) => {
     const run = (event, inputs = {}) => Boolean(evaluateWorkflow(candidate, event, inputs));
     for (const event of ["push", "pull_request", "merge_group"]) {
@@ -1172,12 +1171,21 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
   }
 
   assert.match(job, /^    runs-on: macos-26$/m);
+  assert.match(job, /github\.repository == 'SceneWorks\/SceneWorks'/);
   assert.doesNotMatch(job, /^    needs:/m);
   assert.doesNotMatch(job, /^    continue-on-error:/m);
   assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(job, /Initialize private browser fixture paths/);
+  assert.match(job, /CARGO_TARGET_DIR=\$root\/target/);
+  assert.match(job, /BROWSER_FIXTURE_OUTPUT=\$root\/output/);
   assert.match(job, /cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json/);
+  assert.match(job, /expected one sceneworks_rust_api libtest executable/);
   assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
+  assert.match(job, /artifact source must be the exact clean workflow SHA/);
+  assert.match(job, /cargo-artifacts\.jsonl/);
   assert.match(job, /PMETAL_METALLIB_PATH/);
+  assert.match(job, /Exact prebuilt unavailable; compiling the pinned MLX source/);
+  assert.match(job, /find "\$CARGO_TARGET_DIR" -type f -name mlx\.metallib/);
   const upload = workflowStep(job, "Upload complete browser fixture artifact");
   assert.match(upload, /uses: actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(upload, /name: rust-api-browser-libtest-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
