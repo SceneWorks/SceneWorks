@@ -680,6 +680,7 @@ fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::Memor
             frames: 1,
             reference_count: hires_fix_reference_count(),
         },
+        reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes: 1 << 40,

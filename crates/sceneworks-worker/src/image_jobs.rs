@@ -473,12 +473,37 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+/// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
+/// contract is explained (and a damaged converted bundle recorded for the catalog) by
+/// [`crate::converted_install::explain_job_result`] — sc-24216: same-size corruption of the bundle
+/// or of a shared co-requisite only surfaces as the engine's own load error.
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+async fn run_image_generate_job_unexplained(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
     sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    // sc-24215: Supra2-IMG's published interface, re-applied before load (the API refuses the same
+    // request before the job exists), so a replayed or hand-built payload never reaches the engine
+    // with an input the generic lane would silently drop.
+    sceneworks_core::supra2::validate_request(
         &job.payload,
         &job.payload
             .get("modelManifestEntry")
@@ -3684,6 +3709,15 @@ include!("image_jobs/stream.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod iris;
+
+// Supra2-IMG (sc-24213 MLX / sc-24214 Candle): pins the generic image lane's wiring for
+// `supra2_img` (bundle + co-requisite staging) on whichever backend the build links, and carries the
+// real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod supra2;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine

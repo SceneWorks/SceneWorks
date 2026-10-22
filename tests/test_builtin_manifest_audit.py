@@ -3558,6 +3558,9 @@ IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY = frozenset(
         "sensenova_u1_8b_infographic_v3_fast",
         "sana_sprint_1600m",
         "pulid_flux_dev",  # image_jobs/pulid.rs hard-sets negative_prompt: None
+        # sc-24213: CFG runs against the checkpoint's stored unconditional embedding; the engine
+        # refuses a negative prompt by name.
+        "supra2_img",
     }
 )
 

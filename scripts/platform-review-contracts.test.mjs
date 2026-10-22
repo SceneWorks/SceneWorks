@@ -2772,7 +2772,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
 test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const worker = workflowJob(workflow, "candle-worker");
-  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"];
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke"];
   const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
   const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
   assert.match(refusal, /-contains 'true'/);
@@ -2784,7 +2784,7 @@ test("Windows facts-only capture rejects mixed profiles and cannot escape throug
   const mixed = { capability_facts_only: true, ...Object.fromEntries(flags.map(flag => [flag, true])) };
   // Even a conflicting YuE2 flag reaches the fatal validator, while its separate GPU job cannot run.
   assert.equal(evaluateWorkflow(workflowExpression(worker), "workflow_dispatch", mixed), true);
-  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "imported-nvfp4-worker-smoke"]) {
+  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke", "imported-nvfp4-worker-smoke"]) {
     assert.equal(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", mixed), false, name);
   }
   const terminal = worker.split(/\n {6}- /).filter(block => /if: .*always\(\).*inputs\.run_epic_20738_terminal_cuda/.test(block));

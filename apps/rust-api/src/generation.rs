@@ -464,7 +464,27 @@ pub(crate) async fn create_image_job(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or_else(|| payload.count.unwrap_or_else(default_image_count));
-        job_payload.insert("seeds".to_owned(), random_image_seeds(count));
+        let mut seeds = random_image_seeds(count);
+        // sc-24215: a native count batch (`image.nativeCountBatch`, Supra2-IMG) renders image k on
+        // seed `seeds[0] + k` in one engine call, so the recorded batch must be that run, not
+        // independent draws the engine never used.
+        if model_manifest_entry
+            .as_object()
+            .is_some_and(sceneworks_core::image_sampling_controls::native_count_batch)
+        {
+            if let Some(base) = seeds
+                .as_array()
+                .and_then(|seeds| seeds.first())
+                .and_then(Value::as_i64)
+            {
+                seeds = Value::Array(
+                    (0..i64::from(count))
+                        .map(|k| Value::from(base + k))
+                        .collect(),
+                );
+            }
+        }
+        job_payload.insert("seeds".to_owned(), seeds);
     }
     // Create in `pending_caption` when an async caption is pending, else the default `queued`. The
     // POST returns 201 immediately either way — it never waits on the expansion (sc-9120).

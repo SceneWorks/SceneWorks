@@ -222,6 +222,8 @@ import {
   negativePromptInertAtGuidance,
   guidanceIsOff,
   patchGridHint,
+  nativeResolutionHint,
+  promptTokenLimitHint,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -2079,6 +2081,10 @@ export function ImageStudio() {
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
+  // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
+  // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -3301,6 +3307,11 @@ export function ImageStudio() {
               `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
               was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
               Free-text models only. */}
+          {!structuredPromptModel && promptTokenNotice ? (
+            <p className="prompt-hint" role="note">
+              {promptTokenNotice}
+            </p>
+          ) : null}
           {!structuredPromptModel && promptHint ? (
             <p className="prompt-hint">
               {promptHint}{" "}
@@ -3917,6 +3928,11 @@ export function ImageStudio() {
                 {patchGridNotice ? (
                   <span className="field-hint" role="note">
                     {patchGridNotice}
+                  </span>
+                ) : null}
+                {nativeResolutionNotice ? (
+                  <span className="field-hint" role="note">
+                    {nativeResolutionNotice}
                   </span>
                 ) : null}
               </label>

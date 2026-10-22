@@ -62,6 +62,11 @@ import {
   sdxlCandleRouteDrift,
   parseDeclaredStrategySupport,
   readDeclaredStrategySupport,
+  compatibilityDefaultSupport,
+  readCompatibilityDefaultSupport,
+  SUPRA2_COMPONENTS,
+  SUPRA2_REPOSITORY,
+  SUPRA2_SOURCE_FILES,
   SDXL_ROUTES_PATH,
   SDXL_ROUTES_UNCHECKED,
   parseWanMlxSealedProviders,
@@ -659,6 +664,88 @@ test("an Iris cell is runnable only on the files its own task loads", async () =
     assert.equal(own.bytes, 2, "two one-byte files");
     assert.ok(whole.bytes > own.bytes, "the whole tree also counts the staged task folders");
   }
+});
+
+// sc-24217. A Supra2 cell binds the pinned upstream snapshot ROOT (the convert's one source file,
+// never a tier folder) and BOTH pinned co-requisites by their exact files; it is runnable on both
+// lanes only when all three are whole, and exports exactly the env family both arms read.
+test("a Supra2 cell binds the upstream checkpoint and both pinned components on both lanes", async () => {
+  const encoder = SUPRA2_COMPONENTS[0];
+  const vae = SUPRA2_COMPONENTS[1];
+  const encoderRevision = "1".repeat(40);
+  const vaeRevision = "2".repeat(40);
+  const models = [{
+    id: "supra2_img",
+    downloads: [
+      { provider: "huggingface", repo: SUPRA2_REPOSITORY, revision: REVISION, files: SUPRA2_SOURCE_FILES },
+      { provider: "huggingface", repo: encoder.repo, revision: encoderRevision, coRequisite: true, componentId: "text_encoder", files: encoder.files },
+      { provider: "huggingface", repo: vae.repo, revision: vaeRevision, coRequisite: true, componentId: "vae", files: vae.files },
+    ],
+  }];
+  const family = PROVIDER_FAMILIES.supra2_img;
+  assert.deepEqual([...family.arms].sort(), ["candle", "mlx"]);
+  for (const backend of family.arms) {
+    const artifact = familyArtifact(family, backend, "bf16");
+    assert.equal(artifact.layout, "flat", backend);
+    assert.deepEqual(artifactRootSuffix(artifact, "bf16"), [], `${backend}: never a tier folder`);
+    assert.equal(requiredComponentsFor(family, backend).length, 2, backend);
+  }
+  const hub = await fakeHub([[SUPRA2_REPOSITORY, REVISION]], { empty: true });
+  const snapshot = snapshotPath(hub, SUPRA2_REPOSITORY, REVISION);
+  const stage = async (dir, files) => {
+    await mkdir(dir, { recursive: true });
+    for (const file of files) await writeFile(path.join(dir, file), "w");
+  };
+  const classify = (backend) => classifyAnchor(`supra2_img:bf16:${backend}`, { provider: "supra2_img" },
+    { models, backend, hubs: [hub], current: new Map(), captured: new Map() });
+
+  // The snapshot directory exists, but not the checkpoint.
+  await writeFile(path.join(snapshot, "README.md"), "w");
+  const noSource = await classify("mlx");
+  assert.equal(noSource.status, "weights_missing");
+  assert.match(noSource.reason, /is missing model_final_ema\.pt/);
+
+  await stage(snapshot, SUPRA2_SOURCE_FILES);
+  const noEncoder = await classify("candle");
+  assert.equal(noEncoder.status, "weights_missing");
+  assert.match(noEncoder.reason, /^no google\/flan-t5-base@/);
+
+  const encoderRoot = snapshotPath(hub, encoder.repo, encoderRevision);
+  await stage(encoderRoot, ["config.json", "model.safetensors"]);
+  const tornEncoder = await classify("mlx");
+  assert.equal(tornEncoder.status, "weights_missing");
+  assert.match(tornEncoder.reason, /is missing tokenizer\.json/);
+  await stage(encoderRoot, ["tokenizer.json"]);
+  const vaeRoot = snapshotPath(hub, vae.repo, vaeRevision);
+  await stage(vaeRoot, vae.files);
+  for (const backend of ["mlx", "candle"]) {
+    const row = await classify(backend);
+    assert.equal(row.status, "runnable", row.reason);
+    assert.deepEqual(row.env, {
+      SCENEWORKS_SUPRA2_IMG_REPOSITORY: SUPRA2_REPOSITORY,
+      SCENEWORKS_SUPRA2_IMG_REVISION: REVISION,
+      SCENEWORKS_SUPRA2_IMG_ROOT: snapshot,
+      SCENEWORKS_SUPRA2_IMG_COMPONENT_TEXT_ENCODER: encoderRoot,
+      SCENEWORKS_SUPRA2_IMG_COMPONENT_VAE: vaeRoot,
+    });
+    // The artifact identity is the checkpoint alone, whatever else the upstream snapshot holds.
+    assert.deepEqual(row.inventoryFiles, SUPRA2_SOURCE_FILES);
+  }
+});
+
+// sc-24217. The fourth override source reads gen-core's compatibility default — and ONLY when the
+// entry point names no `strategies` at all; every other shape is no evidence.
+test("a compatibility-default contract reads as Resident alone, and nothing else does", () => {
+  const plain = "pub fn c() -> MemoryProviderContract { MemoryProviderContract::compatibility_default(ID, b) }";
+  const support = compatibilityDefaultSupport(plain);
+  assert.equal(support("resident"), "Implemented");
+  for (const rung of ["staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]) {
+    assert.equal(support(rung), "Missing", rung);
+  }
+  assert.equal(compatibilityDefaultSupport(`${plain}\nfn f(c: &mut C) { c.strategies = vec![]; }`), null);
+  assert.equal(compatibilityDefaultSupport("fn c() { MemoryProviderContract { strategies: x() } }"), null);
+  // A comment naming the default is not the default.
+  assert.equal(compatibilityDefaultSupport("// MemoryProviderContract::compatibility_default(\nfn c() {}"), null);
 });
 
 test("classification: runnable anchors carry the adapter env family and the canonical tier root", async () => {
@@ -3639,6 +3726,14 @@ test("an anchor row plans the lane's default rung unless the manifest exempts it
       const declared = await declaredRefusesDefault(backend, modelId, fallbackForDump);
       if (declared !== null) declaredEvidence += 1;
       contractRefusesDefault = declared;
+    }
+    // sc-24217: the FOURTH source, and only ever a justification for an override that is already
+    // planned — never a demand for one. Candle Supra2-IMG registers a resident-only witness (not in
+    // the dump) and builds its contract as gen-core's `compatibility_default` with no `strategies`
+    // anywhere in the entry point, whose rung table is fixed by gen-core: Resident alone.
+    if (anchor.strategy && judged && contractRefusesDefault === null) {
+      const support = await readCompatibilityDefaultSupport(modelId, backend, closures);
+      if (support !== null) contractRefusesDefault = support(fallbackForDump) !== "Implemented";
     }
     // Two different absences. A reachable checkout that declares nothing is REFUSED below. No
     // checkout at all is a property of the RUN, not of the override: the module-level guard above

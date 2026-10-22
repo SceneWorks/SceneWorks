@@ -5569,6 +5569,7 @@ fn native_converters_registry_contents_are_pinned() {
         "sd3_5_large_turbo_quant",
         "sd3_5_medium_quant",
         "anima_quant",
+        "supra2_img",
     ]
     .into_iter()
     .collect();
@@ -5592,7 +5593,11 @@ fn native_converters_registry_contents_are_pinned() {
 #[test]
 fn candle_native_converters_registry_contents_are_pinned() {
     use std::collections::BTreeSet;
-    let expected: BTreeSet<&str> = ["flux2_klein_diffusers"].into_iter().collect();
+    // sc-24214: `supra2_img`'s converter is the backend-neutral `gen_core::supra2` one, compiled on
+    // every platform, and the Candle provider loads the bundle it writes.
+    let expected: BTreeSet<&str> = ["flux2_klein_diffusers", "supra2_img"]
+        .into_iter()
+        .collect();
     let actual: BTreeSet<&str> = sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS
         .iter()
         .copied()

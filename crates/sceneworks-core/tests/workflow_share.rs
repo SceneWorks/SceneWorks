@@ -951,6 +951,79 @@ fn every_advanced_key_the_interleave_lane_can_emit_is_classified() {
     }
 }
 
+/// Supra2-IMG (epic 24212 review, E4): every `advanced` key an image-generation builder can put on
+/// the wire is either a control Supra2 honors (or inert recipe metadata) or refused BY ITS WIRE
+/// NAME before a job exists. The keys come from the same static extractor as the lints above, so a
+/// knob the studio starts sending fails here until it is classified for Supra2 too.
+#[test]
+fn every_image_advanced_key_is_honored_or_refused_by_supra2() {
+    // Validated controls (steps / guidance / the engine's own menu choices) and inert recipe
+    // metadata (the resolution label, the style round-trip, the structured-caption record, the
+    // flash-attention off-switch only the Candle SDXL lane reads).
+    const HONORED: &[&str] = &[
+        "resolution",
+        "steps",
+        "guidanceScale",
+        "sampler",
+        "scheduler",
+        "guidanceMethod",
+        "decoder",
+        "flashAttn",
+        "structuredPrompt",
+        "styleId",
+        "stylePrompt",
+    ];
+    let text = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("builtin.models.jsonc embedded")
+        .1;
+    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(text)).unwrap();
+    let entry = manifest["models"]
+        .as_array()
+        .and_then(|models| models.iter().find(|model| model["id"] == "supra2_img"))
+        .and_then(Value::as_object)
+        .cloned()
+        .expect("supra2_img is in the builtin catalog");
+    let mut seen = BTreeSet::new();
+    for source in [
+        AdvancedKeySource::StudioBuilder,
+        AdvancedKeySource::EditBuilder,
+        AdvancedKeySource::CharacterBuilder,
+        AdvancedKeySource::CharacterAngleExtras,
+        AdvancedKeySource::CharacterPoseExtras,
+    ] {
+        let builder = builder_for(source);
+        for key in emitted_keys(builder, &read_repo_file(builder.path)) {
+            seen.insert(key.clone());
+            if HONORED.contains(&key.as_str()) {
+                continue;
+            }
+            let payload = json!({
+                "model": "supra2_img",
+                "prompt": "a fox",
+                "advanced": { key.clone(): true },
+            });
+            let refusal =
+                sceneworks_core::supra2::validate_request(payload.as_object().unwrap(), &entry)
+                    .expect_err(&format!(
+                        "{} ({}) sends advanced.{key}, which Supra2-IMG neither honors nor refuses",
+                        builder.function, builder.path
+                    ));
+            assert!(
+                refusal.contains(&format!("advanced.{key} ")),
+                "the refusal names the wire key advanced.{key}: {refusal}"
+            );
+        }
+    }
+    for key in HONORED {
+        assert!(
+            seen.contains(*key),
+            "`{key}` is listed as honored but no image builder sends it any more"
+        );
+    }
+}
+
 /// The standalone upscale job posts NO `advanced` map — and that is now asserted, not assumed.
 ///
 /// sc-15948 made that job embed (ISSUE 1), which puts `buildUpscaleJobBody` on the same footing as

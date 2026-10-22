@@ -1461,6 +1461,9 @@ impl SynthesisProgress {
     /// the codec/vocoder pass. `None` for a degenerate `total == 0` step.
     fn engine(&mut self, progress: Progress) -> Option<SynthesisUpdate> {
         let (stage, candidate, message) = match progress {
+            // Image prompt upsampling is not an audio synthesis phase.
+            Progress::PromptUpsamplingComplete => return None,
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => return None,
             Progress::Step { current, total } => {
                 if total == 0 {
                     return None;

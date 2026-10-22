@@ -5528,6 +5528,42 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-ref-mlx-q8-576x320-f124-fps24-seed17137"
+    },
+    "supra2_img:bf16:candle": {
+      "provider": "supra2_img",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "supra2-img-candle-resident-v1",
+      "fixture": "supra2-img-candle-bf16-256-seed0-step50",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "supra2_img:bf16:mlx": {
+      "provider": "supra2_img",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "supra2-img-mlx-resident-v1",
+      "fixture": "supra2-img-mlx-bf16-256-seed0-step50"
     }
   }
 }

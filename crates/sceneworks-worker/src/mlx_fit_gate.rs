@@ -1150,6 +1150,7 @@ pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
         Some(gen_core::Quant::Q4) => "q4",
         Some(gen_core::Quant::Q8) => "q8",
         Some(gen_core::Quant::Nvfp4) => "nvfp4",
+        Some(gen_core::Quant::Fp8Rowwise) => "fp8r",
         None if tier.precision == gen_core::Precision::Fp32 => "fp32",
         None => "bf16",
     }
@@ -4759,6 +4760,7 @@ fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
+            reference_resources: None,
             overlay: inputs.overlay.clone(),
             budget,
             predicted_peak_bytes,
@@ -20189,6 +20191,9 @@ mod tests {
         "moss_image_sft",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
+        // sc-24213: Supra2-IMG loads resident and eager; its loader refuses sequential offload and
+        // deferred materialization, so the descriptor advertises neither staging bit.
+        "supra2_img",
     ];
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a
