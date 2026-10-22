@@ -327,7 +327,7 @@ function condition(name, event, profile, relevant = "true", result = "success", 
 test("manual profiles never run legacy jobs", () => {
   for (const profile of ["facts-and-projections", "consumer-assertions", "unknown-unsafe-value"]) {
     for (const name of ["changes", "macos-checks", "nax-worker"]) for (const result of ["success", "skipped", "failure"]) assert.equal(condition(name, "workflow_dispatch", profile, "true", result), false, `${profile}/${name}/${result}`);
-    assert.equal(condition(JOB, "workflow_dispatch", profile), true);
+    assert.equal(condition(JOB, "workflow_dispatch", profile), profile !== "unknown-unsafe-value", profile);
   }
 });
 test("browser fixture artifact profile never queues the self-hosted manual verifier", () => {
@@ -404,8 +404,20 @@ test("manual verifier overrides only host build strip and binds both profiles in
   assert.match(controller, /const runEnv = \{ \.\.\.remoteBuildEnv\(env, request.profile\), \.\.\.createUnitHfSandbox\(root, env\)\.env \};/);
   assert.ok(controller.indexOf("const runEnv = { ...remoteBuildEnv(env, request.profile)") < controller.indexOf('if (request.profile === "facts-and-projections")'));
   assert.equal([...controller.matchAll(/\bremoteBuildEnv\(/g)].length, 2); // definition + single common profile entry
-  // No global Cargo/toolchain/workflow profile edits: only the controller constructs this override.
-  assert.doesNotMatch(workflow, /BUILD_OVERRIDE_STRIP|CARGO_PROFILE_(?:DEV|TEST)_STRIP/);
+  // The hosted artifact producer owns an isolated profile; no override may leak into
+  // workflow-global settings or the existing manual/legacy lanes.
+  const stripOverride = /BUILD_OVERRIDE_STRIP|CARGO_PROFILE_(?:DEV|TEST)_STRIP/;
+  assert.doesNotMatch(workflow.split("\njobs:\n")[0], stripOverride);
+  const jobNames = [...workflow.split("\njobs:\n")[1].matchAll(/^  ([a-z][a-z-]+):$/gm)].map((match) => match[1]);
+  assert.ok(jobNames.includes("browser-fixture-artifact"));
+  for (const name of jobNames.filter((name) => name !== "browser-fixture-artifact")) {
+    assert.doesNotMatch(jobBody(name), stripOverride, name);
+  }
+  const artifactProducer = jobBody("browser-fixture-artifact");
+  for (const profile of ["DEV", "TEST"]) {
+    assert.match(artifactProducer, new RegExp(`CARGO_PROFILE_${profile}_STRIP: "false"`));
+    assert.match(artifactProducer, new RegExp(`CARGO_PROFILE_${profile}_BUILD_OVERRIDE_STRIP: "none"`));
+  }
 });
 test("incremental compilation is scoped to the declared consumer profile and authenticated cache recipe", async () => {
   for (const profile of ["facts-and-projections", "consumer-assertions"]) {
