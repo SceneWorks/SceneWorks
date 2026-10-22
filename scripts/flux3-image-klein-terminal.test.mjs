@@ -6,10 +6,10 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, realpath } from 'node:fs/promi
 import os from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { loadProductTargets, terminalCatalog as terminalPlan, terminalPlan as representativePlan, targetRegistry, imageRequest, requestedDiskBudget } from './flux3-image-klein-terminal-plan.mjs';
+import { loadProductTargets, terminalCatalog as terminalPlan, terminalPlan as representativePlan, targetRegistry, imageRequest, requestedDiskBudget, SCENE_PROMPT, REFERENCE_PROMPT } from './flux3-image-klein-terminal-plan.mjs';
 import { launchTerminalSession, offlineChildEnv, validateAdmission, guardHardware } from './flux3-image-klein-terminal-session.mjs';
 import { assertSavedAsset, ownedApiController, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText } from './flux3-image-klein-app-lifecycle.mjs';
-import { assertImageObservations, executeCell, trainingSequence, retainImage, waitJob, sha256, objectHash, Blocked, runTerminal, replayRequest, assertCheckpoint, pngCrc32, assertFinishedPng, provisioningApproval, provisionCell, importAdapter, ownedNegativeProbe, uploadBinding, assertPackage } from './flux3-image-klein-terminal-driver.mjs';
+import { assertImageObservations, executeCell, trainingSequence, retainImage, waitJob, sha256, objectHash, Blocked, runTerminal, replayRequest, assertCheckpoint, pngCrc32, assertFinishedPng, provisioningApproval, provisionCell, importAdapter, ownedNegativeProbe, uploadBinding, assertPackage, boundAdapterSpec } from './flux3-image-klein-terminal-driver.mjs';
 import { initializeLedger, planHash, auditLedger } from './flux3-image-klein-terminal-budget.mjs';
 const source = 'a'.repeat(40), inference = 'b'.repeat(40), tip = 'c'.repeat(40), digest = 'd'.repeat(64);
 const sources = await loadProductTargets(), registry = targetRegistry(sources), plan = terminalPlan(sources);
@@ -410,4 +410,38 @@ test('explicit public PUP-only provisioning does not read any account token and 
     spawn: (binary, args, options) => { workerId = options.env.SCENEWORKS_WORKER_ID; envs.push(options.env); return child(600 + envs.length); }, controller: () => ({ verify: async () => true, startWorker: async fn => fn(), call: async () => [{ id: workerId, gpuId: '1', status: 'idle', capabilities: ['gpu', 'candle'] }], close() {} }),
   });
   try { assert.equal(envs[0].HF_TOKEN, undefined); assert.equal(envs[0].HF_ENDPOINT, 'https://huggingface.co'); assert.equal(envs[0].HF_HUB_OFFLINE, undefined); assert.equal(envs[1].HF_TOKEN, undefined); assert.equal(envs[1].HF_HUB_OFFLINE, '1'); } finally { await s.close(); }
+});
+
+test('a bound adapter case uses only its own backend training export on the trained checkpoint', () => {
+  const representative = representativePlan(sources);
+  const on = representative.cases.find(c => c.caseId === 'candle.base.lora-on.bf16');
+  assert.deepEqual(on.adapterBinding, { source: 'training-export', lifecycleId: 'candle.base.train-interrupt-resume-export-captioned.bf16', backend: 'candle', modelId: 'flux3_klein_base' });
+  const exported = { lifecycleId: on.adapterBinding.lifecycleId, modelId: 'flux3_klein_base', sha256: digest, bytes: 1, rank: 4, root: 'r', path: 'r/a', repository: on.repository, resolvedRevision: on.resolvedRevision };
+  const provisioned = { sha256: 'e'.repeat(64) };
+  assert.equal(boundAdapterSpec({ trainingExports: { candle: exported } }, on, provisioned), exported, 'the exported LoRA, never a provisioned substitute');
+  for (const [session, cell, pattern] of [
+    [{}, on, /run its bound training lifecycle .* first/],
+    [{ trainingExports: { mlx: { ...exported } } }, on, /run its bound training lifecycle/],
+    [{ trainingExports: { candle: { ...exported, lifecycleId: 'candle.base.other.bf16' } } }, on, /run its bound training lifecycle/],
+    [{ trainingExports: { candle: exported } }, { ...on, modelId: 'flux3_klein' }, /cannot drive flux3_klein/],
+    [{ trainingExports: { candle: { ...exported, modelId: 'flux3_klein' } } }, on, /checkpoint differs/],
+    [{ trainingExports: { candle: exported } }, { ...on, adapterBinding: { ...on.adapterBinding, backend: 'mlx' } }, /own backend/],
+  ]) assert.throws(() => boundAdapterSpec(session, cell, provisioned), error => error instanceof Blocked && pattern.test(error.message));
+  const legacy = { ...on }; delete legacy.adapterBinding;
+  assert.equal(boundAdapterSpec({}, legacy, provisioned), provisioned, 'unbound diagnostic cases keep their provisioned adapter');
+});
+test('reference cases use a neutral, identity-preserving, setting-only prompt; text-only cases stay person-free', () => {
+  const representative = representativePlan(sources);
+  for (const prompt of [REFERENCE_PROMPT]) for (const banned of [/nud|naked|nsfw|undress|lingerie|sexy/i, /(age|younger|older|child|teen|kid)/i, /different (person|face|identity)|swap/i]) assert.doesNotMatch(prompt, banned);
+  assert.match(REFERENCE_PROMPT, /unchanged identity/);
+  for (const invocation of representative.generationInvocations) {
+    const references = invocation.options.references ?? 0;
+    assert.equal(invocation.requestTemplate.prompt, references ? REFERENCE_PROMPT : SCENE_PROMPT, invocation.invocationId);
+    for (const box of invocation.requestTemplate.advanced.flux3_layout?.boxes ?? []) {
+      if (references) assert.doesNotMatch(box.desc, /teapot|cup/, 'reference layout descriptors are subject-agnostic');
+    }
+  }
+  const moveRemove = representative.generationInvocations.find(i => i.options.references === 10 && i.requestTemplate.advanced.flux3_layout);
+  assert.deepEqual(moveRemove.requestTemplate.advanced.flux3_layout.boxes.map(b => [b.id, b.src_bbox, b.tgt_bbox]), [
+    ['move', [0.125, 0.25, 0.75, 0.875], [0.25, 0.125, 0.875, 0.75]], ['remove', [0.01, 0.02, 0.11, 0.12], null]], 'layout geometry is unchanged');
 });
