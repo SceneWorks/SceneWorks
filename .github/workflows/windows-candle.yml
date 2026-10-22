@@ -245,7 +245,7 @@ on:
           - "0,1"
         default: "1"
       run_supra2_worker_smoke:
-        description: "Run the sc-24214 Supra2-IMG Candle worker job once on real weights (install-time convert, then one default 256², 50-step, CFG 3.0, seed-0 image_generate job; the three pinned snapshots must already be in E:\\huggingface\\hub)"
+        description: "Run the Supra2-IMG Candle worker real-weight tests (sc-24214/24216/24217): install-time convert, one default 256² image_generate job, the offline cancel/recover/unload lifecycle, and the epic acceptance matrix; the three pinned snapshots must already be in E:\\huggingface\\hub"
         required: false
         type: boolean
         default: false
@@ -1807,7 +1807,9 @@ jobs:
 
   # SC-24214 (epic 24212): one real-weight Supra2-IMG `image_generate` job through the production
   # Candle worker dispatch, on the real-weights card. Dispatch only — never on PR/push — and bounded
-  # (the install-time `.pt` -> bundle convert, then ONE default 256², 50-step image). Offline: the
+  # (the install-time `.pt` -> bundle convert, ONE default 256², 50-step image, the sc-24216
+  # lifecycle, and the sc-24217 epic acceptance matrix — about a dozen 256² images on a bundle the
+  # convert step wrote; PNGs + supra2_matrix_candle.json are uploaded as evidence). Offline: the
   # pinned SupraLabs/Supra2-IMG, google/flan-t5-base and stabilityai/sd-vae-ft-mse snapshots must
   # already be in E:\huggingface\hub (inference's `candle-supra2` real-weight job materializes them
   # there); a missing snapshot fails the job rather than downloading.
@@ -1849,13 +1851,39 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
-      - name: Run the Supra2-IMG Candle worker smoke
+      - name: Run the Supra2-IMG Candle worker smoke, lifecycle and acceptance matrix
         shell: cmd
+        env:
+          # The installed layout: the worker admits a modelPath only inside its own data dir,
+          # which the acceptance matrix takes from this path.
+          SUPRA2_DATA_ROOT: ${{ runner.temp }}\supra2-data
+          SUPRA2_BUNDLE_OUT: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
+          SUPRA2_BUNDLE_DIR: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
+          SUPRA2_RENDER_OUT: ${{ runner.temp }}\supra2-worker-evidence
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release supra2_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+          cargo test -p sceneworks-worker --features backend-candle --release --lib --no-run
+          if errorlevel 1 exit /b 1
+          if exist "%SUPRA2_DATA_ROOT%" rmdir /s /q "%SUPRA2_DATA_ROOT%"
+          if not exist "%SUPRA2_RENDER_OUT%" mkdir "%SUPRA2_RENDER_OUT%"
+          rem Each invocation runs EXACTLY one passing test (run-one.cmd). The convert test writes the
+          rem bundle to SUPRA2_BUNDLE_OUT in its own process; the acceptance matrix loads it later.
+          call scripts\ci\supra2-candle-real-weights\run-one.cmd model_jobs::supra2_convert_tests::supra2_real_weight_convert_writes_a_loadable_bundle "%SUPRA2_RENDER_OUT%\convert.log"
+          if errorlevel 1 exit /b 1
+          call scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_smoke "%SUPRA2_RENDER_OUT%\smoke.log"
           if errorlevel 1 exit /b 1
           rem sc-24216: the offline installed-model lifecycle (cancel at the first progress event,
           rem recovery, generator unload + reload) on the same card, same build.
-          cargo test -p sceneworks-worker --features backend-candle --release supra2_worker_gpu_lifecycle -- --ignored --nocapture --test-threads=1
+          call scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_lifecycle "%SUPRA2_RENDER_OUT%\lifecycle.log"
+          if errorlevel 1 exit /b 1
+          rem Epic 24212 acceptance matrix (sc-24217): short / truncated prompt, CFG 3 vs 1, seed
+          rem repeat, count 4 vs single renders on seed + k, offline.
+          call scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_acceptance_matrix "%SUPRA2_RENDER_OUT%\matrix.log"
+      - name: Upload the Supra2-IMG Candle worker evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supra2-candle-worker-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\supra2-worker-evidence
+          if-no-files-found: warn

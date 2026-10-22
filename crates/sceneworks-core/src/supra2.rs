@@ -37,9 +37,10 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "pidTarget",
     "strength",
     "ipAdapterScale",
-    "identityStructure",
-    "controlnetScale",
-    "variationStrength",
+    // The InstantID identity-structure slider's WIRE key (`imageJobAdvanced.js` /
+    // `CharacterAdvancedOptions.jsx`); `identityStructure` / `controlnetScale` /
+    // `variationStrength` are studio UI-state names that never reach a request.
+    "controlnetConditioningScale",
     "trueCfgScale",
     "textStyleGain",
     "viewAngle",
@@ -52,6 +53,16 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "phases",
     "transparentBackground",
     "textEncoderModel",
+    // The Pose Library's face-restoration pass (sent with `poses`).
+    "faceRestore",
+    // The tier-pick marker that rides with `mlxQuantize`.
+    "mlxQuantizeExplicit",
+    // MOSS-Image's own wire objects (`imageJobAdvanced.js` / the MCP image tool).
+    "mossImage",
+    "mossOrdinarySettings",
+    // The character lane's Angle Set / Key Point Library extras (`characterPanels.jsx`).
+    "angleSet",
+    "keypointCollectionId",
 ];
 
 /// Top-level carriers of a source, reference, mask, control, adapter or prompt batch.
@@ -64,6 +75,11 @@ const UNSUPPORTED_CARRIERS: &[&str] = &[
     "controlnets",
     "loras",
     "prompts",
+    // A character identity (the studio sends these on `character_image`; the MCP image tool
+    // forwards `characterId` with any mode). `fitMode` is NOT here: the API stamps its default on
+    // every image job, and it only shapes an edit source, which text-to-image has none of.
+    "characterId",
+    "characterLookId",
 ];
 
 /// A value that asks for something: not `null`, `""`, `[]`, `{}` or `false`.
@@ -135,6 +151,45 @@ pub fn pinned_revisions(entry: &JsonObject) -> Value {
         })
         .collect();
     Value::Array(rows)
+}
+
+/// Worker-owned `rawAdapterSettings` key: which unconditional context classifier-free guidance
+/// steered against — [`UNCONDITIONAL_STORED`], [`UNCONDITIONAL_EMPTY_PROMPT`] or
+/// [`UNCONDITIONAL_NONE`] (see [`unconditional_source`]).
+pub const UNCONDITIONAL_KEY: &str = "unconditional";
+/// CFG used the checkpoint-stored unconditional embedding (the pinned bundle's conditioning file).
+pub const UNCONDITIONAL_STORED: &str = "stored";
+/// CFG used upstream's fallback, the empty-prompt encoding (a bundle that stores no conditioning;
+/// the pin contract refuses such a bundle at load, so a published asset never records it).
+pub const UNCONDITIONAL_EMPTY_PROMPT: &str = "emptyPrompt";
+/// Guidance `<= 1.0`: upstream's unguided branch evaluates no unconditional context at all.
+pub const UNCONDITIONAL_NONE: &str = "none";
+/// Worker-owned `rawAdapterSettings` key: the backend that rendered the asset (`mlx` / `candle`).
+pub const BACKEND_KEY: &str = "backend";
+
+/// Which unconditional context a render at `guidance` (the resolved value; `None` ⇒ the release
+/// default) steers against, derived deterministically the way the engine decides it: CFG runs iff
+/// `guidance > 1` (`gen_core::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
+/// when its manifest records one, else the empty-prompt fallback. The engine's own
+/// `used_stored_unconditional` flag stays inside the provider (the `Generator` report does not carry
+/// it), so the worker reads the same fact off the converted bundle's manifest at the entry's
+/// `modelPath`. `Null` when the manifest cannot be read (that render fails at load anyway).
+pub fn unconditional_source(entry: &JsonObject, guidance: Option<f32>) -> Value {
+    if !s2::cfg_enabled(guidance.unwrap_or(s2::DEFAULT_GUIDANCE)) {
+        return Value::from(UNCONDITIONAL_NONE);
+    }
+    let manifest = entry
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .and_then(|dir| std::fs::read(std::path::Path::new(dir).join(s2::BUNDLE_MANIFEST)).ok())
+        .and_then(|bytes| serde_json::from_slice::<s2::BundleManifest>(&bytes).ok());
+    match manifest {
+        Some(manifest) if manifest.conditioning.is_some() => Value::from(UNCONDITIONAL_STORED),
+        Some(_) => Value::from(UNCONDITIONAL_EMPTY_PROMPT),
+        None => Value::Null,
+    }
 }
 
 /// The largest `advanced.steps` Supra2 accepts: the entry's declared `limits.hardMaxSteps` (the
@@ -321,6 +376,70 @@ mod tests {
         assert_eq!(pinned_revisions(&JsonObject::new()), json!([]));
     }
 
+    /// The studio's off-state for the keys it always spells (a `false` toggle, a `null` id) is not
+    /// a request for the knob, so it renders.
+    #[test]
+    fn studio_off_states_are_accepted() {
+        assert!(validate(json!({
+            "prompt": "a fox", "characterId": null, "characterLookId": null,
+            "advanced": { "faceRestore": false, "flashAttn": false, "resolution": "256x256" }
+        }))
+        .is_ok());
+    }
+
+    /// CFG <= 1 evaluates no unconditional context; CFG > 1 uses the bundle's stored conditioning
+    /// when its manifest records one, else the empty-prompt fallback; no readable manifest ⇒ null.
+    #[test]
+    fn the_unconditional_source_follows_guidance_and_the_bundle_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |path: &str| s2::BundleFile {
+            file: path.to_owned(),
+            bytes: 1,
+            sha256: "0".repeat(64),
+        };
+        let manifest = |conditioning: Option<s2::BundleFile>| s2::BundleManifest {
+            schema: s2::BUNDLE_SCHEMA.to_owned(),
+            provider_id: s2::PROVIDER_ID.to_owned(),
+            source: s2::BundleSource {
+                repo: None,
+                revision: None,
+                file: "model_final_ema.pt".to_owned(),
+                bytes: 1,
+                sha256: "0".repeat(64),
+                weights_key: "ema".to_owned(),
+            },
+            config: s2::Supra2Config::published(),
+            vae_scale: s2::VAE_SCALE,
+            denoiser: file(s2::DENOISER_FILE),
+            denoiser_tensors: 1,
+            conditioning,
+            components: Vec::new(),
+        };
+        let entry = object(json!({ "modelPath": dir.path() }));
+        let write = |m: &s2::BundleManifest| {
+            std::fs::write(
+                dir.path().join(s2::BUNDLE_MANIFEST),
+                serde_json::to_vec(m).unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(unconditional_source(&entry, Some(3.0)), Value::Null);
+        write(&manifest(Some(file(s2::CONDITIONING_FILE))));
+        assert_eq!(unconditional_source(&entry, Some(3.0)), json!("stored"));
+        assert_eq!(unconditional_source(&entry, None), json!("stored"));
+        assert_eq!(unconditional_source(&entry, Some(1.0)), json!("none"));
+        assert_eq!(unconditional_source(&entry, Some(0.5)), json!("none"));
+        write(&manifest(None));
+        assert_eq!(
+            unconditional_source(&entry, Some(3.0)),
+            json!("emptyPrompt")
+        );
+        assert_eq!(
+            unconditional_source(&JsonObject::new(), Some(1.0)),
+            json!("none")
+        );
+    }
+
     #[test]
     fn other_models_are_untouched() {
         let payload = object(json!({ "model": "flux_schnell", "negativePrompt": "x", "width": 9 }));
@@ -415,6 +534,27 @@ mod tests {
                 "controlImage",
             ),
             (json!({ "advanced": { "usePid": true } }), "usePid"),
+            // The studio's WIRE names (epic-review E4): the identity-structure slider and the pose
+            // library's face restoration, as `imageJobAdvanced.js` sends them.
+            (
+                json!({ "advanced": { "controlnetConditioningScale": 0.8 } }),
+                "controlnetConditioningScale",
+            ),
+            (
+                json!({ "advanced": { "faceRestore": true } }),
+                "faceRestore",
+            ),
+            (
+                json!({ "advanced": { "mlxQuantizeExplicit": true } }),
+                "mlxQuantizeExplicit",
+            ),
+            (
+                json!({ "advanced": { "mossImage": { "acceleration": "off" } } }),
+                "mossImage",
+            ),
+            (json!({ "advanced": { "angleSet": true } }), "angleSet"),
+            (json!({ "characterId": "c1" }), "characterId"),
+            (json!({ "characterLookId": "l1" }), "characterLookId"),
             (json!({ "advanced": "x" }), "advanced must be an object"),
         ] {
             let error = validate(payload.clone()).expect_err(&payload.to_string());

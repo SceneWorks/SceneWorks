@@ -7181,7 +7181,11 @@ mod supra2_convert_tests {
         let source = snapshot(gen_core::supra2::SUPRA2_SOURCE).join(SUPRA2_SOURCE_FILE);
         let t5 = snapshot(gen_core::supra2::FLAN_T5_BASE);
         let vae = snapshot(gen_core::supra2::SD_VAE);
-        let out = data_dir.path().join("bundle");
+        // `SUPRA2_BUNDLE_OUT` keeps the bundle for the acceptance matrix, which a LATER process
+        // loads as `SUPRA2_BUNDLE_DIR` (the real-weight lanes convert once, in this separate step).
+        let out = std::env::var_os("SUPRA2_BUNDLE_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.path().join("bundle"));
         convert_supra2_bundle(&source, &t5, &vae, &out).expect("real conversion succeeds");
         let bundle =
             gen_core::supra2::read_pinned_bundle(&out, gen_core::supra2::BundleCheck::Digests)

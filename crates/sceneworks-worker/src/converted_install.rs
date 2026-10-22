@@ -12,7 +12,8 @@
 //! finds the fault, replaces the raw error with one that names the damaged part and the remedy. A
 //! damaged converted bundle is also RECORDED next to the bundle, so the catalog reports the model
 //! as needing conversion and the Model Manager enables "Convert again". A healthy install is never
-//! hashed by SceneWorks: only a failed job pays for the diagnosis.
+//! hashed by SceneWorks: only a job whose ENGINE LOAD failed pays for the diagnosis (a validation,
+//! admission, out-of-memory, generation-time or cancel failure never does).
 
 use crate::settings::Settings;
 use crate::{WorkerError, WorkerResult};
@@ -68,7 +69,7 @@ pub(crate) fn component_message(name: &str, fault: &InstallFault) -> Option<Stri
     })
 }
 
-/// After a FAILED image job: when the model is convert-at-install with an engine pin contract,
+/// After an image job whose ENGINE LOAD failed ([`is_engine_load_failure`]): when the model is convert-at-install with an engine pin contract,
 /// re-verify its installed files in full and, if one is at fault, return an actionable error in
 /// place of `error` (recording a damaged converted bundle for the catalog). Every other failure —
 /// and every other model — is returned unchanged.
@@ -94,7 +95,7 @@ async fn explain_failed_load_with(
     error: WorkerError,
     diagnose: impl FnOnce(&str, &std::path::Path) -> Option<InstallFault> + Send + 'static,
 ) -> WorkerError {
-    if matches!(error, WorkerError::Canceled(_)) {
+    if !is_engine_load_failure(&error) {
         return error;
     }
     let Some((name, converter, bundle)) = contract_install(payload) else {
@@ -121,6 +122,39 @@ async fn explain_failed_load_with(
         // Intact install (the failure has another cause), or the diagnosis task itself failed:
         // the original error is the honest answer.
         Ok(None) | Err(_) => error,
+    }
+}
+
+/// The context every image arm's generator load wraps an engine load error in
+/// (`"{engine} load failed"` on MLX, `"candle {engine} load failed"` on Candle — through
+/// `generator_cache`'s `classify_engine_error(load_error_context, …)`).
+const ENGINE_LOAD_FAILURE: &str = " load failed: ";
+
+/// Substrings of an out-of-memory load failure: the files are not the cause, so it is not diagnosed.
+const OUT_OF_MEMORY_MARKERS: &[&str] = &[
+    "out of memory",
+    "OutOfMemory",
+    "CUDA_ERROR_OUT_OF_MEMORY",
+    "insufficient memory",
+    "Attempting to allocate",
+];
+
+/// Is `error` the engine's own load-time failure — the only place a size-preserving corruption of
+/// the converted bundle or a co-requisite surfaces (digest mismatch, safetensors parse, missing
+/// tensor)? Everything else is never diagnosed, so a failed job does not re-hash ~1.7 GB for a cause
+/// the install cannot have: a pre-load validation/routing refusal (`validate_request`, the step
+/// ceiling, the geometry envelope), an admission or out-of-memory refusal, a generation-time
+/// failure, or a cancel. A cheap pre-load integrity refusal (`converted_artifact_preflight`,
+/// weight resolution, component staging) already carries its own actionable message.
+fn is_engine_load_failure(error: &WorkerError) -> bool {
+    match error {
+        WorkerError::InvalidPayload(message) | WorkerError::Engine(message) => {
+            message.contains(ENGINE_LOAD_FAILURE)
+                && !OUT_OF_MEMORY_MARKERS
+                    .iter()
+                    .any(|marker| message.contains(marker))
+        }
+        _ => false,
     }
 }
 
@@ -328,7 +362,7 @@ mod tests {
         let missing = explain_job_result(
             &settings,
             &payload(&bundle),
-            Err(WorkerError::Engine("raw".to_owned())),
+            Err(WorkerError::Engine(LOAD_FAILURE.to_owned())),
         )
         .await
         .expect_err("still a failure")
@@ -348,17 +382,103 @@ mod tests {
 
         let mut other = payload(&bundle);
         other["modelManifestEntry"]["mlx"]["converter"] = json!("anima_quant");
-        let untouched =
-            explain_failed_load(&settings, &other, WorkerError::Engine("raw".to_owned())).await;
-        assert_eq!(untouched.to_string(), "raw");
+        let untouched = explain_failed_load(
+            &settings,
+            &other,
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+        )
+        .await;
+        assert_eq!(untouched.to_string(), LOAD_FAILURE);
 
         let mut no_path = payload(&bundle);
         no_path["modelManifestEntry"]
             .as_object_mut()
             .unwrap()
             .remove("modelPath");
-        let untouched =
-            explain_failed_load(&settings, &no_path, WorkerError::Engine("raw".to_owned())).await;
-        assert_eq!(untouched.to_string(), "raw");
+        let untouched = explain_failed_load(
+            &settings,
+            &no_path,
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+        )
+        .await;
+        assert_eq!(untouched.to_string(), LOAD_FAILURE);
+    }
+
+    /// A raw engine load error, as `generator_cache` wraps it for the MLX arm.
+    const LOAD_FAILURE: &str = "supra2_img load failed: backend op failed: safetensors header";
+
+    /// Epic-review E3: only an ENGINE LOAD failure pays for the full-install diagnosis. A pre-load
+    /// validation refusal, an admission refusal, a cheap pre-load integrity refusal (already
+    /// actionable), an out-of-memory load, a generation-time failure and a cancel are returned
+    /// untouched WITHOUT diagnosing; a load failure on either backend (the typed `Unsupported`
+    /// digest refusal arrives as `InvalidPayload`, everything else as `Engine`) is diagnosed.
+    ///
+    /// *Mutations that red this:* diagnose every non-cancel error (the pre-fix behaviour); drop the
+    /// out-of-memory exclusion; match only `Engine` (misses the typed digest refusal).
+    #[tokio::test]
+    async fn only_an_engine_load_failure_is_diagnosed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let data = tempfile::tempdir().unwrap();
+        let bundle = data.path().join("models/mlx/supra2_img");
+        let diagnose = |calls: std::sync::Arc<AtomicUsize>| {
+            move |_: &str, _: &std::path::Path| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Some(InstallFault::Converted {
+                    problem: "denoiser.safetensors does not match its manifest".to_owned(),
+                })
+            }
+        };
+        for error in [
+            WorkerError::InvalidPayload(
+                "supra2_img: advanced.faceRestore is not supported (Supra2-IMG takes prompt, \
+                 seed, guidance, steps and image count only)"
+                    .to_owned(),
+            ),
+            WorkerError::InvalidPayload(
+                "supra2_img needs 3.1 GB but only 1.2 GB of unified memory is available".to_owned(),
+            ),
+            WorkerError::InvalidPayload(converted_files_message(
+                "Supra2-IMG",
+                "denoiser.safetensors is 12 bytes, expected 419430400",
+            )),
+            WorkerError::Engine(
+                "candle supra2_img load failed: backend op failed: \
+                 DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")"
+                    .to_owned(),
+            ),
+            WorkerError::Engine(
+                "supra2_img load failed: [metal::malloc] Attempting to allocate 9 GB".to_owned(),
+            ),
+            WorkerError::Engine("supra2 generation failed: backend op failed: nan".to_owned()),
+            WorkerError::Canceled("user".to_owned()),
+        ] {
+            let calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let before = error.to_string();
+            let after =
+                explain_failed_load_with(&payload(&bundle), error, diagnose(calls.clone())).await;
+            assert_eq!(after.to_string(), before, "returned untouched");
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "not diagnosed: {before}");
+        }
+        for error in [
+            WorkerError::InvalidPayload(
+                "supra2_img load failed: unsupported: supra2: bundle file denoiser.safetensors \
+                 does not match its manifest"
+                    .to_owned(),
+            ),
+            WorkerError::Engine(LOAD_FAILURE.to_owned()),
+            WorkerError::Engine(
+                "candle supra2_img load failed: backend op failed: safetensors header".to_owned(),
+            ),
+        ] {
+            let calls = std::sync::Arc::new(AtomicUsize::new(0));
+            let before = error.to_string();
+            let after =
+                explain_failed_load_with(&payload(&bundle), error, diagnose(calls.clone())).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "diagnosed: {before}");
+            assert!(
+                after.to_string().contains("run Convert again"),
+                "{before} -> {after}"
+            );
+        }
     }
 }
