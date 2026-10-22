@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { readFile, mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -110,8 +110,8 @@ test('no driver/ledger/model/GPU before full barrier; race/failure/interrupt rel
   assert.equal(stopped, 1); assert.equal(released, 2);
   await assert.rejects(superviseChild({ tick: async () => {}, start: async () => { throw Error('spawn failed'); }, release: async () => { released++; } }), /spawn failed/);
   assert.equal(released, 3);
-  await assert.rejects(superviseChild({ interval: 0, wait: async () => {}, tick: async () => {}, start: async () => ({ done: Promise.resolve(1), stop: async () => { throw Error('must not stop exited child'); } }), release: async () => { released++; } }), /child failed/);
-  assert.equal(released, 4);
+  await assert.rejects(superviseChild({ interval: 0, wait: async () => {}, tick: async () => {}, start: async () => ({ done: Promise.resolve(1), stop: async () => { stopped++; } }), release: async () => { released++; } }), /child failed/);
+  assert.equal(released, 4); assert.equal(stopped, 2, 'root exit still requires cleanup');
 });
 test('supervisor heartbeat checks continue while its separate model child blocks on CPU work', async () => {
   let ticks = 0, releases = 0;
@@ -136,7 +136,8 @@ test('workflow/privacy contracts: one manual four-slot scheduler matrix; no uplo
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda\]/); assert.match(workflow, /CUDA_VISIBLE_DEVICES: "-1"/);
   const code = await readFile(new URL('./flux3-terminal-queue.mjs', import.meta.url), 'utf8'), campaign = await readFile(new URL('./flux3-terminal-queue-campaign.mjs', import.meta.url), 'utf8');
   for (const text of [workflow, code, campaign]) assert.doesNotMatch(text, /upload-artifact|actions\/cache|Stop-ScheduledTask|Disable-ScheduledTask|Stop-Service|schtasks|Set-Acl|taskkill/i);
-  assert.match(code, /stdio: \['ignore', logHandle\.fd, logHandle\.fd\]/);
+  const native = await readFile(new URL('./flux3-queue-container.ps1', import.meta.url), 'utf8');
+  assert.match(native, /0x2000/); assert(native.indexOf('if(!AssignProcessToJobObject') < native.indexOf('ResumeThread(p.thread)'));
   assert.match(code, /if \(role === 'executor'\)/); assert.match(code, /setInterval/); assert.match(code, /'wx'/);
   assert.match(campaign, /existing ledger\/claim requires coordinator reconciliation/);
   const driver = await readFile(new URL('./flux3-image-klein-terminal-driver.mjs', import.meta.url), 'utf8'); assert.match(driver, /admission\.queueReservation && report\.executionStatus !== 'PASSED'/);
@@ -154,4 +155,39 @@ test('rendezvous publication is atomic/exclusive: a race publishes one complete 
 });
 test('binding path cannot select an arbitrary reservation, and missing proof refuses (no PID fallback)', async () => {
   await assert.rejects(verifyQueueReservation({ queueReservation: { path: '/tmp/untrusted/binding.json', runId: 1, attempt: 1, sha256: digest } }, [], 1), /strictly equal/);
+});
+
+test('cleanup failure cannot release even after root exits; holders retain slots through failure/cancel/deadline until verified zero', async () => {
+  let released = 0, cleanup = 0;
+  await assert.rejects(superviseChild({ interval: 0, wait: async () => {}, tick: async () => {}, start: async () => ({ done: Promise.resolve(0), stop: async () => { cleanup++; throw Error('kernel accounting unavailable'); } }), release: async () => { released++; } }), /kernel accounting/);
+  assert.equal(cleanup, 1); assert.equal(released, 0, 'no SAFE_TO_RELEASE on cleanup failure');
+  let grandchildAlive = true, held = 0, probes = 0;
+  await holdUntilSafe({ probe: async () => { probes++; if (probes === 1) throw Error('API failure/invalid ACK'); return !grandchildAlive; }, heartbeat: async () => { held++; assert.equal(released, 0); }, wait: async () => { if (held === 4) grandchildAlive = false; } });
+  assert.equal(held, 4, 'holder remains occupied despite failure, cancellation or expired ordinary deadline');
+  assert.equal(grandchildAlive, false); released++; assert.equal(released, 1);
+});
+test('verification samples its live clock after asynchronous observations, including a pulse published between reads', async () => {
+  const f = fixture(); let now = NOW, collected = false;
+  const result = await verifyObservedRoster(async () => {
+    await Promise.resolve(); now += 25;
+    const runner = 'cuda-windows-2'; f.pulses[runner] = signed({ ...f.pulses[runner].value, at: now }, f.keys[runner].privateKey);
+    collected = true; return { binding: f.binding, pulses: f.pulses, table: f.table };
+  }, f.controllerPid, () => { assert(collected, 'clock captured before observations'); return now; });
+  assert.deepEqual(result, [200,300,400]);
+  assert.throws(() => verifyRoster(f.binding, f.pulses, f.table, f.controllerPid, NOW), /heartbeat/, 'mutation: the old early numeric clock falsely refuses a healthy future pulse');
+  await assert.rejects(verifyObservedRoster(async () => ({ binding: f.binding, pulses: f.pulses, table: f.table }), f.controllerPid, NOW));
+});
+test('one campaign-wide concurrency group serializes dispatches but never serializes the four siblings against each other', async () => {
+  const dispatcher = await readFile(new URL('../.github/workflows/memory-catalog-campaign.yml', import.meta.url), 'utf8');
+  const workflow = await readFile(new URL('../.github/workflows/flux3-image-klein-terminal-queue.yml', import.meta.url), 'utf8');
+  const block = dispatcher.slice(dispatcher.indexOf('  flux3-terminal-queue:')).split('\n  qwen-app-lifecycle:')[0];
+  const contract = b => {
+    assert.match(b, /concurrency:\n      group: flux3-terminal-queue-physical-host\n      cancel-in-progress: false/);
+    const group = /group: (.+)/.exec(b)[1]; assert.doesNotMatch(group, /\$\{\{|run_id|source_sha|ref/);
+    return group;
+  };
+  assert.equal(contract(block), contract(block), 'all source branches/approvals of our queue profile share one group');
+  assert.throws(() => contract(block.replace('group: flux3-terminal-queue-physical-host', 'group: per-run-id')), 'mutation: removing the common group breaks serialization');
+  assert.doesNotMatch(workflow, /concurrency:/, 'no nested equal group or per-member group deadlock');
+  assert.match(workflow, /max-parallel: 4/); assert.match(workflow, /slot: \[1, 2, 3, 4\]/);
 });

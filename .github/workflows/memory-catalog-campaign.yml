@@ -303,6 +303,11 @@ jobs:
       control_sha256: ${{ inputs.flux3_terminal_control_sha256 }}
   flux3-terminal-queue:
     if: ${{ inputs.profile == 'flux3-image-klein-terminal-queue' }}
+    # Serialize WHOLE campaigns, not individual matrix slots. Otherwise two dispatches can each
+    # occupy half the box. One stable group across branches/approvals; no second inner group.
+    concurrency:
+      group: flux3-terminal-queue-physical-host
+      cancel-in-progress: false
     permissions:
       contents: read
       actions: read

@@ -97,7 +97,7 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   if (a.queueReservation) {
     assert(platform === 'win32' && a.backend === 'candle', 'queue reservations are Windows Candle only');
     const { verifyQueueReservation } = await import('./flux3-terminal-queue.mjs');
-    companions = await verifyQueueReservation(a, table, controllerPid, now());
+    companions = await verifyQueueReservation(a, table, controllerPid, now);
   }
   assert(runners.every(p => ancestors.has(p.pid) || companions.includes(p.pid)), 'foreign Runner.Worker active; only the ancestor hosting THIS job or verified queue companions are allowed');
   if (a.backend === 'mlx') {
