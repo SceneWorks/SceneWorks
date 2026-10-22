@@ -1,0 +1,235 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SupraLabs/Supra2-IMG",
+        "resolvedRevision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+        "variant": "bf16"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "supra2-img-candle-resident-v1",
+      "capturedAt": "2026-10-22T03:56:57Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:supra2-img-anchor",
+        "blockers": [
+          "sc-24217 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Supra2-IMG lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned provider publishes no calibration identity"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 1747976192
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 1747976192
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 2821718016
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 2821718016
+          },
+          {
+            "name": "bundleConvertedInChildProcess",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "bundleConvertWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 2924
+          },
+          {
+            "name": "loadWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 830
+          },
+          {
+            "name": "conditioningWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 247
+          },
+          {
+            "name": "denoiseWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 975
+          },
+          {
+            "name": "decodeWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 156
+          },
+          {
+            "name": "count1RenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 1379
+          },
+          {
+            "name": "productMaxCount",
+            "unit": "count",
+            "value": 8
+          },
+          {
+            "name": "productMaxCountDevicePeakDelta",
+            "unit": "bytes",
+            "value": 2821718016
+          },
+          {
+            "name": "productMaxCountRenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 2364
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 256
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 256
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "supra2-img-candle-bf16-256-seed0-step50",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-720c45380d2ce4058aa0",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SupraLabs/Supra2-IMG@10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-af8d1aa485422134b05d",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1747976192,
+          "allocatorBytes": 1747976192,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 2821718016,
+          "allocatorBytes": 2821718016,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 1747976192,
+          "allocatorBytes": 1747976192,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 2821718016,
+          "allocatorBytes": 2821718016,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "3fa810a10b3df6efbfd667499445bfa8af50972b8e33f4aa81a99149df0c614e",
+          "dirty": false,
+          "revision": "81cff07c13137fea520cec0b1dc9b8f083514601"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:d6b20c0d9c84d8a7b529c49a2e18cd0d528655d9dc31d5b51e071629ac292ced",
+          "revision": "6f03ae483e6be85216cbd72197e9101d29d1bd47"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-24217 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Supra2-IMG lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned provider publishes no calibration identity",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded Supra2 admission check rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned supra2_img provider at inference 81cff07c13137fea520cec0b1dc9b8f083514601 publishes no calibration identity (gen-core compatibility_default contract), so its admission carries no calibration handshake for stale evidence to fail",
+          "result": "not_applicable"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-24217 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Supra2-IMG lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned provider publishes no calibration identity",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-24217 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Supra2-IMG lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned provider publishes no calibration identity",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-24217 anchor capture measures exact per-phase device memory and the strategy identity for the Candle Supra2-IMG lane; it stays gated because this run does not repeat the full promotion-quality, negative-mutation and lifecycle scenario suite, and the pinned provider publishes no calibration identity",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the supra2_img resident path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 256,
+          "width": 256
+        },
+        "mode": "text_to_image",
+        "modelId": "supra2_img",
+        "overlay": "none",
+        "provider": "supra2_img",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}
