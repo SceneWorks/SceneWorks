@@ -412,6 +412,33 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
         .unwrap_err()
         .to_string()
         .contains("6144x4096"));
+
+    // sc-26644: a model that neither is SDXL nor advertises `ui.img2img` is refused, naming the
+    // model and the missing capability — the same shared gate the API now runs at enqueue.
+    let not_capable = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "hiresFix": { "enabled": true }
+    }));
+    let error = validate_hires_fix_request(&not_capable)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("img2img-capable"),
+        "names the missing capability: {error}"
+    );
+    assert!(error.contains("z_image_turbo"), "names the model: {error}");
+
+    // An absent `hiresFix` block is unchanged: disabled, and every other check inert.
+    let no_block = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "upscale": { "enabled": true }
+    }));
+    assert!(no_block.hires_fix.is_disabled());
+    validate_hires_fix_request(&no_block).expect("no hiresFix block, no refusal");
 }
 
 #[cfg(any(
