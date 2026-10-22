@@ -3177,6 +3177,23 @@ fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
              is refused because the loader cannot derive its architecture.",
         ));
     }
+    // sc-26680: a dense MiniMax-H3 DiT imports only as its complete transformer component directory
+    // — the `MiniMaxH3Transformer3DModel` config beside exactly one weight file — because both
+    // native providers open the directory whole.
+    if matches!(
+        &detection,
+        BaseWeightDetection::Recognized(verdict)
+            if verdict.family.as_deref() == Some("minimax-h3")
+    ) && (!source.is_dir()
+        || !sceneworks_core::base_weights::is_minimax_h3_transformer_dir(source))
+    {
+        return Err(ApiError::bad_request(
+            "Model import for the 'minimax-h3' family requires a complete transformer directory \
+             containing a MiniMaxH3Transformer3DModel config.json and exactly one \
+             diffusion_pytorch_model.safetensors; a bare weights file, a sharded directory, or a \
+             directory with other weight files is refused.",
+        ));
+    }
     Ok(())
 }
 
@@ -8985,11 +9002,38 @@ fn apply_imported_provider_surface(object: &mut JsonObject) {
     apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
 }
 
+/// The Mac and off-Mac support blocks for an imported, plan-backed video entry (sc-26680).
+///
+/// The id-keyed pass in `apply_mac_and_mlx_fields` asks the claim predicates about a probe carrying
+/// no manifest entry, so for an imported id every plan-backed predicate answers `false` and the
+/// Video Studio would hide a model both native lanes serve. This replaces both blocks with the
+/// entry-keyed verdicts, derived from the SAME predicates the scheduler and the no-lane gate ask
+/// about a submitted job. Emitted on every platform, like the id-keyed blocks it replaces.
+fn apply_imported_video_support_surface(object: &mut JsonObject) {
+    if let Ok(mac_support) =
+        serde_json::to_value(sceneworks_core::jobs_store::imported_video_model_mac_support(object))
+    {
+        object.insert("macSupport".to_owned(), mac_support);
+    }
+    if let Ok(candle_support) = serde_json::to_value(
+        sceneworks_core::jobs_store::imported_video_model_candle_support(object),
+    ) {
+        object.insert("candleSupport".to_owned(), candle_support);
+    }
+}
+
 fn apply_imported_provider_surface_for_lanes(
     object: &mut JsonObject,
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
+    if object.get("catalogScope").and_then(Value::as_str) != Some("builtin")
+        && object.get("type").and_then(Value::as_str) == Some("video")
+        && sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(object)
+    {
+        apply_imported_video_support_surface(object);
+        return;
+    }
     if object.get("type").and_then(Value::as_str) != Some("image")
         || object.get("catalogScope").and_then(Value::as_str) == Some("builtin")
     {

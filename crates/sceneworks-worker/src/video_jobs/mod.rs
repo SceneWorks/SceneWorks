@@ -251,6 +251,11 @@ enum VideoRoute {
     /// providers. [`minimax_h3_available`] folds in the registry check, the partition/shape
     /// agreement check and weights resolution.
     MiniMaxH3(&'static str),
+    /// A plan-backed entry (`importPlan.checkpointId`, epic 20398) that no MLX video lane loads.
+    /// Refused by name rather than stubbed: every arm below either loads its model id's SHIPPED
+    /// weights or renders procedural video, and either would complete a job under the imported
+    /// checkpoint's id without ever reading its bytes (sc-26680).
+    NoPlanLane,
     /// No native engine matched (or weights unresolved) → the procedural stub, after
     /// `ensure_video_engine_weights` fails a known-but-unprovisioned engine loudly (sc-4176).
     Stub,
@@ -288,6 +293,20 @@ fn resolve_video_route_with(
     settings: &Settings,
     minimax_h3_ready: bool,
 ) -> VideoRoute {
+    // A plan-backed entry is decided FIRST, by the one MLX video lane that loads a plan's bytes:
+    // the imported dense MiniMax-H3 DiT (sc-26680), which `generate_minimax_h3` resolves through
+    // the plan store and refuses by name when it cannot. Anything else plan-backed has no MLX lane
+    // and must not reach the id-keyed ladder below. Mirrors the scheduler's MLX claim, which
+    // decides plan-backed entries ahead of `VIDEO_MLX_ROUTED_MODELS` the same way.
+    if sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
+        .is_some()
+    {
+        return if imported_minimax_h3_checkpoint_id(request).is_some() {
+            VideoRoute::MiniMaxH3(MINIMAX_H3_ENGINE_ID)
+        } else {
+            VideoRoute::NoPlanLane
+        };
+    }
     // Lives at the top of `_with`, not in the thin `resolve_video_route` wrapper: the wrapper is a
     // one-line delegation and every routing decision belongs on the seam tests drive directly.
     if request.model == "wan_2_2_vace_fun_14b" && request.mode != "replace_person" {
@@ -466,6 +485,18 @@ fn resolve_candle_video_route(
     if let Some(checkpoint_id) =
         sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(&request.model_manifest_entry)
     {
+        // An imported dense MiniMax-H3 DiT (sc-26680) loads through the live candle H3 provider;
+        // `generate_candle_minimax_h3` resolves the plan and refuses by name when it cannot.
+        if imported_minimax_h3_checkpoint_id(request).is_some() {
+            if !settings.backend_candle_enabled {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "[checkpoint-plan:no-video-lane] checkpoint {checkpoint_id:?}: the candle \
+                     backend is disabled on this worker, and a plan-backed entry never renders \
+                     procedural stub output"
+                )));
+            }
+            return Ok(CandleVideoRoute::MiniMaxH3(MINIMAX_H3_ENGINE_ID));
+        }
         candle::plan_backed_wan_video_route(request, settings, checkpoint_id)?;
         return Ok(CandleVideoRoute::WanComfyui);
     }
@@ -967,6 +998,22 @@ pub(crate) async fn run_video_generate_job(
                 )
                 .await?;
                 (decoded, MINIMAX_H3_ADAPTER, raw_settings, None)
+            }
+            VideoRoute::NoPlanLane => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "[checkpoint-plan:no-video-lane] checkpoint {:?}: no MLX video lane loads a \
+                     checkpoint plan for the {:?} family, and a plan-backed entry never renders \
+                     procedural stub output",
+                    sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(
+                        &request.model_manifest_entry
+                    )
+                    .unwrap_or_default(),
+                    request
+                        .model_manifest_entry
+                        .get("family")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                )));
             }
             VideoRoute::Stub => {
                 // An MLX-routed video model whose snapshot didn't resolve must fail
@@ -2149,15 +2196,15 @@ mod mochi;
 #[cfg(target_os = "macos")]
 use mochi::{generate_mochi, mochi_available, mochi_engine_id, MOCHI_ADAPTER};
 pub(crate) mod minimax_h3;
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-use minimax_h3::minimax_h3_engine_id;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use minimax_h3::{generate_candle_minimax_h3, CANDLE_MINIMAX_H3_ADAPTER};
 #[cfg(target_os = "macos")]
 use minimax_h3::{generate_minimax_h3, minimax_h3_available, MINIMAX_H3_ADAPTER};
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use minimax_h3::{imported_minimax_h3_checkpoint_id, minimax_h3_engine_id, MINIMAX_H3_ENGINE_ID};
 mod svd;
 #[cfg(target_os = "macos")]
 use svd::{generate_svd, svd_available, svd_engine_id, svd_raw_settings, SVD_ADAPTER};

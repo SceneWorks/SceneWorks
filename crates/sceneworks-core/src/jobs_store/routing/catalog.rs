@@ -1511,6 +1511,118 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
         .and_then(checkpoint_plan_checkpoint_id)
 }
 
+/// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
+/// lanes, because both providers load a staged DiT directory through the same `transformer`
+/// component seam.
+///
+/// Keyed on the forwarded `modelManifestEntry` ([`crate::minimax_h3_import::entry_is_imported_minimax_h3`]),
+/// never on the model id, and narrow on every axis because a claim is a promise a worker arm exists:
+/// * **id** — never a builtin video id. A builtin id names the shipped weights; a plan forwarded
+///   under one would render the imported bytes under another checkpoint's name (or, on a lane that
+///   ignored the plan, the shipped bytes under the imported one).
+/// * **shape** — exactly the base partition's (`text_to_video` / `image_to_video` /
+///   `first_last_frame`, no references), the one partition the stamped assembly binds. The SAME
+///   predicate the builtin `minimax_h3` candle arm uses, so the two cannot drift.
+/// * **adapters** — none. LoRA and turbo support on imported H3 checkpoints is a later story; the
+///   entry advertises no adapters and the worker route refuses them.
+///
+/// This is a claim, not a load: the worker still resolves and re-verifies the plan, the binding and
+/// the resident components, and refuses by name when it cannot.
+pub(crate) fn plan_backed_minimax_h3_video_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+) -> bool {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
+        return false;
+    }
+    if crate::video_request::is_minimax_h3_model(model)
+        || VIDEO_MLX_ROUTED_MODELS.contains(&model)
+        || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+    {
+        return false;
+    }
+    if payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty())
+    {
+        return false;
+    }
+    super::candle::minimax_h3_base_partition_shape(payload)
+}
+
+/// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the
+/// [`video_model_mac_support`] twin that asks the REAL MLX claim predicate with the entry forwarded,
+/// exactly as a submitted job forwards it. The id-keyed form cannot answer for an imported model:
+/// its probe carries no entry, so every plan-backed predicate answers `false` and the Video Studio
+/// would hide a model the lane serves.
+pub fn imported_video_model_mac_support(entry: &Map<String, Value>) -> ModelMacSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::mlx::video_request_is_mlx_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelMacSupport {
+            supported: true,
+            reason: None,
+            features: ModelMacFeatures {
+                video_modes,
+                ..ModelMacFeatures::default()
+            },
+        };
+    }
+    video_model_mac_support(model)
+}
+
+/// The off-Mac twin of [`imported_video_model_mac_support`].
+pub fn imported_video_model_candle_support(entry: &Map<String, Value>) -> ModelCandleSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::candle::video_request_is_candle_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelCandleSupport {
+            supported: true,
+            reason: None,
+            features: ModelCandleFeatures { video_modes },
+        };
+    }
+    video_model_candle_support(model)
+}
+
+/// [`video_mode_probe_payload`] with the imported entry forwarded as `modelManifestEntry`.
+fn imported_video_mode_probe_payload(
+    model: &str,
+    mode: &str,
+    entry: &Map<String, Value>,
+) -> Map<String, Value> {
+    let mut payload = video_mode_probe_payload(model, mode);
+    payload.insert(
+        "modelManifestEntry".to_owned(),
+        Value::Object(entry.clone()),
+    );
+    payload
+}
+
 /// The path a bespoke imported lane actually LOADS from, in the order the entry may spell it.
 /// `None` when every spelling is absent or blank.
 ///
