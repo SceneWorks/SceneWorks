@@ -241,6 +241,81 @@ class InspectTests(Fixture):
             self.assertTrue(any(a == call or a.startswith(call + os.sep) for a in allowed), call)
 
 
+class PrivacyTests(Fixture):
+    SENTINELS = ("hf_sensitive_sentinel", "https://user:pw@example.invalid/x?token=abc", "ghp_SECRETTOKEN")
+
+    def test_invalid_hf_values_are_never_echoed(self):
+        for var in ("HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+            for sentinel in self.SENTINELS:
+                out = self.runner_temp / f"inv-{var}-{abs(hash(sentinel))}"
+                before = snapshot_tree(self.base)
+                env = {"RUNNER_TEMP": str(self.runner_temp), "HOME": str(self.base), var: sentinel}
+                with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                    code = ci.main(["--output-dir", str(out)], env=env)
+                text = (out / "cache-inventory.json").read_text(encoding="utf-8") + stdout.getvalue()
+                self.assertEqual(code, 3)
+                report = json.loads((out / "cache-inventory.json").read_text(encoding="utf-8"))
+                self.assertEqual(report["root_status"], "REJECTED")
+                self.assertEqual(report["resolver"]["chosen_variable"], var)
+                self.assertTrue(report["resolver"]["reason"])
+                for secret in self.SENTINELS:
+                    self.assertNotIn(secret, text)
+                self.assertNotIn("pw@", text)
+                added = [r for r in snapshot_tree(self.base) if r not in before]
+                self.assertTrue(all(r[0] == "runner_temp" or r[0].startswith("runner_temp/" + out.name) for r in added))
+
+    def test_unset_and_nonfilesystem_values_never_leak_unrelated_env(self):
+        env = self.env(GITHUB_TOKEN="ghp_SECRETTOKEN", HF_TOKEN="hf_SECRETTOKEN", HF_HOME="hf_sensitive_sentinel")
+        env["HF_HUB_CACHE"] = ""
+        text = json.dumps(ci.build_report(env, home=None))
+        for secret in ("ghp_SECRETTOKEN", "hf_SECRETTOKEN", "hf_sensitive_sentinel"):
+            self.assertNotIn(secret, text)
+
+    def test_outside_root_leaf_link_text_is_redacted_and_never_followed(self):
+        self.seed_iris()
+        leaf = self.root / IRIS / "snapshots" / "rev" / "model.safetensors"
+        os.symlink("https://user:pw@example.invalid/x?token=abc", leaf)
+        outside = self.base / "outside_secret_dir"
+        outside.mkdir()
+        (outside / "f").write_bytes(b"s")
+        os.symlink(outside / "f", self.root / IRIS / "snapshots" / "rev" / "depth" / "model.safetensors")
+        before = snapshot_tree(self.base)
+        report = ci.build_report(self.env(), home=None)
+        text = json.dumps(report)
+        self.assertNotIn("example.invalid", text)
+        self.assertNotIn("outside_secret_dir", text)
+        uri = self.entries(report)[f"{IRIS}/snapshots/rev/model.safetensors"]
+        self.assertTrue(uri["readlink_redacted"])
+        self.assertNotIn("readlink", uri)
+        entry = self.entries(report)[f"{IRIS}/snapshots/rev/depth/model.safetensors"]
+        self.assertFalse(entry["target_lexically_within_root"])
+        for entry in (entry,):
+            self.assertTrue(entry["readlink_redacted"])
+            self.assertNotIn("readlink", entry)
+        # in-root links keep their text; nothing anywhere was written
+        self.assertEqual(self.entries(report)[f"{IRIS}/snapshots/rev/depth/config.yaml"]["readlink"], "../../blobs/blob2")
+        self.assertEqual(snapshot_tree(self.base), before)
+
+    def test_symlinked_root_target_text_is_redacted(self):
+        self.seed_iris()
+        alias = self.base / "alias" / "x" / "hub"
+        alias.parent.mkdir(parents=True)
+        os.symlink(self.root, alias)
+        record = ci.build_report(self.env(HF_HUB_CACHE=str(alias)), home=None)["root"]
+        self.assertTrue(record["readlink_redacted"])
+        self.assertNotIn("readlink", record)
+
+    def test_report_size_is_bounded(self):
+        self.seed_iris()
+        out = self.runner_temp / "inv-size"
+        self.assertEqual(self.run_main_for(out), 0)
+        self.assertLess((out / "cache-inventory.json").stat().st_size, 32 * 1024)
+
+    def run_main_for(self, out):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return ci.main(["--output-dir", str(out)], env=self.env())
+
+
 class MainTests(Fixture):
     def run_main(self, out, **env_extra):
         env = self.env(**env_extra)

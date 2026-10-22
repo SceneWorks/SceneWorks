@@ -15,6 +15,7 @@ import datetime
 import errno
 import json
 import os
+import re
 import stat
 import sys
 
@@ -22,6 +23,8 @@ SCHEMA_VERSION = 1
 FAILED_RUN_ID = "39687007308"
 FAILED_SOURCE_SHA = "f203ec37f49386fd5043c62333adb87fbb4c1550"
 REPORT_NAME = "cache-inventory.json"
+SAFE_LINK_TEXT = re.compile(r"[A-Za-z0-9._/-]+")  # no scheme, query, userinfo or spaces
+MAX_LINK_TEXT = 256  # in-root link text only; longer or outside-root text is redacted
 
 # Root resolution mirrors sceneworks_core::hf_home::huggingface_hub_cache_dir at f203, minus the
 # cfg(test-support) CacheRootGuard and the final `<data_dir>/cache/huggingface/hub` fallback: that
@@ -125,7 +128,7 @@ def resolve_root(env, home=None):
     chosen = None
     for name, suffix in ROOT_ENV_ORDER:
         value = (env.get(name) or "").strip()
-        sources.append({"variable": name, "set": bool(value), "value": value or None})
+        sources.append({"variable": name, "set": bool(value)})  # never the raw value
         if value and chosen is None:
             chosen = (name, value, suffix)
     provenance = {
@@ -138,13 +141,14 @@ def resolve_root(env, home=None):
         return None, provenance
     name, value, suffix = chosen
     root = os.path.join(value, suffix) if suffix else value
-    provenance.update(chosen_variable=name, unresolved_root=root)
+    provenance.update(chosen_variable=name)
     problem = _root_problem(root, home)
     if problem:
         provenance.update(status="REJECTED", reason=problem)
         return None, provenance
     provenance["status"] = "RESOLVED"
     normal = os.path.normpath(root)
+    provenance["root"] = normal  # only a valid absolute filesystem path is ever echoed
     if os.path.basename(normal) != "hub":
         provenance["warning"] = "root basename is not 'hub'"
     return normal, provenance
@@ -193,11 +197,14 @@ def inspect_path(resolved_root, relative):
             except OSError as exc:
                 entry["readlink_error"] = _errname(exc)
             else:
-                entry["readlink"] = target
                 lexical = os.path.normpath(os.path.join(os.path.dirname(current), target))
-                entry["target_lexically_within_root"] = lexical == resolved_root or lexical.startswith(
-                    resolved_root + os.sep
-                )
+                within = lexical == resolved_root or lexical.startswith(resolved_root + os.sep)
+                entry["target_lexically_within_root"] = within
+                # Target text outside the cache root may carry arbitrary URI/credential text.
+                if within and len(target) <= MAX_LINK_TEXT and SAFE_LINK_TEXT.fullmatch(target):
+                    entry["readlink"] = target
+                else:
+                    entry["readlink_redacted"] = True
     return entry
 
 
@@ -212,10 +219,7 @@ def inspect_root(root):
         return record, None
     record.update(_meta(st))
     if _kind(st.st_mode) == "symlink":
-        try:
-            record["readlink"] = os.readlink(root)
-        except OSError:
-            pass
+        record["readlink_redacted"] = True
     resolved = os.path.realpath(root)
     record["resolved_root"] = resolved
     problem = _root_problem(resolved, None)
