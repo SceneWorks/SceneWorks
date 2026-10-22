@@ -85,7 +85,7 @@ public sealed class Flux3OwnedContainer : IDisposable {
 if($PSCmdlet.ParameterSetName -eq 'query') {
  if($QueryJob -notmatch '^Local\\SceneWorksFlux3-[0-9]+-[0-9]+-[a-f0-9]{40}$'){throw 'Only an owned queue container may be queried'}
  $active=[Flux3OwnedContainer]::Query($QueryJob)
- @{exists=($active -ge 0);activeProcesses=$active;kernelObjectAbsent=($active -eq -1)}|ConvertTo-Json -Compress
+ @{exists=($active -ge 0);activeProcesses=$active;kernelObjectAbsent=($active -eq -1);context=@{sessionId=(Get-Process -Id $PID).SessionId;ownerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}}|ConvertTo-Json -Depth 4 -Compress
  return
 }
 $boot=Get-Content -Raw -LiteralPath $BootFile|ConvertFrom-Json
@@ -100,7 +100,7 @@ function AtomicJson($file,$value) {
 try {
  $container=[Flux3OwnedContainer]::new([string]$boot.jobName,[int]$boot.supervisorPid)
  $public=@{kty='RSA';n=$container.Modulus.TrimEnd('=').Replace('+','-').Replace('/','_');e=$container.Exponent.TrimEnd('=').Replace('+','-').Replace('/','_')}
- AtomicJson $readyFile @{publicKey=$public;jobName=$boot.jobName;nonce=$boot.identity.nonce;helperPid=$PID;killOnClose=$true}
+ AtomicJson $readyFile @{publicKey=$public;jobName=$boot.jobName;nonce=$boot.identity.nonce;helperPid=$PID;killOnClose=$true;context=@{sessionId=(Get-Process -Id $PID).SessionId;ownerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}}
  $started=$false; $stopping=$false
  while($true) {
   if(-not $container.OwnerAlive -or (Test-Path -LiteralPath $boot.stopFile) -or [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge [long]$boot.deadline) {$stopping=$true;$container.Stop()}

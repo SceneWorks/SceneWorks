@@ -25,15 +25,33 @@ export async function readCleanupAck(container, identity) {
 // still kills its tree. Holders must independently verify the kernel job is zero/destroyed, never
 // infer cleanup merely from parent/helper disappearance. A named Job is destroyed only after its
 // handles are closed AND associated processes terminate; query errors are NOT an absent object.
+export async function currentSecurityContext() {
+  const value = await exec('powershell.exe', ['-NoProfile','-Command', '@{sessionId=(Get-Process -Id $PID).SessionId;ownerSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}|ConvertTo-Json -Compress'], { timeout: 5000 });
+  return JSON.parse(value.stdout);
+}
+export function assertContainerContext(actual, expected) {
+  assert(Number.isInteger(actual?.sessionId) && /^S-[0-9-]+$/.test(actual?.ownerSid ?? ''), 'actual Windows security context required');
+  assert.deepEqual(actual, expected, 'owned job namespace/account context mismatch: absence is NOT cleanup proof');
+}
+async function queryContainer(container) {
+  assert(/^Local\\SceneWorksFlux3-[0-9]+-[0-9]+-[a-f0-9]{40}$/.test(container.jobName), 'invalid owned kernel job name');
+  const root = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+  const query = await exec(path.join(root, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-File', fileURLToPath(new URL('./flux3-queue-container.ps1', import.meta.url)), '-QueryJob', container.jobName], { env: (await import('./flux3-terminal-queue.mjs')).driverEnvironment(process.env, null), timeout: 15000 });
+  const result = JSON.parse(query.stdout);
+  assertContainerContext(result.context, container.context);
+  return result;
+}
+export async function probeContainerAccess(container) {
+  const result = await queryContainer(container);
+  assert(result.exists === true && result.activeProcesses === 0, 'holders must prove query access while the container is empty before model execution');
+  return result.context;
+}
 export async function cleanupStatus(container, identity) {
   const ack = await readCleanupAck(container, identity); if (ack) return ack;
   const { observeProcessTable } = await import('./flux3-image-klein-terminal-session.mjs');
   const rows = await observeProcessTable(exec, 'win32'), expected = container.helper;
   if (rows.some(p => p.pid === expected.pid && p.startedAt === expected.startedAt && p.executable === expected.executable)) return undefined;
-  assert(/^Local\\SceneWorksFlux3-[0-9]+-[0-9]+-[a-f0-9]{40}$/.test(container.jobName), 'invalid owned kernel job name');
-  const root = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-  const query = await exec(path.join(root, 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-File', fileURLToPath(new URL('./flux3-queue-container.ps1', import.meta.url)), '-QueryJob', container.jobName], { env: (await import('./flux3-terminal-queue.mjs')).driverEnvironment(process.env, null), timeout: 15000 });
-  const result = JSON.parse(query.stdout);
+  const result = await queryContainer(container);
   if (!(result.exists === true && result.activeProcesses === 0) && !(result.exists === false && result.kernelObjectAbsent === true && result.activeProcesses === -1)) return undefined;
   return { kind: 'flux3-container-kernel-zero-observation', identity, jobName: container.jobName, cleanupVerified: true, activeProcesses: 0, helperGone: true, kernelObjectAbsent: result.kernelObjectAbsent, exitCode: 1 };
 }
@@ -63,7 +81,7 @@ export async function prepareContainer({ dir, identity, deadline, env, superviso
     const { observeProcessTable } = await import('./flux3-image-klein-terminal-session.mjs');
     const rows = await observeProcessTable(exec, 'win32'), helperIdentity = processIdentity(rows, helper.pid);
     assert.equal(helperIdentity.ppid, process.pid); assert.equal(helperIdentity.executable.toLowerCase(), exe.toLowerCase());
-    definition = { jobName, publicKey: ready.publicKey, helper: helperIdentity, ackFile: paths.ackFile };
+    definition = { jobName, publicKey: ready.publicKey, helper: helperIdentity, ackFile: paths.ackFile, context: ready.context };
     const done = exit.then(async () => { try { const ack = await cleanupStatus(definition, identity); assert(ack, 'owned container exited without verified zero-tree cleanup'); return ack.exitCode; } finally { await log.close(); } }); done.catch(() => {});
     return { definition,
       async start({ executable, args, childEnv, cwd, localLog }) {

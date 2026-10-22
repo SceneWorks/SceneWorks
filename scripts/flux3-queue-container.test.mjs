@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { prepareContainer, cleanupStatus } from './flux3-queue-container.mjs';
+import { prepareContainer, cleanupStatus, probeContainerAccess, assertContainerContext } from './flux3-queue-container.mjs';
 import { driverEnvironment } from './flux3-terminal-queue.mjs';
 const windows = process.platform === 'win32', delay = ms => new Promise(r => setTimeout(r, ms));
 const identity = { repository: 'SceneWorks/SceneWorks', runId: 123, attempt: 1, sourceSha: 'a'.repeat(40), inferenceMainSha: 'b'.repeat(40), controlSha256: 'c'.repeat(64), nonce: 'd'.repeat(64) };
@@ -20,6 +20,8 @@ test('Windows: model parent exits leaving a real CPU grandchild; complete Job tr
   const dir = await fixture(t), pidFile = path.join(dir, 'grandchild.json'), script = path.join(dir, 'parent.mjs');
   await writeFile(script, `import {spawn} from 'node:child_process';import {writeFileSync} from 'node:fs';const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});writeFileSync(${JSON.stringify(pidFile)},JSON.stringify({pid:c.pid}));c.unref();process.exit(7);`);
   const c = await prepareContainer({ dir, identity, deadline: Date.now() + 20000, env });
+  assert.deepEqual(await probeContainerAccess(c.definition), c.definition.context, 'prove actual query access while EMPTY, before child execution');
+  await assert.rejects(probeContainerAccess({ ...c.definition, context: { ...c.definition.context, sessionId: c.definition.context.sessionId + 1 } }), /context mismatch/);
   await c.start({ executable: process.execPath, args: [script], childEnv: env, cwd: dir, localLog: path.join(dir, 'parent.log') });
   assert.equal(await c.done, 7);
   const ack = await c.stop(); assert.equal(ack.activeProcesses, 0); assert.equal(ack.cleanupVerified, true);

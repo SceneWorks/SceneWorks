@@ -69,7 +69,7 @@ export function validateApi(run, jobs, identity, { complete = true } = {}) {
 export function ancestors(table, pid) { const seen = new Set(); while (pid > 0 && !seen.has(pid)) { seen.add(pid); pid = table.find(p => p.pid === pid)?.ppid ?? 0; } return seen; }
 export function processIdentity(table, pid) {
   const p = table.find(p => p.pid === pid); assert(p?.startedAt && p.executable && path.win32.isAbsolute(p.executable), 'queue process identity unavailable');
-  return { pid: p.pid, ppid: p.ppid, startedAt: p.startedAt, executable: p.executable };
+  return { pid: p.pid, ppid: p.ppid, startedAt: p.startedAt, executable: p.executable, ...(Number.isInteger(p.sessionId) ? { sessionId: p.sessionId } : {}) };
 }
 export function workerIdentity(table, controllerPid, runner) {
   electedRole(runner);
@@ -92,6 +92,9 @@ export function verifyRoster(binding, pulses, table, controllerPid, now = Date.n
     const member = binding.members[runner]; sameIdentity(member.identity, binding.identity);
     assert.equal(member.runner, runner); assert.equal(member.role, electedRole(runner)); assert.equal(member.jobId, jobs[runner]);
     assert.equal(member.hostName, binding.members[EXECUTOR].hostName, 'queue slots are not on the same physical host');
+    assert(Number.isInteger(member.context?.sessionId) && /^S-[0-9-]+$/.test(member.context?.ownerSid ?? ''), 'queue actual Windows context required');
+    assert.deepEqual(member.context, binding.members[EXECUTOR].context, 'queue Local job namespace/account differs across slots');
+    assert.equal(member.worker.sessionId, member.context.sessionId); assert.equal(member.supervisor.sessionId, member.context.sessionId);
     assert.equal(normalized(member.worker.executable), normalized(slot.worker));
     sameProcess(table, member.worker); sameProcess(table, member.supervisor);
     assert(ancestors(table, member.supervisor.pid).has(member.worker.pid), 'queue supervisor is not a descendant of its hosting Worker');
@@ -112,10 +115,20 @@ export function verifyRoster(binding, pulses, table, controllerPid, now = Date.n
     const attested = authenticated(binding.containerAttestation, binding.members[EXECUTOR].publicKey);
     sameIdentity(attested.identity, binding.identity); assert.deepEqual(attested.container, binding.container);
     sameProcess(table, binding.container.helper);
+    assert.deepEqual(binding.container.context, binding.members[EXECUTOR].context, 'container namespace/account differs from reserved slots');
+    assert.equal(binding.container.helper.sessionId, binding.container.context.sessionId);
     assert(ancestors(table, binding.container.helper.pid).has(binding.members[EXECUTOR].supervisor.pid), 'container helper is not owned by executor');
     if (controllerPid !== binding.members[EXECUTOR].supervisor.pid) assert(chain.has(binding.container.helper.pid), 'model caller is outside owned containment');
   }
   return Object.keys(SLOTS).filter(r => r !== EXECUTOR).map(r => binding.members[r].worker.pid);
+}
+export function verifyAccessProofs(binding, proofs) {
+  for (const runner of Object.keys(SLOTS).filter(r => r !== EXECUTOR)) {
+    const p = authenticated(proofs[runner], binding.members[runner].publicKey);
+    sameIdentity(p.identity, binding.identity); assert.equal(p.runner, runner);
+    assert.equal(p.containerSha256, digest(binding.container)); assert.equal(p.jobName, binding.container.jobName);
+    assert.deepEqual(p.context, binding.container.context); assert.equal(p.queryAccess, true); assert.equal(p.zeroBeforeStart, true);
+  }
 }
 async function atomic(file, value) { const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`; await writeFile(tmp, JSON.stringify(value), { flag: 'wx' }); await rename(tmp, file); }
 // Publish a COMPLETE immutable document atomically, refusing any prior target. Readers never
@@ -152,6 +165,8 @@ export async function verifyQueueReservation(admission, table, controllerPid, cl
     // key or API credential; refreshed API observations must be signed by that live supervisor.
     const update = authenticated(await json(path.join(dir, 'api.json')), binding.members[EXECUTOR].publicKey);
     sameIdentity(update.identity, binding.identity); binding.api = update.api;
+    const access = {}; for (const runner of Object.keys(SLOTS).filter(r => r !== EXECUTOR)) access[runner] = await json(path.join(dir, `${runner}.container-access.json`));
+    verifyAccessProofs(binding, access);
     return { binding, pulses, table };
   }, controllerPid, clock);
 }
@@ -258,8 +273,10 @@ async function supervisor(env) {
     for (const key of Object.keys(identity)) assert.equal(pair[key], identity[key]); Object.assign(identity, { nonce: pair.nonce });
     const keys = generateKeyPairSync('ed25519'); privateKey = keys.privateKey;
     const table = await census(), worker = workerIdentity(table, process.pid, runner), supervisorProcess = processIdentity(table, process.pid);
+    const context = await (await import('./flux3-queue-container.mjs')).currentSecurityContext();
+    assert.equal(worker.sessionId, context.sessionId); assert.equal(supervisorProcess.sessionId, context.sessionId);
     await check(); const ownJobs = validateApi(api.run, api.jobs, identity, { complete: false }); assert(ownJobs[runner]);
-    member = { role, identity, runner, hostName: hostname(), jobId: ownJobs[runner], worker, supervisor: supervisorProcess, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }) };
+    member = { role, identity, runner, context, hostName: hostname(), jobId: ownJobs[runner], worker, supervisor: supervisorProcess, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }) };
     await publishNew(path.join(dir, `${runner}.member.json`), member); await pulse();
     heartbeatTimer = setInterval(() => {
       if (heartbeatTask || released) return;
@@ -284,9 +301,18 @@ async function supervisor(env) {
       const { prepareContainer } = await import('./flux3-queue-container.mjs');
       container = await prepareContainer({ dir, identity, deadline: campaignDeadline, env: driverEnvironment(env, null) });
       binding.container = container.definition;
+      assert.deepEqual(binding.container.context, member.context, 'container helper Windows context mismatch');
       binding.containerAttestation = signed({ identity, container: binding.container }, privateKey);
       const bindingFile = path.join(dir, 'binding.json'); await publishNew(bindingFile, binding);
       const ref = { path: bindingFile, sha256: digest(JSON.stringify(binding)), runId: identity.runId, attempt: identity.attempt };
+      // All holders must actually open/query this EMPTY Local Job under their own real context.
+      // No child CreateProcess/start file exists until every signed access acknowledgement arrives.
+      while (true) {
+        await check(); binding.api = api; verifyRoster(binding, await readPulses(), await census(), process.pid);
+        const access = {}; for (const name of Object.keys(SLOTS).filter(r => r !== EXECUTOR)) access[name] = await optional(path.join(dir, `${name}.container-access.json`));
+        if (Object.values(access).every(Boolean)) { verifyAccessProofs(binding, access); break; }
+        await sleep(HEARTBEAT_MS);
+      }
       const tick = async () => {
         await check(); validateApi(api.run, api.jobs, identity);
         await atomic(path.join(dir, 'api.json'), signed({ identity, api }, privateKey));
@@ -298,7 +324,17 @@ async function supervisor(env) {
         return container;
       } });
     } else {
+      let accessProved = false;
       while (true) {
+        if (!accessProved) {
+          const prepared = await optional(path.join(dir, 'binding.json'));
+          if (prepared) {
+            const owned = await containerFrom(prepared), context = await (await import('./flux3-queue-container.mjs')).probeContainerAccess(owned);
+            assert.deepEqual(context, member.context);
+            await publishNew(path.join(dir, `${runner}.container-access.json`), signed({ identity, runner, jobName: owned.jobName, containerSha256: digest(owned), context, queryAccess: true, zeroBeforeStart: true }, privateKey));
+            accessProved = true;
+          }
+        }
         const p = authenticated(await json(path.join(dir, `${EXECUTOR}.pulse.json`)), members[EXECUTOR].publicKey); sameIdentity(p.identity, identity);
         if (p.status === 'safe_to_release') { await safeHolderRelease(); break; }
         await check(); validateApi(api.run, api.jobs, identity); binding.api = api;

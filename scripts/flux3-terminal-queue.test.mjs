@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { readFile, mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -17,15 +17,15 @@ function fixture() {
   const jobs = [], table = [], members = {}, pulses = {}, keys = {};
   for (const [n, [runner, slot]] of Object.entries(SLOTS).entries()) {
     const pid = (n + 1) * 100, jobId = n + 1000;
-    table.push({ pid, ppid: 0, startedAt: `worker-start-${n}`, executable: slot.worker, command: slot.worker });
-    table.push({ pid: pid + 1, ppid: pid, startedAt: `supervisor-start-${n}`, executable: 'C:/node/node.exe', command: 'node.exe' });
+    table.push({ pid, ppid: 0, startedAt: `worker-start-${n}`, executable: slot.worker, command: slot.worker, sessionId: 2 });
+    table.push({ pid: pid + 1, ppid: pid, startedAt: `supervisor-start-${n}`, executable: 'C:/node/node.exe', command: 'node.exe', sessionId: 2 });
     jobs.push({ id: jobId, name: `flux3-terminal-queue / reserve (${4 - n})`, run_id: 123, head_sha: source, status: 'in_progress', runner_name: runner, runner_id: slot.id });
     keys[runner] = generateKeyPairSync('ed25519');
-    const process = p => ({ pid: p.pid, ppid: p.ppid, startedAt: p.startedAt, executable: p.executable });
-    members[runner] = { identity: structuredClone(identity), runner, role: electedRole(runner), hostName: 'DECLARED-WINDOWS-HOST', jobId, worker: process(table.at(-2)), supervisor: process(table.at(-1)), publicKey: keys[runner].publicKey.export({ type: 'spki', format: 'pem' }) };
+    const process = p => ({ pid: p.pid, ppid: p.ppid, startedAt: p.startedAt, executable: p.executable, sessionId: p.sessionId });
+    members[runner] = { identity: structuredClone(identity), runner, role: electedRole(runner), hostName: 'DECLARED-WINDOWS-HOST', context: {sessionId:2,ownerSid:'S-1-5-21-123'}, jobId, worker: process(table.at(-2)), supervisor: process(table.at(-1)), publicKey: keys[runner].publicKey.export({ type: 'spki', format: 'pem' }) };
     pulses[runner] = signed({ identity: structuredClone(identity), runner, jobId, at: NOW, apiValidUntil: NOW + API_FRESH_MS, sequence: 1, status: 'holding' }, keys[runner].privateKey);
   }
-  table.push({ pid: 110, ppid: 101, startedAt: 'driver-start', executable: 'C:/node/node.exe', command: 'node.exe' });
+  table.push({ pid: 110, ppid: 101, startedAt: 'driver-start', executable: 'C:/node/node.exe', command: 'node.exe', sessionId: 2 });
   const binding = { kind: 'flux3-four-slot-reservation', identity, members, deadline: NOW + 100000, api: { run, jobs, observedAt: NOW } };
   return { binding, pulses, table, keys, controllerPid: 110 };
 }
@@ -57,6 +57,8 @@ test('API proof requires exact repo/run/attempt/source, four live job identities
 test('barrier refuses missing, wrong host/name/source/nonce, duplicate identity, stale or forged heartbeat and any fifth Worker', () => {
   for (const [label, mutate] of [
     ['missing member', f => { delete f.binding.members['cuda-windows-4']; }],
+    ['different Windows session', f => { f.binding.members['cuda-windows-3'].context.sessionId = 3; }],
+    ['different account', f => { f.binding.members['cuda-windows-3'].context.ownerSid = 'S-1-5-21-456'; }],
     ['third machine', f => { f.binding.members['cuda-windows-3'].hostName = 'OTHER-HOST'; }],
     ['wrong runner', f => { f.binding.members['cuda-windows-4'].runner = 'cuda-windows-3'; }],
     ['wrong source', f => { f.binding.members['cuda-windows-2'].identity.sourceSha = 'f'.repeat(40); }],
@@ -190,4 +192,16 @@ test('one campaign-wide concurrency group serializes dispatches but never serial
   assert.throws(() => contract(block.replace('group: flux3-terminal-queue-physical-host', 'group: per-run-id')), 'mutation: removing the common group breaks serialization');
   assert.doesNotMatch(workflow, /concurrency:/, 'no nested equal group or per-member group deadlock');
   assert.match(workflow, /max-parallel: 4/); assert.match(workflow, /slot: \[1, 2, 3, 4\]/);
+});
+
+test('every holder must attest real query access to the same empty container before resume; missing/mutated proofs refuse', () => {
+  const f = fixture(); f.binding.container = {jobName:'Local\\SceneWorksFlux3-123-1-'+'f'.repeat(40),context:f.binding.members[EXECUTOR].context};
+  const proofs = {};
+  for(const runner of Object.keys(SLOTS).filter(r=>r!==EXECUTOR)) proofs[runner]=signed({identity:f.binding.identity,runner,jobName:f.binding.container.jobName,containerSha256:queueDigest(f.binding.container),context:f.binding.container.context,queryAccess:true,zeroBeforeStart:true},f.keys[runner].privateKey);
+  verifyAccessProofs(f.binding,proofs);
+  const runner='cuda-windows-3';
+  for(const change of [{queryAccess:false},{zeroBeforeStart:false},{containerSha256:'0'.repeat(64)},{context:{sessionId:99,ownerSid:'S-1-5-21-123'}}]) {
+    const mutated={...proofs,[runner]:signed({...proofs[runner].value,...change},f.keys[runner].privateKey)};assert.throws(()=>verifyAccessProofs(f.binding,mutated));
+  }
+  const { [runner]:_omitted,...missing }=proofs;assert.throws(()=>verifyAccessProofs(f.binding,missing));
 });

@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { MAC_RUNNERS } from './flux3-image-klein-terminal-session.mjs';
+import { parseSafePreparationFailure } from './flux3-image-klein-preparation.mjs';
 const execFile = promisify(execFileCb);
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const STEPS = Object.freeze(['prepare', 'self-test', 'run']);
@@ -103,7 +104,14 @@ async function child(root, name, command, args, { env = process.env, cwd = ROOT 
   try {
     const code = await new Promise((resolve, reject) => { const c = spawn(command, args, { cwd, env, stdio: ['ignore', log.fd, log.fd] }); c.once('error', reject); c.once('close', resolve); });
     say({ action: name, exitCode: code });
-    if (code !== 0) throw blocked(`${name} failed (exit ${code}); its log stays on this host only`);
+    if (code !== 0) {
+      if (['preparation-plan', 'preparation-run'].includes(name)) {
+        const reader = await open(logFile, 'r');
+        try { const size = (await reader.stat()).size, tail = Buffer.alloc(Math.min(size, 4096)); await reader.read(tail, 0, tail.length, size - tail.length); say(parseSafePreparationFailure(tail.toString('utf8'), name === 'preparation-plan' ? 'plan' : 'execution')); }
+        finally { await reader.close(); }
+      }
+      throw blocked(`${name} failed (exit ${code}); its log stays on this host only`);
+    }
   } finally { await log.close(); }
   return logFile;
 }
@@ -149,7 +157,7 @@ async function preparation(root, dispatch, control, api, inference) {
   const planLog = await child(root, 'preparation-plan', node, [driver, 'prepare', 'plan', requestFile]);
   const plan = JSON.parse(await readFile(planLog, 'utf8')); const planFile = state(root, dispatch, 'preparation-plan'); await writeFile(planFile, JSON.stringify(plan, null, 2) + '\n', { flag: 'wx' });
   const account = userInfo().username, outputRoot = path.join(root, 'preparation', dispatch.sourceSha.slice(0, 12)); await mkdir(outputRoot, { recursive: true });
-  const a = { actualProvision: true, userProvisionApprovalId: control.userProvisionApprovalId, admissionId: control.resourceAdmissionId, approvedBy: control.approvedBy, runner: dispatch.host, runnerAccount: account, backend: 'mlx',
+  const a = { actualProvision: true, userProvisionApprovalId: control.userProvisionApprovalId, admissionId: control.resourceAdmissionId, approvedBy: control.approvedBy, runner: dispatch.host, runnerTarget: dispatch.runnerTarget, runnerLabel: dispatch.runnerLabel, runnerAccount: account, backend: 'mlx',
     sourceSha: dispatch.sourceSha, inferenceMainSha: dispatch.inferenceMainSha, inferenceMainTipSha: inference.tip, inferenceRepository: inference.repo, preparationPlanSha256: plan.planSha256, outputRoot, hfHome: control.hfHome,
     binary: api.receipt.binary.path, binarySourceSha: dispatch.sourceSha, binarySha256: api.receipt.binary.sha256, binaryBuildReceipt: { root: path.dirname(api.receiptPath), path: api.receiptPath, sha256: api.receiptSha256 },
     preparationBuildReceiptBinding: api.binding, timeoutSeconds: 10800, diskBudgetBytes: plan.downloadBytes + 60 * 1024 ** 3, generationAttempts: 0,

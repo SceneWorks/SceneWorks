@@ -9,7 +9,7 @@ import { hostname, userInfo } from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, utilityWorkerId, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText, assertClaimedWithin } from './flux3-image-klein-app-lifecycle.mjs';
-import { contained, fileHash, safeEnvironment } from './flux3-image-klein-terminal-session.mjs';
+import { contained, fileHash, safeEnvironment, MAC_RUNNERS } from './flux3-image-klein-terminal-session.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
 import { verifyPreparationBuild } from './flux3-image-klein-terminal-build.mjs';
 const exec = promisify(execCb);
@@ -22,6 +22,47 @@ const fixed = {
 const floor = 30 * 1024 ** 3;
 const id = value => { assert(/^[a-zA-Z0-9_.-]+$/.test(value ?? ''), 'invalid owned identity'); return value; };
 const text = value => typeof value === 'string' && value.length > 0;
+// Safe observability: fixed enums only; never copy an assertion message, path, response or value.
+export const PREPARATION_FAILURE_CODES = Object.freeze({
+  plan: 'PREP_PLAN_INVALID', admission: 'PREP_INVALID_APPROVAL', runtime_identity: 'PREP_RUNNER_IDENTITY_MISMATCH',
+  source_identity: 'PREP_SOURCE_IDENTITY_MISMATCH', build_proof: 'PREP_BUILD_PROOF_INVALID', storage: 'PREP_STORAGE_UNAVAILABLE',
+  authorization: 'PREP_AUTHORIZATION_FAILED', session: 'PREP_SESSION_FAILED', download: 'PREP_DOWNLOAD_FAILED',
+  inventory: 'PREP_INVENTORY_INVALID', cleanup: 'PREP_CLEANUP_FAILED', execution: 'PREP_UNKNOWN_FAILURE',
+});
+export class PreparationFailure extends Error {
+  constructor(phase) { assert(Object.hasOwn(PREPARATION_FAILURE_CODES, phase)); super(PREPARATION_FAILURE_CODES[phase]); this.phase = phase; this.code = PREPARATION_FAILURE_CODES[phase]; }
+}
+export function safePreparationFailure(error, phase = 'execution') {
+  const known = error instanceof PreparationFailure && Object.hasOwn(PREPARATION_FAILURE_CODES, error.phase) && error.code === PREPARATION_FAILURE_CODES[error.phase];
+  return { schemaVersion: 1, kind: 'flux3-preparation-safe-error', phase: known ? error.phase : Object.hasOwn(PREPARATION_FAILURE_CODES, phase) ? phase : 'execution', code: known ? error.code : 'PREP_UNKNOWN_FAILURE' };
+}
+export function parseSafePreparationFailure(text, phase = 'execution') {
+  // At most a bounded tail/line: raw secret-looking text and extra JSON fields are never echoed.
+  const fallback = safePreparationFailure(null, phase);
+  if (typeof text !== 'string' || Buffer.byteLength(text) > 4096) return fallback;
+  for (const line of text.split(/\r?\n/).slice(-8).reverse()) {
+    if (line.length > 512) continue;
+    let v; try { v = JSON.parse(line); } catch { continue; }
+    if (!v || JSON.stringify(Object.keys(v).sort()) !== JSON.stringify(['code','kind','phase','schemaVersion'])) continue;
+    if (v.schemaVersion !== 1 || v.kind !== 'flux3-preparation-safe-error' || !Object.hasOwn(PREPARATION_FAILURE_CODES, v.phase)) continue;
+    if (v.code !== 'PREP_UNKNOWN_FAILURE' && v.code !== PREPARATION_FAILURE_CODES[v.phase]) continue;
+    return { schemaVersion: 1, kind: 'flux3-preparation-safe-error', phase: v.phase, code: v.code };
+  }
+  return fallback;
+}
+export function validatePreparationRuntimeIdentity(a, io) {
+  try {
+    assert.equal(a.runnerAccount, io.account());
+    assert.equal(io.platform, a.backend === 'candle' ? 'win32' : 'darwin');
+    if (io.platform === 'darwin') {
+      assert(Object.hasOwn(MAC_RUNNERS, a.runner ?? ''));
+      assert.equal(io.env.RUNNER_NAME, a.runner, 'actual named runner required');
+      assert.equal(a.runnerTarget, MAC_RUNNERS[a.runner].runnerTarget);
+      assert.equal(a.runnerLabel, MAC_RUNNERS[a.runner].runnerLabel);
+      if (a.physicalHostName !== undefined) assert.equal(io.host().split('.')[0], a.physicalHostName);
+    } else assert.equal(a.runner, io.host().split('.')[0]); // Preserve Windows local-host admission.
+  } catch { throw new PreparationFailure('runtime_identity'); }
+}
 export function preparationPlan(request, sources) {
   assert.deepEqual(Object.keys(request).sort(), ['backend', 'inferenceMainSha', 'modelIds', 'sourceSha']);
   assert(['candle', 'mlx'].includes(request.backend));
@@ -325,25 +366,34 @@ async function cpuSession(a, io, credential) {
   } catch { await close(); throw new Error('owned CPU preparation startup failed'); }
 }
 export async function runPreparation(a, plan, sources, dependencies = {}) {
+  let phase = 'admission';
+  try { return await runPreparationObserved(a, plan, sources, dependencies, value => { phase = value; }); }
+  catch (error) { if (error instanceof PreparationFailure) throw error; throw new PreparationFailure(phase); }
+}
+async function runPreparationObserved(a, plan, sources, dependencies, phase) {
   validatePreparationApproval(a, plan, sources); // ALL approvals before environment/credentials/spawn/network.
   const io = { root: ROOT, env: process.env, platform: process.platform, account: () => userInfo().username, host: hostname, git: async (root, ...args) => (await exec('git', args, { cwd: root, timeout: 30_000 })).stdout.trim(), verifyBuild: verifyPreparationBuild, statfs, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, spawn, fetch, now: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), ...dependencies };
+  phase('runtime_identity');
   assert.equal(io.env.CUDA_VISIBLE_DEVICES, '-1', 'CPU preparation requires explicit parent CUDA_VISIBLE_DEVICES=-1');
-  assert.equal(a.runnerAccount, io.account()); assert.equal(a.runner, io.host().split('.')[0]);
-  assert.equal(io.platform, a.backend === 'candle' ? 'win32' : 'darwin'); if (io.platform === 'darwin') assert(['nax-macos', 'nax-macos-2'].includes(a.runner), 'only a known physical Mac runner prepares MLX');
+  validatePreparationRuntimeIdentity(a, io);
+  phase('source_identity');
   assert.equal(await io.git(io.root, 'rev-parse', 'HEAD'), a.sourceSha); assert.equal(await io.git(io.root, 'status', '--porcelain'), '');
   assert.equal(await io.git(a.inferenceRepository, 'rev-parse', 'refs/remotes/origin/main'), a.inferenceMainTipSha); await io.git(a.inferenceRepository, 'merge-base', '--is-ancestor', a.inferenceMainSha, 'refs/remotes/origin/main');
   assertPins(await Promise.all(['Cargo.toml', 'crates/sceneworks-worker/Cargo.toml', 'crates/sceneworks-memory-adapter/Cargo.toml'].map(f => readFile(path.join(io.root, f), 'utf8'))), await readFile(path.join(io.root, 'Cargo.lock'), 'utf8'), a.inferenceMainSha);
-  await io.verifyBuild(a, { sourceRoot: io.root });
+  phase('build_proof'); await io.verifyBuild(a, { sourceRoot: io.root });
+  phase('storage');
   const checkout = await realpath(io.root); for (const directory of [a.outputRoot, a.hfHome]) { const actual = await realpath(directory), relative = path.relative(checkout, actual); assert(relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative), 'preparation storage must be outside checkout'); }
   const disk = async () => { const cache = await io.statfs(a.hfHome), output = await io.statfs(a.outputRoot); assert(cache.bavail * cache.bsize >= floor && output.bavail * output.bsize >= floor, 'preparation disk safety floor'); };
   const initial = await io.statfs(a.hfHome); assert(initial.bavail * initial.bsize >= a.diskBudgetBytes); await disk();
   let credential, session; const inventories = [], authorizations = [];
   try {
+    phase('authorization');
     if (plan.repositories.some(r => r.modelId !== 'flux3_image_klein_pup')) credential = await io.readCredential({ HF_HOME: a.hfHome, HOME: io.env.HOME });
     for (const row of plan.repositories) { const proof = await io.authorize(row.repository, row.resolvedRevision, credential, { fetchImpl: io.fetch, signal: AbortSignal.timeout(30_000) }); assert.equal(proof.httpStatus, 200); assert(digestPattern.test(proof.configSha256)); authorizations.push(proof); }
-    session = await cpuSession(a, io, credential); const transport = preparationTransport(session.endpoint, plan.repositories, { workerId: session.identity.workerId, now: io.now });
+    phase('session'); session = await cpuSession(a, io, credential); const transport = preparationTransport(session.endpoint, plan.repositories, { workerId: session.identity.workerId, now: io.now });
     for (const [index, row] of plan.repositories.entries()) {
-      session.check(); await disk();
+      phase('storage'); session.check(); await disk();
+      phase('download');
       let ready = false;
       for (let n = 0; n < 300; n++) {
         session.check(); const worker = assertPreparationWorkers(await transport.call('GET', '/api/v1/workers'), session.identity.workerId);
@@ -357,10 +407,10 @@ export async function runPreparation(a, plan, sources, dependencies = {}) {
         finished = await waitPreparationDownload({ transport, accepted, workerId: session.identity.workerId, timeoutSeconds: a.timeoutSeconds, check: session.check, disk, now: io.now, sleep: io.sleep });
       } catch { await transport.call('POST', `/api/v1/jobs/${accepted.id}/cancel`).catch(() => {}); throw new Error('owned preparation download failed'); }
       const installed = (await transport.call('GET', '/api/v1/models')).find(m => m.id === row.modelId);
-      inventories.push(await discoverPreparationInventory({ state: session.identity.state, hfHome: a.hfHome, row, job: finished, authorization: authorizations[index], installed }));
+      phase('inventory'); inventories.push(await discoverPreparationInventory({ state: session.identity.state, hfHome: a.hfHome, row, job: finished, authorization: authorizations[index], installed }));
     }
     const report = { schemaVersion: 1, kind: 'flux3-cpu-preparation-observed-inventories', status: 'OBSERVED', gpuExecutionApproved: false, generationAttempts: 0, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, runner: a.runner, runnerAccount: a.runnerAccount, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt.sha256, preparationPlanSha256: plan.planSha256, userProvisionApprovalId: a.userProvisionApprovalId, inventories };
     const file = path.join(a.outputRoot, `${session.identity.nonce}-observed-inventories.json`); await writeFile(file, JSON.stringify(report, null, 2) + '\n', { flag: 'wx' }); return { file, status: report.status };
   } catch { throw new Error('CPU preparation refused or incomplete; no GPU evidence or execution approval produced'); }
-  finally { credential = undefined; if (session) await session.close(); }
+  finally { credential = undefined; if (session) try { await session.close(); } catch { throw new PreparationFailure('cleanup'); } }
 }
