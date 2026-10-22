@@ -190,38 +190,40 @@ table describes that diagnostic inventory, **not a request to render every cell*
 | failures | bad-reference, reference-count, bad-box, checkpoint-compatibility | Intended actionable rejection, not unrelated missing-model failure |
 | failures | install-missing, authentication-denied | Separate empty-cache fault profile; injected denial is not successful upstream account authentication |
 
-Base q4/q8 have no production catalog rows/trusted real conversion hashes yet.
-Their cells stay BLOCKED, with an API refusal check when selected. Do not fabricate
-rows/hashes or reinterpret this gap as an unsupported exception. Missing base
-access (including existing HF403), packages, PUP, adapters, or checkpoint provenance
-must be actionable BLOCKED, never fallback/skip-as-PASS.
+Base q4/q8 now have production catalog rows pinned to genuine local conversions of the
+downloaded base snapshot. On 2026-10-21 the shipped capture helper
+`local_derivation::tests::flux3_capture_conversion_artifacts` converted them on the CPU
+(`CUDA_VISIBLE_DEVICES=-1`) from `black-forest-labs/flux-3-image-klein-base` at
+`1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4` (SceneWorks `6fe7ecbf`, inference `da7534d5`).
+Each package passed `flux3_converted_bundle_check`. The converted bytes are never
+redistributed, and every install converts locally from the verified original. Their cells are
+NOT_RUN, never PASS. Missing access, packages, PUP, adapters or checkpoint provenance at run
+time must still be actionable BLOCKED, never fallback/skip-as-PASS.
 
 The machine-readable **required artifact/resource prerequisite inventory** is
 [`sc-26243-terminal-artifact-prerequisites.json`](sc-26243-terminal-artifact-prerequisites.json).
-It preserves the original full future anchor records and exact base repository
-`black-forest-labs/flux-3-image-klein-base` at
-`1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4` for these four coordinates:
+Its `activated` records bind these four former prerequisites to their genuine evidence:
+converted weights bytes/SHA256, the conversion receipt recipe and receipt digest. The validator
+cross-checks each record against the published catalog row, so a wrong size or SHA refuses
+activation:
 
-| Required canonical anchor | Artifact/resource prerequisite status |
-|---|---|
-| `flux3_klein_base:q4:candle` | **BLOCKED** — real converted size/SHA and production install row missing |
-| `flux3_klein_base:q8:candle` | **BLOCKED** — real converted size/SHA and production install row missing |
-| `flux3_klein_base:q4:mlx` | **BLOCKED** — real converted size/SHA and production install row missing |
-| `flux3_klein_base:q8:mlx` | **BLOCKED** — real converted size/SHA and production install row missing |
+| Required canonical anchor | Converted `model.safetensors` (bytes, SHA256) | Status |
+|---|---|---|
+| `flux3_klein_base:q4:candle` | 4,433,178,832 · `c62a66ba7b86b4d3b84b043b07bb54307d19b302285aaf111842c0862dfeaa8b` | active, **NOT_RUN** |
+| `flux3_klein_base:q8:candle` | 6,547,108,144 · `b7b35072a153c9cc8a8f5d83babac8a7e1c89dd9cb1f04c6a1235068027fd5f9` | active, **NOT_RUN** |
+| `flux3_klein_base:q4:mlx` | 4,131,240,680 · `371fc8243bb40f06104a468e0097d5ecf1f887262d1cdb541a06e5cd3148d701` | active, **NOT_RUN** |
+| `flux3_klein_base:q8:mlx` | 6,547,160,088 · `1f82b806f7b29b46ee0a083054253fe3990a08634743a095f8993e945ec34df6` | active, **NOT_RUN** |
 
-These are **outside the executable calibration anchor plan**, not removed from
-acceptance. The fixed REQUIRED canonical inventory remains **16**: the disjoint
-union of **12 published active anchors + 4 explicitly BLOCKED artifact obligations**.
-Base bf16 on both backends and published Candle base fp8r/nvfp4 remain active.
-Missing an obligation from both inventories is an error, as is activating an
-unpublished tier. Only real converted byte counts/SHA256 and the corresponding
-pinned production local-derivation row can make an obligation eligible to move
-into the active plan; an execution or measurement admission is still separate.
-No unsupported exception, fabricated package hash, pending-derivation trust flag,
-new tier-axis declaration or deleted requirement is allowed. Existing HF403 access
-remains actionable. **Overall terminal acceptance remains BLOCKED** pending these
-artifacts and their required observations; the representative 38/40-attempt
-proposal neither completes nor erases these obligations.
+The fixed REQUIRED canonical inventory remains **16**. It is now **16 published active
+anchors / 0 BLOCKED artifact obligations**. Each of the four base q4/q8 coordinates must
+always be either an explicit BLOCKED obligation or an `activated` record, never silently
+dropped. Withdrawing a row, its calibration anchor or its record without restoring the BLOCKED
+obligation is an error, as is activating an unpublished tier. No unsupported exception,
+fabricated package hash, pending-derivation trust flag, new tier-axis declaration or deleted
+requirement is allowed. Activation is publication, not measurement: every anchor measurement,
+resource case and observation still needs its own execution/measurement admission.
+**Overall terminal acceptance remains NOT_PROVEN** (never PASS) until those observations exist.
+The representative 38/40-attempt proposal neither completes nor erases them.
 
 ## Future execution contract — not authorization to run
 

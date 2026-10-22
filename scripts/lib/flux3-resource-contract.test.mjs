@@ -5,7 +5,7 @@ import { stripJsoncComments } from "./jsonc.mjs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { FLUX3_REQUIRED_CANONICAL_ANCHORS, validateFlux3AnchorPrerequisites, flux3AnchorRequestDigest, FLUX3_RESOURCE_OBLIGATIONS, missingFlux3ResourceObligations, normalizeResourceCase, resourceCaseDigest, bindResourceCaseInputs, flux3Checkpoint, flux3Conversion, flux3PackageRelativePath, assertSupplementalResourceObservation } from "./flux3-resource-contract.mjs";
+import { FLUX3_REQUIRED_CANONICAL_ANCHORS, FLUX3_ARTIFACT_PREREQUISITE_COORDINATES, flux3ConversionRecipe, validateFlux3AnchorPrerequisites, flux3AnchorRequestDigest, FLUX3_RESOURCE_OBLIGATIONS, missingFlux3ResourceObligations, normalizeResourceCase, resourceCaseDigest, bindResourceCaseInputs, flux3Checkpoint, flux3Conversion, flux3PackageRelativePath, assertSupplementalResourceObservation } from "./flux3-resource-contract.mjs";
 const sha = value => createHash("sha256").update(value).digest("hex");
 function fixture() {
   return { schemaVersion: 1, caseId: "candle.base.reference10.q4", scenario: "reference10", backend: "candle", modelId: "flux3_klein_base", tier: "q4", generation: { prompt: "move the red box", width: 1024, height: 1024 }, references: Array.from({length:10}, (_, index) => ({ instanceId: `attachment-${index}`, assetId: "same-asset", index, path: "ref.png", sha256: sha("reference") })) };
@@ -18,74 +18,112 @@ async function anchorPrerequisiteFixture() {
     artifactPrerequisites: JSON.parse(await read("docs/testing/sc-26243-terminal-artifact-prerequisites.json")),
   };
 }
-test("all sixteen REQUIRED canonical anchors partition into published active rows and explicit BLOCKED artifacts", async () => {
+test("all sixteen REQUIRED canonical anchors are active published rows: 16 active / 0 blocked, measurement still unproven", async () => {
   const input = await anchorPrerequisiteFixture();
   const result = validateFlux3AnchorPrerequisites(input);
   assert.equal(result.requiredCanonicalAnchors, 16);
-  assert.equal(result.activeCanonicalAnchors, 12);
-  assert.deepEqual(result.blockedArtifactCoordinates.sort(), [
-    "flux3_klein_base:q4:candle", "flux3_klein_base:q8:candle",
-    "flux3_klein_base:q4:mlx", "flux3_klein_base:q8:mlx",
-  ].sort());
-  assert.equal(result.terminalAcceptance, "BLOCKED");
+  assert.equal(result.activeCanonicalAnchors, 16);
+  assert.deepEqual(result.blockedArtifactCoordinates, []);
+  assert.deepEqual(result.activatedArtifactCoordinates.sort(), [...FLUX3_ARTIFACT_PREREQUISITE_COORDINATES].sort());
+  assert.equal(result.terminalAcceptance, "NOT_PROVEN");
   assert.equal(result.measurementProven, false);
   assert.equal(result.executionAuthorized, false);
   assert.equal(new Set(FLUX3_REQUIRED_CANONICAL_ANCHORS).size, 16);
-  for (const obligation of input.artifactPrerequisites.obligations) {
-    assert.equal(input.calibrationPlan.anchors[obligation.coordinate], undefined);
-    assert.match(obligation.blocker, /HF403/);
+  assert.deepEqual(input.artifactPrerequisites.obligations, []);
+  assert.equal(input.artifactPrerequisites.overallTerminalAcceptance, "NOT_PROVEN");
+  assert.doesNotMatch(JSON.stringify(input.artifactPrerequisites), /HF403/, "the retired access blocker is not restated");
+  for (const record of input.artifactPrerequisites.activated) {
+    assert.ok(input.calibrationPlan.anchors[record.coordinate], `${record.coordinate} is an active canonical anchor`);
+    assert.equal(record.measurement, "NOT_RUN");
   }
   const { loadProductTargets, terminalCatalog } = await import("../flux3-image-klein-terminal-plan.mjs");
   const catalog = terminalCatalog(await loadProductTargets());
-  assert.equal(catalog.artifactPrerequisites.classification.terminalAcceptance, "BLOCKED");
-  assert.equal(catalog.artifactPrerequisites.obligations.length, 4);
+  assert.equal(catalog.artifactPrerequisites.classification.terminalAcceptance, "NOT_PROVEN");
+  assert.equal(catalog.artifactPrerequisites.obligations.length, 0);
+  assert.ok(catalog.cases.filter(c => c.modelId === "flux3_klein_base" && ["q4", "q8"].includes(c.tier)).every(c => c.status === "NOT_RUN"),
+    "published base q4/q8 cells are runnable-but-unrun, never PASS");
   const documentation = await readFile(new URL("../../docs/testing/sc-26243-terminal-case-plan.md", import.meta.url), "utf8");
-  for (const obligation of input.artifactPrerequisites.obligations) assert.ok(documentation.includes(obligation.coordinate));
-  assert.ok(documentation.includes("Overall terminal acceptance remains BLOCKED"));
+  for (const record of input.artifactPrerequisites.activated) assert.ok(documentation.includes(record.coordinate));
+  assert.ok(documentation.includes("Overall terminal acceptance remains NOT_PROVEN"));
   for (const flag of ["hosted_only=true", "run_memory_calibration=false", "run_five_rung_reference=false", "provision_qwen_snapshot=false", "provision_z_image_snapshot=false"]) assert.ok(documentation.includes(`-f ${flag}`));
   assert.ok(!documentation.includes('--ref "$BOOTSTRAP_REF" --json'), "do not recommend the proven-broken boolean-JSON CLI serialization");
 });
-test("missing blocked obligations and unpublished active anchors fail, rather than deleting unfinished acceptance", async () => {
+test("each activated base row matches its genuine conversion receipt recipe, weights bytes and SHA", async () => {
   const input = await anchorPrerequisiteFixture();
+  const base = input.models.find(m => m.id === "flux3_klein_base");
+  for (const record of input.artifactPrerequisites.activated) {
+    const platform = record.backend === "mlx" ? "macos" : "windows";
+    const rows = base.downloads.filter(d => d.variant === record.tier && d.localDerivation && d.platforms.includes(platform));
+    assert.equal(rows.length, 1, `${record.coordinate}: exactly one production row`);
+    const [row] = rows;
+    assert.equal(row.repo, record.repository); assert.equal(row.revision, record.resolvedRevision); assert.deepEqual(row.files, []);
+    assert.equal(row.localDerivation.conversion, record.conversion);
+    assert.equal(row.localDerivation.conversion, flux3Conversion(record.backend, record.tier));
+    assert.deepEqual(record.receiptRecipe, flux3ConversionRecipe(record.backend, record.tier), "receipt recipe is the conversion id's own");
+    assert.equal(row.localDerivation.weightsBytes, record.weightsBytes);
+    assert.equal(row.localDerivation.weightsSha256, record.weightsSha256);
+    assert.ok(row.footprint.diskSizeBytes > row.estimatedSizeBytes + record.weightsBytes, "disk = source + whole owned package");
+    assert.deepEqual(row.platforms, record.backend === "mlx" ? ["macos"] : ["windows", "linux"]);
+  }
+});
+test("a wrong SHA/size, recipe, missing record or unhonest status fails rather than activating", async () => {
+  const input = await anchorPrerequisiteFixture();
+  const row = (v, coordinate) => {
+    const [modelId, tier, backend] = coordinate.split(":");
+    return v.models.find(m => m.id === modelId).downloads.find(d => d.variant === tier && d.localDerivation &&
+      d.platforms.includes(backend === "mlx" ? "macos" : "windows")).localDerivation;
+  };
+  for (const record of input.artifactPrerequisites.activated) {
+    for (const [mutate, pattern] of [
+      [v => { row(v, record.coordinate).weightsSha256 = "0".repeat(64); }, /differs from its genuine/],
+      [v => { row(v, record.coordinate).weightsBytes += 1; }, /differs from its genuine/],
+      [v => { v.artifactPrerequisites.activated.find(r => r.coordinate === record.coordinate).weightsSha256 = "f".repeat(64); }, /differs from its genuine/],
+      [v => { v.artifactPrerequisites.activated.find(r => r.coordinate === record.coordinate).receiptRecipe.bits = 2; }, /recipe/],
+      [v => { v.artifactPrerequisites.activated.find(r => r.coordinate === record.coordinate).measurement = "PASS"; }, /recipe\/evidence/],
+      [v => { delete v.calibrationPlan.anchors[record.coordinate]; }, /BLOCKED/],
+      [v => { v.artifactPrerequisites.activated = v.artifactPrerequisites.activated.filter(r => r.coordinate !== record.coordinate); }, /neither blocked nor activated/],
+    ]) {
+      const changed = structuredClone(input); mutate(changed);
+      assert.throws(() => validateFlux3AnchorPrerequisites(changed), pattern, record.coordinate);
+    }
+  }
   for (const mutate of [
-    v => v.artifactPrerequisites.obligations.shift(),
-    v => { v.artifactPrerequisites.obligations = []; },
-    v => v.artifactPrerequisites.obligations.push(v.artifactPrerequisites.obligations[0]),
-    v => { v.artifactPrerequisites.obligations[0].status = "PASS"; },
     v => { v.artifactPrerequisites.overallTerminalAcceptance = "PASS"; },
-    v => { v.artifactPrerequisites.obligations[0].resolvedRevision = "0".repeat(40); },
-    v => { v.artifactPrerequisites.obligations[0].missingEvidence.pop(); },
-    v => { const o = v.artifactPrerequisites.obligations.shift(); v.calibrationPlan.anchors[o.coordinate] = o.plannedAnchor; },
+    v => { v.artifactPrerequisites.overallTerminalAcceptance = "BLOCKED"; },
+    v => v.artifactPrerequisites.activated.push(v.artifactPrerequisites.activated[0]),
+    v => { v.artifactPrerequisites.activated[0].coordinate = "flux3_klein:q4:candle"; },
   ]) {
     const changed = structuredClone(input); mutate(changed);
     assert.throws(() => validateFlux3AnchorPrerequisites(changed), /BLOCKED/);
   }
 });
-test("only a fully pinned SYNTHETIC publication fixture can activate its corresponding required canonical anchor", async () => {
-  // No real weights or production pins: this explicitly synthetic declaration tests classification.
+test("re-blocking an artifact (row, anchor and record withdrawn) restores an explicit BLOCKED obligation, never a silent gap", async () => {
   const input = await anchorPrerequisiteFixture();
-  const obligation = input.artifactPrerequisites.obligations.shift();
-  input.calibrationPlan.anchors[obligation.coordinate] = obligation.plannedAnchor;
-  const model = input.models.find(m => m.id === obligation.modelId);
-  const row = { provider: "huggingface", repo: obligation.repository, revision: obligation.resolvedRevision,
-    variant: obligation.tier, platforms: ["windows", "linux"], files: [],
-    localDerivation: { fromVariant: "bf16", conversion: obligation.conversion,
-      weightsFile: "model.safetensors", weightsBytes: 123, weightsSha256: sha("DECLARED SYNTHETIC fixture, not actual weights") } };
-  model.downloads.push(row);
+  const record = input.artifactPrerequisites.activated.shift();
+  const plannedAnchor = input.calibrationPlan.anchors[record.coordinate];
+  delete input.calibrationPlan.anchors[record.coordinate];
+  const base = input.models.find(m => m.id === record.modelId);
+  base.downloads = base.downloads.filter(d => d.localDerivation?.conversion !== record.conversion);
+  assert.throws(() => validateFlux3AnchorPrerequisites(input), /neither blocked nor activated/);
+  input.artifactPrerequisites.obligations.push({ coordinate: record.coordinate, required: true, status: "BLOCKED",
+    modelId: record.modelId, backend: record.backend, tier: record.tier, repository: record.repository,
+    resolvedRevision: record.resolvedRevision, conversion: record.conversion,
+    missingEvidence: ["realConvertedWeightsBytes", "realConvertedWeightsSha256", "productionLocalDerivationRow"],
+    blocker: "DECLARED SYNTHETIC re-block for classification coverage", plannedAnchor });
+  assert.throws(() => validateFlux3AnchorPrerequisites(input), /explicit diagnostic artifact prerequisite inventory/, "BLOCKED status required again");
+  input.artifactPrerequisites.overallTerminalAcceptance = "BLOCKED";
   const result = validateFlux3AnchorPrerequisites(input);
-  assert.equal(result.activeCanonicalAnchors, 13);
-  assert.equal(result.blockedArtifactCoordinates.length, 3);
+  assert.equal(result.activeCanonicalAnchors, 15);
+  assert.deepEqual(result.blockedArtifactCoordinates, [record.coordinate]);
   assert.equal(result.terminalAcceptance, "BLOCKED");
+  // A blocked obligation still refuses a published row or an executable calibration row.
   for (const mutate of [
-    d => { delete d.localDerivation.weightsSha256; },
-    d => { d.localDerivation.weightsBytes = 0; },
-    d => { d.revision = "0".repeat(40); },
-    d => { d.platforms = ["macos"]; },
-    d => { d.localDerivation = { pendingDerivation: true }; },
+    v => { v.calibrationPlan.anchors[record.coordinate] = plannedAnchor; },
+    v => { v.artifactPrerequisites.obligations[0].missingEvidence.pop(); },
+    v => { v.artifactPrerequisites.obligations[0].status = "PASS"; },
   ]) {
-    const changed = structuredClone(input);
-    mutate(changed.models.find(m => m.id === obligation.modelId).downloads.at(-1));
-    assert.throws(() => validateFlux3AnchorPrerequisites(changed), /lacks published pinned artifact/);
+    const changed = structuredClone(input); mutate(changed);
+    assert.throws(() => validateFlux3AnchorPrerequisites(changed), /BLOCKED/);
   }
 });
 test("canonical native anchor hashes match the independent Rust witnesses for both checkpoints", () => {

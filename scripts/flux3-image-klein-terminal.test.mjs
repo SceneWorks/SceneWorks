@@ -44,7 +44,12 @@ test('planner is pure and covers both checkpoints/backends, all explicit obligat
     if (model === 'base') for (const mode of ['captioned', 'edit']) assert(find(`train-interrupt-resume-export-${mode}`, model, backend));
   }
   assert(plan.cases.every(c => ['NOT_RUN', 'BLOCKED'].includes(c.status)));
-  assert.deepEqual(plan.cases.filter(c => c.status === 'BLOCKED').map(c => c.caseId).sort(), ['mlx.base.native-tier.q4', 'mlx.base.native-tier.q8', 'candle.base.native-tier.q4', 'candle.base.native-tier.q8'].sort());
+  // Base q4/q8 now have production rows pinned to genuine local conversions: runnable-but-unrun,
+  // not BLOCKED and never PASS.
+  assert.deepEqual(plan.cases.filter(c => c.status === 'BLOCKED').map(c => c.caseId), []);
+  for (const caseId of ['mlx.base.native-tier.q4', 'mlx.base.native-tier.q8', 'candle.base.native-tier.q4', 'candle.base.native-tier.q8']) {
+    const cell = plan.cases.find(c => c.caseId === caseId); assert.equal(cell?.status, 'NOT_RUN', caseId); assert.equal(cell.blocker, null);
+  }
   assert(!plan.cases.some(c => c.backend === 'mlx' && ['fp8r', 'nvfp4'].includes(c.tier)));
 });
 test('payload uses shipped defaults and actual quantTier/enhancePrompt/ordered-layout carriers', () => {

@@ -16984,7 +16984,8 @@ fn image_job_quant_tiers_are_flux3_packages_and_fp8r_is_flux3_only() {
 }
 
 #[tokio::test]
-async fn flux3_base_catalog_tiers_are_canonical_and_unpinned_derivations_fail_closed() {
+async fn flux3_catalog_tiers_are_canonical_for_both_checkpoints_and_unpinned_derivations_fail_closed(
+) {
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
     sceneworks_core::builtin_manifests::seed_builtin_manifests(
@@ -16993,6 +16994,7 @@ async fn flux3_base_catalog_tiers_are_canonical_and_unpinned_derivations_fail_cl
     )
     .unwrap();
     let (_app, state) = create_app_with_state(settings).unwrap();
+    let mut authoritative_base = None;
     for model in ["flux3_klein", "flux3_klein_base"] {
         for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
             let mut payload = json!({
@@ -17008,26 +17010,39 @@ async fn flux3_base_catalog_tiers_are_canonical_and_unpinned_derivations_fail_cl
                 &mut payload,
             )
             .await;
-            if model == "flux3_klein_base" && matches!(tier, "q4" | "q8") {
-                let error = result.expect_err("forged catalog cannot invent converted pins");
-                assert_eq!(error.status, StatusCode::BAD_REQUEST);
-                assert!(
-                    error.detail.contains(tier)
-                        && error.detail.contains("SHA-256")
-                        && error.detail.contains("403"),
-                    "{}",
-                    error.detail
-                );
-            } else {
-                let entry = result.unwrap().unwrap();
-                assert_eq!(entry["id"], model);
-                let declared = entry["downloads"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|row| row["variant"] == tier);
-                assert!(declared, "{model}/{tier}");
+            // Both checkpoints declare every tier: base q4/q8 carry genuine local-conversion pins
+            // (sc-26243). The forged payload entry never replaces the authoritative catalog.
+            let entry = result.unwrap().unwrap();
+            assert_eq!(entry["id"], model);
+            let declared = entry["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["variant"] == tier);
+            assert!(declared, "{model}/{tier}");
+            if model == "flux3_klein_base" {
+                authoritative_base = Some(entry);
             }
         }
+    }
+    // An unpinned derivation still fails closed: strip the conversion pins from the authoritative
+    // base entry and the native tier refusal names the missing SHA-256 pins, with no dense
+    // fallback and no stale access-denial claim.
+    let mut base = authoritative_base.expect("authoritative base entry");
+    for row in base["downloads"].as_array_mut().unwrap() {
+        row.as_object_mut().unwrap().remove("localDerivation");
+    }
+    for tier in ["q4", "q8"] {
+        let advanced = json!({ "quantTier": tier }).as_object().unwrap().clone();
+        let reason = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+            "flux3_klein_base",
+            &advanced,
+            &base,
+        )
+        .expect("unpinned base derivation is refused");
+        assert!(
+            reason.contains(tier) && reason.contains("SHA-256") && !reason.contains("403"),
+            "{reason}"
+        );
     }
 }

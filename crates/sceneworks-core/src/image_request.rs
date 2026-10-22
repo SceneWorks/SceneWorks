@@ -671,9 +671,8 @@ pub fn flux3_catalog_tier_refusal(
         return None;
     }
     let evidence = if model == "flux3_klein_base" && matches!(tier, Flux3Tier::Q4 | Flux3Tier::Q8) {
-        " Base repository file access is blocked (HTTP 403); verified base conversion output size \
-         and SHA-256 pins are required before installation can be offered. Distilled pins cannot \
-         be reused."
+        " Verified base conversion output size and SHA-256 pins are required before installation \
+         can be offered. Distilled pins cannot be reused."
     } else {
         " Install a catalog-declared package with verified artifact pins."
     };
@@ -988,7 +987,7 @@ mod tests {
                 flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
                     .unwrap();
             assert!(
-                reason.contains(tier) && reason.contains("SHA-256") && reason.contains("403"),
+                reason.contains(tier) && reason.contains("SHA-256") && !reason.contains("403"),
                 "{reason}"
             );
             assert!(reason.contains("No dense fallback"), "{reason}");
