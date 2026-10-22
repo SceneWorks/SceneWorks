@@ -358,9 +358,10 @@ jobs:
     env:
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
       MACOSX_DEPLOYMENT_TARGET: "15.0"
-    # Well above the observed warm 6-14 min, sized for a cold MLX-from-source build on a
-    # hosted image rather than on an M5 Max. Re-size from the first ten runs.
-    timeout-minutes: 90
+    # Run 39800004883 exhausted 90 minutes after about 72 minutes of cold native build,
+    # clippy and test codegen, while the full workspace suite was still making progress.
+    # Keep a finite two-hour cold-build budget without narrowing tests or changing runners.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch

@@ -1683,6 +1683,36 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   );
 });
 
+test("hosted macOS bounds the complete cold native pipeline at two hours", async (t) => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const hosted = workflowJob(workflow, "macos-checks");
+  const budget = "    timeout-minutes: 120\n";
+  const validate = (candidate) => {
+    const job = workflowJob(candidate, "macos-checks");
+    assert.match(job, /^    timeout-minutes: 120$/m, "the hosted cold-build budget stays finite and sufficient");
+    assert.match(job, /^    runs-on: macos-26$/m);
+    for (const command of [
+      "cargo build -p sceneworks-worker",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct",
+    ]) assert.ok(job.includes(`run: ${command}\n`), command);
+  };
+  validate(workflow);
+  assert.equal(hosted.split(budget).length - 1, 1);
+  for (const [name, replacement] of [
+    ["MAC-cold-budget-90", "    timeout-minutes: 90\n"],
+    ["MAC-cold-budget-missing", ""],
+    ["MAC-cold-budget-platform-maximum", "    timeout-minutes: 360\n"],
+  ]) await t.test(name, () => {
+    const mutant = workflow.replace(hosted, hosted.replace(budget, replacement));
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => validate(mutant));
+    validate(workflow); // Restored source is GREEN; no workflow file is mutated by this test.
+  });
+});
+
 // The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
 // default-members, so the macOS lane's bare `cargo test` never compiles it; without this exact
 // invocation the memory-mlx-adapter unit tests — including the sc-18104 dispatch-refusal guards —
