@@ -426,6 +426,36 @@ fn builtin_reference_partition_entry() -> Option<&'static Map<String, Value>> {
     builtin_partition_entry(MINIMAX_H3_REFERENCE_PARTITION_MODEL)
 }
 
+/// The persisted shared precision is independent of imported checkpoint precision. A caller may
+/// explicitly confirm it, but neither readiness nor generation may rediscover another closure.
+pub fn selected_import_component_tier(entry: &Map<String, Value>) -> Result<&'static str, String> {
+    let tier = match entry_str(entry, "importComponentTier") {
+        Some("q4") => "q4",
+        Some("q8") => "q8",
+        Some("bf16") => "bf16",
+        _ => {
+            return Err(
+                "the imported checkpoint has no selected shared component tier; re-import it"
+                    .into(),
+            )
+        }
+    };
+    if entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("variant")
+                    .and_then(Value::as_str)
+                    .is_some_and(|variant| variant != tier)
+            })
+        })
+    {
+        return Err("component bindings disagree with the selected shared tier".into());
+    }
+    Ok(tier)
+}
+
 /// Tighten co-requisite globs to the files H3 providers actually consume. A landed config or one
 /// shard cannot make a partially downloaded component ready. Literal-only rows retain the shared
 /// downloader's all-files check; provider configuration compatibility is checked again at load.

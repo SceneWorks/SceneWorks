@@ -274,6 +274,8 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
         "family": "minimax-h3",
         "baseModel": if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" },
         "minimaxH3Partition": partition,
+        "importComponentTier": "q4",
+        "downloads": component_downloads("q4", partition),
         "importPlan": {
             "checkpointId": install.checkpoint_id,
             "planId": install.compiled.plan.plan_id,
@@ -304,6 +306,76 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
     }
 }
 
+pub(crate) const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
+pub(crate) const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
+
+pub(crate) fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
+    let mut rows = Vec::new();
+    for (id, dir) in [
+        ("tokenizer", "tokenizer"),
+        ("video_vae", "vae"),
+        ("audio_vae", "audio_vae"),
+        ("fl2va_audio_vae_config", "FL2VA/audio_vae"),
+    ] {
+        rows.push(json!({"provider":"huggingface","repo":"MiniMaxAI/MiniMax-H3","revision":SHARED_REVISION,"coRequisite":true,"componentId":id,"subdir":dir,"files":if id == "fl2va_audio_vae_config" { json!(["FL2VA/audio_vae/config.json","FL2VA/audio_vae/config.yaml","FL2VA/audio_vae/metadata.json"]) } else { json!([format!("{dir}/*")]) }}));
+    }
+    let encoder = if tier == "bf16" {
+        "text_encoder".to_owned()
+    } else {
+        format!("{tier}/text_encoder")
+    };
+    rows.push(json!({"provider":"huggingface","repo":if tier == "bf16" { "MiniMaxAI/MiniMax-H3" } else { "SceneWorks/minimax-h3-mlx" },"revision":if tier == "bf16" {SHARED_REVISION} else {TIER_REVISION},"coRequisite":true,"variant":tier,"componentId":"text_encoder","subdir":encoder,"files":[format!("{encoder}/*")]}));
+    if partition != "hybrid" {
+        let companion = if partition == "ref2va" {
+            "transformer"
+        } else {
+            "transformer_ref"
+        };
+        let dir = format!("{tier}/{companion}");
+        rows.push(json!({"provider":"huggingface","repo":"SceneWorks/minimax-h3-mlx","revision":TIER_REVISION,"coRequisite":true,"variant":tier,"subdir":dir,"files":[format!("{dir}/*")]}));
+    }
+    rows
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn write_companion(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("config.json"), "{}").unwrap();
+    write_safetensors(&dir.join("fixture.safetensors"), &[("weight", "F16")], 0x2a);
+    std::fs::write(
+        dir.join("diffusion_pytorch_model.safetensors.index.json"),
+        json!({"weight_map":{"weight":"fixture.safetensors"}}).to_string(),
+    )
+    .unwrap();
+}
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
+    for (repo, revision, source) in [
+        ("models--MiniMaxAI--MiniMax-H3", SHARED_REVISION, base),
+        ("models--SceneWorks--minimax-h3-mlx", TIER_REVISION, tiers),
+    ] {
+        let snapshot = hub.join(repo).join("snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        for name in [
+            "q4",
+            "q8",
+            "bf16",
+            "tokenizer",
+            "vae",
+            "audio_vae",
+            "FL2VA",
+            "text_encoder",
+        ] {
+            let target = source.join(name);
+            let link = snapshot.join(name);
+            if target.exists() && std::fs::symlink_metadata(&link).is_err() {
+                std::os::unix::fs::symlink(target, link).unwrap();
+            }
+        }
+    }
+}
+
 /// Constructor documents at fixture scale; no model weights, downloads, or tensor runtime.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn write_shared_configs(root: &Path, encoder: &Path) {
@@ -325,7 +397,22 @@ pub(crate) fn write_shared_configs(root: &Path, encoder: &Path) {
     );
     put(
         encoder.join("model.safetensors.index.json"),
-        json!({"weight_map":{}}),
+        json!({"weight_map":{"weight":"fixture.safetensors"}}),
+    );
+    write_safetensors(
+        &encoder.join("fixture.safetensors"),
+        &[("weight", "F16")],
+        0x2a,
+    );
+    write_safetensors(
+        &root.join("vae/fixture.safetensors"),
+        &[("weight", "F16")],
+        0x2b,
+    );
+    write_safetensors(
+        &root.join("audio_vae/fixture.safetensors"),
+        &[("weight", "F16")],
+        0x2c,
     );
     let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig::default();
     put(

@@ -174,7 +174,12 @@ impl StartupMaintenance {
 
     /// Start exactly one bounded blocking sweep. Returns false when another
     /// caller already started it.
-    pub(crate) fn start(&self, data_dir: PathBuf, timeout: Duration) -> bool {
+    pub(crate) fn start(
+        &self,
+        data_dir: PathBuf,
+        jobs: Arc<sceneworks_core::jobs_store::JobsStore>,
+        timeout: Duration,
+    ) -> bool {
         if self
             .inner
             .started
@@ -196,7 +201,7 @@ impl StartupMaintenance {
                 StartupPhaseTimer::start("upload_sweeps", StartupCriticality::BackgroundSafe);
             let worker_cancelled = cancelled.clone();
             let mut worker = tokio::task::spawn_blocking(move || {
-                run_upload_sweeps(&data_dir, worker_cancelled.as_ref())
+                run_upload_sweeps(&data_dir, &jobs, worker_cancelled.as_ref())
             });
             match tokio::time::timeout(timeout, &mut worker).await {
                 Ok(Ok(result)) if result.cancelled => {
@@ -321,7 +326,11 @@ struct UploadSweepResult {
     cancelled: bool,
 }
 
-fn run_upload_sweeps(data_dir: &Path, cancelled: &AtomicBool) -> UploadSweepResult {
+fn run_upload_sweeps(
+    data_dir: &Path,
+    jobs: &sceneworks_core::jobs_store::JobsStore,
+    cancelled: &AtomicBool,
+) -> UploadSweepResult {
     #[cfg(test)]
     if let Some(hook) = take_test_hook(data_dir) {
         hook.reached.notify_one();
@@ -350,9 +359,16 @@ fn run_upload_sweeps(data_dir: &Path, cancelled: &AtomicBool) -> UploadSweepResu
             result.cancelled = true;
             break;
         }
-        match sweep_stale_uploads_cancellable(data_dir, subdir, cutoff, || {
-            !cancelled.load(Ordering::Acquire)
-        }) {
+        let sweep = if subdir == "model-uploads" {
+            crate::sweep_stale_model_uploads(data_dir, jobs, cutoff, || {
+                !cancelled.load(Ordering::Acquire)
+            })
+        } else {
+            sweep_stale_uploads_cancellable(data_dir, subdir, cutoff, || {
+                !cancelled.load(Ordering::Acquire)
+            })
+        };
+        match sweep {
             Ok(removed) => result.removed_uploads = result.removed_uploads.saturating_add(removed),
             Err(error) => {
                 result.failure_count = result.failure_count.saturating_add(1);

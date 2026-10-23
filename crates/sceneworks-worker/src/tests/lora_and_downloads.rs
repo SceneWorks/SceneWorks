@@ -2748,7 +2748,9 @@ async fn interrupted_h3_postcommit_publication_recovers_only_the_original_job() 
     let fixture = managed_import_fixture_with_id(url, "recover_h3").await;
     let staged = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(&fixture.settings.data_dir, "recover_h3");
     let source = fixture.settings.data_dir.join("models/incoming/recover_h3");
-    let job = h3_import_job(&fixture, &source);
+    let mut job = h3_import_job(&fixture, &source);
+    let digest = sha256_hex(&staged.install_dir.join("diffusion_pytorch_model.safetensors"));
+    job.payload.insert("expectedSha256".into(), json!(format!(" \nsha256: {digest} \t")));
     // Emulate a process dying immediately after finalize, before its catalog publication.
     super::imports::write_model_install_marker(&staged.install_dir, &job.payload, "", &job.id, None, None).await.unwrap();
     std::fs::remove_dir_all(&source).unwrap(); // recovery must not require transfer source again
@@ -2761,6 +2763,12 @@ async fn interrupted_h3_postcommit_publication_recovers_only_the_original_job() 
     let entry = fixture.manifest_entry().expect("same job recovers publication");
     assert_eq!(entry["importPlan"]["planId"], staged.plan_id);
     assert_eq!(entry["importPlan"]["semanticDigest"], staged.semantic_digest);
+    super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap();
+    assert_eq!(fixture.manifest_entry(), Some(entry.clone()), "same-job recovery is idempotent with normalized checksums");
+    job.payload.insert("expectedSha256".into(), json!(format!(" sha256: {} ", "f".repeat(64))));
+    let error = super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap_err();
+    assert!(error.to_string().contains("differs from expectedSha256"));
+    assert_eq!(fixture.manifest_entry(), Some(entry), "mismatch cannot rewrite a committed import");
 }
 
 #[tokio::test]

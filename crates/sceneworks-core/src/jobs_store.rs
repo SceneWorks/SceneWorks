@@ -1474,6 +1474,22 @@ impl JobsStore {
         Ok(jobs)
     }
 
+    /// Retained model-import retry inputs, without the queue UI's 500-row cap. Cleared or
+    /// completed jobs relinquish ownership; failed, canceled and interrupted jobs remain retryable.
+    pub fn model_upload_sources_for_recovery(&self) -> JobsStoreResult<Vec<String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select json_extract(payload_json, '$.sourcePath') from jobs
+             where type = 'model_import' and status != 'completed' and cleared_at is null
+               and json_extract(payload_json, '$.uploadedSourcePath') = 1
+               and json_type(payload_json, '$.sourcePath') = 'text'",
+        )?;
+        let sources = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(sources)
+    }
+
     /// Every non-completed Create-from-Prompt parent that an API restart must resume or clean.
     /// Deliberately unbounded: a durable coordinator cannot strand an older workflow merely because
     /// 500 newer queue rows exist. The JSON predicate is paid once at startup, outside claim paths.

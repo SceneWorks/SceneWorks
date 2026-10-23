@@ -128,13 +128,21 @@ DiT's task partition is never downloaded over or replaced. Hybrid imports do not
 task companion. Shared component jobs remain independently retryable and shared caches are not
 owned by the imported model. An imported entry is not installed/ready until its source plan and
 assembly resolve and every bound component row is present in its declared revision.
+The selected shared precision is persisted as `importComponentTier`, independently of imported
+DiT precision. Both native providers consume that tier and each persisted repository/revision
+binding directly, never `refs/main`, operator directory overrides, or a stock tier search. Explicit
+precision controls may confirm the selected shared tier but cannot silently substitute another
+closure. Assets retain the exact selected tier and component download bindings.
 
 Interrupted managed transfers discard staging and can retry. A process interrupted after the
 managed commit can replay H3 publication only when the committed install marker belongs to that
 same job and the persisted source plan still verifies; another job's install is never replaced.
 Uploaded model inputs are retained across failed attempts and process restarts (hard-linked into
 staging on the same volume rather than consumed). Successful publication releases the upload;
-abandoned retry inputs use the existing 24-hour stale-upload cleanup policy.
+only unowned or explicitly cleared/expired retry inputs use the 24-hour stale-upload cleanup policy.
+Queued, active, failed, canceled and interrupted retained model-import jobs protect their exact
+upload input through both synchronous restart and deferred maintenance sweeps, regardless of age.
+Checksum recovery uses the same normalization as initial ingestion, including `sha256:` prefixes.
 Cancellation and manifest-publication failures roll back unpublished managed installs. Linked
 source drift makes the imported entry incomplete; an explicit rescan refreshes the binding while
 retaining its original base/partition declaration. Relinking preserves root and checkpoint identity.

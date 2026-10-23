@@ -3956,6 +3956,7 @@ pub(crate) async fn queue_model_import_job(
         let declaration =
             json!({"baseModel":base_id,"minimaxH3Partition":payload.minimax_h3_partition});
         let default_tier = default.get("variant").and_then(Value::as_str);
+        let mut selected_tier = default_tier.unwrap_or("bf16").to_owned();
         let mut rows = sceneworks_core::minimax_h3_import::import_component_downloads(
             declaration.as_object().expect("declaration"),
             &base,
@@ -3974,6 +3975,7 @@ pub(crate) async fn queue_model_import_job(
                 if candidate.iter().all(|row| imported_component_presence(&state.settings.data_dir, row)
                     == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed) {
                     rows = candidate;
+                    selected_tier = tier.to_owned();
                     break;
                 }
             }
@@ -3984,7 +3986,7 @@ pub(crate) async fn queue_model_import_job(
             .collect();
         ensure_license_acknowledged_for_source(&state, &repos, None, payload.license_acknowledged)
             .await?;
-        Some((base, rows))
+        Some((base, rows, selected_tier))
     } else {
         None
     };
@@ -4050,8 +4052,9 @@ pub(crate) async fn queue_model_import_job(
                 Value::String(partition.clone()),
             );
         }
-        if let Some((_, rows)) = &import_components {
+        if let Some((_, rows, tier)) = &import_components {
             object.insert("downloads".to_owned(), json!(rows));
+            object.insert("importComponentTier".to_owned(), json!(tier));
         }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
@@ -4084,7 +4087,7 @@ pub(crate) async fn queue_model_import_job(
         Value::String(manifest_path.display().to_string()),
     );
     payload.insert("manifestEntry".to_owned(), manifest_entry);
-    if let Some((base, rows)) = import_components {
+    if let Some((base, rows, _)) = import_components {
         for row in rows {
             if imported_component_presence(&state.settings.data_dir, &row)
                 == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
@@ -7856,6 +7859,11 @@ fn install_state_for(
             Err(error) => missing.push(error.to_string()),
         }
         let rows = model_co_requisite_downloads(model);
+        if let Err(reason) =
+            sceneworks_core::minimax_h3_import::selected_import_component_tier(entry)
+        {
+            missing.push(reason);
+        }
         if rows.is_empty() {
             missing.push(
                 "The import has no compatible component closure; re-import with the selected base"
@@ -9283,6 +9291,12 @@ fn apply_imported_provider_surface(object: &mut JsonObject) {
 /// entry-keyed verdicts, derived from the SAME predicates the scheduler and the no-lane gate ask
 /// about a submitted job. Emitted on every platform, like the id-keyed blocks it replaces.
 fn apply_imported_video_support_surface(object: &mut JsonObject) {
+    // The existing picker must not synthesize a q4/q8 shared precision for an import whose
+    // admitted closure is bf16 (or vice versa). Imported DiT precision remains source-owned.
+    let tiers = sceneworks_core::minimax_h3_import::selected_import_component_tier(object)
+        .map(|tier| vec![tier])
+        .unwrap_or_default();
+    object.insert("runtimeQuantTiers".to_owned(), json!(tiers));
     if let Ok(mac_support) =
         serde_json::to_value(sceneworks_core::jobs_store::imported_video_model_mac_support(object))
     {
@@ -16472,6 +16486,7 @@ mod minimax_h3_import_declaration_tests {
             .unwrap();
         sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         let mut model = Value::Object(entry);
+        model["importComponentTier"] = json!("q4");
         let missing = super::install_state_for(None, &model, &settings.data_dir);
         assert!(!missing.installed);
         assert!(missing.cache_incomplete);
@@ -16596,5 +16611,57 @@ mod minimax_h3_import_declaration_tests {
         let (status, job) = request(app, "POST", "/api/v1/models/import", body).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
         assert_eq!(job["payload"]["manifestEntry"]["baseModel"], "minimax_h3");
+    }
+
+    #[tokio::test]
+    async fn import_persists_a_complete_bf16_only_shared_closure_as_its_generation_default() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let _ = app(&temp);
+        let settings = test_settings(&temp);
+        let revision = "1111111111111111111111111111111111111111";
+        let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
+            {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
+            {"provider":"huggingface","repo":"fixture/tiers","variant":"bf16","files":["bf16/transformer/*"]},
+            {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"q4","files":["q4/encoder.bin"]},
+            {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"bf16","files":["bf16/encoder.bin"]}
+        ]});
+        std::fs::write(
+            settings.config_dir.join("manifests/builtin.models.jsonc"),
+            json!({"schemaVersion":1,"models":[base]}).to_string(),
+        )
+        .unwrap();
+        let snapshot = super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared")
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(snapshot.join("bf16")).unwrap();
+        std::fs::write(
+            snapshot.join("bf16/encoder.bin"),
+            b"selected bf16 shared encoder",
+        )
+        .unwrap();
+        let app = create_app(settings).unwrap();
+        let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(
+            job["payload"]["manifestEntry"]["importComponentTier"],
+            "bf16"
+        );
+        assert_eq!(
+            job["payload"]["manifestEntry"]["downloads"][0]["variant"],
+            "bf16"
+        );
+        assert_eq!(
+            job["payload"]["manifestEntry"]["downloads"][0]["revision"],
+            revision
+        );
+        let mut surface = job["payload"]["manifestEntry"].as_object().unwrap().clone();
+        super::apply_imported_video_support_surface(&mut surface);
+        assert_eq!(
+            surface["runtimeQuantTiers"],
+            json!(["bf16"]),
+            "normal picker defaults can only select the bound closure"
+        );
     }
 }

@@ -17960,6 +17960,15 @@ fn drive_minimax_h3_arm_in_project_with_loader(
     };
     let job = minimax_h3_job_snapshot();
     let hf_cache = tier_root.join("unused-hf-cache");
+    if request
+        .model_manifest_entry
+        .get("importComponentTier")
+        .is_some()
+    {
+        crate::minimax_h3_import_fixture::install_fixture_snapshots(
+            &hf_cache, tier_root, base_root,
+        );
+    }
     let project_path = project_path.to_path_buf();
     let mut env: Vec<(&str, &str)> = vec![
         ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),

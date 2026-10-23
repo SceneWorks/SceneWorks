@@ -6168,7 +6168,8 @@ async fn recover_committed_h3_import(
         })?;
     let (digest, _) = stable_model_file_sha256(api, settings, &job.id, &primary).await?;
     if optional_payload_string(&job.payload, "expectedSha256")
-        .is_some_and(|expected| !expected.eq_ignore_ascii_case(&digest))
+        .and_then(normalize_sha256)
+        .is_some_and(|expected| expected != digest)
     {
         return Err(WorkerError::InvalidPayload(
             "Recovered H3 import differs from expectedSha256".into(),
