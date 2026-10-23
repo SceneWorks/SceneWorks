@@ -636,7 +636,9 @@ fn convrot_import_native_cuda_projection_smoke() {
         .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
         .unwrap();
     let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
-    let weights = candle_gen::Weights::from_files(
+    // Match MiniMaxH3Dit::load_from_dir: preserve I8 codes and F32 row scales through
+    // the validated native reader, not Candle's generic safetensors dtype loader.
+    let weights = candle_gen::Weights::from_files_native_int8(
         &[output.join("diffusion_pytorch_model-00001-of-00001.safetensors")],
         &device,
         DType::BF16,

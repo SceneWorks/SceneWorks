@@ -658,6 +658,9 @@ Stub-loader metadata tests supply an explicit admission budget and still exercis
 the real rejection gate; they must not depend on a live hardware probe. Production
 continues to resolve a fresh live budget at admission, and native projection
 fixtures still create the actual backend device rather than using that test budget.
+The CUDA ConvRot projection fixture uses the same validated native INT8 reader as
+the production H3 DiT loader, preserving signed-byte codes and F32 row scales;
+Candle's generic safetensors reader does not support the checkpoint's I8 dtype.
 
 Optionally install local Git hooks that run `npm run rust:fmt` before commits
 touching Rust files:
