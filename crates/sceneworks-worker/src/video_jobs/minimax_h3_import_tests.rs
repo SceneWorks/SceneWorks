@@ -467,12 +467,12 @@ fn imported_declared_partitions_keep_their_weights_for_every_operation() {
             &tiers.path().join("q4/text_encoder"),
         );
         let data = minimax_h3_data_dir(tiers.path());
-        let imported =
-            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
-                &data,
-                "minimax_h3_custom",
-                partition,
-            );
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            &data,
+            "minimax_h3_custom",
+            "dense",
+            partition,
+        );
         let (project_id, project_path, image_id) = stage_minimax_h3_reference_project(&data);
         // The provider cache deliberately reuses one generator across this checkpoint's modes.
         // Keep one positive probe attached to that generator, not a fresh uncalled loader per mode.
@@ -729,12 +729,12 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
         ..offline_settings()
     };
     for partition in ["fl2va", "ref2va", "hybrid"] {
-        let imported =
-            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
-                data.path(),
-                &format!("candle_{partition}"),
-                partition,
-            );
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            &format!("candle_{partition}"),
+            "dense",
+            partition,
+        );
         for references in [false, true] {
             let mut request =
                 imported_minimax_h3_request(&format!("candle_{partition}"), &imported.entry);

@@ -128,14 +128,6 @@ pub(crate) fn stage_managed_minimax_h3_import_layout(
     stage_managed_minimax_h3_import_source(data_dir, model_id, layout, "fl2va")
 }
 
-pub(crate) fn stage_managed_minimax_h3_import_with_partition(
-    data_dir: &Path,
-    model_id: &str,
-    partition: &str,
-) -> ManagedMiniMaxH3Import {
-    stage_managed_minimax_h3_import_source(data_dir, model_id, "dense", partition)
-}
-
 pub(crate) fn stage_managed_minimax_h3_import_source(
     data_dir: &Path,
     model_id: &str,
