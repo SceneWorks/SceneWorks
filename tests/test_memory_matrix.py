@@ -547,55 +547,100 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
 
 
 def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
-    """sc-22511: currency is a REPORT. A staled loader closure means the anchor needs re-extraction,
-    not that the rung stopped existing — so `anchor.current` may not partition the states."""
-    matrix = load_matrix()
-    anchored = [cell for cell in matrix["cells"] if cell["anchor"] is not None]
-    assert anchored
-    by_current: dict[bool, set[str]] = {}
-    for cell in anchored:
-        by_current.setdefault(cell["anchor"]["current"], set()).add(cell["state"])
-    # The currency flag is a boolean report and nothing else. Which values the checked-in store
-    # carries is provenance at this pin, not a distribution this test may freeze. The assertions
-    # below therefore re-derive every state without a currency term.
-    assert by_current and set(by_current) <= {True, False}, sorted(by_current)
-    # Every anchored cell's state must re-derive from the three facts WITHOUT a currency term. An
-    # anchor may land on a coordinate the architecture rules out (sc-22509 measured krea_2_turbo
-    # candle q4, whose streamed-blocks overlay coordinates are structurally exempt), so the
-    # allowed vocabulary is not `Anchored`/`Anchored/underived` alone — the point is that flipping
-    # `current` could not have produced any of these states.
-    for cell in anchored:
-        if cell["implementation"] == "missing":
-            expected = "Missing"
-        elif cell["implementation"] == "structurally-na":
-            expected = "Structurally N/A"
-        elif cell["derivationDefined"] and cell["anchor"]["derivable"]:
-            expected = "Anchored"
-        else:
-            expected = "Anchored/underived"
-        assert cell["state"] == expected, cell["id"]
-    # Teeth: the anchored population must span more than one state, or the loop above is vacuous.
-    assert len({cell["state"] for cell in anchored}) > 1
-    # A cell's reported currency is its inventory row's, not an independent claim: two copies of one
-    # fact that can disagree is how a stale anchor reads as current on the cell that cites it.
-    inventory = {row["id"]: row for row in matrix["anchors"]}
-    for cell in anchored:
-        assert cell["anchor"]["current"] == inventory[cell["anchor"]["id"]]["current"], cell["id"]
-    # And the reported staleness is the store's own, recomputed from the closure ledger.
-    closures = json.loads(
-        (ROOT / "config/anchor-loader-closures.json").read_text(encoding="utf-8")
-    )["models"]
-    store = json.loads((ROOT / "config/memory-anchors.json").read_text(encoding="utf-8"))
-    by_id = {anchor["id"]: anchor for anchor in store["anchors"]}
-    for row in matrix["anchors"]:
-        anchor = by_id[row["id"]]
-        assert row["current"] == (
-            closures.get(f"{anchor['modelId']}:{anchor['backend']}", {}).get("digest")
-            == anchor["source"]["loaderClosureDigest"]
-        ), row["id"]
-    assert matrix["summary"]["staleAnchors"] == sum(
-        1 for row in matrix["anchors"] if not row["current"]
+    """Currency is advisory: controlled matching/stale inputs change reports, never states.
+
+    The packaged matrix is historical evidence, not a freshness gate against today's loader
+    ledger. Exercise the real generator with in-memory overrides; never restamp the store.
+    """
+    generated = subprocess.run(
+        [
+            "node", "--input-type=module", "-e",
+            r"""
+import { readFile } from "node:fs/promises";
+import { buildMatrix } from "./scripts/generate-memory-matrix.mjs";
+const original = JSON.parse(await readFile("config/memory-anchors.json", "utf8"));
+const matching = "1".repeat(64);
+const store = {
+  ...original,
+  anchors: original.anchors.map((anchor) => ({
+    ...anchor, source: { ...anchor.source, loaderClosureDigest: matching },
+  })),
+};
+const cases = [];
+for (const [digest, current] of [[matching, true], ["2".repeat(64), false]]) {
+  const closures = Object.fromEntries(store.anchors.map((anchor) =>
+    [`${anchor.modelId}:${anchor.backend}`, { digest }],
+  ));
+  const matrix = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      anchorStore: JSON.stringify(store),
+      anchorLoaderClosures: JSON.stringify({ models: closures }),
+    },
+  });
+  cases.push({ current, closures, matrix: {
+    cells: matrix.cells.map(({ id, state, implementation, derivationDefined, anchor }) => ({
+      id, state, implementation, derivationDefined,
+      anchor: anchor && { id: anchor.id, current: anchor.current, derivable: anchor.derivable },
+    })),
+    anchors: matrix.anchors.map(({ id, current }) => ({ id, current })),
+    summary: { staleAnchors: matrix.summary.staleAnchors },
+  } });
+}
+console.log(JSON.stringify({ cases, store }));
+""",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
+    fixture = json.loads(generated.stdout)
+    assert len(fixture["cases"]) == 2
+    assert {case["current"] for case in fixture["cases"]} == {True, False}
+    by_id = {anchor["id"]: anchor for anchor in fixture["store"]["anchors"]}
+    baseline_states = None
+    for case in fixture["cases"]:
+        matrix = case["matrix"]
+        anchored = [cell for cell in matrix["cells"] if cell["anchor"] is not None]
+        assert anchored
+        by_current: dict[bool, set[str]] = {}
+        for cell in anchored:
+            by_current.setdefault(cell["anchor"]["current"], set()).add(cell["state"])
+        assert set(by_current) == {case["current"]}
+        # Re-derive every state WITHOUT currency, including structural and missing coordinates.
+        for cell in matrix["cells"]:
+            if cell["implementation"] == "missing":
+                expected = "Missing"
+            elif cell["implementation"] == "structurally-na":
+                expected = "Structurally N/A"
+            elif cell["anchor"] is None:
+                expected = "Implemented"
+            elif cell["derivationDefined"] and cell["anchor"]["derivable"]:
+                expected = "Anchored"
+            else:
+                expected = "Anchored/underived"
+            assert cell["state"] == expected, cell["id"]
+        assert len({cell["state"] for cell in anchored}) > 1
+        states = {cell["id"]: cell["state"] for cell in matrix["cells"]}
+        if baseline_states is None:
+            baseline_states = states
+        else:
+            assert states == baseline_states, "staling every closure must not move any state"
+        inventory = {row["id"]: row for row in matrix["anchors"]}
+        for cell in anchored:
+            assert cell["anchor"]["current"] == inventory[cell["anchor"]["id"]]["current"], cell["id"]
+        for row in matrix["anchors"]:
+            anchor = by_id[row["id"]]
+            assert row["current"] == case["current"]
+            assert row["current"] == (
+                case["closures"][f"{anchor['modelId']}:{anchor['backend']}"]["digest"]
+                == anchor["source"]["loaderClosureDigest"]
+            ), row["id"]
+        assert matrix["summary"]["staleAnchors"] == sum(
+            1 for row in matrix["anchors"] if not row["current"]
+        )
 
 
 def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
