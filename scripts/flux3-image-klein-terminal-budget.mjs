@@ -52,6 +52,8 @@ export function validateApprovedPlan(approval) {
   assert(approval?.schemaVersion === 1 && approval.kind === 'flux3-terminal-plan-approval', 'explicit immutable terminal plan approval required');
   assert(approval.approvalId && approval.userPlanApprovalId && approval.approvedBy, 'parent-recorded user plan approval identity required');
   if (Object.hasOwn(approval, 'candleSourceTransitionSha256')) assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'valid root Candle transition authorization digest required');
+  validateCandleDeviceTransitionBinding(approval);
+  validateCandleMeasurementTransitionBinding(approval);
   assert(revision.test(approval.sourceSha ?? '') && revision.test(approval.inferenceMainSha ?? ''), 'approved final source/MAIN identities required');
   assert(/^[a-zA-Z0-9_-]{12,100}$/.test(approval.ledgerId ?? ''), 'stable non-resettable ledger identity required');
   // A backend whose inputs cannot exist yet (e.g. a second host still to be provisioned) may be
@@ -141,12 +143,63 @@ function exactKeys(value, keys, label) {
   assert(value && typeof value === 'object' && !Array.isArray(value), `${label} object required`);
   assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} has unknown/missing fields`);
 }
+const DEVICE_TRANSITION_KEYS = ['schemaVersion','previousSourceSha','nextSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256','previousDevice','nextDevice'];
+const PREVIOUS_CANDLE_DEVICE = {physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'};
+const NEXT_CANDLE_DEVICE = {physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'};
+/** Strict fixed device/source/prefix binding; absence preserves the legacy same-device format.
+ * Does not itself authenticate the authorization: carried-prefix/append validation does that. */
+export function validateCandleDeviceTransitionBinding(approval) {
+  if (!Object.hasOwn(approval, 'candleDeviceTransition')) return undefined;
+  const binding = approval.candleDeviceTransition;
+  exactKeys(binding, DEVICE_TRANSITION_KEYS, 'Candle device transition');
+  assert.equal(binding.schemaVersion, 1);
+  assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'device transition requires root source-transition authorization');
+  assert.equal(binding.previousSourceSha, CANDLE_PREVIOUS_SOURCE, 'only the fixed original Candle source may transition devices');
+  assert(revision.test(approval.sourceSha ?? '') && approval.sourceSha !== CANDLE_PREVIOUS_SOURCE, 'device transition needs a different approved source');
+  assert.equal(binding.nextSourceSha, approval.sourceSha, 'device destination source differs from approval.sourceSha');
+  for (const field of ['previousApprovedPlanSha256','previousHeadSha256','previousClaimSha256']) assert(sha.test(binding[field] ?? ''), `device transition ${field} required`);
+  assert.equal(binding.previousSequence, 1); assert.equal(binding.previousGenerationCount, 1);
+  assert.deepEqual(binding.previousConsumedIds, [CANDLE_CONSUMED]);
+  for (const [field, expected] of [['previousDevice',PREVIOUS_CANDLE_DEVICE],['nextDevice',NEXT_CANDLE_DEVICE]]) {
+    exactKeys(binding[field], ['physicalGpuId','gpuUuid','pciBusId'], `Candle ${field}`);
+    assert.deepEqual(binding[field], expected, `Candle ${field} is not the fixed authorized physical device`);
+  }
+  return binding;
+}
+const MEASUREMENT_KIND = 'windows-owned-process-accounting-v1';
+const MEASUREMENT_REASON = 'measurement-only owned-process producer/consumer accounting; renderer and inference unchanged';
+const OLD_CANDLE_BINARIES = {api:'d264bf21ba5e5a19012388041da92bc54764d2b3144c3d10065505b1a383e52d',resource:'4795a3e8fd5d0ee2d60c6586a72153759133209403d6b15120af7d50fcc48df5'};
+/** Approval-bound fixed measurement producer/consumer replacement, never a generic binary remap.
+ * Authentication and the previous approval's bindings are checked by compatibility/append. */
+export function validateCandleMeasurementTransitionBinding(approval) {
+  if (!Object.hasOwn(approval, 'candleMeasurementTransition')) return undefined;
+  const binding = approval.candleMeasurementTransition, device = validateCandleDeviceTransitionBinding(approval);
+  assert(device, 'measurement transition requires the fixed device/source transition');
+  exactKeys(binding, ['schemaVersion','previousSourceSha','nextSourceSha','measurementKind','reason','previousBuilds','nextBuilds'], 'Candle measurement transition');
+  assert.equal(binding.schemaVersion, 1); assert.equal(binding.measurementKind, MEASUREMENT_KIND); assert.equal(binding.reason, MEASUREMENT_REASON);
+  assert.equal(binding.previousSourceSha, CANDLE_PREVIOUS_SOURCE); assert.equal(binding.nextSourceSha, approval.sourceSha);
+  for (const side of ['previousBuilds','nextBuilds']) {
+    exactKeys(binding[side], ['api','resource'], `measurement ${side}`);
+    for (const role of ['api','resource']) {
+      const build = binding[side][role]; exactKeys(build, ['binarySha256','receiptSha256'], `measurement ${side} ${role}`);
+      assert(sha.test(build.binarySha256 ?? '') && sha.test(build.receiptSha256 ?? ''), 'measurement binary and producer receipt digests required');
+      if (side === 'previousBuilds') assert.equal(build.binarySha256, OLD_CANDLE_BINARIES[role], 'only the fixed original Candle binaries may transition');
+      else {
+        const approved = approval[role === 'api' ? 'buildReceipts' : 'resourceBuildReceipts']?.candle;
+        assert.equal(build.binarySha256, approved?.binarySha256, 'measurement destination binary differs from approved build');
+        assert.equal(build.receiptSha256, approved?.receiptSha256, 'measurement destination producer receipt differs from approved build');
+      }
+    }
+  }
+  assert.notEqual(binding.nextBuilds.resource.binarySha256, binding.previousBuilds.resource.binarySha256, 'measurement transition must replace the resource measurement binary');
+  return binding;
+}
 /** Hash ALL approval fields canonically, omitting ONLY the root authorization digest. */
 export function candleNextApprovalBaseSha256(approval) {
   const { candleSourceTransitionSha256, ...base } = approval;
   return rawHash(`flux3-candle-next-approval-base-v1\n${canonical(base)}`);
 }
-export function validateCandleSourceCompatibility(previousApproval, approval) {
+export function validateCandleSourceCompatibility(previousApproval, approval, authorization, previousReceipt) {
   validateApprovedPlan(previousApproval); validateApprovedPlan(approval);
   assert.equal(previousApproval.sourceSha, CANDLE_PREVIOUS_SOURCE, 'only the fixed original Candle source may transition');
   assert(!Object.hasOwn(previousApproval, 'candleSourceTransitionSha256'), 'a second Candle source transition is forbidden');
@@ -158,19 +211,38 @@ export function validateCandleSourceCompatibility(previousApproval, approval) {
     validateNativeBoundaryReceipt(a.plan.nativeBoundaryReceipts?.candle, {backend:'candle',invocations:a.plan.generationInvocations.filter(i => i.backend === 'candle' && i.kind.startsWith('resource_')),
       binarySha256:a.resourceBuildReceipts?.candle?.binarySha256,buildReceiptSha256:a.resourceBuildReceipts?.candle?.receiptSha256,sourceSha:a.sourceSha,inferenceMainSha:a.inferenceMainSha});
   }
+  const deviceBinding = validateCandleDeviceTransitionBinding(approval), measurementBinding = validateCandleMeasurementTransitionBinding(approval);
+  if (measurementBinding) for (const role of ['api','resource']) {
+    const previous = previousApproval[role === 'api' ? 'buildReceipts' : 'resourceBuildReceipts']?.candle;
+    assert.equal(measurementBinding.previousBuilds[role].binarySha256, previous?.binarySha256, 'measurement original binary differs from old approval');
+    assert.equal(measurementBinding.previousBuilds[role].receiptSha256, previous?.receiptSha256, 'measurement original producer receipt differs from old approval');
+  }
+  if (deviceBinding) {
+    // Compatibility may omit the new field ONLY after proving its exact authorization and
+    // authentic old prefix. The append path additionally verifies the immutable claim bytes.
+    verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
+    validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt);
+  }
   const scrub = (a, next) => {
     const result = structuredClone(a); delete result.approvalId; delete result.sourceSha;
-    if (next) delete result.candleSourceTransitionSha256;
+    if (next) {
+      delete result.candleSourceTransitionSha256;
+      if (deviceBinding) delete result.candleDeviceTransition;
+      if (measurementBinding) delete result.candleMeasurementTransition;
+    }
     for (const key of ['buildReceipts', 'resourceBuildReceipts']) {
       assert(result[key]?.candle, 'both sealed Candle builds required');
       delete result[key].candle.receiptSha256; delete result[key].candle.transcriptSha256;
+      if (measurementBinding) delete result[key].candle.binarySha256;
     }
     if (result.plan.nativeBoundaryReceipts?.candle) {
       delete result.plan.nativeBoundaryReceipts.candle.sourceSha;
       delete result.plan.nativeBoundaryReceipts.candle.buildReceiptSha256;
+      if (measurementBinding) delete result.plan.nativeBoundaryReceipts.candle.binarySha256;
     }
     for (const row of result.plan.resourceCases ?? []) if (row.backend === 'candle') {
       delete row.nativeBoundaryReceiptSha256; delete row.parentNativeBoundaryVerificationId;
+      if (measurementBinding) delete row.nativeBoundaryBinarySha256;
     }
     return result;
   };
@@ -178,13 +250,30 @@ export function validateCandleSourceCompatibility(previousApproval, approval) {
   return true;
 }
 const AUTH_KEYS = ['schemaVersion','kind','authorizationId','approvedBy','producersStopped','previousSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256','previousApproval','previousReceipt','previousBuilds','nextBuilds','nextSourceSha','nextApprovalBaseSha256','baseline'];
+function transitionAuthorizationKeys(approval) {
+  return [...AUTH_KEYS, ...(validateCandleDeviceTransitionBinding(approval) ? ['deviceTransition'] : []), ...(validateCandleMeasurementTransitionBinding(approval) ? ['measurementTransition'] : [])];
+}
 const BASELINE_KEYS = ['caseId','consumedInvocationId','nextInvocationId','png','sidecar','report','readback','firstRequestSha256','secondRecordedRequestSha256','oldJobId','oldWorkerId','oldWorkerPid','allowedLineageRemap'];
 function artifactBinding(binding) {
   exactKeys(binding, ['path','sha256'], 'artifact binding');
   assert(typeof binding.path === 'string' && path.isAbsolute(binding.path) && sha.test(binding.sha256), 'absolute owned artifact and raw digest required');
 }
 function validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt) {
-  exactKeys(authorization, AUTH_KEYS, 'source transition authorization');
+  const deviceBinding = validateCandleDeviceTransitionBinding(approval);
+  exactKeys(authorization, transitionAuthorizationKeys(approval), 'source transition authorization');
+  const measurementBinding = validateCandleMeasurementTransitionBinding(approval);
+  if (measurementBinding) {
+    assert.deepEqual(authorization.measurementTransition, measurementBinding, 'authorization measurement transition differs from approval');
+    for (const [side, builds] of [['previousBuilds', authorization.previousBuilds], ['nextBuilds', authorization.nextBuilds]]) for (const role of ['api','resource']) {
+      assert.equal(measurementBinding[side][role].receiptSha256, builds?.[role]?.sha256, 'measurement producer receipt differs from authorized artifact');
+    }
+  }
+  if (deviceBinding) {
+    assert.deepEqual(authorization.deviceTransition, deviceBinding, 'authorization device transition differs from approval');
+    for (const field of ['previousSourceSha','nextSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256']) {
+      assert.deepEqual(deviceBinding[field], authorization[field], `device transition ${field} differs from authorized old prefix`);
+    }
+  }
   assert.equal(authorization.schemaVersion, 1); assert.equal(authorization.kind, 'flux3-candle-source-transition-authorization');
   for (const field of ['authorizationId','approvedBy']) assert(typeof authorization[field] === 'string' && authorization[field].length);
   assert.equal(authorization.producersStopped, true, 'stopped-producer parent authorization required');
@@ -218,7 +307,7 @@ function transitionPrefix(approval, event) {
   assert.equal(rawHash(record.authorizationJson), approval.candleSourceTransitionSha256, 'authorization raw bytes differ from approval');
   assert.equal(record.authorizationSha256, approval.candleSourceTransitionSha256);
   const authorization = JSON.parse(record.authorizationJson), previousApproval = JSON.parse(record.previousApprovalJson), previousReceipt = JSON.parse(record.previousReceiptJson);
-  validateCandleSourceCompatibility(previousApproval, approval);
+  validateCandleSourceCompatibility(previousApproval, approval, authorization, previousReceipt);
   assert.equal(rawHash(record.previousApprovalJson), authorization.previousApproval.sha256, 'old approval raw bytes mismatch');
   assert.equal(rawHash(record.previousReceiptJson), authorization.previousReceipt.sha256, 'old final receipt raw bytes mismatch');
   verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
@@ -259,7 +348,7 @@ async function verifyTransitionBuilds(approval, bindings, ownedRoot) {
     const verified = await verifyTerminalBuild({approvedPlan:approval,backend:'candle',sourceSha:approval.sourceSha,inferenceMainSha:approval.inferenceMainSha,
       binaryBuildReceipt:{...bindings[key],root:ownedRoot},binary:receipt.binary.path,binarySha256:receipt.binary.sha256}, {role});
     const transcript = JSON.parse(await ownedArtifact({path:path.join(path.dirname(bindings[key].path), 'producer-transcript.json'),sha256:verified.transcriptSha256}, ownedRoot));
-    results[key] = {receipt:verified,transcript};
+    results[key] = {receipt:verified,receiptSha256:rawHash(json),transcript};
   }
   return results;
 }
@@ -269,10 +358,10 @@ export async function appendCandleSourceTransition({approval, ledgerRoot, contin
   assert.equal(continuation?.sha256, approval.candleSourceTransitionSha256, 'authorization differs from approved raw SHA');
   const authorizationJson = await ownedArtifact(continuation, ownedRoot), authorization = JSON.parse(authorizationJson);
   // Validate structure before following any artifact paths.
-  exactKeys(authorization, AUTH_KEYS, 'source transition authorization');
+  exactKeys(authorization, transitionAuthorizationKeys(approval), 'source transition authorization');
   const previousApprovalJson = await ownedArtifact(authorization.previousApproval, ownedRoot), previousApproval = JSON.parse(previousApprovalJson);
   const previousReceiptJson = await ownedArtifact(authorization.previousReceipt, ownedRoot), previousReceipt = JSON.parse(previousReceiptJson);
-  validateCandleSourceCompatibility(previousApproval, approval); verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
+  validateCandleSourceCompatibility(previousApproval, approval, authorization, previousReceipt); verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
   validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt);
   const claimFile = path.join(path.dirname(root), `.flux3-${approval.ledgerId}-candle.initialized`);
   const claimJson = await ownedArtifact({path:claimFile,sha256:authorization.previousClaimSha256}, ownedRoot);
@@ -281,7 +370,13 @@ export async function appendCandleSourceTransition({approval, ledgerRoot, contin
   for (const key of ['api','resource']) {
     const before = beforeBuilds[key], after = afterBuilds[key];
     assert.deepEqual(before.receipt.recipe, after.receipt.recipe, 'build recipe changed');
-    assert.equal(before.receipt.binary.sha256, after.receipt.binary.sha256, 'sealed binary changed');
+    const measurement = validateCandleMeasurementTransitionBinding(approval);
+    if (measurement) {
+      for (const [side, build] of [['previousBuilds',before],['nextBuilds',after]]) {
+        assert.equal(build.receipt.binary.sha256, measurement[side][key].binarySha256, 'actual producer binary differs from measurement transition');
+        assert.equal(build.receiptSha256, measurement[side][key].receiptSha256, 'actual producer receipt differs from measurement transition');
+      }
+    } else assert.equal(before.receipt.binary.sha256, after.receipt.binary.sha256, 'sealed binary changed');
     for (const field of ['recipe','cargoExecutableSha256','rustcExecutableSha256','rustcSha256','rustflags','msvcVersion','msvcObserved','cudaObserved']) assert.deepEqual(before.transcript[field], after.transcript[field], `build toolchain ${field} changed`);
     for (const field of ['cargoLockSha256','manifestSha256']) assert.deepEqual(before.transcript.sourceBefore[field], after.transcript.sourceBefore[field], `build ${field} changed`);
   }

@@ -246,3 +246,45 @@ test('retained replay rejects generation-2 hash mismatch or wrong new job/worker
     assert.equal(report.carriedBaseline.historicalExecutionStatus, 'FAILED'); assert.equal(report.carriedBaseline.semanticAcceptance, 'PENDING');
   }
 });
+
+test('CPU cross-device replay preserves GPU1 provenance and requires actual GPU0 launch/output proofs', async t => {
+  const f = await resumeFixture(t);
+  const historical = { physicalGpuId: '1', gpuUuid: 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe', pciBusId: '00000000:C1:00.0' };
+  const destination = { physicalGpuId: '0', gpuUuid: 'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0', pciBusId: '00000000:21:00.0', logicalCudaOrdinal: 0 };
+  f.prefix.deviceTransition = { previousDevice: historical, nextDevice: destination };
+  f.prefix.oldDevice = { ...historical, logicalCudaOrdinal: 0 };
+  const session = { replayPrefix: f.prefix, identity: f.session.identity, deviceAtLaunch: destination };
+  const generate = async () => {
+    f.report.jobs.push({ id: 'DECLARED_SYNTHETIC_GPU0_JOB', workerId: session.identity.workerId });
+    f.report.outputs.push({ pngSha256: f.prefix.pngSha256, device: { ...destination } });
+  };
+  await executeRetainedReplayPrefix(session, f.cell, f.body, f.project, f.report, generate);
+  assert.equal(f.report.replayComparison.kind, 'CROSS_SOURCE_CROSS_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON');
+  assert.equal(f.report.replayComparison.samePhysicalDeviceClaim, false);
+  assert.equal(f.report.replayComparison.sameBinaryClaim, false);
+  assert.equal(f.report.replayComparison.sameSourceClaim, false);
+  assert.equal(f.report.replayComparison.historicalMemoryTransferred, false);
+  assert.equal(f.report.replayComparison.historicalDevice.physicalGpuId, '1');
+  assert.equal(f.report.replayComparison.destinationDevice.physicalGpuId, '0');
+  for (const mutate of [d => d.physicalGpuId = '1', d => d.gpuUuid = historical.gpuUuid, d => d.pciBusId = historical.pciBusId, d => d.logicalCudaOrdinal = 1]) {
+    const bad = structuredClone(destination); mutate(bad); let calls = 0;
+    await assert.rejects(executeRetainedReplayPrefix({ ...session, deviceAtLaunch: bad }, f.cell, f.body, f.project, { outputs: [], jobs: [] }, async () => { calls++; }));
+    assert.equal(calls, 0);
+    const report = { outputs: [], jobs: [] };
+    await assert.rejects(executeRetainedReplayPrefix(session, f.cell, f.body, f.project, report, async () => {
+      report.jobs.push({ id: 'DECLARED_SYNTHETIC_BAD_DEVICE_JOB', workerId: session.identity.workerId });
+      report.outputs.push({ pngSha256: f.prefix.pngSha256, device: bad });
+    }));
+  }
+});
+
+test('CPU historical GPU UUID cannot be rebound to destination when cross-device authorization is supplied', async t => {
+  const f = await fixture(t);
+  f.authorization.deviceTransition = { previousDevice: { physicalGpuId: '1', gpuUuid: 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe', pciBusId: '00000000:C1:00.0' } };
+  await assert.rejects(validate(f), /historical device/);
+  f.output.device.gpuUuid = f.authorization.deviceTransition.previousDevice.gpuUuid;
+  await persist(f);
+  const baseline = await validate(f);
+  assert.equal(baseline.oldDevice.physicalGpuId, '1');
+  assert.deepEqual(baseline.deviceTransition, f.authorization.deviceTransition);
+});

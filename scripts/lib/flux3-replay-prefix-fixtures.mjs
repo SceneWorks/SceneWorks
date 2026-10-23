@@ -44,7 +44,7 @@ function syntheticPng() {
   const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(width); ihdr.writeUInt32BE(height, 4); ihdr[8] = 8; ihdr[9] = 2;
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(pixels)), chunk('IEND', Buffer.alloc(0))]);
 }
-export async function makeReplayBaselineFixture({ root, approval, previousReceipt }) {
+export async function makeReplayBaselineFixture({ root, approval, previousReceipt, historicalDevice = {} }) {
   assert(path.isAbsolute(root), 'fixture root must be an owned absolute temporary directory');
   const prepared = prepareReplayRequestFixture(approval), { cell, recipe, firstRequestSha256, secondRecordedRequestSha256 } = prepared;
   assert.equal(previousReceipt.events[0].requestSha256, firstRequestSha256, 'reserve prepareReplayRequestFixture(approval).firstRequestSha256 before finalizing fixture');
@@ -63,7 +63,7 @@ export async function makeReplayBaselineFixture({ root, approval, previousReceip
     createdAt: timestamp, updatedAt: timestamp, startedAt: timestamp, completedAt: timestamp, canceledAt: null, lastHeartbeatAt: timestamp, backend: '1', title: 'DECLARED_SYNTHETIC', queueRank: 0, revision: 1 };
   const output = { job_id: job.id, asset_id: saved.id, generation_set_id: saved.generationSetId, project_id: projectId, backend: '1', adapter: 'candle_flux3', model: 'flux3_klein', media_path: paths.png,
     semanticAcceptance: 'PENDING', pixelValidity, visualObligations: cell.visualObligations ?? [], assetId: saved.id, pngSha256, sidecarSha256, width: 1024, height: 1024, retainedPng: paths.png, retainedSidecar: paths.sidecar, recipe,
-    device: { physicalGpuId: '1', gpuUuid: 'DECLARED_SYNTHETIC_GPU_UUID', logicalCudaOrdinal: 0, ownComputePids: [oldWorkerPid], foreignGraphics: { luid: 'DECLARED_SYNTHETIC_LUID', processes: 0, totalBytes: 0, maxProcessBytes: 0, processLimitBytes: 731, totalLimitBytes: 1462 } } };
+    device: { physicalGpuId: '1', gpuUuid: historicalDevice.gpuUuid ?? 'DECLARED_SYNTHETIC_GPU_UUID', ...(historicalDevice.pciBusId ? {pciBusId:historicalDevice.pciBusId} : {}), logicalCudaOrdinal: 0, ownComputePids: [oldWorkerPid], foreignGraphics: { luid: 'DECLARED_SYNTHETIC_LUID', processes: 0, totalBytes: 0, maxProcessBytes: 0, processLimitBytes: 731, totalLimitBytes: 1462 } } };
   const recorded = { ...cell, executionStatus: 'FAILED', sourceSha: approval.sourceSha, inferenceMainSha: approval.inferenceMainSha, resourceAdmissionId: 'DECLARED_SYNTHETIC_ADMISSION',
     events: [{ id: job.id, status: 'running', stage: 'denoising', progress: 0.5, workerId: oldWorkerId, result: {} }],
     requests: [{ body: prepared.imageRequest, sha256: firstRequestSha256 }, { body: prepared.replayRequest, sha256: secondRecordedRequestSha256 }], jobs: [job], outputs: [output], adapters: [], observations: [], timeoutSeconds: 10, visualInspection: 'NOT_INSPECTED',

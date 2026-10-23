@@ -82,14 +82,14 @@ test('child environment is offline and scrubbed; no inherited token/cache/backen
   assert.equal(env.CUDA_VISIBLE_DEVICES, '1'); assert.equal(env.SCENEWORKS_GPU_ID, '1'); assert.equal(env.HF_TOKEN, undefined); assert.equal(env.HF_TOKEN_PATH, undefined); assert.equal(env.API_KEY, undefined); assert.equal(env.HF_ENDPOINT, undefined); assert.equal(env.HF_HUB_OFFLINE, '1'); assert.equal(env.SCENEWORKS_API_PORT, '12345');
 });
 test('GPU guard rejects foreign Runner.Worker/compute, UUID mismatch and actual worker on GPU0', async () => {
-  const a = admission('D:/synthetic'), processTable = async () => [{ pid: process.pid, ppid: 0, command: 'node.exe' }];
-  const exec = async (command, args) => { if (command === 'powershell.exe') return { stdout: a.gpuUuid }; if (args.includes('--query-gpu=index,uuid')) return { stdout: `1,${a.gpuUuid}` }; if (args.includes('-x')) return { stdout: `<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>123</pid><type>C</type></process_info></processes>` }; return { stdout: `123,${a.gpuUuid}` }; };
+  const a = admission('D:/synthetic'), processTable = async () => [{ pid: process.pid, ppid: 0, command: 'node.exe' }, {pid:123,ppid:process.pid,command:'api.exe',startedAt:'2000-01-01T00:00:00Z',sessionId:1}];
+  const exec = async (command, args) => { if (command === 'powershell.exe') return { stdout: `${a.gpuUuid} luid=0xdeadbeef_0x00000001` }; if (args.includes('--query-gpu=index,uuid,pci.bus_id')) return { stdout: `1,${a.gpuUuid},00000000:C1:00.0` }; if(args.includes('--query-gpu=memory.total,memory.free'))return{stdout:'96000,90000'}; if (args.includes('-x')) return { stdout: `<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>123</pid><type>C</type></process_info></processes>` }; return { stdout: `123,${a.gpuUuid}` }; };
   const deps = { exec, platform: 'win32', processTable };
   assert.deepEqual((await guardHardware(a, [123], deps)).ownComputePids, [123]);
-  await assert.rejects(guardHardware(a, [], deps), /foreign pure-compute/);
+  await assert.rejects(guardHardware(a, [], deps), /JSON/); // Foreign C is measured, never categorically refused; this mock supplies no memory JSON.
   await assert.rejects(guardHardware(a, [123], { ...deps, processTable: async () => [...await processTable(), { pid: 99, ppid: 0, command: 'Runner.Worker.exe' }] }), /Runner.Worker/);
   await assert.rejects(guardHardware(a, [123], { ...deps, exec: async (c, args) => c === 'powershell.exe' ? { stdout: 'GPU-other' } : exec(c, args) }), /masked CUDA0/);
-  await assert.rejects(guardHardware(a, [123], { ...deps, exec: async (c, args) => args.includes('--query-compute-apps=pid,gpu_uuid') ? { stdout: '123,GPU-reserved0' } : exec(c, args) }), /reserved GPU0/);
+  await assert.rejects(guardHardware(a, [123], { ...deps, exec: async (c, args) => args.includes('--query-compute-apps=pid,gpu_uuid') ? { stdout: '123,GPU-0000' } : exec(c, args) }), /wrong physical GPU UUID/);
 });
 test('MLX guard requires coordinator exclusive lease in addition to physical secondary labels', async () => {
   const a = { ...admission('D:/synthetic'), backend: 'mlx', runner: 'nax-macos-2', runnerTarget: 'secondary', runnerLabel: 'rw-mage', hostName: 'nax-macos-2' }, table = [{ pid: process.pid, ppid: 0, command: 'node', startedAt: 'fixture-start' }];

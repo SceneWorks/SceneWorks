@@ -482,7 +482,8 @@ test('fixed guard phase observation does not change any checks, command environm
       exec: async (command, args, options) => {
         calls.push({ command, args, options });
         if (command === 'powershell.exe') return { stdout: gpu + ' luid=0x00000001_0x00000002' };
-        if (args.includes('--query-gpu=index,uuid')) return { stdout: '1, ' + gpu };
+        if (args.includes('--query-gpu=index,uuid,pci.bus_id')) return { stdout: '1, ' + gpu + ', 00000000:C1:00.0' };
+        if (args.includes('--query-gpu=memory.total,memory.free')) return { stdout: '97887, 96835' };
         if (args.includes('-x')) return { stdout: '<uuid>' + gpu + '</uuid><processes></processes>' };
         if (args.includes('--query-compute-apps=pid,gpu_uuid')) return { stdout: '' };
         assert.fail('unexpected probe');

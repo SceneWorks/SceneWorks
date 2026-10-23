@@ -8,6 +8,7 @@ import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { admittedHost, auditLedger, inHostLane, ledgerLane, planHash, validateApprovedPlan } from './flux3-image-klein-terminal-budget.mjs';
 import { flux3AnchorRequestDigest, resourceCaseDigest, verifyNativeResourceCapture } from './lib/flux3-resource-contract.mjs';
+import { admittedCandleDevice } from './flux3-image-klein-terminal-session.mjs';
 const loaderKeys = ['SCENEWORKS_FLUX3_KLEIN_ROOT','SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT','SCENEWORKS_FLUX3_KLEIN_REPOSITORY','SCENEWORKS_FLUX3_KLEIN_REVISION','SCENEWORKS_FLUX3_RESOURCE_INPUT_ROOT'];
 async function validate(admission) {
   const { validateAdmission } = await import('./flux3-image-klein-terminal-session.mjs');
@@ -67,7 +68,7 @@ export async function launchFlux3Resource({ admission, request, invocationId, re
   for (const key of Object.keys(resourceEnvironment)) { assert(loaderKeys.includes(key),'only fixed local loader environment permitted'); assert.equal(typeof resourceEnvironment[key],'string'); env[key]=resourceEnvironment[key]; }
   Object.assign(env,{HF_HOME:a.hfHome,HF_HUB_CACHE:path.join(a.hfHome,'hub'),HUGGINGFACE_HUB_CACHE:path.join(a.hfHome,'hub'),
     HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',SCENEWORKS_HUGGINGFACE_BASE_URL:'http://127.0.0.1:9',
-    CUDA_VISIBLE_DEVICES:a.backend==='candle'?'1':'-1',CUDA_DEVICE_ORDER:'PCI_BUS_ID',SCENEWORKS_FLUX3_BUDGET_NODE:process.execPath});
+    CUDA_VISIBLE_DEVICES:a.backend==='candle'?admittedCandleDevice(a).cudaVisibleDevices:'-1',CUDA_DEVICE_ORDER:'PCI_BUS_ID',SCENEWORKS_FLUX3_BUDGET_NODE:process.execPath});
   await io.mkdir(a.outputRoot,{recursive:true});
   const stem=path.join(a.outputRoot,`resource-${invocationId}-${randomBytes(8).toString('hex')}`);
   const approvalFile=`${stem}.approval.json`, admissionFile=`${stem}.admission.json`;

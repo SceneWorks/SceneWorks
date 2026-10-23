@@ -4,6 +4,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { realpath, stat, readdir } from "node:fs/promises";
+import { admittedCandleDevice } from "../flux3-image-klein-terminal-session.mjs";
+import { OWNED_ACCOUNTING_KIND, validateOwnedProcessAccountingRecord } from "./flux3-owned-accounting-contract.mjs";
 
 export const FLUX3_CHECKPOINTS = Object.freeze({
   flux3_klein: Object.freeze({ repository: "black-forest-labs/flux-3-image-klein", revision: "8454017f9ebaada30c998fccd9f67a80c7580f68", checkpoint: "distilled", steps: 16 }),
@@ -363,11 +365,26 @@ export function verifyNativeResourceCapture(value, { admission, invocation, adap
     || !Number.isFinite(Date.parse(hardwareObservation.observedAt))) fail('actual producer/build observation missing');
   const proof = hardwareObservation.proof;
   if (admission.backend === 'candle') {
-    if (proof?.physicalGpuId !== '1' || proof.gpuUuid?.toLowerCase() !== admission.gpuUuid?.toLowerCase()
-      || proof.logicalCudaOrdinal !== 0 || !proof.ownComputePids?.includes(adapterPid)) fail('GPU1 UUID/PID proof missing');
-    // The measured foreign desktop share of GPU1 is part of the anchor's evidence: it is memory the
-    // anchor did NOT have, so it must be recorded rather than silently absorbed into headroom.
-    if (!Number.isSafeInteger(proof.foreignGraphics?.totalBytes) || !Number.isSafeInteger(proof.foreignGraphics?.processes)) fail('GPU1 foreign desktop memory observation missing');
+    const target = admittedCandleDevice(admission);
+    if (proof?.physicalGpuId !== target.physicalGpuId || proof.gpuUuid?.toLowerCase() !== target.gpuUuid?.toLowerCase()
+      || proof.logicalCudaOrdinal !== 0 || !proof.ownComputePids?.includes(adapterPid)) fail('admitted physical GPU UUID/PID proof missing');
+    if (admission.approvedPlan?.candleDeviceTransition) {
+      if (proof.pciBusId?.toLowerCase() !== target.pciBusId?.toLowerCase()
+        || !/^0x[0-9a-f]{8}_0x[0-9a-f]{8}$/i.test(proof.foreignGraphics?.luid ?? '')
+        || proof.sharedPolicy?.sharingMode !== 'bounded-shared' || proof.sharedPolicy.exclusiveThroughputClaim !== false
+        || proof.sharedPolicy.deviceTotalAttributionClaim !== false
+        || JSON.stringify(proof.sharedPolicy.foreignProcessTypes) !== JSON.stringify(['C','C+G'])
+        || proof.sharedPolicy.computeActivityAssessment !== 'unsupported-dedicated-memory-only') fail('bounded-shared physical GPU PCI/LUID/policy proof missing');
+      const foreign = proof.foreignGraphics;
+      if (![foreign.totalBytes, foreign.maxProcessBytes, foreign.processes].every(n => Number.isSafeInteger(n) && n >= 0)
+        || foreign.maxProcessBytes > 1024 ** 3 || foreign.totalBytes > 3 * 1024 ** 3
+        || foreign.processLimitBytes !== 1024 ** 3 || foreign.totalLimitBytes !== 3 * 1024 ** 3
+        || !Number.isSafeInteger(proof.gpuHeadroom?.totalBytes) || !Number.isSafeInteger(proof.gpuHeadroom?.freeBytes)
+        || proof.gpuHeadroom.freeBytes <= 0 || proof.gpuHeadroom.freeBytes > proof.gpuHeadroom.totalBytes) fail('bounded-shared foreign allocations/headroom proof invalid');
+    }
+    // Foreign C and C+G allocations remain separate from owned/native measurements and reduce
+    // available capacity. Their presence cannot establish exclusive performance or attribution.
+    if (!Number.isSafeInteger(proof.foreignGraphics?.totalBytes) || !Number.isSafeInteger(proof.foreignGraphics?.processes)) fail('admitted GPU foreign memory observation missing');
   } else if (!['nax-macos', 'nax-macos-2'].includes(admission.runner) || proof?.runner !== admission.runner || proof.host?.split('.')[0] !== admission.hostName || proof.runtime?.platform !== 'darwin'
     || proof.runtime?.arch !== 'arm64' || !proof.coordinatorLeaseId || proof.exclusivity !== 'coordinator-attested-and-process-monitored') fail('secondary Mac runtime/host/lease proof missing');
   const spec = value.actualLoadSpec;
@@ -376,6 +393,32 @@ export function verifyNativeResourceCapture(value, { admission, invocation, adap
     || spec.provider !== invocation.modelId || spec.tier !== invocation.tier
     || specSha256 !== flux3CaptureDigest('flux3_actual_load_spec_v1\0',actualSpec)
     || value.loadedGenerator?.provider !== invocation.modelId || value.loadedGenerator?.backend !== invocation.backend) fail('actual loaded spec/provider mismatch');
+  if (value.measurementKind !== undefined || value.ownedProcessMemory !== undefined) {
+    if (admission.backend !== 'candle' || value.measurementKind !== OWNED_ACCOUNTING_KIND) fail('unsupported process accounting producer');
+    const typed = invocation.kind === 'resource_anchor' ? value.anchorFragment : value;
+    if (!typed) fail('typed resource fragment missing');
+    for (const key of ['measurementKind','ownedProcessMemory','observedExecutionRecipe','observedExecutionRecipeSha256','observedOperatingConditions']) {
+      if (JSON.stringify(canonical(typed[key])) !== JSON.stringify(canonical(value[key]))) fail('typed fragment and native envelope disagree');
+    }
+    validateOwnedProcessAccountingRecord({ ...typed, backend: 'candle', target: { provider: invocation.modelId, tier: invocation.tier } });
+    const memoryIdentity = typed.ownedProcessMemory.identity;
+    const normalizePath = s => s?.toLowerCase().split(String.fromCharCode(92)).join('/');
+    if (memoryIdentity.pid !== adapterPid || Date.parse(memoryIdentity.startedAt) !== Date.parse(hardwareObservation.adapterProcess.startedAt)
+      || normalizePath(memoryIdentity.executable) !== normalizePath(admission.binary)
+      || memoryIdentity.luid !== proof.foreignGraphics.luid || memoryIdentity.physicalGpuId !== proof.physicalGpuId
+      || memoryIdentity.gpuUuid.toLowerCase() !== proof.gpuUuid.toLowerCase() || memoryIdentity.pciBusId.toLowerCase() !== proof.pciBusId?.toLowerCase()) fail('phase-accounting native producer/device identity differs from actual observation');
+    const expectedRecipe = { schemaVersion: 1, backend: 'candle', provider: invocation.modelId, tier: invocation.tier,
+      actualLoadSpecSha256: spec.sha256, actualGenerationRequestSha256: flux3CaptureDigest('flux3_observed_generation_request_v1\0', actualRequest),
+      invocationRequestSha256: invocation.requestSha256, measuredStrategySha256: flux3CaptureDigest('flux3_observed_memory_strategy_v1\0', typed.strategy) };
+    if (JSON.stringify(canonical(typed.observedExecutionRecipe)) !== JSON.stringify(canonical(expectedRecipe))) fail('actual measured execution recipe differs from native request/load/strategy');
+    const foreign = proof.foreignGraphics;
+    const expectedConditions = { schemaVersion: 1, sharingMode: 'bounded-shared', physicalGpuId: proof.physicalGpuId, gpuUuid: proof.gpuUuid, pciBusId: proof.pciBusId,
+      observedAt: hardwareObservation.observedAt, totalDeviceBytes: proof.gpuHeadroom.totalBytes, freeDeviceBytes: proof.gpuHeadroom.freeBytes,
+      foreignDedicatedBytes: foreign.totalBytes, foreignProcessCount: foreign.processes, foreignMaxProcessBytes: foreign.maxProcessBytes,
+      foreignProcessLimitBytes: foreign.processLimitBytes, foreignTotalLimitBytes: foreign.totalLimitBytes,
+      observationScope: 'producer-reservation-admission', fitAuthorization: false, exclusiveThroughputClaim: false, physicalResidencyClaim: false };
+    if (JSON.stringify(canonical(typed.observedOperatingConditions)) !== JSON.stringify(canonical(expectedConditions))) fail('observed operating conditions differ from producer reservation');
+  } else if (admission.approvedPlan?.candleMeasurementTransition) fail('new measurement approval cannot fall back to legacy residency evidence');
   if (invocation.kind === 'resource_supplemental') {
     assertSupplementalResourceObservation(value);
     if (value.evidenceKind !== 'flux3_supplemental_resource_observation_v1' || value.anchorFragment !== undefined) fail('supplemental cannot extract an anchor');

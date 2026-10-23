@@ -6424,6 +6424,7 @@ mod tests {
             anchors: vec![z_image_q4_anchor()],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         }
     }
@@ -7521,6 +7522,7 @@ mod tests {
             anchors: vec![foreign],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         };
         let absent_cell = z_image_fixture_floors(
@@ -8067,6 +8069,7 @@ mod tests {
             // (sc-22510) is not read by it.
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         };
         // Every guard of `candle_image_anchor` -- identity only, since sc-22738 retired the
@@ -8132,6 +8135,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![mutated],
             };
@@ -8167,6 +8171,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![moved_closure],
             };
@@ -8189,6 +8194,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![rotated],
             };
@@ -8250,6 +8256,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![relabelled],
             };
@@ -8282,6 +8289,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![foreign],
             };

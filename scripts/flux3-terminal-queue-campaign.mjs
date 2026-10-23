@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { userInfo } from 'node:os';
 import path from 'node:path';
 import { CONTROL_FILE, QUEUE_ROOT, SOURCE_ROOT, digest, verifyQueueReservation, QueuePhaseFailure, QUEUE_PHASES } from './flux3-terminal-queue.mjs';
-import { observeProcessTable, guardHardware, validateAdmission, fileHash } from './flux3-image-klein-terminal-session.mjs';
+import { observeProcessTable, guardHardware, validateAdmission, fileHash, admittedCandleDevice } from './flux3-image-klein-terminal-session.mjs';
 import { validateApprovedPlan, planHash, initializeLedger, auditLedger, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
 import { verifyTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
 import { loadProductTargets, targetRegistry, requestedDiskBudget } from './flux3-image-klein-terminal-plan.mjs';
@@ -93,7 +93,8 @@ async function runCampaignInner(env, trace) {
   phase('license');
   const admitted = control.admission;
   assert(admitted && admitted.trainingLicenseAcknowledged === true && typeof admitted.trainingLicenseAcceptance === 'string' && admitted.trainingLicenseAcceptance.includes('And I accept the license'), 'actual user training-license acceptance must be recorded verbatim');
-  assert.equal(admitted.physicalGpuId, '1'); assert.equal(admitted.cudaVisibleDevices, '1'); assert.equal(admitted.logicalCudaOrdinal, 0);
+  const targetDevice = admittedCandleDevice({ ...admitted, approvedPlan: approval, approvedPlanSha256: approved.approvedPlanSha256, sourceSha: approval.sourceSha });
+  assert.equal(admitted.physicalGpuId, targetDevice.physicalGpuId); assert.equal(admitted.cudaVisibleDevices, targetDevice.cudaVisibleDevices); assert.equal(admitted.logicalCudaOrdinal, 0);
   phase('disk_metadata');
   const present = {}, conversionOutputBytes = {};
   for (const t of registry.filter(t => t.backend === 'candle')) for (const d of t.model.downloads) {
@@ -111,24 +112,25 @@ async function runCampaignInner(env, trace) {
   const base = { actualRun: true, backend: 'candle', admissionId: control.admissionId, approvedBy: control.approvedBy, phases: plan.phases, runner: 'cuda-windows', runnerAccount: userInfo().username,
     sourceSha: approval.sourceSha, inferenceMainSha: approval.inferenceMainSha, inferenceRepository: admitted.inferenceRepository, inferenceMainTipSha: admitted.inferenceMainTipSha,
     outputRoot, hfHome: admitted.hfHome, timeoutSeconds: admitted.timeoutSeconds, approvedPlan: approval, approvedPlanSha256: approved.approvedPlanSha256, ledgerId: approval.ledgerId, ledgerRoot: approval.ledgerRoots.candle,
-    inputSpecSha256: planHash(inputSpec), physicalGpuId: '1', cudaVisibleDevices: '1', logicalCudaOrdinal: 0, gpuUuid: admitted.gpuUuid, disk,
+    inputSpecSha256: planHash(inputSpec), ...targetDevice, disk,
     trainingLicenseAcknowledged: true, trainingLicenseAcceptance: admitted.trainingLicenseAcceptance, queueReservation: ref };
   const admission = { ...base, ...sealed(api) }, resourceAdmission = { ...base, ...sealed(resource) };
   phase('source_pins'); await validateAdmission(admission, 'candle');
   phase('api_receipt'); await verifyTerminalBuild(admission);
   phase('resource_receipt'); await verifyTerminalBuild(resourceAdmission, { role: 'resource-adapter' });
   phase('queue_ownership'); const device = await guardHardware(admission, [], { onPhase: phase });
-  // CUDA1 capacity excludes measured foreign desktop memory; do not subtract it from already-free
-  // VRAM a second time. Every native resource capture also carries its live foreign-memory proof.
+  // The admitted physical device is bounded-shared, not an exclusive benchmark. Capacity
+  // excludes measured foreign C/C+G allocations; already-free VRAM must not be reduced twice.
+  // Native resource measurements must independently attribute their phase-window evidence.
   phase('gpu_capacity');
-  const smi = (await exec('nvidia-smi', ['-i', '1', '--query-gpu=memory.total', '--format=csv,noheader,nounits'], { timeout: 5000 })).stdout.trim();
+  const smi = (await exec('nvidia-smi', ['-i', targetDevice.physicalGpuId, '--query-gpu=memory.total', '--format=csv,noheader,nounits'], { timeout: 5000 })).stdout.trim();
   assert(/^\d+$/.test(smi));
   const capacityBytes = Number(smi) * 1024 ** 2, foreignBytes = device.foreignGraphics.totalBytes;
   trace.metrics.physicalCapacityBytes = capacityBytes; trace.metrics.foreignDedicatedBytes = foreignBytes;
   assert(capacityBytes > foreignBytes);
   phase('admission_write');
   await writeFile(path.join(path.dirname(outputRoot), 'admission.json'), JSON.stringify({ ...admission, operation: control.operation, diagnosticOnly: control.operation === 'admission-only', deviceAtAdmission: device, resourceHeadroom: { physicalCapacityBytes: capacityBytes, foreignDedicatedBytes: foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, alreadyFreeVramMustNotBeSubtractedAgain: true } }, null, 2), { flag: 'wx' });
-  await milestone({ kind: 'admission', operation: control.operation, physicalGpuId: '1', gpuUuid: admitted.gpuUuid, foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, diskFreeBytes: disk.freeBytes });
+  await milestone({ kind: 'admission', operation: control.operation, physicalGpuId: targetDevice.physicalGpuId, gpuUuid: targetDevice.gpuUuid, pciBusId: targetDevice.pciBusId, sharingMode: 'bounded-shared', exclusiveThroughputClaim: false, foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, diskFreeBytes: disk.freeBytes });
   let continuationContext;
   const result = await executeAdmittedQueueOperation(control.operation, {
     initialize: async () => {

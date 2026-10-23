@@ -1988,6 +1988,252 @@ pub struct MemoryAnchorStore {
     /// migration still parses.
     #[serde(default)]
     pub exceeded_bounds: Vec<ExceededBound>,
+    /// Sampled accounting observations, NEVER input to the legacy residency/allocator laws.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub observed_operating_envelopes: Vec<ObservedOperatingEnvelope>,
+}
+
+/// Exact executed recipe identity. Hashes bind actual native structs, not requested profiles.
+/// Matching this identity does not turn an accounting observation into a capacity guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservedExecutionRecipe {
+    pub schema_version: u32,
+    pub backend: AnchorBackend,
+    pub provider: String,
+    pub tier: String,
+    pub actual_load_spec_sha256: String,
+    pub actual_generation_request_sha256: String,
+    pub invocation_request_sha256: String,
+    pub measured_strategy_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedProcessAccountingPhase {
+    pub dedicated_peak_bytes: u64,
+    pub shared_peak_bytes: u64,
+    pub total_committed_peak_bytes: u64,
+    pub samples: u64,
+    pub first_sample_ms: u64,
+    pub last_sample_ms: u64,
+    pub max_gap_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedProcessAccountingPhases {
+    pub load: OwnedProcessAccountingPhase,
+    pub conditioning: OwnedProcessAccountingPhase,
+    pub denoise: OwnedProcessAccountingPhase,
+    pub decode: OwnedProcessAccountingPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_upsampling: Option<OwnedProcessAccountingPhase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedProcessAccountingIdentity {
+    pub pid: u32,
+    pub started_at: String,
+    pub executable: String,
+    pub luid: String,
+    pub physical_gpu_id: String,
+    pub gpu_uuid: String,
+    pub pci_bus_id: String,
+    pub logical_cuda_ordinal: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedProcessAccountingSampling {
+    pub interval_ms: u64,
+    pub max_allowed_gap_ms: u64,
+    pub max_allowed_read_skew_ms: u64,
+    pub max_observed_read_skew_ms: u64,
+    pub lossless_peak_claim: bool,
+}
+
+/// Unit serializes as JSON null; non-null counters cannot deserialize into unavailable metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnavailableAccountingMetrics {
+    pub physical_resident_bytes: (),
+    pub active_bytes: (),
+    pub allocator_bytes: (),
+}
+
+/// Windows process accounting is not physical residency, allocator activity, or an upper bound
+/// on all CUDA demand. Independent peaks are not additive. Shared accounting is not proof of
+/// physical spill. No method on this type yields a legacy active/allocator peak or a fit verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnedProcessAccountingEvidence {
+    pub schema_version: u32,
+    pub kind: String,
+    pub source: String,
+    pub semantics: String,
+    pub attribution: String,
+    pub physical_residency_claim: bool,
+    pub allocator_activity_claim: bool,
+    pub device_total_delta_attribution_claim: bool,
+    pub exclusive_throughput_claim: bool,
+    pub sampling: OwnedProcessAccountingSampling,
+    pub identity: OwnedProcessAccountingIdentity,
+    pub physical_nodes: Vec<u32>,
+    pub phases: OwnedProcessAccountingPhases,
+    pub overall: OwnedProcessAccountingPhase,
+    pub unavailable_metrics: UnavailableAccountingMetrics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountingObservationSource {
+    pub path: String,
+    pub sha256: String,
+    pub record_id: String,
+}
+
+/// A source-bound observed execution, kept separate from analytic residency anchors. Exact recipe
+/// lookup is observation-only: changing geometry, artifacts, request or native choices is outside
+/// its domain. Fit/admission additionally requires independently observed operating conditions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservedOperatingEnvelope {
+    pub id: String,
+    pub model_id: String,
+    pub recipe: ObservedExecutionRecipe,
+    pub accounting: OwnedProcessAccountingEvidence,
+    pub operating_conditions: ObservedOperatingConditions,
+    pub source: AccountingObservationSource,
+}
+
+/// Admission-instant foreign/headroom snapshot; not a phase minimum or a reservation guarantee.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ObservedOperatingConditions {
+    pub schema_version: u32,
+    pub sharing_mode: String,
+    pub physical_gpu_id: String,
+    pub gpu_uuid: String,
+    pub pci_bus_id: String,
+    pub observed_at: String,
+    pub total_device_bytes: u64,
+    pub free_device_bytes: u64,
+    pub foreign_dedicated_bytes: u64,
+    pub foreign_process_count: u64,
+    pub foreign_max_process_bytes: u64,
+    pub foreign_process_limit_bytes: u64,
+    pub foreign_total_limit_bytes: u64,
+    pub observation_scope: String,
+    pub fit_authorization: bool,
+    pub exclusive_throughput_claim: bool,
+    pub physical_residency_claim: bool,
+}
+
+fn accounting_timestamp_valid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if !(22..=30).contains(&bytes.len())
+        || !bytes.iter().enumerate().all(|(index, byte)| match index {
+            4 | 7 => *byte == b'-',
+            10 => *byte == b'T',
+            13 | 16 => *byte == b':',
+            19 => *byte == b'.',
+            end if end == bytes.len() - 1 => *byte == b'Z',
+            _ => byte.is_ascii_digit(),
+        })
+    {
+        return false;
+    }
+    let number = |start, end| value[start..end].parse::<u32>().unwrap_or(0);
+    let year = number(0, 4);
+    let month = number(5, 7);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 0,
+    };
+    year > 0
+        && number(8, 10) > 0
+        && number(8, 10) <= days
+        && number(11, 13) < 24
+        && number(14, 16) < 60
+        && number(17, 19) < 60
+}
+
+impl OwnedProcessAccountingEvidence {
+    pub fn validate(&self) -> Result<(), String> {
+        let identity = &self.identity;
+        let luid_parts: Vec<_> = identity.luid.split('_').collect();
+        let luid_valid = luid_parts.len() == 2
+            && luid_parts.iter().all(|part| {
+                part.len() == 10
+                    && part.starts_with("0x")
+                    && part[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+        if self.schema_version != 1
+            || self.kind != "flux3_owned_process_memory_accounting_v1"
+            || self.source != "Windows GPU Process Memory performance counters"
+            || self.semantics != "sampled per-process dedicated/shared/total-committed accounting; not physical residency or CUDA active/reserved allocator bytes"
+            || self.attribution != "own PID/start-time/executable and CUDA adapter LUID; includes any cross-process-shared allocations charged to this process"
+            || self.physical_residency_claim || self.allocator_activity_claim
+            || self.device_total_delta_attribution_claim || self.exclusive_throughput_claim
+            || self.sampling.interval_ms != 200 || self.sampling.max_allowed_gap_ms != 1500
+            || self.sampling.max_allowed_read_skew_ms != 250 || self.sampling.max_observed_read_skew_ms > 250 || self.sampling.lossless_peak_claim
+            || identity.pid == 0 || identity.logical_cuda_ordinal != 0 || !luid_valid
+            || !matches!(identity.physical_gpu_id.as_str(), "0" | "1")
+            || !identity.gpu_uuid.strip_prefix("GPU-").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-'))
+            || identity.pci_bus_id.len() != 16 || !identity.pci_bus_id.bytes().enumerate().all(|(index, byte)| match index { 8 | 11 => byte == b':', 14 => byte == b'.', 15 => (b'0'..=b'7').contains(&byte), _ => byte.is_ascii_hexdigit() })
+            || !accounting_timestamp_valid(&identity.started_at)
+            || [&identity.executable, &identity.physical_gpu_id, &identity.gpu_uuid, &identity.pci_bus_id].iter().any(|value| value.trim().is_empty())
+            || self.physical_nodes.is_empty()
+            || self.physical_nodes.iter().collect::<std::collections::BTreeSet<_>>().len() != self.physical_nodes.len()
+        {
+            return Err("invalid owned-process accounting semantics, sampling or identity".into());
+        }
+        let overall = &self.overall;
+        let mut phases = vec![&self.phases.load];
+        if let Some(prompt) = &self.phases.prompt_upsampling {
+            phases.push(prompt);
+        }
+        phases.extend([
+            &self.phases.conditioning,
+            &self.phases.denoise,
+            &self.phases.decode,
+        ]);
+        for phase in std::iter::once(overall).chain(phases.iter().copied()) {
+            let span = phase.last_sample_ms.saturating_sub(phase.first_sample_ms);
+            if phase.samples < 2
+                || phase.last_sample_ms <= phase.first_sample_ms
+                || phase.max_gap_ms == 0
+                || phase.max_gap_ms > 1500
+                || phase.max_gap_ms > span
+                || span > phase.max_gap_ms.saturating_mul(phase.samples - 1)
+            {
+                return Err("invalid owned-process phase coverage or sample gap".into());
+            }
+            if phase.first_sample_ms < overall.first_sample_ms
+                || phase.last_sample_ms > overall.last_sample_ms
+                || phase.dedicated_peak_bytes > overall.dedicated_peak_bytes
+                || phase.shared_peak_bytes > overall.shared_peak_bytes
+                || phase.total_committed_peak_bytes > overall.total_committed_peak_bytes
+                || phase.samples > overall.samples
+            {
+                return Err("owned-process overall does not cover its phases".into());
+            }
+        }
+        if phases
+            .windows(2)
+            .any(|pair| pair[0].last_sample_ms != pair[1].first_sample_ms)
+        {
+            return Err(
+                "owned-process phase boundaries lack a synchronized shared endpoint".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// A MEASURED LOWER BOUND on one cell's peak: the request reached `observed_footprint_bytes` of
@@ -2525,7 +2771,226 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     validate_analytic_only(&store)?;
     validate_component_deltas(&store)?;
     validate_exceeded_bounds(&store)?;
+    validate_observed_operating_envelopes(&store)?;
     Ok(store)
+}
+
+impl ObservedOperatingEnvelope {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_accounting_context(
+            &self.model_id,
+            &self.recipe,
+            &self.accounting,
+            &self.operating_conditions,
+        )
+    }
+}
+
+pub(crate) fn validate_accounting_context(
+    model_id: &str,
+    recipe: &ObservedExecutionRecipe,
+    accounting: &OwnedProcessAccountingEvidence,
+    conditions: &ObservedOperatingConditions,
+) -> Result<(), String> {
+    accounting.validate()?;
+    let identity = &accounting.identity;
+    if !model_id.starts_with("flux3")
+        || recipe.schema_version != 1
+        || recipe.backend != AnchorBackend::Candle
+        || !matches!(recipe.provider.as_str(), "flux3_klein" | "flux3_klein_base")
+        || recipe.tier.trim().is_empty()
+        || ![
+            &recipe.actual_load_spec_sha256,
+            &recipe.actual_generation_request_sha256,
+            &recipe.invocation_request_sha256,
+            &recipe.measured_strategy_sha256,
+        ]
+        .iter()
+        .all(|hash| is_sha256(hash))
+        || conditions.schema_version != 1
+        || conditions.sharing_mode != "bounded-shared"
+        || conditions.observation_scope != "producer-reservation-admission"
+        || conditions.fit_authorization
+        || conditions.exclusive_throughput_claim
+        || conditions.physical_residency_claim
+        || !accounting_timestamp_valid(&conditions.observed_at)
+        || conditions.physical_gpu_id != identity.physical_gpu_id
+        || conditions.gpu_uuid != identity.gpu_uuid
+        || conditions.pci_bus_id != identity.pci_bus_id
+        || conditions.total_device_bytes == 0
+        || conditions.free_device_bytes == 0
+        || conditions.free_device_bytes > conditions.total_device_bytes
+        || conditions.foreign_dedicated_bytes >= conditions.total_device_bytes
+        || conditions.foreign_process_limit_bytes != 1_073_741_824
+        || conditions.foreign_total_limit_bytes != 3_221_225_472
+        || conditions.foreign_dedicated_bytes > conditions.foreign_total_limit_bytes
+        || conditions.foreign_max_process_bytes > conditions.foreign_process_limit_bytes
+        || conditions.foreign_max_process_bytes > conditions.foreign_dedicated_bytes
+        || (conditions.foreign_process_count == 0
+            && (conditions.foreign_dedicated_bytes != 0
+                || conditions.foreign_max_process_bytes != 0))
+    {
+        return Err("invalid observed recipe or admission-instant operating conditions".into());
+    }
+    Ok(())
+}
+
+impl MemoryAnchorStore {
+    /// Exact executed-recipe observation only. This never authorizes fit, scales geometry, or
+    /// enters a residency derivation. Hardware and contemporaneous conditions remain visible.
+    pub fn observed_operating_envelopes_for<'a>(
+        &'a self,
+        model_id: &'a str,
+        recipe: &'a ObservedExecutionRecipe,
+    ) -> impl Iterator<Item = &'a ObservedOperatingEnvelope> + 'a {
+        self.observed_operating_envelopes
+            .iter()
+            .filter(move |entry| entry.model_id == model_id && &entry.recipe == recipe)
+    }
+}
+
+pub(crate) fn accounting_digest(domain: &str, value: &serde_json::Value) -> String {
+    fn canonical(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) => {
+                let sorted: BTreeMap<_, _> = map
+                    .iter()
+                    .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect();
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(array) => {
+                serde_json::Value::Array(array.iter().map(canonical).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(serde_json::to_vec(&canonical(value)).expect("JSON values serialize"));
+    format!("{:x}", hasher.finalize())
+}
+
+fn validate_observed_operating_envelopes(store: &MemoryAnchorStore) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for entry in &store.observed_operating_envelopes {
+        entry.validate()?;
+        if !seen.insert(&entry.id) {
+            return Err(format!("duplicate accounting observation {}", entry.id));
+        }
+        let (_, raw) = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == entry.source.path)
+            .ok_or_else(|| {
+                format!(
+                    "accounting observation {} cites an unpackaged source",
+                    entry.id
+                )
+            })?;
+        if format!("{:x}", Sha256::digest(raw.as_bytes())) != entry.source.sha256 {
+            return Err(format!(
+                "accounting observation {} source digest mismatch",
+                entry.id
+            ));
+        }
+        let corpus: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let records = corpus
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "accounting observation source has no records".to_string())?;
+        let matches: Vec<_> = records
+            .iter()
+            .filter(|record| {
+                record.get("id").and_then(serde_json::Value::as_str)
+                    == Some(entry.source.record_id.as_str())
+            })
+            .collect();
+        if matches.len() != 1 {
+            return Err("accounting observation source record is missing or ambiguous".into());
+        }
+        let record = matches[0];
+        if record
+            .get("measurementKind")
+            .and_then(serde_json::Value::as_str)
+            != Some("windows-owned-process-accounting-v1")
+            || record.get("backend").and_then(serde_json::Value::as_str) != Some("candle")
+            || record
+                .get("evidenceScope")
+                .and_then(serde_json::Value::as_str)
+                != Some("authoritative")
+            || !matches!(
+                record.get("status").and_then(serde_json::Value::as_str),
+                Some("complete" | "runtime_complete")
+            )
+            || record.get("observedMemory").is_some()
+            || record
+                .pointer("/target/modelId")
+                .and_then(serde_json::Value::as_str)
+                != Some(entry.model_id.as_str())
+            || record
+                .pointer("/target/provider")
+                .and_then(serde_json::Value::as_str)
+                != Some(entry.recipe.provider.as_str())
+            || record
+                .pointer("/target/tier")
+                .and_then(serde_json::Value::as_str)
+                != Some(entry.recipe.tier.as_str())
+        {
+            return Err("accounting observation source identity/kind disagrees".into());
+        }
+        let read = |key: &str| {
+            record
+                .get(key)
+                .cloned()
+                .ok_or_else(|| format!("accounting record lacks {key}"))
+        };
+        let accounting: OwnedProcessAccountingEvidence =
+            serde_json::from_value(read("ownedProcessMemory")?)
+                .map_err(|error| error.to_string())?;
+        let recipe: ObservedExecutionRecipe =
+            serde_json::from_value(read("observedExecutionRecipe")?)
+                .map_err(|error| error.to_string())?;
+        let conditions: ObservedOperatingConditions =
+            serde_json::from_value(read("observedOperatingConditions")?)
+                .map_err(|error| error.to_string())?;
+        if record
+            .get("observedExecutionRecipeSha256")
+            .and_then(serde_json::Value::as_str)
+            != Some(
+                accounting_digest(
+                    "flux3_observed_execution_recipe_v1\0",
+                    &read("observedExecutionRecipe")?,
+                )
+                .as_str(),
+            )
+            || recipe.measured_strategy_sha256
+                != accounting_digest("flux3_observed_memory_strategy_v1\0", &read("strategy")?)
+        {
+            return Err("accounting observation execution recipe/strategy binding changed".into());
+        }
+        if record
+            .pointer("/diagnostics/measurements")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|measurements| {
+                measurements.iter().any(|measurement| {
+                    measurement
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| name.ends_with("DevicePeakDelta"))
+                })
+            })
+        {
+            return Err("accounting observation aliases legacy device deltas".into());
+        }
+        if accounting != entry.accounting
+            || recipe != entry.recipe
+            || conditions != entry.operating_conditions
+        {
+            return Err("accounting observation drifted from retained typed evidence".into());
+        }
+    }
+    Ok(())
 }
 
 /// An attestation is a justification or it is nothing (sc-22667): both revisions must be real
@@ -2877,6 +3342,9 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
                 anchor.id, anchor.source.record_id, anchor.source.path
             )
         })?;
+    if record.get("measurementKind").is_some() || record.get("ownedProcessMemory").is_some() {
+        return Err("sampled accounting cannot satisfy a legacy residency/allocator anchor".into());
+    }
     let target = record.get("target").unwrap_or(&serde_json::Value::Null);
     let str_at = |value: &serde_json::Value, key: &str| {
         value
@@ -4679,6 +5147,148 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    // Synthetic CPU protocol fixture, never a measurement or committed calibration receipt.
+    fn accounting_protocol_fixture() -> ObservedOperatingEnvelope {
+        let phase = |first, last| {
+            serde_json::json!({
+                "dedicatedPeakBytes": 80, "sharedPeakBytes": 30, "totalCommittedPeakBytes": 90,
+                "samples": 2, "firstSampleMs": first, "lastSampleMs": last, "maxGapMs": last-first
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "id": "cpu-protocol-only", "modelId": "flux3_klein",
+            "recipe": { "schemaVersion": 1, "backend": "candle", "provider": "flux3_klein", "tier": "bf16",
+                "actualLoadSpecSha256": "1".repeat(64), "actualGenerationRequestSha256": "2".repeat(64),
+                "invocationRequestSha256": "3".repeat(64), "measuredStrategySha256": "4".repeat(64) },
+            "accounting": {
+                "schemaVersion": 1, "kind": "flux3_owned_process_memory_accounting_v1",
+                "source": "Windows GPU Process Memory performance counters",
+                "semantics": "sampled per-process dedicated/shared/total-committed accounting; not physical residency or CUDA active/reserved allocator bytes",
+                "attribution": "own PID/start-time/executable and CUDA adapter LUID; includes any cross-process-shared allocations charged to this process",
+                "physicalResidencyClaim": false, "allocatorActivityClaim": false,
+                "deviceTotalDeltaAttributionClaim": false, "exclusiveThroughputClaim": false,
+                "sampling": { "intervalMs": 200, "maxAllowedGapMs": 1500, "maxAllowedReadSkewMs": 250, "maxObservedReadSkewMs": 10, "losslessPeakClaim": false },
+                "identity": { "pid": 42, "startedAt": "2026-10-23T00:00:00.000Z", "executable": "cpu-fixture.exe",
+                    "luid": "0x00000000_0x0001f363", "physicalGpuId": "1", "gpuUuid": "GPU-00000000-0000-0000-0000-000000000001", "pciBusId": "00000000:21:00.0", "logicalCudaOrdinal": 0 },
+                "physicalNodes": [0, 1],
+                "phases": { "load": phase(0,200), "conditioning": phase(200,400), "denoise": phase(400,600), "decode": phase(600,800) },
+                "overall": { "dedicatedPeakBytes": 80, "sharedPeakBytes": 30, "totalCommittedPeakBytes": 90,
+                    "samples": 5, "firstSampleMs": 0, "lastSampleMs": 800, "maxGapMs": 200 },
+                "unavailableMetrics": { "physicalResidentBytes": null, "activeBytes": null, "allocatorBytes": null }
+            },
+            "operatingConditions": { "schemaVersion": 1, "sharingMode": "bounded-shared", "physicalGpuId": "1",
+                "gpuUuid": "GPU-00000000-0000-0000-0000-000000000001", "pciBusId": "00000000:21:00.0", "observedAt": "2026-10-23T00:00:00.000Z",
+                "totalDeviceBytes": 1000, "freeDeviceBytes": 800, "foreignDedicatedBytes": 20,
+                "foreignProcessCount": 1, "foreignMaxProcessBytes": 20,
+                "foreignProcessLimitBytes": 1073741824_u64, "foreignTotalLimitBytes": 3221225472_u64,
+                "observationScope": "producer-reservation-admission", "fitAuthorization": false,
+                "exclusiveThroughputClaim": false, "physicalResidencyClaim": false },
+            "source": { "path": "cpu-fixture-only", "sha256": "5".repeat(64), "recordId": "cpu-only" }
+        })).unwrap()
+    }
+
+    #[test]
+    fn sampled_accounting_is_distinct_typed_observation_not_residency() {
+        let fixture = accounting_protocol_fixture();
+        fixture.validate().unwrap();
+        // Independent peaks are deliberately nonadditive: 80 + 30 != 90 remains valid.
+        let value = serde_json::to_value(&fixture.accounting).unwrap();
+        assert!(value.get("activeBytes").is_none());
+        assert!(value["unavailableMetrics"]["physicalResidentBytes"].is_null());
+        assert!(
+            serde_json::from_value::<MemoryAnchor>(serde_json::to_value(&fixture).unwrap())
+                .is_err()
+        );
+        let mut store = bound_store(Vec::new());
+        store.observed_operating_envelopes.push(fixture.clone());
+        assert_eq!(
+            store
+                .observed_operating_envelopes_for("flux3_klein", &fixture.recipe)
+                .count(),
+            1
+        );
+        let mut changed = fixture.recipe.clone();
+        changed.measured_strategy_sha256 = "6".repeat(64);
+        assert_eq!(
+            store
+                .observed_operating_envelopes_for("flux3_klein", &changed)
+                .count(),
+            0
+        );
+        changed = fixture.recipe.clone();
+        changed.actual_generation_request_sha256 = "7".repeat(64);
+        assert_eq!(
+            store
+                .observed_operating_envelopes_for("flux3_klein", &changed)
+                .count(),
+            0
+        );
+        assert!(store
+            .image_anchor_for("flux3_klein", AnchorBackend::Candle, "bf16")
+            .is_none());
+        // A valid typed object is not enough: it still needs compiled, byte-exact provenance.
+        assert!(validate_observed_operating_envelopes(&store)
+            .unwrap_err()
+            .contains("unpackaged"));
+    }
+
+    #[test]
+    fn sampled_accounting_rejects_identity_coverage_and_residency_mutants() {
+        let fixture = accounting_protocol_fixture();
+        for mutate in [
+            |entry: &mut ObservedOperatingEnvelope| entry.accounting.identity.pid = 0,
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.identity.started_at = "2026-02-30T00:00:00.000Z".into()
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.identity.luid = "foreign".into()
+            },
+            |entry: &mut ObservedOperatingEnvelope| entry.accounting.physical_nodes.push(0),
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.physical_residency_claim = true
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.allocator_activity_claim = true
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.sampling.lossless_peak_claim = true
+            },
+            |entry: &mut ObservedOperatingEnvelope| entry.accounting.phases.denoise.samples = 1,
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.phases.denoise.max_gap_ms = 1501
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.phases.denoise.last_sample_ms = 400
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.phases.denoise.dedicated_peak_bytes = 81
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.accounting.phases.denoise.first_sample_ms = 0
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.operating_conditions.fit_authorization = true
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.operating_conditions.gpu_uuid = "GPU-other".into()
+            },
+            |entry: &mut ObservedOperatingEnvelope| {
+                entry.operating_conditions.free_device_bytes = 1001
+            },
+            |entry: &mut ObservedOperatingEnvelope| entry.recipe.measured_strategy_sha256.clear(),
+        ] {
+            let mut mutant = fixture.clone();
+            mutate(&mut mutant);
+            assert!(mutant.validate().is_err(), "accepted mutant {mutant:?}");
+        }
+        let mut value = serde_json::to_value(&fixture.accounting).unwrap();
+        value["unavailableMetrics"]["activeBytes"] = serde_json::json!(80);
+        assert!(serde_json::from_value::<OwnedProcessAccountingEvidence>(value).is_err());
+        let mut value = serde_json::to_value(&fixture.accounting).unwrap();
+        value["allocatorBytes"] = serde_json::json!(90);
+        assert!(serde_json::from_value::<OwnedProcessAccountingEvidence>(value).is_err());
     }
 
     #[test]
@@ -7095,6 +7705,7 @@ mod tests {
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
             exceeded_bounds: bounds,
+            observed_operating_envelopes: Vec::new(),
         }
     }
 
@@ -8576,6 +9187,7 @@ mod tests {
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
             exceeded_bounds: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
         };
         assert_eq!(
             store

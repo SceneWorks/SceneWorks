@@ -12,7 +12,7 @@ import { userInfo } from 'node:os';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText } from './flux3-image-klein-app-lifecycle.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
-import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256, admittedHost, candleReplayPrefix } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256, admittedHost, candleReplayPrefix, validateCandleDeviceTransitionBinding } from './flux3-image-klein-terminal-budget.mjs';
 const execFile = promisify(execFileCb);
 // Physical Macs: runner name -> its GitHub runner target and unique label.
 export const MAC_RUNNERS = Object.freeze({ 'nax-macos': Object.freeze({ runnerTarget: 'primary', runnerLabel: 'rw-starvector' }), 'nax-macos-2': Object.freeze({ runnerTarget: 'secondary', runnerLabel: 'rw-mage' }) });
@@ -21,6 +21,21 @@ export async function contained(file, root) {
   const resolved = await realpath(file), relative = path.relative(await realpath(root), resolved);
   assert(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'file escaped admitted root');
   assert((await stat(resolved)).isFile(), 'regular file required'); return resolved;
+}
+export function admittedCandleDevice(a) {
+  const transition = a.approvedPlan?.candleDeviceTransition === undefined ? undefined : validateCandleDeviceTransitionBinding(a.approvedPlan);
+  const expected = transition?.nextDevice ?? { physicalGpuId: '1' };
+  const physicalGpuId = a.physicalGpuId ?? '1', cudaVisibleDevices = a.cudaVisibleDevices ?? '1', logicalCudaOrdinal = a.logicalCudaOrdinal ?? 0;
+  assert.equal(physicalGpuId, expected.physicalGpuId, 'physical GPU destination must match approved device transition (legacy GPU1 only)');
+  assert.equal(cudaVisibleDevices, expected.physicalGpuId, 'CUDA visibility must mask exactly the approved physical GPU');
+  assert.equal(logicalCudaOrdinal, 0, 'masked CUDA logical ordinal must be zero');
+  if (transition) {
+    assert.equal(a.sourceSha, transition.nextSourceSha, 'device transition source differs from admission');
+    assert.equal(a.gpuUuid?.toLowerCase(), expected.gpuUuid.toLowerCase(), 'GPU UUID differs from approved device transition');
+    assert.equal(a.pciBusId?.toLowerCase(), expected.pciBusId.toLowerCase(), 'GPU PCI bus differs from approved device transition');
+    assert.equal(a.approvedPlanSha256, planHash(a.approvedPlan), 'device transition requires exact approved plan binding');
+  }
+  return { physicalGpuId, cudaVisibleDevices, logicalCudaOrdinal, gpuUuid: a.gpuUuid, pciBusId: a.pciBusId };
 }
 export async function validateAdmission(a, backend, { git = async (cwd, ...args) => (await execFile('git', args, { cwd, timeout: 30_000 })).stdout.trim(), root = ROOT, account = () => userInfo().username } = {}) {
   assert.equal(a.actualRun, true, 'execution requires explicit actualRun:true; planning never launches');
@@ -39,7 +54,7 @@ export async function validateAdmission(a, backend, { git = async (cwd, ...args)
   assert(Number.isInteger(a.timeoutSeconds) && a.timeoutSeconds >= 60 && a.timeoutSeconds <= 10800, 'bounded run timeout required');
   // Which Mac a plan admits is its host lanes' decision (admittedHost); an unsplit plan keeps nax-macos-2.
   if (backend === 'mlx') assert(Object.hasOwn(MAC_RUNNERS, a.runner ?? ''), 'only a known physical Mac runner admitted');
-  else assert(a.runner && a.physicalGpuId === '1' && a.cudaVisibleDevices === '1' && a.logicalCudaOrdinal === 0 && /^GPU-[a-f0-9-]+$/i.test(a.gpuUuid ?? ''), 'physical GPU1/masked CUDA0 admission required');
+  else { assert(a.runner && typeof a.physicalGpuId === 'string' && typeof a.cudaVisibleDevices === 'string' && a.logicalCudaOrdinal === 0 && /^GPU-[a-f0-9-]+$/i.test(a.gpuUuid ?? ''), 'explicit physical GPU/masked CUDA0 admission required'); admittedCandleDevice(a); }
 }
 export function safeEnvironment(env) {
   const base = {};
@@ -48,15 +63,15 @@ export function safeEnvironment(env) {
   return base;
 }
 export function offlineChildEnv(env, admission, identity, url) {
-  const base = safeEnvironment(env);
-  Object.assign(base, { HF_HOME: admission.hfHome, HF_HUB_CACHE: path.join(admission.hfHome, 'hub'), HUGGINGFACE_HUB_CACHE: path.join(admission.hfHome, 'hub'), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', SCENEWORKS_HUGGINGFACE_BASE_URL: 'http://127.0.0.1:9', SCENEWORKS_RESOLVED_CACHE_ENABLED: 'false', SCENEWORKS_POLL_SECONDS: '1', SCENEWORKS_HEARTBEAT_SECONDS: '2', SCENEWORKS_BACKEND_CANDLE_ENABLED: String(admission.backend === 'candle'), SCENEWORKS_BACKEND_MLX_ENABLED: String(admission.backend === 'mlx'), SCENEWORKS_CANDLE_REQUIRED: admission.backend === 'candle' ? '1' : '0', CUDA_VISIBLE_DEVICES: admission.backend === 'candle' ? '1' : '-1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID', SCENEWORKS_GPU_ID: admission.backend === 'candle' ? '1' : 'mlx' });
+  const base = safeEnvironment(env), device = admission.backend === 'candle' ? admittedCandleDevice(admission) : undefined;
+  Object.assign(base, { HF_HOME: admission.hfHome, HF_HUB_CACHE: path.join(admission.hfHome, 'hub'), HUGGINGFACE_HUB_CACHE: path.join(admission.hfHome, 'hub'), HF_HUB_OFFLINE: '1', TRANSFORMERS_OFFLINE: '1', SCENEWORKS_HUGGINGFACE_BASE_URL: 'http://127.0.0.1:9', SCENEWORKS_RESOLVED_CACHE_ENABLED: 'false', SCENEWORKS_POLL_SECONDS: '1', SCENEWORKS_HEARTBEAT_SECONDS: '2', SCENEWORKS_BACKEND_CANDLE_ENABLED: String(admission.backend === 'candle'), SCENEWORKS_BACKEND_MLX_ENABLED: String(admission.backend === 'mlx'), SCENEWORKS_CANDLE_REQUIRED: admission.backend === 'candle' ? '1' : '0', CUDA_VISIBLE_DEVICES: device ? device.cudaVisibleDevices : '-1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID', SCENEWORKS_GPU_ID: device ? device.physicalGpuId : 'mlx' });
   return { ...bindOwnedEnv(base, identity, url), ...(url ? { SCENEWORKS_WORKER_ONLY: '1', SCENEWORKS_WORKER_CHILD: '1' } : {}) };
 }
 // Driver API UUID query runs in a separate short process with the SAME visibility mask.
 const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class TerminalCudaIdentity { [DllImport("nvcuda.dll")] public static extern int cuInit(uint flags); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetCount(out int count); [DllImport("nvcuda.dll")] public static extern int cuDeviceGet(out int device, int ordinal); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetUuid_v2([Out] byte[] uuid, int device); [DllImport("nvcuda.dll")] public static extern int cuDeviceGetLuid([Out] byte[] luid, out uint mask, int device); }'; if([TerminalCudaIdentity]::cuInit(0) -ne 0){throw "CUDA init"}; $n=0; if([TerminalCudaIdentity]::cuDeviceGetCount([ref]$n) -ne 0 -or $n -ne 1){throw "CUDA mask"}; $d=0; if([TerminalCudaIdentity]::cuDeviceGet([ref]$d,0) -ne 0){throw "CUDA ordinal"}; $u=New-Object byte[] 16; if([TerminalCudaIdentity]::cuDeviceGetUuid_v2($u,$d) -ne 0){throw "CUDA UUID"}; $h=([BitConverter]::ToString($u)).Replace("-","").ToLowerInvariant(); $l=New-Object byte[] 8; $m=[uint32]0; $luid=""; if([TerminalCudaIdentity]::cuDeviceGetLuid($l,[ref]$m,$d) -eq 0){$luid=(" luid=0x{0:x8}_0x{1:x8}" -f [BitConverter]::ToUInt32($l,4),[BitConverter]::ToUInt32($l,0))}; Write-Output ("GPU-"+$h.Substring(0,8)+"-"+$h.Substring(8,4)+"-"+$h.Substring(12,4)+"-"+$h.Substring(16,4)+"-"+$h.Substring(20,12)+$luid)`;
-// Windows desktop compositor/apps appear on the display GPU as C+G with N/A memory in nvidia-smi
-// (WDDM). Their actual dedicated memory comes from the Windows per-process counters of the
-// adapter LUID that CUDA itself reports for masked CUDA0 (physical GPU1). Bounded, never ignored.
+// Windows WDDM C and C+G rows can have N/A SMI memory, regardless of compute activity.
+// Both use the SAME bounded dedicated-allocation accounting on CUDA's actual adapter LUID.
+// Dedicated counters never establish CUDA exclusivity or competing-compute inactivity.
 export const FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES = 1024 * 1024 ** 2;
 export const FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES = 3 * 1024 ** 3;
 export function gpuProcessMemoryScript(luid, requiredProcesses) {
@@ -95,7 +110,7 @@ $samples=@($sets | ForEach-Object { $_.CounterSamples } | ForEach-Object {
   if (($_.Status -eq 0 -or $_.Status -eq 1) -and -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and $value -ge 0) { $row.cookedBytes=$value }; [pscustomobject]$row
 });
 $expectedAfter=@(Get-RequiredCounterMetadata);
-$identities=@(Get-CimInstance Win32_Process | Where-Object { $wanted -contains $_.ProcessId } | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;startedAt=$_.CreationDate.ToUniversalTime().ToString('o')} });
+$identities=@(Get-CimInstance Win32_Process | Where-Object { $wanted -contains $_.ProcessId } | ForEach-Object { ${requiredProcesses.some(p => Object.hasOwn(p, 'sessionId')) ? "if ($null -eq $_.SessionId) { throw 'Required GPU process session identity unavailable' }; " : ''}[pscustomobject]@{pid=[int]$_.ProcessId;startedAt=$_.CreationDate.ToUniversalTime().ToString('o')${requiredProcesses.some(p => Object.hasOwn(p, 'sessionId')) ? ';sessionId=[int]$_.SessionId' : ''}} });
 $errors=@($counterErrors | ForEach-Object { $code='UNKNOWN_COUNTER_PROVIDER_ERROR'; if (([string]$_.FullyQualifiedErrorId).StartsWith('CounterApiError,')) { $code='CounterApiError' }; [pscustomobject]@{category=[string]$_.CategoryInfo.Category;code=$code} });
 [pscustomobject]@{expectedBefore=$expectedBefore;expectedAfter=$expectedAfter;samples=$samples;identities=$identities;errors=$errors} | ConvertTo-Json -Depth 5 -Compress`;
 }
@@ -120,6 +135,7 @@ export function validateGpuProcessMemory(observation, luid, requiredProcesses) {
   const identities = new Map();
   for (const p of observation.identities) { assert(required.has(p.pid) && !identities.has(p.pid), 'unexpected/duplicate GPU counter process identity'); identities.set(p.pid, p.startedAt); }
   for (const [pid, startedAt] of required) assert.equal(identities.get(pid), startedAt, 'required GPU process missing/reused during counter observation');
+  for (const process of requiredProcesses) if (Object.hasOwn(process, 'sessionId')) { assert(Number.isSafeInteger(process.sessionId) && process.sessionId >= 0, 'required GPU session identity malformed'); assert.equal(observation.identities.find(p => p.pid === process.pid)?.sessionId, process.sessionId, 'required GPU session identity missing/changed'); }
   const memory = new Map(), seen = new Set(), observedRequired = new Set(); let invalidUnrequired = 0;
   for (const sample of observation.samples) {
     assert(Number.isSafeInteger(sample.pid) && sample.pid > 0 && sample.luid === luid.toLowerCase() && Number.isSafeInteger(sample.physicalNode) && sample.physicalNode >= 0 && Number.isSafeInteger(sample.status) && sample.status >= 0 && sample.status <= 0xffffffff, 'malformed GPU counter sample identity/status');
@@ -141,17 +157,17 @@ export function validateGpuProcessMemory(observation, luid, requiredProcesses) {
   assert((observation.errors.length > 0) === (invalidUnrequired > 0), 'unexplained GPU counter provider error/invalid sample');
   return memory;
 }
-/** Foreign desktop graphics on GPU1: every foreign C+G must be measured and within bounds; the
- *  measured total is evidence (it reduces the headroom any resource anchor actually had). */
+/** Historical API name: every foreign C AND C+G is measured against the same limits.
+ * Dedicated allocation is not activity, nor is device-total usage attributable to our process. */
 export function assessForeignGraphics(foreignPids, memoryByPid, { processLimit = FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, totalLimit = FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } = {}) {
   let totalBytes = 0, maxProcessBytes = 0;
   for (const pid of foreignPids) {
     const bytes = memoryByPid.get(pid);
-    assert(Number.isSafeInteger(bytes) && bytes >= 0, `foreign desktop C+G process ${pid} on GPU1 is unmeasurable; refusing`);
-    assert(bytes <= processLimit, `foreign desktop C+G process ${pid} uses ${Math.ceil(bytes / 1024 ** 2)} MiB of GPU1 (limit ${processLimit / 1024 ** 2} MiB)`);
+    assert(Number.isSafeInteger(bytes) && bytes >= 0, `foreign C/C+G process ${pid} on approved GPU is unmeasurable; refusing`);
+    assert(bytes <= processLimit, `foreign C/C+G process ${pid} uses ${Math.ceil(bytes / 1024 ** 2)} MiB of approved GPU (limit ${processLimit / 1024 ** 2} MiB)`);
     totalBytes += bytes; maxProcessBytes = Math.max(maxProcessBytes, bytes);
   }
-  assert(totalBytes <= totalLimit, `foreign desktop C+G processes use ${Math.ceil(totalBytes / 1024 ** 2)} MiB of GPU1 in total (limit ${totalLimit / 1024 ** 2} MiB)`);
+  assert(totalBytes <= totalLimit, `foreign C/C+G processes use ${Math.ceil(totalBytes / 1024 ** 2)} MiB of approved GPU in total (limit ${totalLimit / 1024 ** 2} MiB)`);
   return { processes: foreignPids.length, totalBytes, maxProcessBytes, processLimitBytes: processLimit, totalLimitBytes: totalLimit };
 }
 export async function observeProcessTable(checked, platform) {
@@ -167,6 +183,7 @@ export async function readMacWorkloadLease(a) {
   assert(a.macWorkloadLease?.path && a.macWorkloadLease.root && digestPattern.test(a.macWorkloadLease.sha256), 'secondary Mac requires coordinator exclusive-workload attestation lease');
   const file = await contained(a.macWorkloadLease.path, a.macWorkloadLease.root), bytes = await readFile(file); assert(bytes.length <= 1024 * 1024 && createHash('sha256').update(bytes).digest('hex') === a.macWorkloadLease.sha256, 'coordinator lease bytes changed'); return JSON.parse(bytes);
 }
+const ownedGpuIdentities = new WeakMap();
 export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env, processTable, leaseReader = readMacWorkloadLease, controllerPid = process.pid, now = Date.now, onPhase = () => {} } = {}) {
   onPhase('queue_ownership');
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
@@ -197,42 +214,64 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     return { runner: a.runner, runnerTarget: a.runnerTarget, runnerLabel: a.runnerLabel, host, runtime: { platform, arch }, backend: 'mlx', coordinatorLeaseId: lease.coordinatorApprovalId, exclusivity: 'coordinator-attested-and-process-monitored' };
   }
   assert.equal(platform, 'win32');
-    const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
+  const device = admittedCandleDevice(a), smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
+  const owned = new Set();
+  for (const pid of ownPids) {
+    const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'owned GPU process identity missing/ambiguous');
+    const p = matches[0], controller = table.find(p => p.pid === controllerPid);
+    assert(p.startedAt && Number.isFinite(Date.parse(p.startedAt)) && Number.isSafeInteger(p.sessionId) && p.sessionId >= 0, 'owned GPU process start/session identity missing');
+    const descendant = pid !== controllerPid && processAncestors(table, pid).has(controllerPid);
+    // The adapter-native-boundary CLI has its sealed adapter as its immediate parent.
+    const adapterParent = controller.ppid === pid && path.isAbsolute(a.binary ?? '') && path.isAbsolute(p.executable ?? '') && path.resolve(p.executable) === path.resolve(a.binary);
+    assert(descendant || adapterParent, 'unrelated PID cannot be classified as owned GPU process');
+    const identities = ownedGpuIdentities.get(a) ?? new Map(); ownedGpuIdentities.set(a, identities);
+    if (identities.has(pid)) assert.deepEqual(p, identities.get(pid), 'owned GPU PID identity changed/reused across monitoring');
+    else identities.set(pid, structuredClone(p));
+    owned.add(pid);
+  }
   onPhase('physical_gpu_uuid');
-  const [index, uuid] = (await smi(['-i', '1', '--query-gpu=index,uuid', '--format=csv,noheader'])).split(',').map(s => s.trim());
-  assert.equal(index, '1'); assert.equal(uuid.toLowerCase(), a.gpuUuid.toLowerCase());
+  const [index, uuid, pciBusId] = (await smi(['-i', device.physicalGpuId, '--query-gpu=index,uuid,pci.bus_id', '--format=csv,noheader'])).split(',').map(s => s.trim());
+  assert.equal(index, device.physicalGpuId, 'SMI index differs from approved physical GPU'); assert.equal(uuid?.toLowerCase(), a.gpuUuid?.toLowerCase(), 'SMI UUID differs from approved physical GPU');
+  assert(/^GPU-[a-f0-9-]+$/i.test(uuid ?? '') && /^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/i.test(pciBusId ?? ''), 'SMI UUID/PCI identity unavailable');
+  if (device.pciBusId !== undefined) assert.equal(pciBusId.toLowerCase(), device.pciBusId.toLowerCase(), 'SMI PCI differs from approved physical GPU');
   onPhase('masked_cuda_uuid');
-  const [masked = '', luidField] = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: '1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim().split(/\s+/);
-  assert.equal(masked.toLowerCase(), uuid.toLowerCase(), 'masked CUDA0 must be physical GPU1');
+  const [masked = '', luidField] = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: device.cudaVisibleDevices, CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim().split(/\s+/);
+  assert.equal(masked.toLowerCase(), uuid.toLowerCase(), 'masked CUDA0 must be approved physical GPU');
   const luid = /^luid=(0x[0-9a-f]{8}_0x[0-9a-f]{8})$/i.exec(luidField ?? '')?.[1]?.toLowerCase();
+  assert(luid, 'approved GPU is unmeasurable: CUDA reported no adapter LUID; refusing');
   onPhase('gpu_process_identity');
-  const xml = await smi(['-i', '1', '-q', '-x']); assert(xml.includes('<processes>') && xml.includes(uuid), 'GPU1 process identity unavailable');
+  const xml = await smi(['-i', device.physicalGpuId, '-q', '-x']); assert(xml.includes('<processes>') && xml.includes(uuid), 'approved GPU process identity unavailable');
   const types = new Map();
   for (const [, block] of xml.matchAll(/<process_info>([\s\S]*?)<\/process_info>/g)) {
     const pid = Number(/<pid>([^<]+)<\/pid>/.exec(block)?.[1]), type = /<type>([^<]+)<\/type>/.exec(block)?.[1]?.trim();
-    assert(Number.isInteger(pid) && ['C', 'G', 'C+G'].includes(type));
-    assert(type !== 'C' || ownPids.includes(pid), 'foreign pure-compute process on GPU1'); types.set(pid, type);
+    assert(Number.isSafeInteger(pid) && pid > 0 && ['C', 'G', 'C+G'].includes(type) && !types.has(pid), 'unknown/duplicate GPU process identity/type'); types.set(pid, type);
   }
   const apps = (await smi(['--query-compute-apps=pid,gpu_uuid', '--format=csv,noheader,nounits'])).split(/\r?\n/).filter(Boolean).map(line => line.split(',').map(x => x.trim()));
-  const foreign = [];
-  for (const [pid, device] of apps) {
-    assert(Number.isInteger(Number(pid)) && Number(pid) > 0 && /^GPU-/i.test(device), 'compute-app identity unavailable');
-    if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0');
-    else if (device.toLowerCase() === uuid.toLowerCase()) { assert.equal(types.get(Number(pid)), 'C+G', 'foreign process actually computing on GPU1 (pure compute or unidentified type)'); foreign.push(Number(pid)); }
+  const foreign = [...types].filter(([pid, type]) => ['C','C+G'].includes(type) && !owned.has(pid)).map(([pid]) => pid), seenApps = new Set();
+  for (const row of apps) {
+    const [pidText, physicalUuid] = row, pid = Number(pidText); assert(row.length === 2 && Number.isSafeInteger(pid) && pid > 0 && /^GPU-[a-f0-9-]+$/i.test(physicalUuid), 'compute-app identity unavailable');
+    const key = `${pid}:${physicalUuid.toLowerCase()}`; assert(!seenApps.has(key), 'duplicate compute-app identity'); seenApps.add(key);
+    if (owned.has(pid)) assert.equal(physicalUuid.toLowerCase(), uuid.toLowerCase(), 'owned process touched wrong physical GPU UUID');
+    if (physicalUuid.toLowerCase() === uuid.toLowerCase()) assert(['C','C+G'].includes(types.get(pid)), 'compute-app has unidentified type on approved GPU');
   }
+  for (const [pid, type] of types) if (['C','C+G'].includes(type)) assert(seenApps.has(`${pid}:${uuid.toLowerCase()}`), 'GPU process compute-app identity missing');
   onPhase('gpu_headroom');
+  const headroom = (await smi(['-i', device.physicalGpuId, '--query-gpu=memory.total,memory.free', '--format=csv,noheader,nounits'])).split(',');
+  assert(headroom.length === 2 && headroom.every(x => /^\d+(?:\.\d+)?$/.test(x.trim())), 'GPU headroom counters unavailable');
+  const [totalBytes, freeBytes] = headroom.map(x => Number(x.trim()) * 1024 ** 2);
+  assert([totalBytes,freeBytes].every(Number.isSafeInteger) && totalBytes > 0 && freeBytes > 0 && freeBytes <= totalBytes, 'valid positive GPU headroom required');
   let memory = new Map(), counterProof;
   if (foreign.length) {
-    assert(luid, 'foreign desktop C+G on GPU1 is unmeasurable: CUDA reported no adapter LUID; refusing');
-    const requiredProcesses = foreign.map(pid => { const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'foreign GPU process identity missing/ambiguous'); return { pid, startedAt: matches[0].startedAt }; });
+    const requiredProcesses = foreign.map(pid => { const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'foreign GPU process identity missing/ambiguous'); const p = matches[0]; assert(Number.isSafeInteger(p.sessionId) && p.sessionId >= 0, 'foreign GPU process session identity missing'); return { pid, startedAt: p.startedAt, sessionId: p.sessionId }; });
     const observation = JSON.parse((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid, requiredProcesses)], { timeout: 30_000 })).stdout);
-    memory = validateGpuProcessMemory(observation, luid, requiredProcesses);
-    counterProof = { requiredProcesses, ...observation };
+    memory = validateGpuProcessMemory(observation, luid, requiredProcesses); counterProof = { requiredProcesses, ...observation };
   }
-  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory) };
-  // Node-only validation detail: preserve the established JSON/Rust hardware-observation shape.
+  const after = await (processTable ? processTable() : observeProcessTable(checked, platform));
+  for (const pid of new Set([...owned, ...foreign])) { const before = table.find(p => p.pid === pid), matches = after.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'GPU process exited/reused during observation'); assert.deepEqual(matches[0], before, 'GPU process identity changed/reused during observation'); }
+  // Historical wire name retained: this is the combined C AND C+G allocation, not graphics-only.
+  const foreignGraphics = { luid, ...assessForeignGraphics(foreign, memory) };
   if (counterProof) Object.defineProperty(foreignGraphics, 'counterProof', { value: counterProof, enumerable: false });
-  return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)), foreignGraphics };
+  return { physicalGpuId: device.physicalGpuId, gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: [...owned].filter(pid => seenApps.has(`${pid}:${uuid.toLowerCase()}`)), foreignGraphics, pciBusId, gpuHeadroom: {totalBytes,freeBytes}, sharedPolicy: { sharingMode: 'bounded-shared', foreignProcessTypes: ['C','C+G'], exclusiveThroughputClaim: false, deviceTotalAttributionClaim: false, computeActivityAssessment: 'unsupported-dedicated-memory-only' } };
 }
 // Called ONLY by the adapter's synchronous native-boundary child CLI, before reservation.
 // No resource template can supply its own process/build/hardware observation.
@@ -253,7 +292,7 @@ export async function verifyResourceProducerHardware(a, context, dependencies = 
   const executable = producer.executable ?? producer.command; assert(path.isAbsolute(executable ?? ''), 'actual adapter executable path unavailable; process name is not compiled identity');
   const resolved = await io.realpath(executable); assert.equal(resolved, await io.realpath(a.binary), 'actual adapter process is not the sealed admitted executable'); assert.equal(await io.hash(resolved), a.binarySha256, 'actual running adapter executable bytes differ from owned build');
   const proof = await io.guard(a, [context.adapterPid]);
-  if (a.backend === 'candle') { assert.equal(proof.physicalGpuId, '1'); assert.equal(proof.gpuUuid?.toLowerCase(), a.gpuUuid.toLowerCase()); assert.equal(proof.logicalCudaOrdinal, 0); assert(proof.ownComputePids?.includes(context.adapterPid), 'actual adapter PID/GPU1 UUID compute observation missing'); }
+  if (a.backend === 'candle') { const target = admittedCandleDevice(a); assert.equal(proof.physicalGpuId, target.physicalGpuId); assert.equal(proof.gpuUuid?.toLowerCase(), a.gpuUuid.toLowerCase()); if (target.pciBusId !== undefined) assert.equal(proof.pciBusId?.toLowerCase(), target.pciBusId.toLowerCase(), 'resource producer PCI proof differs from admitted target'); assert.equal(proof.logicalCudaOrdinal, target.logicalCudaOrdinal); assert(proof.ownComputePids?.includes(context.adapterPid), 'actual adapter PID/approved GPU UUID compute observation missing'); }
   else { assert(Object.hasOwn(MAC_RUNNERS, a.runner ?? '') && proof.runner === a.runner, 'observed Mac runner differs from the admitted lane host'); assert.equal(proof.host?.split('.')[0], a.hostName); assert.deepEqual(proof.runtime, { platform: 'darwin', arch: 'arm64' }); assert(proof.coordinatorLeaseId && proof.exclusivity === 'coordinator-attested-and-process-monitored', 'actual secondary Mac exclusive runtime observation missing'); }
   const after = (await observe()).find(p => p.pid === context.adapterPid); assert.deepEqual(after, producer, 'adapter exited/changed identity during hardware observation');
   return { kind: 'flux3-resource-producer-hardware-observation', backend: a.backend, adapterPid: context.adapterPid, caseId: context.caseId, invocationId: context.invocationId, requestSha256: context.requestSha256, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt.sha256, approvedPlanSha256: approved.approvedPlanSha256, observedAt: new Date().toISOString(), adapterProcess: producer, proof };
@@ -378,7 +417,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     if (endpoint.exchange) { const ordinaryExchange = endpoint.exchange.bind(endpoint); endpoint.exchange = async (method, route, body, options) => { await beforeMutation(method, route, body); return ordinaryExchange(method, route, body, options); }; }
     const startWorker = async () => {
       await guard(); worker = await endpoint.startWorker(() => launch(`worker-${++generation}`, childEnv(url)));
-      const record = await wait(async () => { const w = (await endpoint.call('GET', '/api/v1/workers')).find(w => w.id === identity.workerId); if (!w || w.status !== 'idle') return false; assert(w.capabilities?.includes('gpu')); assert.equal(w.gpuId, a.backend === 'candle' ? '1' : 'mlx'); if (a.backend === 'candle') assert(w.capabilities.includes('candle')); else assert(!w.capabilities.includes('candle')); return w; });
+      const record = await wait(async () => { const w = (await endpoint.call('GET', '/api/v1/workers')).find(w => w.id === identity.workerId); if (!w || w.status !== 'idle') return false; assert(w.capabilities?.includes('gpu')); assert.equal(w.gpuId, a.backend === 'candle' ? admittedCandleDevice(a).physicalGpuId : 'mlx'); if (a.backend === 'candle') assert(w.capabilities.includes('candle')); else assert(!w.capabilities.includes('candle')); return w; });
       return { pid: worker.pid, record };
     };
     const started = await startWorker();
@@ -397,6 +436,6 @@ export async function launchTerminalSession(a, dependencies = {}) {
       failClosed(error) { abort.abort(error); },
       async pauseWorker() { restarting = true; await monitorTask; alive(); await stop(worker); workerPaused = true; return { pid: worker.pid }; },
       async restartWorker() { restarting = true; try { await monitorTask; alive(); const previous = worker.pid; await stop(worker); identity.workerId = `flux3-app-${identity.nonce}-resume-${generation}`; const next = await startWorker(); assert.notEqual(next.pid, previous, 'resume must use a fresh process'); this.workerPid = next.pid; this.worker = next.record; workerPaused = false; return next; } finally { restarting = false; } },
-      async assertDeviceProof() { const proof = await guard(); if (a.backend === 'candle') assert(proof.ownComputePids.includes(worker.pid), 'actual worker PID/GPU1 UUID proof unavailable'); return proof; }, close };
+      async assertDeviceProof() { const proof = await guard(); if (a.backend === 'candle') assert(proof.ownComputePids.includes(worker.pid), 'actual worker PID/approved GPU UUID proof unavailable'); return proof; }, close };
   } catch (error) { await close(); throw error; }
 }

@@ -87,6 +87,7 @@ import { fileURLToPath } from "node:url";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { buildMatrix } from "./generate-memory-matrix.mjs";
+import { validateOwnedProcessAccountingRecord } from "./lib/flux3-owned-accounting-contract.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -235,9 +236,29 @@ const measurementsOf = (record) => {
 };
 
 const envelopeOf = (record) => {
+  if (record?.measurementKind !== undefined || record?.ownedProcessMemory !== undefined) return null;
   const bytes = record?.observedMemory?.overall?.allocatorBytes;
   return Number.isInteger(bytes) && bytes > 0 ? bytes : null;
 };
+
+/** Extract a typed accounting observation, never a residency anchor or predictive fit. */
+export function observedOperatingEnvelope(record, corpus) {
+  if (record?.measurementKind !== "windows-owned-process-accounting-v1") {
+    if (record?.ownedProcessMemory !== undefined) throw new Error("owned-process accounting lacks its measurement kind");
+    return null;
+  }
+  validateOwnedProcessAccountingRecord(record);
+  if (record.evidenceScope !== "authoritative" || !["complete", "runtime_complete"].includes(record.status)) return null;
+  if (typeof record.id !== "string" || typeof record.target?.modelId !== "string") throw new Error("accounting observation lacks record/model identity");
+  return {
+    id: `observation:${record.target.modelId}:${record.id}`,
+    modelId: record.target.modelId,
+    recipe: structuredClone(record.observedExecutionRecipe),
+    accounting: structuredClone(record.ownedProcessMemory),
+    operatingConditions: structuredClone(record.observedOperatingConditions),
+    source: { path: corpus.path, sha256: corpus.sha256, recordId: record.id },
+  };
+}
 
 export const cellKey = (modelId, backend, tier) =>
   `${modelId}:${backend}:${tier}`;
@@ -259,6 +280,8 @@ export const identityKey = (candidate) =>
 
 /** One retained record's anchor candidacy. `null` when the record cannot anchor anything. */
 export function anchorCandidate(record, corpus) {
+  // New accounting can never be promoted by adding legacy-looking alias fields.
+  if (record?.measurementKind !== undefined || record?.ownedProcessMemory !== undefined) return null;
   const target = record?.target;
   if (!target || typeof target !== "object") return null;
   const modelId = target.modelId;
@@ -1802,6 +1825,18 @@ export async function buildAnchorStore({
     packagedSources,
     catalogByCell,
   );
+  const observedOperatingEnvelopes = [];
+  for (const corpus of corpora) {
+    for (const record of corpus.records) {
+      const observation = observedOperatingEnvelope(record, corpus);
+      if (observation === null) continue;
+      if (!packagedSources.has(corpus.path)) throw new Error(`accounting observation source must be packaged: ${corpus.path}`);
+      if (!catalogByCell.has(cellKey(observation.modelId, "candle", observation.recipe.tier))) throw new Error(`accounting observation resolves no catalog cell: ${observation.id}`);
+      observedOperatingEnvelopes.push(observation);
+    }
+  }
+  observedOperatingEnvelopes.sort((left, right) => compareText(left.id, right.id) || compareText(left.source.path, right.source.path));
+  if (new Set(observedOperatingEnvelopes.map((entry) => entry.id)).size !== observedOperatingEnvelopes.length) throw new Error("duplicate accounting observation identity");
   const byIdentity = new Map();
   // sc-22738: EVERY completed render of a packaged corpus, overlay or not, catalog-resolved or
   // not — the population a measured lower bound can be superseded from (`retainExceededBounds`).
@@ -1989,6 +2024,7 @@ export async function buildAnchorStore({
     analyticOnly,
     componentDeltas,
     exceededBounds,
+    ...(observedOperatingEnvelopes.length > 0 ? { observedOperatingEnvelopes } : {}),
   };
 }
 

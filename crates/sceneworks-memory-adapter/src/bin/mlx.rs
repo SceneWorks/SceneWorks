@@ -22475,6 +22475,7 @@ fn exceeded_bound_capture_refusal_in(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: store
             .exceeded_bounds
             .iter()
@@ -33281,6 +33282,7 @@ mod exceeded_bound_tests {
             anchors: Vec::new(),
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: bounds,
         }
     }
@@ -33294,6 +33296,7 @@ mod exceeded_bound_tests {
             anchors: Vec::new(),
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: vec![anchor::ExceededBound {
                 id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
                 model_id: "bernini".to_owned(),

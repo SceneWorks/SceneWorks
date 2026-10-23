@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { loadProductTargets, targetRegistry, terminalCatalog, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { snapshotPath, stageTerminalArtifacts, verifyTerminalMapping, artifactStagingPlan } from './flux3-image-klein-terminal-artifacts.mjs';
-import { launchTerminalSession, guardHardware, fileHash, verifyResourceProducerHardware, assessForeignGraphics, gpuProcessMemoryScript, validateGpuProcessMemory, FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } from './flux3-image-klein-terminal-session.mjs';
+import { launchTerminalSession, guardHardware, admittedCandleDevice, offlineChildEnv, fileHash, verifyResourceProducerHardware, assessForeignGraphics, gpuProcessMemoryScript, validateGpuProcessMemory, FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } from './flux3-image-klein-terminal-session.mjs';
 import { produceTerminalBuild, verifyTerminalBuild, verifyPreparationBuild, buildRecipe } from './flux3-image-klein-terminal-build.mjs';
 import { nativeDatasetFingerprint, expectedNativeArtifacts, bindTrainingExpectation, verifyNativeContinuation, RNG_ALGORITHM } from './flux3-image-klein-terminal-training-proof.mjs';
 import { assertFinishedPng, assertCheckpoint, trainingSequence, pngCrc32, sha256 } from './flux3-image-klein-terminal-driver.mjs';
@@ -111,15 +111,16 @@ test('resource native-boundary observation binds actual adapter parent PID, exec
  }
 });
 
-test('GPU1 guard: bounded measured desktop C+G passes, pure compute/over-limit/unmeasurable refuse, foreign runners refuse (DECLARED MOCK)',async()=>{
- const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'}],MiB=1024**2,LUID='0xdeadbeef_0x00000001';
+test('GPU1 guard: bounded C and C+G share caps, incomplete identity/memory and foreign runners refuse (DECLARED MOCK)',async()=>{
+ const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'},{pid:21,ppid:20,command:'api.exe',startedAt:'2000-01-01T00:00:00.0000000Z',sessionId:1}],MiB=1024**2,LUID='0xdeadbeef_0x00000001';
  const startedAt='2000-01-01T00:00:00.0000000Z';
- const processTable=()=>[...table,...procs.filter(([pid])=>!own.includes(pid)).map(([pid])=>({pid,ppid:1,command:'synthetic-desktop.exe',startedAt}))];
+ const processTable=()=>[...table,...procs.filter(([pid])=>!own.includes(pid)).map(([pid])=>({pid,ppid:1,command:'synthetic-desktop.exe',startedAt,sessionId:1}))];
  let procs,memory,luid,memoryQueries;
  const exec=async(cmd,args)=>{const script=args.at(-1);
   if(cmd==='powershell.exe'&&script.includes('cuDeviceGetLuid'))return{stdout:`${a.gpuUuid}${luid?` luid=${luid}`:''}`};
-  if(cmd==='powershell.exe'&&script.includes('GPU Process Memory')){memoryQueries.push(script);return{stdout:JSON.stringify({samples:[...memory].map(([pid,cookedBytes])=>({pid,luid:LUID,physicalNode:0,status:0,cookedBytes})),...Object.fromEntries(['expectedBefore','expectedAfter'].map(key=>[key,procs.filter(([pid,type])=>type==='C+G'&&!own.includes(pid)).map(([pid])=>({pid,luid:LUID,physicalNode:0}))])),identities:procs.filter(([pid,type])=>type==='C+G'&&!own.includes(pid)).map(([pid])=>({pid,startedAt})),errors:[]})};}
-  if(args.includes('--query-gpu=index,uuid'))return{stdout:`1,${a.gpuUuid}`};
+  if(cmd==='powershell.exe'&&script.includes('GPU Process Memory')){memoryQueries.push(script);return{stdout:JSON.stringify({samples:[...memory].map(([pid,cookedBytes])=>({pid,luid:LUID,physicalNode:0,status:0,cookedBytes})),...Object.fromEntries(['expectedBefore','expectedAfter'].map(key=>[key,procs.filter(([pid,type])=>['C','C+G'].includes(type)&&!own.includes(pid)).map(([pid])=>({pid,luid:LUID,physicalNode:0}))])),identities:procs.filter(([pid,type])=>['C','C+G'].includes(type)&&!own.includes(pid)).map(([pid])=>({pid,startedAt,sessionId:1})),errors:[]})};}
+  if(args.includes('--query-gpu=index,uuid,pci.bus_id'))return{stdout:`1,${a.gpuUuid},00000000:C1:00.0`};
+  if(args.includes('--query-gpu=memory.total,memory.free'))return{stdout:'96000,90000'};
   if(args.includes('-x'))return{stdout:`<uuid>${a.gpuUuid}</uuid><processes>${procs.map(([pid,type])=>`<process_info><pid>${pid}</pid><type>${type}</type></process_info>`).join('')}</processes>`};
   return{stdout:procs.filter(([,type])=>type!=='G').map(([pid])=>`${pid},${a.gpuUuid}`).join('\n')};};
  const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>processTable()};
@@ -129,19 +130,50 @@ test('GPU1 guard: bounded measured desktop C+G passes, pure compute/over-limit/u
  const proof=await guardHardware(a,own,deps);
  const {counterProof,...graphics}=proof.foreignGraphics;
  assert.deepEqual(graphics,{luid:LUID,processes:2,totalBytes:1000*MiB,maxProcessBytes:900*MiB,processLimitBytes:1024*MiB,totalLimitBytes:3*1024*MiB},'measured foreign total is recorded, never hidden');
- assert.deepEqual(counterProof.requiredProcesses,[{pid:99,startedAt},{pid:98,startedAt}]);
+ assert.deepEqual(counterProof.requiredProcesses,[{pid:99,startedAt,sessionId:1},{pid:98,startedAt,sessionId:1}]);
  assert.deepEqual(JSON.parse(JSON.stringify(proof.foreignGraphics)),graphics,'Node-only counter completeness proof must not alter the external Rust hardware-observation JSON');
  assert.deepEqual([...validateGpuProcessMemory(counterProof,LUID,counterProof.requiredProcesses)],[[99,900*MiB],[98,100*MiB]]);
  assert.equal(memoryQueries.length,1);assert.equal(memoryQueries[0],gpuProcessMemoryScript(LUID,counterProof.requiredProcesses),'memory comes from the GPU1 LUID CUDA itself reported');
  reset([[97,'G']],[]);assert.equal((await guardHardware(a,own,deps)).foreignGraphics.totalBytes,0);assert.equal(memoryQueries.length,0,'graphics-only needs no measurement');
- reset([[99,'C+G']],[[99,1024*MiB+1]]);await assert.rejects(guardHardware(a,own,deps),/uses 1025 MiB of GPU1 \(limit 1024 MiB\)/);
+ reset([[99,'C+G']],[[99,1024*MiB+1]]);await assert.rejects(guardHardware(a,own,deps),/uses 1025 MiB of approved GPU \(limit 1024 MiB\)/);
  reset([[99,'C+G'],[98,'C+G'],[96,'C+G'],[95,'C+G']],[[99,900*MiB],[98,900*MiB],[96,900*MiB],[95,900*MiB]]);await assert.rejects(guardHardware(a,own,deps),/in total \(limit 3072 MiB\)/);
- reset([[99,'C']],[[99,1]]);await assert.rejects(guardHardware(a,own,deps),/foreign pure-compute/,'pure compute refuses at any size');
+ reset([[99,'C'],[98,'C+G']],[[99,MiB],[98,MiB]]);assert.equal((await guardHardware(a,own,deps)).foreignGraphics.totalBytes,2*MiB,'idle C and C+G use the SAME bounded allocation policy');
+ reset([[99,'C']],[[99,1024*MiB+1]]);await assert.rejects(guardHardware(a,own,deps),/limit 1024 MiB/);
+ reset([[99,'C'],[98,'C+G'],[96,'C'],[95,'C+G']],[[99,900*MiB],[98,900*MiB],[96,900*MiB],[95,900*MiB]]);await assert.rejects(guardHardware(a,own,deps),/in total/);
  reset([[99,'C+G']],[]);await assert.rejects(guardHardware(a,own,deps),/required GPU counter physical-node coverage incomplete/);
  reset([[99,'C+G']],[[99,MiB]],null);await assert.rejects(guardHardware(a,own,deps),/no adapter LUID/);
  reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,processTable:async()=>[...table,{pid:11,ppid:0,command:'Runner.Worker.exe'}]}),/foreign Runner.Worker/);
  // An unidentified compute-app type on GPU1 is not presumed desktop.
- reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,exec:async(c,args)=>args.includes('-x')?{stdout:`<uuid>${a.gpuUuid}</uuid><processes></processes>`}:exec(c,args)}),/pure compute or unidentified type/);
+ reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,exec:async(c,args)=>args.includes('-x')?{stdout:`<uuid>${a.gpuUuid}</uuid><processes></processes>`}:exec(c,args)}),/unidentified type/);
+});
+function sharedGpu0Fixture() {
+ const previousSourceSha='7090f742a7d2973dc3cc1c144aa8a272cdc293c9';
+ const approval={sourceSha:source,candleSourceTransitionSha256:digest,candleDeviceTransition:{schemaVersion:1,previousSourceSha,nextSourceSha:source,previousApprovedPlanSha256:digest,previousHeadSha256:digest,previousSequence:1,previousGenerationCount:1,previousConsumedIds:['candle.distilled.representative-repro.bf16.generation-1'],previousClaimSha256:digest,previousDevice:{physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'},nextDevice:{physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'}}};
+ return {backend:'candle',sourceSha:source,...approval.candleDeviceTransition.nextDevice,cudaVisibleDevices:'0',logicalCudaOrdinal:0,approvedPlan:approval,approvedPlanSha256:planHash(approval),hfHome:'D:/declared-synthetic-hf'};
+}
+test('approved GPU0 target propagates exact mask and identity; legacy cannot switch devices (DECLARED SYNTHETIC)',()=>{
+ const a=sharedGpu0Fixture(); assert.equal(admittedCandleDevice(a).physicalGpuId,'0');
+ const env=offlineChildEnv({},a,{state:'D:/declared-synthetic-state',workerId:'fixture'});assert.equal(env.CUDA_VISIBLE_DEVICES,'0');assert.equal(env.SCENEWORKS_GPU_ID,'0');
+ for(const mutate of [x=>delete x.approvedPlan,x=>x.physicalGpuId='1',x=>x.cudaVisibleDevices='1',x=>x.logicalCudaOrdinal=1,x=>x.gpuUuid='GPU-ffff',x=>x.pciBusId='00000000:C1:00.0',x=>x.sourceSha='c'.repeat(40),x=>x.approvedPlanSha256='f'.repeat(64),x=>x.approvedPlan.candleDeviceTransition.nextDevice.physicalGpuId='1']){const bad=structuredClone(a);mutate(bad);assert.throws(()=>admittedCandleDevice(bad));}
+});
+test('GPU0 bounded-shared guard verifies index/UUID/PCI, ownership, sessions, headroom and PID reuse without exclusivity claims (DECLARED MOCK)',async()=>{
+ const a=sharedGpu0Fixture(),LUID='0xdeadbeef_0x00000001',startedAt='2000-01-01T00:00:00.0000000Z';
+ const table=[{pid:20,ppid:1,command:'node.exe'},{pid:21,ppid:20,command:'owned.exe',startedAt,sessionId:1},{pid:99,ppid:1,command:'unrelated.exe',startedAt,sessionId:1}];
+ const expected=[{pid:99,luid:LUID,physicalNode:0}],observation={expectedBefore:expected,expectedAfter:expected,samples:[{...expected[0],status:0,cookedBytes:1}],identities:[{pid:99,startedAt,sessionId:1}],errors:[]};
+ const exec=async(command,args,options)=>{if(command==='powershell.exe'){if(args.at(-1).includes('cuDeviceGetLuid')){assert.equal(options.env.CUDA_VISIBLE_DEVICES,'0');return{stdout:`${a.gpuUuid} luid=${LUID}`};}return{stdout:JSON.stringify(observation)};}
+ if(args.includes('-i'))assert.equal(args[args.indexOf('-i')+1],'0');
+ if(args.includes('--query-gpu=index,uuid,pci.bus_id'))return{stdout:`0,${a.gpuUuid},${a.pciBusId}`};
+ if(args.includes('--query-gpu=memory.total,memory.free'))return{stdout:'96000,90000'};
+ if(args.includes('-x'))return{stdout:`<uuid>${a.gpuUuid}</uuid><processes><process_info><pid>21</pid><type>C</type></process_info><process_info><pid>99</pid><type>C</type></process_info></processes>`};return{stdout:`21,${a.gpuUuid}\n99,${a.gpuUuid}`};};
+ const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>structuredClone(table)};
+ const proof=await guardHardware(a,[21],deps);assert.equal(proof.physicalGpuId,'0');assert.equal(proof.pciBusId,a.pciBusId);assert.equal(proof.foreignGraphics.totalBytes,1);assert.equal(proof.sharedPolicy.sharingMode,'bounded-shared');assert.equal(proof.sharedPolicy.exclusiveThroughputClaim,false);assert.equal(proof.sharedPolicy.deviceTotalAttributionClaim,false);assert.equal(proof.sharedPolicy.computeActivityAssessment,'unsupported-dedicated-memory-only');assert.deepEqual(JSON.parse(JSON.stringify(proof)).sharedPolicy,proof.sharedPolicy);
+ for(const [query,stdout] of [['--query-gpu=index,uuid,pci.bus_id',`1,${a.gpuUuid},${a.pciBusId}`],['--query-gpu=index,uuid,pci.bus_id',`0,GPU-ffff,${a.pciBusId}`],['--query-gpu=index,uuid,pci.bus_id',`0,${a.gpuUuid},00000000:C1:00.0`],['--query-gpu=memory.total,memory.free','96000,NaN'],['--query-gpu=memory.total,memory.free','96000,0'],['--query-gpu=memory.total,memory.free','96000,96001'],['--query-compute-apps=pid,gpu_uuid',`21,GPU-ffff\n99,${a.gpuUuid}`]])await assert.rejects(guardHardware(a,[21],{...deps,exec:(c,args,o)=>args.includes(query)?Promise.resolve({stdout}):exec(c,args,o)}));
+ await assert.rejects(guardHardware(a,[21,99],deps),/unrelated PID/);
+ await assert.rejects(guardHardware(a,[21],{...deps,exec:async(c,args,o)=>{const result=await exec(c,args,o);return args.includes('-x')?{stdout:result.stdout.replace('<type>C</type>','<type>UNKNOWN</type>')}:result;}}),/identity\/type/);
+ await assert.rejects(guardHardware(a,[21],{...deps,processTable:async()=>{const t=structuredClone(table);delete t[2].sessionId;return t;}}),/session identity/);
+ for(const mutate of [x=>delete x.sessionId,x=>x.startedAt='invalid',x=>x.startedAt='2001-01-01T00:00:00Z'])await assert.rejects(guardHardware(a,[21],{...deps,processTable:async()=>{const t=structuredClone(table);mutate(t[1]);return t;}}));
+ const changed=structuredClone(observation);changed.identities[0].sessionId=2;await assert.rejects(guardHardware(a,[21],{...deps,exec:(c,args,o)=>c==='powershell.exe'&&args.at(-1).includes('GPU Process Memory')?Promise.resolve({stdout:JSON.stringify(changed)}):exec(c,args,o)}),/session identity/);
+ let calls=0;await assert.rejects(guardHardware(a,[21],{...deps,processTable:async()=>{const t=structuredClone(table);if(++calls>1)t[2].startedAt='2001-01-01T00:00:00Z';return t;}}),/changed\/reused/);
 });
 const counterFixture=JSON.parse(await readFile(new URL('./fixtures/flux3-gpu-counter-normalized-synthetic.json',import.meta.url),'utf8'));
 const counterLuid=counterFixture.luid, counterRequired=counterFixture.requiredProcesses;
