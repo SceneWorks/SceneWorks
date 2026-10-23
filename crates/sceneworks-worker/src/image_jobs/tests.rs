@@ -21688,6 +21688,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
         // and reaches the generic `generate_candle_stream` base-model admission gate.
         "KolorsEdit",
+        // MOSS retains edit rank A/B tensors on its existing base projections, with no second
+        // independently loaded conditioning network. Its native edit peak includes those tensors
+        // and the reference workspace; the exact cold estimate and loader gate are checked below.
+        "MossImageEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
@@ -21718,6 +21722,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // them. Their companion snapshot's transformer is replaced by the primary File and must not be
     // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "MossImageEdit",
+            "moss.rs",
+            include_str!("moss.rs"),
+            "moss_edit_cold_peak(variant,",
+        ),
         (
             "SdxlEdit",
             "sdxl_edit_candle.rs",
@@ -21846,6 +21856,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_with_request_state_using_owned(",
         ]
         .iter()
         .filter_map(|needle| {
@@ -21874,6 +21885,60 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             );
         }
     }
+
+    // MOSS computes its exact edit peak before the cache handoff and admits inside the actual
+    // cache-miss loader. Check the Candle arm specifically, so the parallel MLX arm cannot carry
+    // this assertion, then bind the production loader callback to the admitted factory boundary.
+    let moss = include_str!("moss.rs");
+    let candle_peak = moss
+        .split_once("#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]\n    let peak = if edit {")
+        .expect("MOSS must retain its Candle cold-peak arm")
+        .1
+        .split_once("} else {")
+        .expect("MOSS must retain separate ordinary and edit estimates")
+        .0;
+    assert!(
+        candle_peak.lines().any(|line| {
+            line.contains("moss_edit_cold_peak(variant,") && !line.trim_start().starts_with("//")
+        }),
+        "MOSS Candle edit must use the exact native edit peak before the cache handoff"
+    );
+    let loader = moss
+        .split_once("move |id, spec| {")
+        .expect("MOSS must retain its actual cache-miss loader")
+        .1
+        .split_once("\n        },")
+        .expect("MOSS loader callback must end")
+        .0;
+    let live_loader = loader
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live_loader.contains("moss_load_admitted(")
+            && live_loader.contains("|| load_generator(id, spec)"),
+        "MOSS actual provider construction must remain inside the admitted loader closure"
+    );
+    let factory = moss
+        .split_once("fn moss_load_admitted<T>(")
+        .expect("MOSS admitted factory must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("MOSS admitted factory must end")
+        .0;
+    let live_factory = factory
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let admission = live_factory
+        .find("moss_admit(peak, 0, budget)")
+        .expect("MOSS cold admission must grant no residency credit");
+    let load = live_factory
+        .find("\n    load()")
+        .expect("MOSS admitted factory must invoke the supplied loader");
+    assert!(admission < load, "MOSS must admit before provider loading");
 
     // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the

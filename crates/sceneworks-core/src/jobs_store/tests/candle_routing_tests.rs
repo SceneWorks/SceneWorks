@@ -130,6 +130,64 @@ const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
+fn moss_edit_candle_named_lane_and_claim_share_strict_typed_contract() {
+    let worker = gpu_worker(CANDLE_CAPS);
+    for model in ["moss_image_base", "moss_image_sft"] {
+        for reference in [
+            json!({"sourceAssetId":"ref"}),
+            json!({"referenceAssetId":"ref"}),
+            json!({"referenceAssetIds":["ref"],"sourceAssetId":"ref"}),
+        ] {
+            let mut payload = object(
+                json!({"model":model,"mode":"edit_image","prompt":"make it blue",
+                "advanced":{"mossImageEdit":{"reference_max_edge":256,"use_kv_cache":false}}}),
+            );
+            payload.extend(object(reference));
+            for job in [
+                image_generate_job(json!(payload)),
+                image_edit_job(json!(payload)),
+            ] {
+                assert_eq!(
+                    image_job_candle_lane(&job),
+                    Some(CandleImageLane::MossImageEdit)
+                );
+                assert!(worker_supports_job(&worker, &job));
+            }
+            assert!(crate::moss_image::edit_backend_eligible(model, "candle"));
+            assert!(crate::moss_image::edit_backend_eligible(model, "mlx"));
+            assert!(!crate::moss_image::edit_backend_eligible(model, "unknown"));
+            for patch in [
+                json!({"referenceAssetIds":[] ,"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other"]}),
+                json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"]}),
+                json!({"maskAssetId":"mask"}),
+                json!({"loras":[{"id":"custom"}]}),
+                json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
+                json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
+                json!({"advanced":{"controlImage":"pose"}}),
+            ] {
+                let mut invalid = payload.clone();
+                invalid.extend(object(patch));
+                let job = image_edit_job(json!(invalid));
+                assert_eq!(image_job_candle_lane(&job), None, "{invalid:?}");
+                assert!(!worker_supports_job(&worker, &job), "{invalid:?}");
+            }
+        }
+        // Ordinary generation remains a distinct generic lane and acquires no edit conditioning.
+        let ordinary = image_generate_job(json!({"model":model,"mode":"text_to_image"}));
+        assert_eq!(
+            image_job_candle_lane(&ordinary),
+            Some(CandleImageLane::TextToImage)
+        );
+    }
+    assert!(!crate::moss_image::edit_backend_eligible(
+        "krea_2_raw",
+        "candle"
+    ));
+}
+
+#[test]
 fn candle_marker_detection_parses_exact_capability_membership() {
     assert!(encoded_worker_has_capability(
         r#"["gpu","image_generate","candle"]"#,
@@ -164,6 +222,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
     assert_eq!(
         candle_image_route_lanes(),
         vec![
+            CandleImageLane::MossImageEdit,
             CandleImageLane::InstantId,
             CandleImageLane::SdxlControl,
             CandleImageLane::SdxlEdit,

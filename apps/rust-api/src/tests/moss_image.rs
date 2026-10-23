@@ -13,6 +13,55 @@ fn setup(temp: &tempfile::TempDir) {
     .unwrap();
 }
 #[tokio::test]
+async fn moss_edit_catalog_projection_tracks_actual_backend_even_with_a_shared_snapshot_cache() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let path = temp.path().join("config/manifests/builtin.models.jsonc");
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["models"].as_array_mut().unwrap().push(json!({"id":"krea_2_raw","name":"Krea","type":"image","family":"krea","capabilities":["text_to_image","edit_image"],"downloads":[],"paths":{}}));
+    std::fs::write(path, manifest.to_string()).unwrap();
+    let (_, mut state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let mut previous: Option<(&str, std::sync::Arc<Vec<Value>>)> = None;
+    for candle_required in [false, true, false] {
+        state.settings.candle_required = candle_required;
+        let backend = crate::generation::enqueue_backend(&state);
+        let models = crate::models::model_catalog_snapshot(&state).await.unwrap();
+        let same_backend = crate::models::model_catalog_snapshot(&state).await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&models, &same_backend));
+        if let Some((previous_backend, previous_models)) = previous.as_ref() {
+            assert_eq!(
+                std::sync::Arc::ptr_eq(previous_models, &models),
+                *previous_backend == backend,
+                "a backend transition must rebuild the shared catalog snapshot"
+            );
+        }
+        previous = Some((backend, models.clone()));
+        for model in models.iter().filter(|model| {
+            sceneworks_core::moss_image::is_moss(model["id"].as_str().unwrap_or(""))
+        }) {
+            let caps = model["capabilities"].as_array().unwrap();
+            assert!(caps.contains(&json!("text_to_image")));
+            assert!(caps.contains(&json!("edit_image")));
+            assert_eq!(model["defaults"]["steps"], 50);
+            assert_eq!(model["defaults"]["guidanceScale"], 3);
+        }
+        let krea = models
+            .iter()
+            .find(|model| model["id"] == "krea_2_raw")
+            .unwrap();
+        assert_eq!(krea["capabilities"], json!(["text_to_image", "edit_image"]));
+        assert_eq!(
+            backend,
+            if !cfg!(target_os = "macos") || candle_required {
+                "candle"
+            } else {
+                "mlx"
+            }
+        );
+    }
+}
+#[tokio::test]
 async fn moss_component_download_repairs_wrong_revision_and_skips_exact_cached_revision() {
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
@@ -349,6 +398,98 @@ async fn moss_batch_prompts_are_verbatim_and_wrong_optional_revision_cannot_sati
             error.to_string().contains("conditional-components"),
             "{error}"
         );
+    }
+}
+
+#[tokio::test]
+async fn moss_edit_candle_enqueue_requires_exact_package_and_is_actually_claimable() {
+    let _hf = isolate_hf_cache();
+    for model in ["moss_image_base", "moss_image_sft"] {
+        let temp = tempfile::tempdir().unwrap();
+        setup(&temp);
+        let mut settings = test_settings(&temp);
+        settings.candle_required = true;
+        let (app, state) = create_app_with_state(settings).unwrap();
+        assert_eq!(crate::generation::enqueue_backend(&state), "candle");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"Candle edit"}),
+        )
+        .await;
+        let route = format!(
+            "/api/v1/projects/{}/assets",
+            project["id"].as_str().unwrap()
+        );
+        let (_, asset) =
+            request_multipart_upload(app.clone(), &route, "ref.png", "image/png", b"png-bytes")
+                .await;
+        let body = json!({"projectId":project["id"],"model":model,"mode":"edit_image","prompt":"blue cup","referenceAssetIds":[asset["id"]]});
+        let mut selected = json!({"repo":"chinoll/Moss-Image-Edit","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","files":["adapter_config.json","adapter_model.safetensors"]});
+        for seed_wrong_revision in [false, true] {
+            if seed_wrong_revision {
+                super::yue2_catalog::seed_snapshot(&temp, &selected);
+            }
+            let (status, error) =
+                request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(error.to_string().contains("moss_image_edit"), "{error}");
+        }
+        selected["revision"] = json!("e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11");
+        super::yue2_catalog::seed_snapshot(&temp, &selected);
+        let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        let downloads = job["payload"]["modelManifestEntry"]["downloads"]
+            .as_array()
+            .unwrap();
+        assert!(downloads
+            .iter()
+            .any(|row| row["repo"] == selected["repo"] && row["revision"] == selected["revision"]));
+        assert!(!downloads
+            .iter()
+            .any(|row| row["repo"] == "lodestones/MOSS-Image-SFT-8-steps-dmd"));
+        state
+            .jobs_store
+            .register_worker(sceneworks_core::jobs_store::RegisterWorker {
+                worker_id: "candle-edit-fixture".into(),
+                gpu_id: "0".into(),
+                gpu_name: None,
+                capabilities: vec![
+                    WorkerCapability::Gpu,
+                    WorkerCapability::ImageGenerate,
+                    WorkerCapability::ImageEdit,
+                    WorkerCapability::Unknown("candle".into()),
+                ],
+                loaded_models: vec![],
+                utilization: None,
+            })
+            .unwrap();
+        let claimed = state
+            .jobs_store
+            .claim_next_job("candle-edit-fixture")
+            .unwrap()
+            .expect("Candle worker claims typed edit");
+        assert_eq!(claimed.id, job["id"].as_str().unwrap());
+        assert_eq!(claimed.payload["referenceAssetIds"], json!([asset["id"]]));
+        assert_eq!(
+            claimed.job_type,
+            sceneworks_core::contracts::JobType::ImageEdit
+        );
+        let (status, ordinary) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({"projectId":project["id"],"model":model,"prompt":"ordinary cup"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{ordinary}");
+        assert!(ordinary["payload"]["modelManifestEntry"]["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["repo"] != "chinoll/Moss-Image-Edit"
+                && row["repo"] != "lodestones/MOSS-Image-SFT-8-steps-dmd"));
     }
 }
 

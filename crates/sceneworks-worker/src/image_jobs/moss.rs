@@ -40,6 +40,16 @@ fn moss_admit(peak: u64, owned: u64, budget: gen_core::MemoryBudget) -> WorkerRe
     }
     Ok(())
 }
+/// The actual worker factory boundary: a cold estimate receives no residency credit and must
+/// pass before the provider is allowed to construct or materialize any weights.
+fn moss_load_admitted<T>(
+    peak: u64,
+    budget: gen_core::MemoryBudget,
+    load: impl FnOnce() -> gen_core::Result<T>,
+) -> gen_core::Result<T> {
+    moss_admit(peak, 0, budget).map_err(|e| gen_core::Error::Unsupported(e.to_string()))?;
+    load()
+}
 fn moss_execution_asset_selected(
     mode: gen_core::moss_image::MossImageAcceleration,
     repo: &str,
@@ -225,6 +235,26 @@ fn moss_load_reference(
         height: rgb.height(),
         pixels: rgb.into_raw(),
     })
+}
+fn moss_edit_cold_peak(
+    variant: gen_core::moss_image::MossImageVariant,
+    spec: &LoadSpec,
+    request: &GenerationRequest,
+    references: &[Image],
+    options: sceneworks_core::moss_image::EditOptions,
+) -> WorkerResult<u64> {
+    moss_memory::edit_request_peak(
+        variant,
+        spec,
+        request,
+        gen_core::moss_image_edit::MossImageEditInputs {
+            references,
+            reference_max_edge: options.reference_max_edge,
+            use_kv_cache: options.use_kv_cache,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| crate::classify_engine_error("MOSS edit cold admission", e))
 }
 fn moss_edit_peak(
     generator: &dyn Generator,
@@ -424,18 +454,7 @@ async fn generate_moss_stream_using(
     pinned?;
     #[cfg(target_os = "macos")]
     let peak = if edit {
-        moss_memory::edit_request_peak(
-            variant,
-            &spec,
-            &native,
-            gen_core::moss_image_edit::MossImageEditInputs {
-                references: &references,
-                reference_max_edge: edit_options.reference_max_edge,
-                use_kv_cache: edit_options.use_kv_cache,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| crate::classify_engine_error("MOSS edit cold admission", e))?
+        moss_edit_cold_peak(variant, &spec, &native, &references, edit_options)?
     } else {
         let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
@@ -471,14 +490,18 @@ async fn generate_moss_stream_using(
             .ok_or_else(|| WorkerError::InvalidPayload("MOSS memory estimate overflow".into()))?
     };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let peak = moss_memory::selected_preload_estimate(
-        variant,
-        &spec,
-        &native,
-        gen_core::moss_image::MossImageAdvancedInputs::default(),
-    )
-    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
-    .peak_bytes;
+    let peak = if edit {
+        moss_edit_cold_peak(variant, &spec, &native, &references, edit_options)?
+    } else {
+        moss_memory::selected_preload_estimate(
+            variant,
+            &spec,
+            &native,
+            gen_core::moss_image::MossImageAdvancedInputs::default(),
+        )
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
+        .peak_bytes
+    };
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
     let job_request = request.clone();
@@ -511,14 +534,12 @@ async fn generate_moss_stream_using(
         spec,
         "MOSS exact native load".into(),
         move |id, spec| {
-            moss_admit(
+            moss_load_admitted(
                 peak,
-                0,
                 moss_live_budget(&cold_settings)
                     .map_err(|e| gen_core::Error::Unsupported(e.to_string()))?,
+                || load_generator(id, spec),
             )
-            .map_err(|e| gen_core::Error::Unsupported(e.to_string()))?;
-            load_generator(id, spec)
         },
         move |generator, _state, _loaded_policy, warm_policy, _external, owned, tx, cancel| {
             warm_policy
@@ -1151,6 +1172,147 @@ mod moss_consumer_tests {
             }]))
         }
     }
+    #[tokio::test]
+    async fn direct_moss_edit_worker_refuses_invalid_controls_before_any_api_or_provider_call() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("data"));
+        let api = ApiClient::new(&settings);
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for patch in [
+                json!({"sourceAssetId":"conflict"}),
+                json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                json!({"advanced":{"controlImage":"pose"}}),
+                json!({"referenceAssetIds":[]}),
+            ] {
+                let mut payload =
+                    json!({"model":model,"mode":"edit_image","referenceAssetIds":["ref"]})
+                        .as_object()
+                        .unwrap()
+                        .clone();
+                payload.extend(patch.as_object().unwrap().clone());
+                let job: JobSnapshot = serde_json::from_value(json!({"id":"moss-refusal","type":"image_edit","status":"queued",
+                    "payload":payload,"result":{},"requestedGpu":"auto","progress":0,"stage":"queued","message":"","attempts":1,
+                    "cancelRequested":false,"createdAt":"2026-10-23T00:00:00Z","updatedAt":"2026-10-23T00:00:00Z"})).unwrap();
+                assert!(matches!(
+                    run_image_generate_job_unexplained(&api, &settings, &job).await,
+                    Err(WorkerError::InvalidPayload(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn cold_edit_uses_native_typed_validation_before_provider_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let spec = LoadSpec::new(WeightsSource::Dir(temp.path().to_path_buf()));
+        let mut request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+            width: 16, height: 16, ..Default::default()
+        }).unwrap();
+        let refs = [Image { width: 48, height: 16, pixels: vec![73; 48 * 16 * 3] }];
+        let options = sceneworks_core::moss_image::EditOptions { reference_max_edge: 32, use_kv_cache: false };
+        for variant in [MossImageVariant::Base, MossImageVariant::Sft] {
+            let missing = moss_edit_cold_peak(variant, &spec, &request, &refs, options).unwrap_err();
+            assert!(missing.to_string().to_lowercase().contains("edit"), "{missing}");
+            assert!(moss_edit_cold_peak(variant, &spec, &request, &[], options).is_err());
+            request.moss_image.as_mut().unwrap().acceleration = MossImageAcceleration::Dmd(MossDmdPrecision::UnmergedBf16);
+            assert!(moss_edit_cold_peak(variant, &spec, &request, &refs, options).is_err());
+            request.moss_image.as_mut().unwrap().acceleration = MossImageAcceleration::Off;
+        }
+    }
+
+    #[test]
+    fn edit_worker_factory_refuses_before_load_then_uses_typed_warm_peak_and_reenters() {
+        let loads = Cell::new(0);
+        let budget = gen_core::MemoryBudget {
+            total_bytes: 100,
+            committed_bytes: 30,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 10,
+        };
+        let load = || {
+            loads.set(loads.get() + 1);
+            Ok(Probe::new())
+        };
+        // The native edit estimate is 73 bytes in the probe; the ordinary placeholder would fit.
+        assert!(moss_load_admitted(73, budget, load).is_err());
+        assert_eq!(
+            loads.get(),
+            0,
+            "refusal must precede the actual provider callback"
+        );
+        let generator = moss_load_admitted(60, budget, load).unwrap();
+        assert_eq!(loads.get(), 1);
+        let request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+            width: 16,
+            height: 16,
+            ..Default::default()
+        })
+        .unwrap();
+        let references = [Image {
+            width: 48,
+            height: 16,
+            pixels: vec![73; 48 * 16 * 3],
+        }];
+        let options = sceneworks_core::moss_image::EditOptions {
+            reference_max_edge: 32,
+            use_kv_cache: false,
+        };
+        let peak = moss_edit_peak(&generator, &request, &references, options).unwrap();
+        assert_eq!(peak, 73);
+        // A linked ordinary-only provider cannot silently serve an edit via Generator::generate.
+        struct OrdinaryOnly(Probe);
+        impl Generator for OrdinaryOnly {
+            fn descriptor(&self) -> &gen_core::ModelDescriptor { self.0.descriptor() }
+            fn validate(&self, request: &GenerationRequest) -> gen_core::Result<()> { self.0.validate(request) }
+            fn generate(&self, request: &GenerationRequest, progress: &mut dyn FnMut(Progress)) -> gen_core::Result<GenerationOutput> {
+                self.0.generate(request, progress)
+            }
+        }
+        let wrong_provider = OrdinaryOnly(Probe::new());
+        assert!(moss_edit_peak(&wrong_provider, &request, &references, options).is_err());
+        assert!(moss_edit_render(&wrong_provider, &request, &references, options, &mut |_| {}).is_err());
+        assert_eq!(wrong_provider.0.reads.get(), 0, "unsupported edit must not publish ordinary receipts");
+        assert!(moss_admit(peak, moss_owned_weight_bytes(&generator, 0), budget).is_err());
+        generator.owned_weight_bytes.set(20);
+        moss_admit(peak, moss_owned_weight_bytes(&generator, 0), budget).unwrap();
+        let (images, facts) =
+            moss_edit_render(&generator, &request, &references, options, &mut |_| {}).unwrap();
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            facts[sceneworks_core::moss_image::EDIT_REPORT_KEY]["references"][0]
+                ["original_dimensions"],
+            json!([48, 16])
+        );
+        generator.failure.set(true);
+        assert!(moss_edit_render(&generator, &request, &references, options, &mut |_| {}).is_err());
+        assert!(generator.edit_report.borrow().is_none());
+        generator.failure.set(false);
+        generator.cancel.set(true);
+        assert!(matches!(
+            moss_edit_render(&generator, &request, &references, options, &mut |_| {}),
+            Err(WorkerError::Canceled(_))
+        ));
+        generator.cancel.set(false);
+        let request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+            width: 16,
+            height: 16,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            moss_edit_render(&generator, &request, &references, options, &mut |_| {})
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        assert_eq!(
+            loads.get(),
+            1,
+            "warm reentry retains only this matching provider instance"
+        );
+    }
+
     #[test]
     fn edit_calls_typed_native_method_with_uncropped_rgb_and_only_publishes_actual_success() {
         let probe = Probe::new();
