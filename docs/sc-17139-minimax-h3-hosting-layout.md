@@ -63,6 +63,10 @@ Architecture identity does **not** prove task compatibility: FL2VA and Ref2VA us
 tensor shapes but different weights. In the existing Add/Import workflow, explicitly select the
 compatible base and declare `minimaxH3Partition`:
 
+This declaration also constrains the detected source architecture, even if `family` is omitted.
+Non-H3 local, remote, or linked checkpoint bytes are refused before registration; managed staging
+is discarded and refused linked plan bindings are invalidated without changing library files.
+
 | Declaration | Exact `baseModel` | Supported operations |
 | --- | --- | --- |
 | `fl2va` | `minimax_h3` | Text, first frame, first/last frames |

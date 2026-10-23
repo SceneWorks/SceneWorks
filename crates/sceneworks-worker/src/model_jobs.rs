@@ -5812,6 +5812,23 @@ pub(crate) fn linked_checkpoint_manifest_entry(
     entry
 }
 
+fn minimax_h3_source_family_error(payload: &JsonObject, detected: Option<&str>) -> Option<String> {
+    for entry in [
+        Some(payload),
+        payload.get("manifestEntry").and_then(Value::as_object),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(reason) =
+            sceneworks_core::minimax_h3_import::validate_declared_source_family(entry, detected)
+        {
+            return Some(format!("[checkpoint-plan:family-mismatch] {reason}"));
+        }
+    }
+    None
+}
+
 /// Compile a linked checkpoint under an approved root and register it as a selectable model.
 ///
 /// Nothing is downloaded, copied, moved or deleted: the only writes are the plan store's own
@@ -5881,6 +5898,23 @@ async fn run_linked_checkpoint_import_job(
                 .await;
             }
         };
+    if let Some(reason) = minimax_h3_source_family_error(&job.payload, Some(&compiled.plan.family))
+    {
+        CheckpointPlanStore::open(&settings.data_dir)
+            .invalidate(&compiled.checkpoint_id)
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "{reason}; could not invalidate refused linked plan: {error}"
+                ))
+            })?;
+        return fail_job(
+            api,
+            &job.id,
+            "Linked checkpoint import failed.",
+            Some(reason),
+        )
+        .await;
+    }
 
     if let Some(manifest_entry) = job
         .payload
@@ -6412,6 +6446,9 @@ pub(crate) async fn run_model_import_job(
             .await;
         }
     };
+    if let Some(reason) = minimax_h3_source_family_error(&job.payload, detected_family.as_deref()) {
+        return fail_job(api, &job.id, "Model import failed.", Some(reason)).await;
+    }
     let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
     let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
         Ok(family) => family,
@@ -6492,6 +6529,18 @@ pub(crate) async fn run_model_import_job(
         crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
         Some(target_dir.clone())
     );
+    if let Some(reason) =
+        minimax_h3_source_family_error(&job.payload, Some(&install.compiled.plan.family))
+    {
+        plan_store
+            .remove_managed(&install.install_id)
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "{reason}; could not roll back refused managed import: {error}"
+                ))
+            })?;
+        return fail_job(api, &job.id, "Model import failed.", Some(reason)).await;
+    }
     // A CURATED managed NVFP4 variant confirms against its registration (sc-11045, epic 11037).
     //
     // `ManagedCheckpointVariantV1::confirm_installed` compares the committed install id, checkpoint

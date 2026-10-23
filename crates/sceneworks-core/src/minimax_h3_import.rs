@@ -88,6 +88,29 @@ impl MiniMaxH3Partition {
     }
 }
 
+/// H3 compatibility is also an architecture constraint, even when `family` was omitted.
+pub fn entry_requires_minimax_h3_family(entry: &Map<String, Value>) -> bool {
+    entry_str(entry, "family") == Some(MINIMAX_H3_IMPORT_FAMILY)
+        || entry
+            .get("minimaxH3Partition")
+            .is_some_and(|value| !value.is_null())
+        || matches!(
+            entry_str(entry, "baseModel"),
+            Some(MINIMAX_H3_BASE_PARTITION_MODEL | MINIMAX_H3_REFERENCE_PARTITION_MODEL)
+        )
+}
+
+/// Enforce compatibility against source evidence, not against a caller-supplied family stamp.
+pub fn validate_declared_source_family(
+    entry: &Map<String, Value>,
+    detected: Option<&str>,
+) -> Result<(), String> {
+    if entry_requires_minimax_h3_family(entry) && detected != Some(MINIMAX_H3_IMPORT_FAMILY) {
+        return Err(format!("MiniMax-H3 compatibility declaration requires detected source family {MINIMAX_H3_IMPORT_FAMILY}; got {}", detected.unwrap_or("unknown")));
+    }
+    Ok(())
+}
+
 /// Resolve task semantics only; the returned stock id must NEVER be used as weight identity.
 pub fn entry_partition_model(
     entry: &Map<String, Value>,

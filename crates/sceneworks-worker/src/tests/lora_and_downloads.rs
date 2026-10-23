@@ -2637,3 +2637,52 @@ async fn h3_import_registration_requires_exact_task_compatibility() {
         }
     }
 }
+
+#[tokio::test]
+async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_path() {
+    let _env = isolate_hf_cache();
+    let (api_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    for kind in ["managed", "remote", "linked"] {
+        for declaration_on_entry in [false, true] {
+            let fixture = managed_import_fixture_with_id(api_url.clone(), &format!("foreign_{kind}_{declaration_on_entry}")).await;
+            crate::minimax_h3_import_fixture::write_safetensors(&fixture.source, &[
+                ("model.diffusion_model.input_blocks.7.0.out_layers.3.weight", "F16"),
+                ("model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight", "F16"),
+                ("conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight", "F16"),
+                ("conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight", "F16"),
+                ("first_stage_model.encoder.conv_in.weight", "F16"),
+                ("first_stage_model.decoder.conv_out.weight", "F16"),
+            ], 0x31);
+            let original = std::fs::read(&fixture.source).unwrap();
+            let mut job = fixture.job(None);
+            job.payload.remove("family");
+            let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+            entry.remove("family");
+            entry.insert("type".to_owned(), json!("video"));
+            let declaration = json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"}).as_object().unwrap().clone();
+            if declaration_on_entry { entry.extend(declaration); } else { job.payload.extend(declaration); }
+            let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+            let linked_id = if kind == "linked" {
+                let root = store.approve_root(fixture.source.parent().unwrap()).unwrap();
+                let compiled = store.compile_linked(&root.root_id, "kreamania.safetensors").unwrap();
+                assert_eq!(compiled.plan.family, "sdxl", "the negative control must contain a supported, different architecture");
+                job.payload.remove("sourcePath");
+                job.payload.insert("ownershipMode".to_owned(), json!("linked"));
+                job.payload.insert("linkedRootId".to_owned(), json!(root.root_id));
+                job.payload.insert("linkedRelativePath".to_owned(), json!("kreamania.safetensors"));
+                Some(compiled.checkpoint_id)
+            } else { None };
+            if kind == "remote" {
+                let source_url = spawn_binary_stub(original.clone()).await;
+                job.payload.remove("sourcePath");
+                job.payload.insert("sourceUrl".to_owned(), json!(format!("{source_url}/sdxl.safetensors")));
+            }
+            posts.lock().unwrap().clear();
+            let _ = super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await;
+            assert!(posts.lock().unwrap().iter().any(|post| post.get("status").and_then(Value::as_str) == Some("failed") && post.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("family-mismatch") && error.contains("sdxl"))), "must fail for source compatibility, not for incidental setup: {kind}, entry={declaration_on_entry}");
+            fixture.assert_nothing_installed(kind);
+            if let Some(id) = linked_id { assert!(store.resolve(&id).is_err(), "refused linked plan must not remain ready"); }
+            assert_eq!(std::fs::read(&fixture.source).unwrap(), original, "library/source bytes are untouched");
+        }
+    }
+}

@@ -3155,7 +3155,7 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// confined by `validate_lora_import_source_path` (LAN-exposed jobs API, epic 4484); this never
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
-fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
+fn import_source_supported(source: &FsPath) -> Result<Option<String>, ApiError> {
     let weight_file = imported_model_primary_weight_file(source);
     let Some(weight_file) = weight_file else {
         return Err(ApiError::bad_request(
@@ -3194,7 +3194,10 @@ fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
              directory with other weight files is refused.",
         ));
     }
-    Ok(())
+    Ok(match detection {
+        BaseWeightDetection::Recognized(verdict) => verdict.family,
+        BaseWeightDetection::Unrecognized { .. } => None,
+    })
 }
 
 pub(crate) async fn create_model_import_job(
@@ -3782,6 +3785,16 @@ pub(crate) async fn queue_model_import_job(
             },
         );
     }
+    // A task/base declaration constrains architecture even if the caller omitted `family`.
+    // Local bytes reconcile below; deferred remote/linked inspection must carry this same
+    // constraint into the worker instead of treating it as descriptive catalog metadata.
+    validate_minimax_h3_import_declaration(&payload)?;
+    let declaration = json!({"family":payload.family,"baseModel":payload.base_model,"minimaxH3Partition":payload.minimax_h3_partition});
+    if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(
+        declaration.as_object().expect("declaration object"),
+    ) {
+        payload.family = Some("minimax-h3".to_owned());
+    }
     let name = payload
         .name
         .clone()
@@ -3858,9 +3871,15 @@ pub(crate) async fn queue_model_import_job(
             validate_lora_import_source_path(&source_path, &allowed_source_roots)?;
             // Compatibility gate (sc-14019): refuse, with the detector's typed
             // reason, any local checkpoint whose shape has no loader today.
-            import_source_supported(FsPath::new(&source_path))?;
+            let base_family = import_source_supported(FsPath::new(&source_path))?;
             let detected = detect_model_family(FsPath::new(&source_path))
-                .map_err(model_family_inspection_error)?;
+                .map_err(model_family_inspection_error)?
+                .or(base_family);
+            sceneworks_core::minimax_h3_import::validate_declared_source_family(
+                declaration.as_object().expect("declaration object"),
+                detected.as_deref(),
+            )
+            .map_err(ApiError::bad_request)?;
             Ok::<_, ApiError>((source_path, detected))
         })
         .await
@@ -16050,5 +16069,100 @@ mod minimax_h3_import_declaration_tests {
                 );
             }
         }
+    }
+    #[tokio::test]
+    async fn omitted_family_h3_declarations_constrain_remote_and_linked_worker_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(&temp);
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let (status, root) = request_with_peer(
+            app.clone(),
+            "POST",
+            "/api/v1/models/library-roots",
+            json!({"path":library.to_str().unwrap()}),
+            "127.0.0.1:54321",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{root}");
+        for source in [
+            json!({"name":"Deferred H3 remote","source":{"kind":"huggingFace","repo":"owner/uninspected-weights"}}),
+            json!({"name":"Deferred H3 linked","linkedRootId":root["rootId"],"linkedRelativePath":"uninspected.safetensors"}),
+        ] {
+            let mut body = source;
+            body["baseModel"] = json!("minimax_h3");
+            body["minimaxH3Partition"] = json!("fl2va");
+            let (status, response) =
+                request(app.clone(), "POST", "/api/v1/models/import", body).await;
+            assert_eq!(status, StatusCode::CREATED, "{response}");
+            assert_eq!(response["payload"]["family"], "minimax-h3");
+            assert_eq!(response["payload"]["manifestEntry"]["family"], "minimax-h3");
+            assert!(
+                response["payload"]["manifestEntry"]
+                    .get("importPlan")
+                    .is_none(),
+                "uninspected bytes are never registered ready by the API"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn local_sdxl_bytes_refuse_h3_declarations_even_when_family_is_omitted() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = test_settings(&temp);
+        let source = settings
+            .data_dir
+            .join("models/incoming/foreign.safetensors");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        let mut header = serde_json::Map::new();
+        for (index, key) in [
+            "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+            "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+            "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+            "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+            "first_stage_model.encoder.conv_in.weight",
+            "first_stage_model.decoder.conv_out.weight",
+        ]
+        .iter()
+        .enumerate()
+        {
+            header.insert(
+                (*key).to_owned(),
+                json!({"dtype":"F16","shape":[1],"data_offsets":[index*2,index*2+2]}),
+            );
+        }
+        let encoded = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.extend([0_u8; 12]);
+        std::fs::write(&source, &bytes).unwrap();
+        assert_eq!(
+            super::import_source_supported(&source).unwrap().as_deref(),
+            Some("sdxl")
+        );
+        let app = app(&temp);
+        let (status, response) = request(app.clone(), "POST", "/api/v1/models/import", json!({"name":"Wrong H3 architecture","sourcePath":source.to_str().unwrap(),"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        let detail = response["detail"].as_str().unwrap();
+        assert!(
+            detail.contains("source family") && detail.contains("sdxl"),
+            "{response}"
+        );
+        assert!(!settings
+            .config_dir
+            .join("manifests/user.models.jsonc")
+            .exists());
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        // The exact same supported source remains a normal image import without H3 compatibility.
+        let (status, response) = request(
+            app,
+            "POST",
+            "/api/v1/models/import",
+            json!({"name":"Normal SDXL architecture","sourcePath":source.to_str().unwrap()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{response}");
+        assert_eq!(response["payload"]["manifestEntry"]["family"], "sdxl");
+        assert_eq!(response["payload"]["manifestEntry"]["type"], "image");
     }
 }
