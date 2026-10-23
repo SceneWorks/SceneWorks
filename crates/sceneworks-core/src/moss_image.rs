@@ -11,6 +11,79 @@ use gen_core::{
 use serde_json::{json, Value};
 
 pub const OPTIONS_KEY: &str = "mossImage";
+pub const EDIT_OPTIONS_KEY: &str = "mossImageEdit";
+pub const EDIT_REPORT_KEY: &str = "mossImageEditExecutionReport";
+pub const EDIT_PURPOSE: &str = "moss_image_edit";
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EditOptions {
+    pub reference_max_edge: u32,
+    pub use_kv_cache: bool,
+}
+impl Default for EditOptions {
+    fn default() -> Self {
+        Self {
+            reference_max_edge: 512,
+            use_kv_cache: true,
+        }
+    }
+}
+pub fn edit_options(advanced: &JsonObject) -> Result<EditOptions, String> {
+    let options: EditOptions = advanced.get(EDIT_OPTIONS_KEY).map_or_else(
+        || Ok(EditOptions::default()),
+        |v| serde_json::from_value(v.clone()).map_err(|e| format!("advanced.mossImageEdit: {e}")),
+    )?;
+    if !(16..=4096).contains(&options.reference_max_edge) {
+        return Err("MOSS edit reference_max_edge must be in 16..=4096".into());
+    }
+    Ok(options)
+}
+/// The ordered plural carrier is authoritative. Aliases may only repeat its first element.
+/// Never trim, deduplicate, or truncate semantic reference slots.
+pub fn edit_reference_ids(payload: &JsonObject) -> Result<Vec<String>, String> {
+    let mut ids = match payload.get("referenceAssetIds") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .filter(|s| !s.is_empty() && s.trim() == *s)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        "referenceAssetIds must contain nonempty exact asset ids".to_owned()
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => return Err("referenceAssetIds must be an array".into()),
+    };
+    for key in ["referenceAssetId", "sourceAssetId"] {
+        if let Some(value) = payload.get(key).filter(|v| !v.is_null()) {
+            let id = value
+                .as_str()
+                .filter(|s| !s.is_empty() && s.trim() == *s)
+                .ok_or_else(|| format!("{key} must be a nonempty exact asset id"))?;
+            if ids.is_empty() {
+                ids.push(id.to_owned());
+            } else if ids[0] != id {
+                return Err(format!("{key} conflicts with the ordered MOSS references"));
+            }
+        }
+    }
+    if ids.len() != 1 {
+        return Err("MOSS edit currently requires exactly one ordered reference".into());
+    }
+    Ok(ids)
+}
+pub fn is_edit(payload: &JsonObject) -> bool {
+    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+}
+pub fn request_purpose(payload: &JsonObject, options: &MossImageOptions) -> Option<&'static str> {
+    if is_edit(payload) {
+        Some(EDIT_PURPOSE)
+    } else {
+        purpose(options)
+    }
+}
 pub const REPORT_KEY: &str = "mossImageExecutionReport";
 pub fn is_moss(model: &str) -> bool {
     MossImageVariant::from_provider_id(model).is_some()
@@ -108,7 +181,7 @@ pub fn native_request(
         .cloned()
         .unwrap_or_default();
     let Some(variant) = MossImageVariant::from_provider_id(model) else {
-        return if advanced.contains_key(OPTIONS_KEY) {
+        return if advanced.contains_key(OPTIONS_KEY) || advanced.contains_key(EDIT_OPTIONS_KEY) {
             Err("advanced.mossImage is only supported by MOSS-Image Base/SFT".into())
         } else {
             Ok(None)
@@ -117,12 +190,19 @@ pub fn native_request(
     if payload.get("advanced").is_some_and(|v| !v.is_object()) {
         return Err("advanced must be an object".into());
     }
+    let edit = is_edit(payload);
     if payload
         .get("mode")
         .and_then(Value::as_str)
-        .is_some_and(|s| s != "text_to_image")
+        .is_some_and(|s| s != "text_to_image" && s != "edit_image")
     {
-        return Err("MOSS-Image supports text_to_image only".into());
+        return Err("MOSS-Image supports text_to_image or explicit edit_image".into());
+    }
+    if edit {
+        edit_reference_ids(payload)?;
+        edit_options(&advanced)?;
+    } else if advanced.contains_key(EDIT_OPTIONS_KEY) {
+        return Err("advanced.mossImageEdit requires edit_image".into());
     }
     for key in [
         "sourceAssetId",
@@ -133,6 +213,9 @@ pub fn native_request(
         "characterLookId",
         "loras",
     ] {
+        if edit && ["sourceAssetId", "referenceAssetId", "referenceAssetIds"].contains(&key) {
+            continue;
+        }
         if payload.get(key).is_some_and(meaningful) {
             return Err(format!(
                 "MOSS-Image does not support {key}; remove the conditioning/adapter"
@@ -178,7 +261,11 @@ pub fn native_request(
         return Err("MOSS-Image does not support hiresFix".into());
     }
     let defaults = entry.get("defaults").and_then(Value::as_object);
-    let (dw, dh) = crate::image_request::default_resolution(entry).unwrap_or((1024, 1024));
+    let (dw, dh) = if edit {
+        (512, 512)
+    } else {
+        crate::image_request::default_resolution(entry).unwrap_or((1024, 1024))
+    };
     let opts = options(&advanced)?;
     let mut request = GenerationRequest {
         prompt: payload
@@ -243,6 +330,9 @@ pub fn native_request(
             ));
         }
     }
+    if edit {
+        request = gen_core::moss_image_edit::edit_request(&request).map_err(|e| e.to_string())?;
+    }
     MossImageResolved::resolve(variant, &request).map_err(|e| e.to_string())?;
     Ok(Some(request))
 }
@@ -250,6 +340,12 @@ pub fn native_request(
 pub fn selected_components(
     entry: &JsonObject,
     options: &MossImageOptions,
+) -> Result<JsonObject, String> {
+    selected_components_for_purpose(entry, purpose(options))
+}
+pub fn selected_components_for_purpose(
+    entry: &JsonObject,
+    purpose: Option<&str>,
 ) -> Result<JsonObject, String> {
     let mut result = entry.clone();
     let downloads = result
@@ -260,9 +356,9 @@ pub fn selected_components(
     downloads.retain(|v| {
         !v.get("componentId")
             .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("moss-dmd-"))
+            .is_some_and(|id| id.starts_with("moss-dmd-") || id == "moss-image-edit")
     });
-    if let Some(purpose) = purpose(options) {
+    if let Some(purpose) = purpose {
         let mut components = crate::model_usage_policy::conditional_component_downloads(
             &Value::Object(entry.clone()),
             purpose,
@@ -291,9 +387,13 @@ pub fn selected_components(
 }
 /// Reports are exclusively worker-produced. Replay keeps requested options but cannot reuse outcomes.
 pub fn scrub_reports(payload: &mut JsonObject) {
+    payload.remove(EDIT_REPORT_KEY);
+    payload.remove("moss_image_edit_execution_report");
     payload.remove(REPORT_KEY);
     payload.remove("moss_image_execution_report");
     if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
+        advanced.remove(EDIT_REPORT_KEY);
+        advanced.remove("moss_image_edit_execution_report");
         advanced.remove(REPORT_KEY);
         advanced.remove("moss_image_execution_report");
     }
@@ -307,6 +407,60 @@ mod tests {
     }
     fn body(advanced: Value) -> JsonObject {
         json!({"model":"moss_image_sft","mode":"text_to_image","prompt":"日本語 <tag> {\"items\":[]}","advanced":advanced}).as_object().unwrap().clone()
+    }
+    #[test]
+    fn explicit_edit_preserves_single_reference_and_author_defaults() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let p = json!({"model":model,"mode":"edit_image","prompt":"change the cup to blue","sourceAssetId":"ref-a","referenceAssetIds":["ref-a"],"advanced":{"mossImageEdit":{"reference_max_edge":768,"use_kv_cache":false}}}).as_object().unwrap().clone();
+            assert_eq!(edit_reference_ids(&p).unwrap(), ["ref-a"]);
+            let request = native_request(&p, &entry()).unwrap().unwrap();
+            assert!(request.conditioning.is_empty());
+            assert_eq!((request.width, request.height), (512, 512));
+            let resolved = MossImageResolved::resolve(
+                MossImageVariant::from_provider_id(model).unwrap(),
+                &request,
+            )
+            .unwrap();
+            assert_eq!(resolved.steps, 30);
+            assert_eq!(resolved.guidance, 4.0);
+            assert_eq!(resolved.shift, 5.0);
+            assert!(resolved.uncond_skip_layers.is_empty());
+            assert_eq!(
+                request_purpose(&p, request.moss_image.as_ref().unwrap()),
+                Some(EDIT_PURPOSE)
+            );
+            let options = edit_options(p["advanced"].as_object().unwrap()).unwrap();
+            assert_eq!(options.reference_max_edge, 768);
+            assert!(!options.use_kv_cache);
+        }
+    }
+    #[test]
+    fn edit_rejects_ambiguous_references_and_unimplemented_combinations() {
+        let p = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":["a"],"advanced":{}}).as_object().unwrap().clone();
+        for (key, value) in [
+            ("referenceAssetIds", json!([])),
+            ("referenceAssetIds", json!(["a", "b"])),
+            ("referenceAssetIds", json!([1])),
+            ("referenceAssetIds", json!([" a"])),
+            ("sourceAssetId", json!("b")),
+            ("maskAssetId", json!("mask")),
+        ] {
+            let mut malformed = p.clone();
+            malformed.insert(key.into(), value);
+            assert!(native_request(&malformed, &entry()).is_err(), "{key}");
+        }
+        for advanced in [
+            json!({"strength":0.5}),
+            json!({"mossImage":{"acceleration":"unmerged_bf16"}}),
+            json!({"mossImage":{"uncond_skip_layers":[22]}}),
+            json!({"mossImageEdit":{"reference_max_edge":0}}),
+            json!({"mossImageEdit":{"use_kv_cache":"yes"}}),
+            json!({"mossImageEdit":{"crop":true}}),
+        ] {
+            let mut malformed = p.clone();
+            malformed.insert("advanced".into(), advanced);
+            assert!(native_request(&malformed, &entry()).is_err());
+        }
     }
     #[test]
     fn omitted_off_and_explicit_off_keep_author_defaults() {

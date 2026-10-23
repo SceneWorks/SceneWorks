@@ -242,6 +242,10 @@ export const PREFILL_NONE = "none"; // it travels, and this studio has nowhere t
 // quietly disappears".
 export const ADVANCED_PREFILL = {
   mossImage: { label: "MOSS controls", prefill: PREFILL_CONTROL },
+  mossImageEdit: { label: "MOSS edit controls", prefill: PREFILL_NONE,
+    detail: "This Studio does not restore native MOSS edit controls from imported workflows." },
+  mossImageEditExecutionReport: { label: "MOSS edit execution receipt", prefill: PREFILL_NONE,
+    detail: "Recorded provenance belongs to the exported image. A new edit computes its own receipt." },
   mossImageExecutionReport: { label: "MOSS execution receipt", prefill: PREFILL_NONE,
     detail: "Recorded provenance belongs to the exported image. A new generation computes its own receipt." },
   resolution: { label: "Resolution", prefill: PREFILL_CONTROL },

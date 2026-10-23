@@ -775,7 +775,7 @@ async fn validate_vector_source_asset(
 /// Deliberately serial rather than a join: the sets are at most ten entries, the store call is a
 /// blocking task, and the first bad entry is the one the caller has to fix — reporting it in
 /// request order is more useful than reporting whichever read finished first.
-async fn validate_ordered_image_references(
+pub(crate) async fn validate_ordered_image_references(
     state: AppState,
     project_id: String,
     asset_ids: Vec<String>,

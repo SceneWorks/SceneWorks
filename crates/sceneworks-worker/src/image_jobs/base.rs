@@ -5494,6 +5494,8 @@ fn mlx_raw_settings_for_bundle(
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
     // Worker-owned too (epic 25899): only the image's own render report adds the record back.
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
+    raw.remove("moss_image_edit_execution_report");
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
     // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.

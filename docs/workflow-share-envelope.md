@@ -386,6 +386,8 @@ smuggled under a scalar key.
 | Key | Shape | What it is |
 | --- | --- | --- |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
+| `mossImageEdit` | `MossImageEditOptions` | API-canonicalized edit reference maximum edge and cache policy. |
+| `mossImageEditExecutionReport` | `MossImageEditReport` | Actual native edit receipt with the frozen adapter/config identities, ordered reference dimensions and pixel/latent hashes, effective controls and cache policy. Local adapter paths are replaced with relative filenames. Imported receipts are display metadata; replay discards them before execution. |
 | `mossImageExecutionReport` | `MossImageReport` | Actual completed native MOSS execution receipt, including frozen asset hashes and adapter application. Local adapter location is replaced with its frozen relative filename. Imported receipts are display metadata; replay discards them and computes a new receipt. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
