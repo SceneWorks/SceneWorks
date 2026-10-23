@@ -2179,6 +2179,7 @@ pub(crate) async fn create_training_job(
             "datasetId": plan.provenance.dataset_id.clone(),
             "datasetVersion": plan.provenance.dataset_version,
             "baseModel": plan.provenance.base_model.clone(),
+            "baseModelRepo": plan.provenance.base_model_repo.clone(),
             "presetId": plan.provenance.preset_id.clone(),
             "presetVersion": plan.provenance.preset_version,
             "presetName": plan.provenance.preset_name.clone(),

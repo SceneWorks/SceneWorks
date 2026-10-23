@@ -1829,6 +1829,98 @@ describe("bucket ladder follows Resolution (sc-2124)", () => {
   });
 });
 
+// MOSS uses literal native module paths, finite fractional alpha, required frozen caches and either
+// bucket wire form. Mutation: normalize module aliases, omit a cache, square a rectangle, or coerce
+// alpha to an integer ⇒ red.
+describe("MOSS training draft serialization", () => {
+  const moss = {
+    id: "moss_image_base_lora",
+    kernel: "moss_image_lora",
+    outputKind: "lora",
+    defaults: {
+      rank: 16,
+      alpha: 16,
+      learningRate: 0.0001,
+      steps: 1000,
+      batchSize: 1,
+      gradientAccumulation: 1,
+      resolution: 1024,
+      saveEvery: 250,
+      seed: 42,
+      optimizer: "adamw",
+      advanced: {
+        networkType: "lora",
+        loraTargetModules: [],
+        cacheLatents: true,
+        cacheTextEmbeddings: true,
+      },
+    },
+    limits: {
+      networkTypes: ["lora", "lokr"],
+      supportsResolutionBuckets: true,
+      resolutions: [256, 512, 768, 1024],
+    },
+  };
+
+  it("persists literal modules, required caches, fractional alpha and a portrait rectangle", () => {
+    const draft = {
+      ...configDraftFromTarget(moss, dataset, ["auto"]),
+      alpha: "0.5",
+      loraTargetModules: "q\nlayers.0.proj.ffn_up_gate",
+      resolutionBuckets: [{ width: "768", height: "1024", repeats: "2" }],
+    };
+    const snapshot = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: draft,
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(snapshot.config.alpha).toBe(0.5);
+    expect(seedResolutionBuckets(moss, "1024")).toEqual([
+      { width: "256", height: "256", repeats: "1" },
+      { width: "512", height: "512", repeats: "1" },
+      { width: "768", height: "768", repeats: "1" },
+      { width: "1024", height: "1024", repeats: "1" },
+    ]);
+    expect(snapshot.config.advanced).toMatchObject({
+      loraTargetModules: ["q", "layers.0.proj.ffn_up_gate"],
+      cacheLatents: true,
+      cacheTextEmbeddings: true,
+      resolutionBuckets: [{ width: 768, height: 1024, repeats: 2 }],
+    });
+    expect(configValidation(draft, { activeDataset: dataset, selectedTarget: moss }).filter(
+      (entry) => entry.field === "resolutionBuckets",
+    )).toEqual([]);
+  });
+
+  it("refuses mixed, incomplete and duplicate rectangular geometry without changing portrait order", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    const messages = (rows) => configValidation(
+      { ...draft, resolutionBuckets: rows },
+      { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "resolutionBuckets").map((entry) => entry.message);
+    expect(messages([
+      { width: "768", height: "1024", repeats: "1" },
+      { resolution: "1024", repeats: "1" },
+    ]).join(" ")).toMatch(/square or rectangular/i);
+    expect(messages([{ width: "768", repeats: "1" }]).join(" ")).toMatch(/resolution or width/i);
+    expect(messages([
+      { width: "768", height: "1024", repeats: "1" },
+      { width: "768", height: "1024", repeats: "2" },
+    ]).join(" ")).toMatch(/already listed/i);
+    const snapshot = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1" }, { width: "1024", height: "768", repeats: "1" }] },
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(snapshot.config.advanced.resolutionBuckets).toEqual([
+      { width: 768, height: 1024, repeats: 1 },
+      { width: 1024, height: 768, repeats: 1 },
+    ]);
+  });
+});
+
 // sc-24161: Start training is held when the saved dataset's edit-pair shape does not fit the
 // selected target, with the cap the base model declares.
 describe("configValidation edit-pair dataset shape", () => {

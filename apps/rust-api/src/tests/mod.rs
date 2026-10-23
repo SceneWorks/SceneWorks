@@ -2,6 +2,7 @@
 //! (sc-11217, F-030). Shared fixtures/helpers live in `support`.
 
 mod auth;
+mod browser_fixture;
 mod catalog;
 mod checkpoint_library;
 mod compression;

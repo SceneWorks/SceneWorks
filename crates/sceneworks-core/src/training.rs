@@ -210,25 +210,64 @@ pub struct ResolutionBucketSpec {
     pub repeats: u32,
 }
 
-/// Parse and validate `advanced.resolutionBuckets` independent of any target: `Ok(None)` when the
-/// key is absent (off), otherwise a non-empty list of at most [`RESOLUTION_BUCKETS_MAX`] rows, each
-/// with an integer `resolution` (`> 0`, a multiple of [`RESOLUTION_BUCKET_STRIDE`], not repeated)
-/// and an integer `repeats` in `1..=`[`RESOLUTION_BUCKET_REPEATS_MAX`]. The error is a
-/// human-facing message for a field error on [`RESOLUTION_BUCKETS_KEY`]. The API's submit-time
-/// validation and the worker's strict preflight share this one parser.
-pub fn parse_resolution_buckets(
+/// A rectangular aspect-ratio bucket accepted alongside the established square form.
+/// Row order remains meaningful: the native resolver preserves it for tie breaking and schedule
+/// provenance, and portrait geometry is distinct from landscape geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AspectRatioBucketSpec {
+    pub width: u32,
+    pub height: u32,
+    pub repeats: u32,
+}
+
+/// The product bucket wire contract. Legacy square rows retain their existing all-items-at-each-row
+/// semantics; rectangular rows are an additive native contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolutionBucketConfig {
+    Legacy(Vec<ResolutionBucketSpec>),
+    AspectRatio(Vec<AspectRatioBucketSpec>),
+}
+
+fn bucket_repeats(row: &serde_json::Map<String, Value>, n: usize) -> Result<u32, String> {
+    row.get("repeats")
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!(
+            "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 and {RESOLUTION_BUCKET_REPEATS_MAX}."
+        ))
+}
+
+fn bucket_dimension(
+    row: &serde_json::Map<String, Value>,
+    key: &str,
+    n: usize,
+) -> Result<u32, String> {
+    row.get(key)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!(
+            "{RESOLUTION_BUCKETS_KEY} row {n}: {key} must be a positive whole number of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
+        ))
+}
+
+/// Parse either the legacy square `[{resolution,repeats}]` list or the additive rectangular
+/// `[{width,height,repeats}]` list. Input may use exactly one form: mixed, incomplete, fractional,
+/// duplicate-geometry and present-empty lists refuse rather than being normalized into an altered
+/// training plan.
+pub fn parse_resolution_bucket_config(
     advanced: &serde_json::Map<String, Value>,
-) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+) -> Result<Option<ResolutionBucketConfig>, String> {
     let Some(value) = technique_value(advanced, RESOLUTION_BUCKETS_KEY) else {
         return Ok(None);
     };
     let rows = value.as_array().ok_or_else(|| {
-        format!("{RESOLUTION_BUCKETS_KEY} must be a list of {{resolution, repeats}} rows.")
+        format!("{RESOLUTION_BUCKETS_KEY} must be a list of square or rectangular bucket rows.")
     })?;
     if rows.is_empty() {
         return Err(format!(
-            "{RESOLUTION_BUCKETS_KEY} must list at least one resolution bucket (omit it to train \
-             at a single resolution)."
+            "{RESOLUTION_BUCKETS_KEY} must list at least one bucket (omit it to disable bucketing)."
         ));
     }
     if rows.len() > RESOLUTION_BUCKETS_MAX {
@@ -237,47 +276,96 @@ pub fn parse_resolution_buckets(
             rows.len()
         ));
     }
-    let mut buckets: Vec<ResolutionBucketSpec> = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
+
+    let mut legacy = Vec::with_capacity(rows.len());
+    let mut aspect = Vec::with_capacity(rows.len());
+    let mut form: Option<&str> = None;
+    for (index, value) in rows.iter().enumerate() {
         let n = index + 1;
-        let row = row.as_object().ok_or_else(|| {
-            format!(
-                "{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats."
-            )
-        })?;
-        let resolution = row
-            .get("resolution")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                format!(
-                    "{RESOLUTION_BUCKETS_KEY} row {n}: resolution must be a positive whole number \
-                     of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
-                )
-            })?;
-        let repeats = row
-            .get("repeats")
-            .and_then(Value::as_u64)
-            .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| {
-                format!(
-                    "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 \
-                     and {RESOLUTION_BUCKET_REPEATS_MAX}."
-                )
-            })?;
-        if buckets.iter().any(|bucket| bucket.resolution == resolution) {
+        let row = value
+            .as_object()
+            .ok_or_else(|| format!("{RESOLUTION_BUCKETS_KEY} row {n} must be an object."))?;
+        let has_resolution = row.contains_key("resolution");
+        let has_width = row.contains_key("width");
+        let has_height = row.contains_key("height");
+        let row_form = match (has_resolution, has_width, has_height) {
+            (true, false, false) => "legacy",
+            (false, true, true) => "aspect",
+            _ => return Err(format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must use exactly {{resolution, repeats}} or {{width, height, repeats}}."
+            )),
+        };
+        if form.is_some_and(|previous| previous != row_form) {
             return Err(format!(
-                "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+                "{RESOLUTION_BUCKETS_KEY} must not mix square and rectangular bucket rows."
             ));
         }
-        buckets.push(ResolutionBucketSpec {
-            resolution,
-            repeats,
-        });
+        form = Some(row_form);
+        let repeats = bucket_repeats(row, n)?;
+        match row_form {
+            "legacy" => {
+                if row.len() != 2 || !row.contains_key("repeats") {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only resolution and repeats."
+                    ));
+                }
+                let resolution = bucket_dimension(row, "resolution", n)?;
+                if legacy
+                    .iter()
+                    .any(|bucket: &ResolutionBucketSpec| bucket.resolution == resolution)
+                {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+                    ));
+                }
+                legacy.push(ResolutionBucketSpec {
+                    resolution,
+                    repeats,
+                });
+            }
+            "aspect" => {
+                if row.len() != 3 || !row.contains_key("repeats") {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} row {n} must contain only width, height and repeats."
+                    ));
+                }
+                let width = bucket_dimension(row, "width", n)?;
+                let height = bucket_dimension(row, "height", n)?;
+                if aspect.iter().any(|bucket: &AspectRatioBucketSpec| {
+                    bucket.width == width && bucket.height == height
+                }) {
+                    return Err(format!(
+                        "{RESOLUTION_BUCKETS_KEY} lists geometry {width}x{height} more than once."
+                    ));
+                }
+                aspect.push(AspectRatioBucketSpec {
+                    width,
+                    height,
+                    repeats,
+                });
+            }
+            _ => unreachable!("row form is classified above"),
+        }
     }
-    Ok(Some(buckets))
+    Ok(Some(match form {
+        Some("legacy") => ResolutionBucketConfig::Legacy(legacy),
+        Some("aspect") => ResolutionBucketConfig::AspectRatio(aspect),
+        _ => unreachable!("non-empty rows have a form"),
+    }))
+}
+
+/// Backwards-compatible reader for native square-bucket consumers. New rectangular consumers use
+/// [`parse_resolution_bucket_config`] so they receive width and height without lossy projection.
+pub fn parse_resolution_buckets(
+    advanced: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+    match parse_resolution_bucket_config(advanced)? {
+        None => Ok(None),
+        Some(ResolutionBucketConfig::Legacy(rows)) => Ok(Some(rows)),
+        Some(ResolutionBucketConfig::AspectRatio(_)) => Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} rectangular rows require a native aspect-ratio bucket trainer."
+        )),
+    }
 }
 
 /// The largest training resolution a config trains at: the largest
@@ -285,10 +373,15 @@ pub fn parse_resolution_buckets(
 /// `resolution`. Memory admission sizes for this (epic 2123 E7). A malformed bucket list falls back
 /// to `resolution` here only because plan validation refuses it before any job is queued.
 pub fn training_max_resolution(config: &TrainingConfig) -> u32 {
-    match parse_resolution_buckets(&config.advanced) {
-        Ok(Some(buckets)) => buckets
+    match parse_resolution_bucket_config(&config.advanced) {
+        Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
             .iter()
             .map(|bucket| bucket.resolution)
+            .max()
+            .unwrap_or(config.resolution),
+        Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
+            .iter()
+            .flat_map(|bucket| [bucket.width, bucket.height])
             .max()
             .unwrap_or(config.resolution),
         _ => config.resolution,
@@ -662,8 +755,10 @@ pub struct TrainingPresetRegistry {
 pub struct TrainingConfig {
     /// LoRA network rank (dimension).
     pub rank: u32,
-    /// LoRA alpha scaling factor.
-    pub alpha: u32,
+    /// LoRA alpha scaling factor. This stays a JSON number so MOSS can use a
+    /// finite positive fractional scale while legacy targets retain their own
+    /// explicitly advertised integral policies.
+    pub alpha: ContractNumber,
     pub learning_rate: ContractNumber,
     /// Total training steps.
     pub steps: u32,
@@ -852,6 +947,9 @@ pub struct TrainingProvenance {
     pub dataset_version: u32,
     pub target_id: String,
     pub base_model: String,
+    /// Canonical source repository selected by the target, when it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1014,7 +1112,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config.steps = 3000;
                     config
@@ -1071,7 +1169,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.steps = 3000;
                     config.advanced.insert("sampleEvery".to_owned(), json!(250));
                     config
@@ -1089,7 +1187,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 2000;
                     config.save_every = 250;
@@ -1128,7 +1226,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1145,7 +1243,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1161,7 +1259,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1196,7 +1294,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1213,7 +1311,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1229,7 +1327,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1260,7 +1358,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1277,7 +1375,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1293,7 +1391,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1326,7 +1424,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1343,7 +1441,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1359,7 +1457,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "low_vram"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.resolution = 768;
                     config.steps = 1200;
                     config
@@ -1390,7 +1488,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1407,7 +1505,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1436,7 +1534,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw", "conservative"),
                 |mut config| {
                     config.rank = 16;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1540,7 +1638,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config.steps = 3000;
                     config
@@ -1558,7 +1656,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config.steps = 3000;
                     config
                 },
@@ -1588,7 +1686,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1605,7 +1703,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "balanced"),
                 |mut config| {
                     config.rank = 32;
-                    config.alpha = 16;
+                    config.alpha = ContractNumber::from(16);
                     config
                 },
                 object(json!({
@@ -1636,7 +1734,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 ("adamw8bit", "conservative"),
                 |mut config| {
                     config.rank = 8;
-                    config.alpha = 8;
+                    config.alpha = ContractNumber::from(8);
                     config.learning_rate = number(0.00005);
                     config
                 },
@@ -1986,7 +2084,7 @@ fn mage_flow_lora_target(
         kernel: "mage_flow_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2087,7 +2185,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
         kernel: "z_image_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2200,7 +2298,7 @@ fn lens_turbo_lora_target() -> TrainingTarget {
         kernel: "lens_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2322,7 +2420,7 @@ fn krea_raw_lora_target() -> TrainingTarget {
         kernel: "krea_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2438,7 +2536,7 @@ fn krea_control_target() -> TrainingTarget {
             // control trainer ignores them. Kept at the family default to satisfy the shared config
             // contract (both are validated `> 0`).
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2525,7 +2623,7 @@ fn sd3_large_lora_target() -> TrainingTarget {
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2634,7 +2732,7 @@ fn sd3_medium_lora_target() -> TrainingTarget {
         kernel: "sd3_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -2858,7 +2956,7 @@ fn ltx_lora_target(
         kernel: "ltx_mlx_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -2916,7 +3014,7 @@ fn wan_lora_target() -> TrainingTarget {
         kernel: "wan_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3027,7 +3125,7 @@ fn wan_moe_lora_target(
         kernel: "wan_moe_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 32,
-            alpha: 32,
+            alpha: ContractNumber::from(32),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3151,7 +3249,7 @@ fn sdxl_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3251,7 +3349,7 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3339,7 +3437,7 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
         kernel: "sdxl_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3434,7 +3532,7 @@ fn kolors_lora_target() -> TrainingTarget {
         kernel: "kolors_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 1500,
             batch_size: 1,
@@ -3800,6 +3898,7 @@ pub fn build_training_plan(
             dataset_version: input.dataset.version,
             target_id: input.target.id.clone(),
             base_model: input.target.base_model.clone(),
+            base_model_repo: input.target.base_model_repo.clone(),
             preset_id: input.preset.as_ref().map(|preset| preset.preset_id.clone()),
             preset_version: input.preset.as_ref().map(|preset| preset.preset_version),
             preset_name: input
@@ -4148,7 +4247,18 @@ fn validate_advertised_numeric_limits(
 
         match field.as_str() {
             "rank" => validate_advertised_numeric_range(field, values, u64::from(config.rank))?,
-            "alpha" => validate_advertised_numeric_range(field, values, u64::from(config.alpha))?,
+            // Legacy target limits intentionally describe integral alpha. MOSS has no
+            // `alpha` numeric range so its finite fractional alpha passes through its
+            // native f32 contract; another target must explicitly opt into fractions.
+            "alpha" => validate_advertised_numeric_range(
+                field,
+                values,
+                config.alpha.as_u64().ok_or_else(|| {
+                    TrainingPlanError::InvalidConfig(
+                        "alpha must be a whole number for this training target.".to_owned(),
+                    )
+                })?,
+            )?,
             "steps" => validate_advertised_numeric_range(field, values, u64::from(config.steps))?,
             "batchSize" => {
                 validate_advertised_numeric_range(field, values, u64::from(config.batch_size))?
@@ -4377,6 +4487,24 @@ fn validate_advertised_advanced_choices(
     Ok(())
 }
 
+/// Convert a product alpha JSON number into the native f32 contract without letting a
+/// mathematically positive f64 overflow to infinity or underflow to zero at the boundary.
+pub fn training_alpha_f32(alpha: &ContractNumber) -> Result<f32, TrainingPlanError> {
+    let value = alpha.as_f64().unwrap_or(f64::NAN);
+    if !(value.is_finite() && value > 0.0) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "alpha must be a positive finite number.".to_owned(),
+        ));
+    }
+    let native = value as f32;
+    if !(native.is_finite() && native > 0.0) {
+        return Err(TrainingPlanError::InvalidConfig(
+            "alpha must be representable as a positive finite f32.".to_owned(),
+        ));
+    }
+    Ok(native)
+}
+
 fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
     let positive = |value: u32, field: &str| {
         if value == 0 {
@@ -4388,7 +4516,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         }
     };
     positive(config.rank, "rank")?;
-    positive(config.alpha, "alpha")?;
+    training_alpha_f32(&config.alpha)?;
     positive(config.steps, "steps")?;
     positive(config.resolution, "resolution")?;
     positive(config.batch_size, "batchSize")?;
@@ -4402,7 +4530,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
     validate_gradient_noise(config)?;
-    parse_resolution_buckets(&config.advanced).map_err(|message| {
+    parse_resolution_bucket_config(&config.advanced).map_err(|message| {
         TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message,
@@ -4522,29 +4650,36 @@ fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPla
     subject_mask_loss_weights(&config.advanced).map(|_| ())
 }
 
-/// Target half of the `advanced.resolutionBuckets` validation (epic 2123 sc-2127, E6): every bucket
-/// resolution must be one the target advertises in `limits.resolutions` (the same menu `resolution`
-/// is held to), as a field error naming [`RESOLUTION_BUCKETS_KEY`]. The structural checks already
-/// ran in [`validate_training_config`].
+/// Target half of the `advanced.resolutionBuckets` validation. Legacy square rows retain the
+/// target's advertised-resolution menu; rectangular rows intentionally have no invented product
+/// maximum beyond the shared positive/u32/stride parser.
 fn validate_resolution_buckets_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    let Ok(Some(buckets)) = parse_resolution_buckets(&config.advanced) else {
+    let buckets = parse_resolution_bucket_config(&config.advanced).map_err(|message| {
+        TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message,
+        }
+    })?;
+    let Some(buckets) = buckets else {
         return Ok(());
     };
-    // The target's trainer on this platform must declare buckets (sc-2127 review): refuse here, at
-    // submit, instead of queueing a job the worker preflight then refuses (E3/E6).
+    // The target's trainer on this platform must declare buckets: reject before queueing instead of
+    // allowing a plan to reach native preflight and fail after the product has accepted it.
     if !target_supports_resolution_buckets(target) {
         return Err(TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message: format!(
-                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this \
-                 platform.",
+                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this platform.",
                 target.name
             ),
         });
     }
+    let ResolutionBucketConfig::Legacy(buckets) = buckets else {
+        return Ok(());
+    };
     let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
         return Ok(());
     };
@@ -4561,8 +4696,7 @@ fn validate_resolution_buckets_for_target(
         return Err(TrainingPlanError::InvalidField {
             field: RESOLUTION_BUCKETS_KEY.to_owned(),
             message: format!(
-                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: \
-                 {allowed}.",
+                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: {allowed}.",
                 target.name, bucket.resolution
             ),
         });
@@ -4741,7 +4875,7 @@ fn anima_base_lora_target() -> TrainingTarget {
         kernel: "anima_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -4870,7 +5004,7 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
         kernel: "qwen_image_2_1_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             steps: 3000,
             batch_size: 1,
@@ -5191,7 +5325,7 @@ fn moss_image_lora_target(sft: bool) -> TrainingTarget {
         kernel: "moss_image_lora".to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("finite"),
             steps: 1000,
             batch_size: 1,
@@ -5203,6 +5337,9 @@ fn moss_image_lora_target(sft: bool) -> TrainingTarget {
             trigger_word: None,
             advanced: object(json!({"mixedPrecision":"bf16", "cacheLatents":true,
                 "cacheTextEmbeddings":true,"gradientCheckpointing":true,"networkType":"lora",
+                // [] means all native MOSS projections. Entries remain literal, case-sensitive
+                // native paths rather than UI-invented aliases.
+                "loraTargetModules":[],"decomposeFactor":-1,
                 "timestepType":"moss_stage3_v1","timestepBias":"balanced","lossType":"mse",
                 "lrScheduler":"constant","weightDecay":0.0,
                 "modelOptions":{"vae_posterior":"posterior_mean_v1"},
@@ -5210,7 +5347,9 @@ fn moss_image_lora_target(sft: bool) -> TrainingTarget {
                 "qualityPreset":"balanced","outputScope":"project","requestedGpu":"auto"})),
             extra: ExtraFields::new(),
         },
-        limits: object(json!({"rank":[1,128],"alpha":[1,128],"steps":[1,10000],
+        // MOSS alpha is a finite positive f32 at the native boundary, so unlike
+        // legacy targets it deliberately has no arbitrary product range.
+        limits: object(json!({"rank":[1,128],"steps":[1,10000],
             "resolutions":[256,512,768,1024],"batchSize":[1,4],
             "optimizers":["adamw","adam","prodigyopt","rose"],"networkTypes":["lora","lokr"],
             "mixedPrecisions":["bf16","f32"],"timestepTypes":["moss_stage3_v1","sigmoid","linear","uniform","weighted"],
@@ -5253,10 +5392,33 @@ mod moss_training_s1_tests {
             assert_eq!(target.limits["networkTypes"], json!(["lora", "lokr"]));
             assert_eq!(target.limits["mixedPrecisions"], json!(["bf16", "f32"]));
             assert_eq!(target.defaults.advanced["mixedPrecision"], json!("bf16"));
+            assert_eq!(target.defaults.advanced["loraTargetModules"], json!([]));
+            assert_eq!(target.defaults.advanced["decomposeFactor"], json!(-1));
+            assert!(!target.limits.contains_key("alpha"));
             for metadata in [&target.limits, &target.ui] {
                 assert!(!metadata.contains_key("appleSiliconOnly"));
                 assert!(!metadata.contains_key("requiresBackend"));
             }
+        }
+    }
+
+    #[test]
+    fn moss_alpha_accepts_positive_fractions_without_an_arbitrary_product_cap() {
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "moss_image_base_lora")
+            .expect("MOSS Base target");
+        let mut config = target.defaults.clone();
+        config.alpha = number(0.5);
+        validate_training_config_for_target(&target, &config).expect("fractional MOSS alpha");
+
+        for refused in [0.0, 1e-50, 1e39] {
+            config.alpha = number(refused);
+            assert!(
+                validate_training_config_for_target(&target, &config).is_err(),
+                "{refused} must not map into the native f32 contract"
+            );
         }
     }
 }
