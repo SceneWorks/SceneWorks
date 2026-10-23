@@ -1234,6 +1234,8 @@
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
           "networkType": "lora",
+          "loraTargetModules": [],
+          "decomposeFactor": -1,
           "timestepType": "moss_stage3_v1",
           "timestepBias": "balanced",
           "lossType": "mse",
@@ -1252,10 +1254,6 @@
       },
       "limits": {
         "rank": [
-          1,
-          128
-        ],
-        "alpha": [
           1,
           128
         ],
@@ -1353,6 +1351,8 @@
           "cacheTextEmbeddings": true,
           "gradientCheckpointing": true,
           "networkType": "lora",
+          "loraTargetModules": [],
+          "decomposeFactor": -1,
           "timestepType": "moss_stage3_v1",
           "timestepBias": "balanced",
           "lossType": "mse",
@@ -1371,10 +1371,6 @@
       },
       "limits": {
         "rank": [
-          1,
-          128
-        ],
-        "alpha": [
           1,
           128
         ],
