@@ -63,9 +63,9 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
 pub struct H3Config(pub Value);
 
 impl H3Config {
-    /// Native exports without a config use the **pinned published architecture**, not dimensions
-    /// inferred from a filename. All tensor shapes must match it. Variant exports must provide
-    /// `config.json` or JSON `__metadata__.h3_config`; this preserves non-shape knobs such as RoPE.
+    /// The pinned published architecture for fixtures and explicit catalog declarations.
+    /// Production sources require their own sidecar/embedded config or an explicitly selected
+    /// base configuration; tensor shapes and filenames never select this value implicitly.
     pub fn published() -> Self {
         Self(json!({
             "_class_name": "MiniMaxH3Transformer3DModel",
@@ -275,16 +275,35 @@ pub struct H3SourceInventory {
 /// Resolve only the plan's declared files; callers must first re-verify/pin source identities.
 impl H3SourceInventory {
     pub fn from_resolved(resolved: &ResolvedCheckpointV1) -> Result<Self, String> {
-        Self::from_files(
+        Self::from_resolved_with_config(resolved, None)
+    }
+
+    /// Consume a plan with its explicitly bound full architecture document, when one is needed.
+    /// The caller owns validating and sealing that configuration's persisted provenance.
+    pub fn from_resolved_with_config(
+        resolved: &ResolvedCheckpointV1,
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
+        Self::from_files_with_config(
             &resolved
                 .layers
                 .iter()
                 .map(|l| (l.layer.target_path.clone(), l.path.clone()))
                 .collect::<Vec<_>>(),
+            bound_config,
         )
     }
 
     pub fn from_files(files: &[(String, PathBuf)]) -> Result<Self, String> {
+        Self::from_files_with_config(files, None)
+    }
+
+    /// A source's sidecar and embedded documents must agree with any explicitly bound config.
+    /// The complete JSON value is preserved, including provider-relevant non-shape fields.
+    pub fn from_files_with_config(
+        files: &[(String, PathBuf)],
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
         let mut weights = Vec::new();
         let mut config = None;
         let mut index = None;
@@ -371,7 +390,15 @@ impl H3SourceInventory {
                 "sharded H3 source requires diffusion_pytorch_model.safetensors.index.json".into(),
             );
         }
-        let config = config.unwrap_or_else(H3Config::published);
+        if let (Some(source), Some(bound)) = (&config, &bound_config) {
+            if source.0 != bound.0 {
+                return Err(
+                    "conflicting MiniMax-H3 source config and explicitly bound configuration"
+                        .into(),
+                );
+            }
+        }
+        let config = config.or(bound_config).ok_or("MiniMax-H3 source has no config.json or embedded h3_config; explicitly select a compatible base to bind its exact configuration before import")?;
         let expected = config.shapes()?;
         let codecs = CheckpointCodecRegistry::new(DENSE_CODECS.iter().copied())
             .map_err(|e| e.to_string())?;
