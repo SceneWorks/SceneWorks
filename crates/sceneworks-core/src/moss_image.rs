@@ -105,9 +105,8 @@ pub fn is_moss(model: &str) -> bool {
     MossImageVariant::from_provider_id(model).is_some()
 }
 /// Product editing availability for the actual enqueue lane, independent of ordinary/DMD support.
-/// The Candle consumer widens this verdict together with its native edit route.
 pub fn edit_backend_eligible(model: &str, backend: &str) -> bool {
-    is_moss(model) && backend == "mlx"
+    is_moss(model) && matches!(backend, "mlx" | "candle")
 }
 
 /// Effective sampling controls persisted by every edit enqueue path, so history can replay

@@ -10,7 +10,7 @@ publish = false
 test-support = []
 
 [dependencies]
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "fb4a68ab0ce532001de10070f4b09c4a18bc0262" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "3b71bffe86a35a0e35ed57cc5a7a0745c0f41e09" }
 directories = "5"
 fs2 = "0.4"
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's

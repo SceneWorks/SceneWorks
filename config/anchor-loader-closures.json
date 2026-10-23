@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "fb4a68ab0ce532001de10070f4b09c4a18bc0262",
+  "inferenceRevision": "3b71bffe86a35a0e35ed57cc5a7a0745c0f41e09",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -2762,7 +2762,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "b950bb035addb16a88d0729bcd9557ecf5e6a2f4a408fbd467a9970b4d11075d",
+      "digest": "5f294abb4c7f9fee10b3d0c4b16441b176e0973678715c3584b7166db130b04b",
       "closureFileCount": 378,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -3430,7 +3430,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "04d36d1954f53afd49e23a95166532172af6895057fefddacf727653d5d60c8c",
+      "digest": "abb8e808226d4317c2aa0dd96f144caee37a07dc6dc9362a4733e7ee7bc6fadb",
       "closureFileCount": 378,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -4100,7 +4100,7 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "b4e89ee15719057a1a9254466334a0b1521cf70c5a9c6127e460ee58d140310c",
+      "digest": "0260f3d31112ee33c672fe2ae97d8b25ceea15d4a7782845635da4c05d7e8b5f",
       "closureFileCount": 378,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -6001,7 +6001,7 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "b889af0bcafdcca237b174d718837a264334dae5dcdbf1626de8142be9d8133f",
+      "digest": "ded9a2864604cec8b9a6bf80b1c9a4931169ed08f37b5235109686ac5bad0062",
       "closureFileCount": 269,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -6577,7 +6577,7 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "b6f70528a38a4c130e900061c3abd9893a986038dd89e7eea289ee5694724cf6",
+      "digest": "02b38d942a04159cb0aabbcc7a9434d46536432d35a9c6c5c21b3da3dfda6e01",
       "closureFileCount": 269,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -12682,7 +12682,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "53bb0b09d05abdf704166e2682cc18c44365161737c28c1619cc6e2b24f9f4c4",
+      "digest": "065a6fbd7cd8e11f59542da472aa81fa822cd3ebe5c5d24c4e8b9fe81ce70a85",
       "closureFileCount": 374,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -13380,7 +13380,7 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "127f75ecf959be75cd435db6530ea432b1d3585cbc3261819942843b15b2d333",
+      "digest": "a6af69785afd46188cae1997892c1051f9da81c62dc101567eb74d8e392c7bd5",
       "closureFileCount": 374,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
