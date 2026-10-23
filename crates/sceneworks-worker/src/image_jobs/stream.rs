@@ -755,22 +755,29 @@ where
         adapter_count,
         spec,
         load_error_context,
-        load_generator,
+        CachedGeneratorFactory {
+            cache: crate::generator_cache::GeneratorCacheHandle::global(),
+            load: load_generator,
+        },
         move |generator, state, policy, warm, external, _owned, tx, cancel| {
             drive(generator, state, policy, warm, external, tx, cancel)
         },
     )
 }
 
-fn start_cached_gen_stream_with_request_state_using_owned<D>(
+/// The cache owner and loader form one private dependency for the existing stream transaction.
+struct CachedGeneratorFactory<L> {
+    cache: crate::generator_cache::GeneratorCacheHandle,
+    load: L,
+}
+
+fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
     spec: LoadSpec,
     load_error_context: String,
-    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
-        + Send
-        + 'static,
+    factory: CachedGeneratorFactory<L>,
     drive: D,
 ) -> (
     CancelFlag,
@@ -778,6 +785,7 @@ fn start_cached_gen_stream_with_request_state_using_owned<D>(
     tokio::task::JoinHandle<WorkerResult<()>>,
 )
 where
+    L: FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
@@ -801,11 +809,12 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request_using(
+        crate::generator_cache::with_cached_generator_for_request_using_cache(
+            factory.cache,
             engine_id,
             spec,
             load_error_context,
-            load_generator,
+            factory.load,
             move |generator,
                   cache_state,
                   loaded_policy,

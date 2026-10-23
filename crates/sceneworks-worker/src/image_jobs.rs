@@ -1623,7 +1623,8 @@ async fn run_image_generate_job_unexplained(
                 // Registry-driven candle generation. Mage Edit is named separately by the resolver so
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
-                CandleImageRoute::MageEdit
+                CandleImageRoute::MossImageEdit
+                | CandleImageRoute::MageEdit
                 | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit

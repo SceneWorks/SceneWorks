@@ -88,6 +88,10 @@ pub const REPORT_KEY: &str = "mossImageExecutionReport";
 pub fn is_moss(model: &str) -> bool {
     MossImageVariant::from_provider_id(model).is_some()
 }
+/// Product editing availability for the actual enqueue lane, independent of ordinary/DMD support.
+pub fn edit_backend_eligible(model: &str, backend: &str) -> bool {
+    is_moss(model) && matches!(backend, "mlx" | "candle")
+}
 /// Discovery metadata only. Request validation always uses the native strict serde + resolver.
 pub fn options_schema() -> Value {
     let modes = [

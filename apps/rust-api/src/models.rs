@@ -48,7 +48,7 @@ pub(crate) struct ModelCatalogCache {
 #[derive(Default)]
 struct ModelCatalogCacheState {
     generation: u64,
-    snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    snapshot: Option<(u64, &'static str, Arc<Vec<Value>>)>,
     /// Last observed resolved-cache publish key. `None` until the first observation, which is why
     /// the first reading never counts as a change — an API that has not looked yet has nothing to
     /// have gone stale against.
@@ -4390,14 +4390,17 @@ mod runtime_text_encoder_option_tests {
 }
 
 pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    let backend = crate::generation::enqueue_backend(state);
     // Before trusting the cached snapshot, check whether the resolved cache's published set moved
     // under us — the worker publishes promotions in another process, so this is the only signal
     // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
     crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
-        if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-            if *snapshot_generation == cache_state.generation {
+        if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+            cache_state.snapshot.as_ref()
+        {
+            if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                 return Ok(snapshot.clone());
             }
         }
@@ -4411,15 +4414,21 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
             // Another builder may have populated the cache while this caller
             // waited for the async serializer.
             let cache_state = state.model_catalog_cache.state.lock();
-            if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-                if *snapshot_generation == cache_state.generation {
+            if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+                cache_state.snapshot.as_ref()
+            {
+                if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                     return Ok(snapshot.clone());
                 }
             }
             cache_state.generation
         };
 
-        let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
+        let mut models = build_model_catalog_snapshot(state).await?;
+        for model in &mut models {
+            project_moss_edit_surface(model, backend);
+        }
+        let snapshot = Arc::new(models);
 
         #[cfg(test)]
         state
@@ -4429,13 +4438,34 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
 
         let mut cache_state = state.model_catalog_cache.state.lock();
         if cache_state.generation == generation {
-            cache_state.snapshot = Some((generation, snapshot.clone()));
+            cache_state.snapshot = Some((generation, backend, snapshot.clone()));
             return Ok(snapshot);
         }
         drop(cache_state);
         // A model writer completed while the filesystem sweep was running.
         // Keep the async serializer and rebuild at the new generation. The
         // stale result was never published or returned.
+    }
+}
+
+fn project_moss_edit_surface(model: &mut Value, backend: &str) {
+    let Some(id) = model.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if !sceneworks_core::moss_image::is_moss(id) {
+        return;
+    }
+    let available = sceneworks_core::moss_image::edit_backend_eligible(id, backend);
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    let capabilities = object.entry("capabilities").or_insert_with(|| json!([]));
+    let Some(capabilities) = capabilities.as_array_mut() else {
+        return;
+    };
+    capabilities.retain(|mode| mode != "edit_image" && mode != "image_edit");
+    if available {
+        capabilities.push(json!("edit_image"));
     }
 }
 
