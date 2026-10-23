@@ -201,12 +201,12 @@ pub(crate) async fn job_events(
     // applying the snapshot, avoiding equal-second updatedAt ambiguity.
     let snapshot_revision = state.events.revision();
     let mut jobs = store_call(state.clone(), |store, _timeout| {
-        store.list_jobs_recently_updated(500)
+        store.list_jobs_recently_updated(MAX_LISTED_JOBS)
     })
     .await?;
-    // The 500-row list is display history, not the correctness boundary. A
-    // reconnecting client names its exact formerly-active set so each of those
-    // rows is authoritative even after more than 500 later mutations.
+    // This list is display history, not the correctness boundary. A reconnecting
+    // client names its exact formerly-active set so each of those rows is
+    // authoritative even after more than MAX_LISTED_JOBS later mutations.
     let mut known_job_ids = reconnect_context.active_job_ids.clone();
     known_job_ids.extend(reconnect_context.known_terminal_job_ids);
     let known_job_ids = dedupe_ids(known_job_ids);

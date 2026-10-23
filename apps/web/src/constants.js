@@ -3,6 +3,12 @@
 // unaffected.
 export { terminalStatuses, actionStatuses } from "./jobTypes.js";
 
+// How many jobs one queue listing carries. Mirrors `MAX_LISTED_JOBS` in
+// crates/sceneworks-core/src/jobs_store.rs — `GET /api/v1/jobs` takes no offset, so the
+// server's page depth and every client bound derived from it must agree or the UI
+// silently shows less history than the server just sent.
+export const MAX_LISTED_JOBS = 1000;
+
 // The offline model-catalog mirror (`fallbackModels`) lives in modelCatalog.js (sc-24217) so it
 // stays out of the initial bundle; import it from there, and only lazily in production code.
 
