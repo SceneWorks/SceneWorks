@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { CheckpointImportPanel } from "./CheckpointImportPanel.jsx";
+import { setSelect } from "../testUtils/dom.js";
 
 // Drives the WHOLE unified experience — both ownerships, the linked lifecycle, the five managed
 // inputs, cancel, retry, typed-refusal surfacing, and the accessibility contract — against injected
@@ -196,6 +197,111 @@ describe("CheckpointImportPanel", () => {
       type: "image",
       source: { kind: "huggingFace", repo: "org/model" },
     });
+  });
+
+  const h3Models = [
+    { id: "minimax_h3", name: "MiniMax-H3", family: "minimax-h3", type: "video" },
+    { id: "minimax_h3_ref", name: "MiniMax-H3 References", family: "minimax-h3", type: "video" },
+  ];
+
+  async function prepareH3Import(onImportModel) {
+    await render({ onImportModel, families: ["sdxl"], models: h3Models });
+    await click(byRole("radio", "Add to SceneWorks"));
+    await click(buttonNamed("Hugging Face"));
+    await type(labelled("Hugging Face repo"), "owner/h3-finetune");
+    await setSelect(labelled("Family"), "minimax-h3");
+  }
+
+  it.each([
+    ["fl2va", "minimax_h3"],
+    ["ref2va", "minimax_h3_ref"],
+    ["hybrid", "minimax_h3"],
+  ])("submits explicit %s compatibility through the existing Add workflow", async (partition, baseModel) => {
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "h3-custom" } }));
+    await prepareH3Import(onImportModel);
+    expect(labelled("Type").value).toBe("video");
+    expect(labelled("Compatible base model").value).toBe("");
+    expect(labelled("MiniMax-H3 partition").value).toBe("");
+    await setSelect(labelled("Compatible base model"), baseModel);
+    await setSelect(labelled("MiniMax-H3 partition"), partition);
+    await click(buttonNamed("Queue Import"));
+    expect(onImportModel).toHaveBeenCalledWith({
+      ownershipMode: "managed",
+      type: "video",
+      family: "minimax-h3",
+      baseModel,
+      minimaxH3Partition: partition,
+      source: { kind: "huggingFace", repo: "owner/h3-finetune" },
+    });
+  });
+
+  it("names missing and incompatible H3 declarations without auto-selecting a partition", async () => {
+    const onImportModel = vi.fn();
+    await prepareH3Import(onImportModel);
+    await click(buttonNamed("Queue Import"));
+    expect(importStatus()).toContain("minimaxH3Partition");
+    await setSelect(labelled("MiniMax-H3 partition"), "ref2va");
+    await click(buttonNamed("Queue Import"));
+    expect(importStatus()).toContain("baseModel minimax_h3_ref");
+    await setSelect(labelled("Compatible base model"), "minimax_h3");
+    await click(buttonNamed("Queue Import"));
+    expect(importStatus()).toContain("baseModel minimax_h3_ref");
+    expect(onImportModel).not.toHaveBeenCalled();
+    await setSelect(labelled("Family"), "sdxl");
+    expect(labelled("Compatible base model")).toBeUndefined();
+    await click(buttonNamed("Queue Import"));
+    expect(onImportModel).toHaveBeenCalledWith(expect.not.objectContaining({ baseModel: expect.anything() }));
+    expect(onImportModel.mock.calls[0][0].minimaxH3Partition).toBeUndefined();
+  });
+
+  function h3Scan(paths = ["custom-h3/transformer"]) {
+    return readyScan({ candidates: paths.map((relativePath) => ({
+      checkpointId: `linked/root-a/${relativePath}`,
+      candidate: { relativePath, container: "directory", headerFamily: "minimax-h3" },
+      selectable: false,
+      status: null,
+    })) });
+  }
+
+  it.each([
+    ["fl2va", "minimax_h3"],
+    ["ref2va", "minimax_h3_ref"],
+    ["hybrid", "minimax_h3"],
+  ])("submits explicit linked %s compatibility without transferring the checkpoint", async (partition, baseModel) => {
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "linked-h3" } }));
+    await render({ onImportModel, models: h3Models, library: libraryStub({ scan: vi.fn(async () => h3Scan()) }) });
+    expect(labelled("Compatible base model").value).toBe("");
+    expect(labelled("MiniMax-H3 partition").value).toBe("");
+    await click(buttonNamed("Validate and use"));
+    expect(importStatus()).toContain("minimaxH3Partition");
+    expect(onImportModel).not.toHaveBeenCalled();
+    await setSelect(labelled("Compatible base model"), baseModel);
+    await setSelect(labelled("MiniMax-H3 partition"), partition);
+    await click(buttonNamed("Validate and use"));
+    expect(onImportModel).toHaveBeenCalledWith({
+      linkedRootId: "root-a",
+      linkedRelativePath: "custom-h3/transformer",
+      name: "transformer",
+      type: "video",
+      family: "minimax-h3",
+      baseModel,
+      minimaxH3Partition: partition,
+    });
+  });
+
+  it("keeps linked declarations candidate-local and names an incompatible base", async () => {
+    const onImportModel = vi.fn();
+    await render({ onImportModel, models: h3Models, library: libraryStub({ scan: vi.fn(async () => h3Scan(["first/transformer", "second/transformer"])) }) });
+    const [first, second] = container.querySelectorAll(".checkpoint-candidate");
+    const [firstBase, firstPartition] = first.querySelectorAll("select");
+    await setSelect(firstBase, "minimax_h3");
+    await setSelect(firstPartition, "ref2va");
+    await click(first.querySelector("button"));
+    expect(importStatus()).toContain("baseModel minimax_h3_ref");
+    await click(second.querySelector("button"));
+    expect(importStatus()).toContain("minimaxH3Partition");
+    expect([...second.querySelectorAll("select")].map((select) => select.value)).toEqual(["", ""]);
+    expect(onImportModel).not.toHaveBeenCalled();
   });
 
   // ------------------------------------------------------- AC1: linked-library management

@@ -1182,12 +1182,17 @@ fn compile_shot(
     // A reference-only knob reaches a reference-only request (sc-23402). The plan declares it once
     // on the family; the shots that resolve to the base partition encode no reference, so the field
     // is not written onto them and never reaches their job body or their attempt record.
+    let imported_reference = shot.conditioning.mode == "reference_to_video"
+        && crate::minimax_h3_import::entry_is_imported_minimax_h3(partition_entry);
     let reference_image_short_edge = plan
         .model
         .advanced
         .as_ref()
         .and_then(|advanced| advanced.reference_image_short_edge)
-        .filter(|_| is_reference_partition_id(&partition.model_id));
+        .filter(|_| is_reference_partition_id(&partition.model_id) || imported_reference)
+        // Imported ids carry no resident-partition token. Resolve the provider default explicitly
+        // into this persisted request so replay and the attempt recorder share the same contract.
+        .or_else(|| imported_reference.then(|| effective_reference_image_short_edge(None)));
     // The plan's one LoRA list, resolved against the partition this shot ACTUALLY dispatches as
     // (sc-23406). A shot whose partition has no compatible entry gets none — the empty list is the
     // record of that, and `effective_steps` below then resolves to the model's own default.
@@ -1288,7 +1293,7 @@ impl CompiledRequest {
     /// `effective_reference_image_short_edge` (this crate has no gen-core dependency), so the
     /// recorded value cannot drift from the value the engine resolved.
     pub fn effective_reference_image_short_edge(&self) -> Option<u32> {
-        is_reference_partition_id(&self.model)
+        (is_reference_partition_id(&self.model) || self.reference_image_short_edge.is_some())
             .then(|| effective_reference_image_short_edge(self.reference_image_short_edge))
     }
 
@@ -2950,6 +2955,58 @@ mod tests {
                 .effective_reference_image_short_edge(),
             None
         );
+    }
+
+    #[test]
+    fn imported_hybrid_compilation_retains_identity_and_reference_controls() {
+        for edge in [None, Some(1536)] {
+            let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+            document["model"]["id"] = json!("minimax_h3_custom");
+            if let Some(edge) = edge {
+                document["model"]["advanced"] = json!({"referenceImageShortEdge":edge});
+            }
+            let plan = parse_plan(&document.to_string()).unwrap();
+            let mut imported = entry();
+            imported.extend(json!({"id":"minimax_h3_custom","family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"hybrid","importSourceShape":"transformer_directory","importPlan":{"checkpointId":"managed/custom","assembly":{"schemaVersion":1,"partition":"hybrid"}}}).as_object().unwrap().clone());
+            crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(&mut imported);
+            let reference = reference_entry();
+            let entries = ModelEntries::with_reference_partition(
+                "minimax_h3_custom",
+                &imported,
+                Some(("minimax_h3_ref", &reference)),
+            );
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &entries,
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &BTreeMap::new(),
+                },
+            )
+            .expect("explicit hybrid compiles");
+            let referenced = compiled.request("SH010").unwrap();
+            let plain = compiled.request("SH020").unwrap();
+            assert_eq!(referenced.model, "minimax_h3_custom");
+            assert_eq!(plain.model, "minimax_h3_custom");
+            assert_eq!(
+                referenced.effective_reference_image_short_edge(),
+                Some(edge.unwrap_or(2048))
+            );
+            assert_eq!(plain.reference_image_short_edge, None);
+            assert_eq!(plain.effective_reference_image_short_edge(), None);
+            let replay: CompiledPlan =
+                serde_json::from_value(serde_json::to_value(&compiled).unwrap()).unwrap();
+            assert_eq!(
+                replay
+                    .request("SH010")
+                    .unwrap()
+                    .effective_reference_image_short_edge(),
+                referenced.effective_reference_image_short_edge()
+            );
+        }
     }
 
     #[test]

@@ -26,13 +26,22 @@ fn dense_dit_plan() -> ImportPlanV1 {
     ImportPlanV1::new(
         "checkpoint-plan-h3",
         "minimax-h3",
-        vec![ImportLayerV1 {
-            layer_id: "artifact:diffusion_pytorch_model.safetensors".to_owned(),
-            role: "transformer".to_owned(),
-            target_path: "diffusion_pytorch_model.safetensors".to_owned(),
-            container: CheckpointContainerV1::Safetensors,
-            source: locator("diffusion_pytorch_model.safetensors"),
-        }],
+        vec![
+            ImportLayerV1 {
+                layer_id: "artifact:diffusion_pytorch_model.safetensors".to_owned(),
+                role: "transformer".to_owned(),
+                target_path: "diffusion_pytorch_model.safetensors".to_owned(),
+                container: CheckpointContainerV1::Safetensors,
+                source: locator("diffusion_pytorch_model.safetensors"),
+            },
+            ImportLayerV1 {
+                layer_id: "artifact:config.json".to_owned(),
+                role: "descriptor".to_owned(),
+                target_path: "config.json".to_owned(),
+                container: CheckpointContainerV1::JsonDescriptor,
+                source: locator("config.json"),
+            },
+        ],
     )
     .expect("valid plan")
 }
@@ -43,7 +52,13 @@ fn imported_entry() -> Map<String, Value> {
         "id": IMPORTED_ID,
         "importPlan": { "checkpointId": "managed/singularity_fl2va_dense" },
     }));
-    let assembly = MiniMaxH3ImportAssembly::from_plan(&dense_dit_plan()).expect("complete");
+    let assembly = MiniMaxH3ImportAssembly::from_declared_plan(
+        &dense_dit_plan(),
+        serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+            .as_object()
+            .unwrap(),
+    )
+    .expect("complete");
     stamp_imported_minimax_h3_entry(&mut entry, &assembly);
     crate::lora_family::apply_model_manifest_defaults(&mut entry, "video", Some("minimax-h3"));
     entry
@@ -233,4 +248,59 @@ fn the_catalog_surfaces_are_derived_from_the_same_claims() {
         .remove("assembly");
     assert!(!imported_video_model_mac_support(&unbound).supported);
     assert!(!imported_video_model_candle_support(&unbound).supported);
+}
+
+#[test]
+fn explicit_ref_and_hybrid_imports_claim_only_their_declared_operations() {
+    for partition in ["fl2va", "ref2va", "hybrid"] {
+        let mut entry = imported_entry();
+        entry.insert("minimaxH3Partition".to_owned(), json!(partition));
+        entry.insert(
+            "baseModel".to_owned(),
+            json!(if partition == "ref2va" {
+                "minimax_h3_ref"
+            } else {
+                "minimax_h3"
+            }),
+        );
+        let assembly =
+            MiniMaxH3ImportAssembly::from_declared_plan(&dense_dit_plan(), &entry).unwrap();
+        stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(&mut entry);
+        for (mode, extra) in [
+            ("text_to_video", json!({})),
+            ("image_to_video", json!({"sourceAssetId":"first"})),
+            (
+                "first_last_frame",
+                json!({"sourceAssetId":"first","lastFrameAssetId":"last"}),
+            ),
+            (
+                "reference_to_video",
+                json!({"referenceAssetIds":["image1","image2"],"sourceClipAssetIds":["video1"],"referenceAudioAssetIds":["audio1"]}),
+            ),
+        ] {
+            let expected =
+                partition == "hybrid" || (partition == "ref2va") == (mode == "reference_to_video");
+            assert_eq!(
+                claimed_on_both(&payload(IMPORTED_ID, mode, extra, entry.clone())),
+                (expected, expected),
+                "{partition}/{mode}"
+            );
+        }
+        // Explicit hybrid is an operation union, never permission to drop keyframes or refs.
+        assert_eq!(
+            claimed_on_both(&payload(
+                IMPORTED_ID,
+                "reference_to_video",
+                json!({"sourceAssetId":"first","referenceAssetIds":["reference"]}),
+                entry.clone()
+            )),
+            (false, false)
+        );
+        entry.remove("minimaxH3Partition");
+        assert_eq!(
+            claimed_on_both(&payload(IMPORTED_ID, "text_to_video", json!({}), entry)),
+            (false, false)
+        );
+    }
 }

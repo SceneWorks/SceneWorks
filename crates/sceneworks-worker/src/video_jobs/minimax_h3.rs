@@ -5,6 +5,10 @@ use super::prelude::*;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use super::wan::{advanced_opt_f32, advanced_opt_u32, generate_video_using, VideoGenInput};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda as platform_runtime;
+#[cfg(target_os = "macos")]
+use runtime_macos as platform_runtime;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -117,7 +121,7 @@ pub(super) const MINIMAX_H3_ENGINE_ID: &str = "minimax_h3";
 /// Named `"transformer"` even when the request will denoise on `transformer_ref/`: the provider
 /// resolves the reference partition as this directory's SIBLING, so the base partition is always
 /// what is staged.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(super) const MINIMAX_H3_DIT_COMPONENT: &str = "transformer";
 
 // The staged-component key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads the PACKED, per-tier
@@ -281,6 +285,15 @@ pub(super) fn resolve_minimax_h3_load(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<MiniMaxH3Load> {
+    resolve_minimax_h3_load_for_import(settings, request, None)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_minimax_h3_load_for_import(
+    settings: &Settings,
+    request: &VideoRequest,
+    imported: Option<sceneworks_core::minimax_h3_import::MiniMaxH3Partition>,
+) -> WorkerResult<MiniMaxH3Load> {
     let order = minimax_h3_tier_order(request);
     let tier_root = match std::env::var(MINIMAX_H3_TIER_DIR_ENV) {
         Ok(dir) => PathBuf::from(dir.trim()),
@@ -311,11 +324,27 @@ pub(super) fn resolve_minimax_h3_load(
             })?
         }
     };
-    let Some(tier) = order
-        .iter()
-        .copied()
-        .find(|tier| minimax_h3_tier_dir_is_complete(&tier_root.join(tier)))
-    else {
+    let Some(tier) = order.iter().copied().find(|tier| {
+        let dir = tier_root.join(tier);
+        match imported {
+            None => minimax_h3_tier_dir_is_complete(&dir),
+            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va) => {
+                sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(&dir)
+            }
+            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va) => {
+                sceneworks_core::mlx_tier_completeness::minimax_h3_tier_complete(&dir)
+            }
+            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Hybrid) => {
+                let encoder = sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+                    &tier_root, &base_root, tier,
+                );
+                sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(
+                    &base_root, &encoder,
+                )
+                .is_empty()
+            }
+        }
+    }) else {
         // Say WHICH half is missing. The two partitions are separate downloads owned by separate
         // catalog entries, so "no complete tier" alone would send a user who installed one of them
         // back to re-download the one they already have.
@@ -1471,7 +1500,7 @@ pub(super) async fn generate_minimax_h3_using(
 ) -> WorkerResult<(DecodedVideo, Value)> {
     // An IMPORTED dense DiT (sc-26680) resolves and re-verifies its plan FIRST — a drifted plan, a
     // stale binding or a builtin id refuses before any media is decoded — and then runs this same
-    // arm with the builtin base partition's SEMANTICS (`semantics`) while every identity-bearing
+    // arm with the explicitly declared task's SEMANTICS (`semantics`) while every identity-bearing
     // record keeps the imported request (`request`).
     let imported = imported_minimax_h3_checkpoint_id(request)
         .map(|_| {
@@ -1487,7 +1516,8 @@ pub(super) async fn generate_minimax_h3_using(
         .transpose()?;
     let partition = imported
         .as_ref()
-        .map(|_| imported_minimax_h3_partition_request(request));
+        .map(|_| imported_minimax_h3_partition_request(request))
+        .transpose()?;
     let semantics = partition.as_ref().unwrap_or(request);
     // Shape before media: a request aimed at the wrong DiT partition must be refused before it
     // costs an asset decode, and long before it costs a 53 GB text-encoder load.
@@ -1725,14 +1755,14 @@ pub(super) async fn generate_candle_minimax_h3_using(
         + Send
         + 'static,
 ) -> WorkerResult<(DecodedVideo, Value)> {
-    // See `generate_minimax_h3_using`: an imported dense DiT (sc-26680) is resolved first, then the
-    // arm runs on the base partition's SEMANTICS with the imported request's IDENTITY.
+    // Imported weights resolve first; declared task semantics do not replace checkpoint identity.
     let imported = imported_minimax_h3_checkpoint_id(request)
         .map(|_| resolve_imported_minimax_h3_dit(request, settings))
         .transpose()?;
     let partition = imported
         .as_ref()
-        .map(|_| imported_minimax_h3_partition_request(request));
+        .map(|_| imported_minimax_h3_partition_request(request))
+        .transpose()?;
     let semantics = partition.as_ref().unwrap_or(request);
     minimax_h3_validate_partition(semantics)?;
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(semantics)?;
@@ -1861,18 +1891,12 @@ pub(super) async fn generate_candle_minimax_h3_using(
 }
 
 // ---------------------------------------------------------------------------
-// Imported dense MiniMax-H3 DiT (sc-26680, epic 26679).
+// Imported MiniMax-H3 DiT (sc-26680/sc-26682, epic 26679).
 //
-// A community H3 fine-tune imported through the shared plan route is a NEW DiT and nothing else:
-// `sceneworks_core::minimax_h3_import` validated its persisted plan as a complete assembly and
-// stamped the binding at `importPlan.assembly`. This arm turns that binding into the SAME provider
-// load the builtin arm makes — the one `minimax_h3` registry id on either backend, the resident
-// install's shared root as `spec.weights` — with exactly one difference: the `transformer`
-// component is the PLAN's verified directory instead of a resident tier's.
-//
-// Identity is kept on both sides of that seam. The request keeps the imported model id end to end
-// (job, raw settings, asset); the builtin partition id is used only for the partition's SEMANTICS
-// (mode set, `17n + 5` lattice, sampling defaults), never as the weights' identity.
+// The assembly records explicit FL2VA, Ref2VA, or hybrid compatibility, independently of tensor
+// shape. One provider registry id serves both task partitions. Stage imported bytes at every
+// supported task path and bind the opposite resident DiT only as a recorded load-time companion.
+// Request, job, and asset identity always remain the imported model's, never the semantic stock id.
 // ---------------------------------------------------------------------------
 
 /// The plan identity of an imported MiniMax-H3 entry, or `None` for every other request.
@@ -1908,6 +1932,7 @@ pub(super) struct ImportedMiniMaxH3Dit {
     pub(super) transformer_dir: PathBuf,
     /// The validated binding, recorded verbatim on the asset.
     pub(super) assembly: Value,
+    pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
     _pins: Vec<gen_core::PinnedWeightsFile>,
@@ -2110,24 +2135,31 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         plan_id: resolved.plan.plan_id.clone(),
         checkpoint_id,
         transformer_dir: directory,
+        partition: assembly.partition,
         assembly: assembly.to_json(),
         _pins: pins,
         _derivative: derivative,
     })
 }
 
-/// The request as the builtin BASE partition sees it — for SEMANTICS only (shape validation, the
+/// The request as its declared task partition sees it — for SEMANTICS only (shape validation, the
 /// frame lattice, sampling defaults, resident tier order). The imported request itself is what
 /// every identity-bearing record is written from.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn imported_minimax_h3_partition_request(request: &VideoRequest) -> VideoRequest {
+fn imported_minimax_h3_partition_request(request: &VideoRequest) -> WorkerResult<VideoRequest> {
     let mut partition = request.clone();
-    partition.model =
-        sceneworks_core::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL.to_owned();
-    partition
+    partition.model = sceneworks_core::minimax_h3_import::entry_partition_model(
+        &request.model_manifest_entry,
+        request.mode == "reference_to_video",
+    )
+    .map_err(|reason| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:unsupported-operation] {reason}"))
+    })?
+    .to_owned();
+    Ok(partition)
 }
 
 /// Record the imported weight identity on the asset's raw settings.
@@ -2169,39 +2201,174 @@ fn record_imported_minimax_h3_identity(
 ))]
 const IMPORTED_MINIMAX_H3_TIER: &str = "imported";
 
+/// Validate shared components with the pinned provider's parsers before provider loading.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn validate_imported_minimax_h3_shared(root: &Path, encoder: &Path) -> WorkerResult<()> {
+    use platform_runtime::providers::minimax_h3 as engine;
+    let refuse = |reason: String| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:incompatible-component] {reason}"))
+    };
+    let read = |path: PathBuf| {
+        std::fs::read_to_string(&path)
+            .map_err(|error| refuse(format!("{}: {error}", path.display())))
+    };
+    let text = read(encoder.join("config.json"))?;
+    let text_json: Value = serde_json::from_str(&text)
+        .map_err(|error| refuse(format!("text_encoder/config.json: {error}")))?;
+    let te = engine::text_encoder::MiniMaxH3TeConfig::from_config_json(&text)
+        .map_err(|error| refuse(format!("text_encoder/config.json: {error}")))?;
+    if text_json.get("model_type").and_then(Value::as_str) != Some("qwen3_vl")
+        || te != engine::text_encoder::MiniMaxH3TeConfig::qwen3_vl_32b()
+    {
+        return Err(refuse(
+            "text_encoder/config.json is not the compatible H3 Qwen3-VL-32B conditioning contract"
+                .to_owned(),
+        ));
+    }
+    let video = engine::config::MiniMaxH3VaeConfig::from_diffusers_json(&read(
+        root.join("vae/config.json"),
+    )?)
+    .map_err(|error| refuse(format!("vae/config.json: {error}")))?;
+    let expected = engine::config::MiniMaxH3VaeConfig::default();
+    if (
+        video.latent_channels,
+        video.in_channels,
+        video.out_channels,
+        video.patch_size,
+        video.patch_size_t,
+        video.clip_length,
+        video.token_drop,
+    ) != (
+        expected.latent_channels,
+        expected.in_channels,
+        expected.out_channels,
+        expected.patch_size,
+        expected.patch_size_t,
+        expected.clip_length,
+        expected.token_drop,
+    ) {
+        return Err(refuse(
+            "vae/config.json is incompatible with H3's video latent/temporal contract".to_owned(),
+        ));
+    }
+    let audio = engine::audio_config::MiniMaxH3AudioVaeConfig::from_source_files(
+        &read(root.join("FL2VA/audio_vae/config.json"))?,
+        &read(root.join("FL2VA/audio_vae/config.yaml"))?,
+        &read(root.join("FL2VA/audio_vae/metadata.json"))?,
+    )
+    .map_err(|error| refuse(format!("FL2VA/audio_vae: {error}")))?;
+    audio
+        .cross_check_diffusers_json(&read(root.join("audio_vae/config.json"))?)
+        .map_err(|error| refuse(format!("audio_vae/config.json: {error}")))?;
+    if audio.sample_rate != 32000 || audio.latent_channels != 32 || audio.output_channels != 2 {
+        return Err(refuse(
+            "audio_vae/config.json must preserve H3's 32kHz stereo/32-channel latent contract"
+                .to_owned(),
+        ));
+    }
+    let tokenizer: Value = serde_json::from_str(&read(root.join("tokenizer/tokenizer.json"))?)
+        .map_err(|error| refuse(format!("tokenizer/tokenizer.json: {error}")))?;
+    if tokenizer
+        .get("model")
+        .and_then(|model| model.get("type"))
+        .and_then(Value::as_str)
+        != Some("BPE")
+    {
+        return Err(refuse(
+            "tokenizer/tokenizer.json has no compatible tokenizer model".to_owned(),
+        ));
+    }
+    let added = tokenizer.get("added_tokens").and_then(Value::as_array);
+    for (token, id) in [
+        ("<|image_pad|>", te.image_token_id),
+        ("<|video_pad|>", te.video_token_id),
+        ("<|vision_start|>", te.vision_start_token_id),
+        ("<|vision_end|>", te.vision_end_token_id),
+    ] {
+        if !added.into_iter().flatten().any(|value| {
+            value.get("content").and_then(Value::as_str) == Some(token)
+                && value.get("id").and_then(Value::as_i64) == Some(i64::from(id))
+        }) {
+            return Err(refuse(format!(
+                "tokenizer/tokenizer.json has incompatible {token} token id; expected {id}"
+            )));
+        }
+    }
+    // The H3 processor lives in the provider, not an external processor_config.json. Its token
+    // presentation requires MiniMax's additions in exactly the published order.
+    let config: Value = serde_json::from_str(&read(root.join("tokenizer/tokenizer_config.json"))?)
+        .map_err(|error| refuse(format!("tokenizer/tokenizer_config.json: {error}")))?;
+    let declared = config
+        .get("additional_special_tokens")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            refuse("tokenizer/tokenizer_config.json has no additional_special_tokens".to_owned())
+        })?;
+    let specials = engine::text_encoder::MINIMAX_ADDED_SPECIALS;
+    if declared.len() < specials.len()
+        || !declared[declared.len() - specials.len()..]
+            .iter()
+            .zip(specials)
+            .all(|(actual, expected)| actual.as_str() == Some(expected))
+    {
+        return Err(refuse("tokenizer/tokenizer_config.json must preserve MiniMax-H3's seven additional special tokens in order".to_owned()));
+    }
+    for token in &declared[..declared.len() - specials.len()] {
+        let known = token.as_str().is_some_and(|token| {
+            tokenizer["model"]["vocab"].get(token).is_some()
+                || added
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.get("content").and_then(Value::as_str) == Some(token))
+        });
+        if !known {
+            return Err(refuse("tokenizer/tokenizer_config.json assigns unrecognized tokens before H3 specials, changing their ids".to_owned()));
+        }
+    }
+    Ok(())
+}
+
 /// The reference DiT partition directory `mlx-gen-minimax-h3::load` probes as the staged DiT's
 /// SIBLING (`REFERENCE_DIT_PARTITION` in the provider) — the `transformer_ref` row of
 /// `minimax_h3_import::MINIMAX_H3_RESIDENT_COMPONENTS`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 const MINIMAX_H3_REFERENCE_DIT_DIR: &str = "transformer_ref";
 
-/// Resolve an imported DiT's MLX load: the resident install's shared root, text encoder and
-/// reference partition, with the plan's DiT staged as the `transformer` component.
-///
-/// The reference partition is the one subtle row. `mlx-gen-minimax-h3::load` probes
-/// `{dit}/../transformer_ref/config.json` on EVERY load, so the imported directory alone does not
-/// load. The companion the assembly records (`transformer_ref` ← resident `minimax_h3_ref`) is made
-/// real by a SceneWorks-owned staging directory whose `transformer` names the imported DiT and whose
-/// `transformer_ref` names the resident tier's — symlinks, so nothing is copied and the user's bytes
-/// are never touched. A base-partition request never denoises on it.
+/// Resolve shared components and the explicitly recorded load-only companion. MLX eagerly probes
+/// both task directories, so an explicit hybrid binds the imported DiT at both paths; a single
+/// partition import binds it only at its declared task path. Unsupported operations refuse before
+/// this load can use a resident companion for denoising.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_imported_minimax_h3_load(
     settings: &Settings,
     request: &VideoRequest,
     dit: &ImportedMiniMaxH3Dit,
 ) -> WorkerResult<(MiniMaxH3Load, &'static str)> {
-    let partition = imported_minimax_h3_partition_request(request);
-    let resident = resolve_minimax_h3_load(settings, &partition).map_err(|error| {
-        WorkerError::InvalidPayload(format!(
+    let partition = imported_minimax_h3_partition_request(request)?;
+    let resident = resolve_minimax_h3_load_for_import(settings, &partition, Some(dit.partition))
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
             "[checkpoint-plan:missing-component] checkpoint {:?} reuses the installed MiniMax-H3 \
              text encoder, tokenizer, VAEs and reference partition, which are not ready: {error}",
             dit.checkpoint_id
         ))
-    })?;
-    let reference = resident
-        .dit_dir
-        .with_file_name(MINIMAX_H3_REFERENCE_DIT_DIR);
-    let staged = stage_imported_minimax_h3_assembly(settings, dit, &reference)?;
+        })?;
+    validate_imported_minimax_h3_shared(
+        &resident.root,
+        resident
+            .text_encoder_dir
+            .as_deref()
+            .unwrap_or(&resident.root.join("text_encoder")),
+    )?;
+    let companion =
+        if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va {
+            resident.dit_dir.clone()
+        } else {
+            resident
+                .dit_dir
+                .with_file_name(MINIMAX_H3_REFERENCE_DIT_DIR)
+        };
+    let staged = stage_imported_minimax_h3_assembly(settings, dit, &companion)?;
     Ok((
         MiniMaxH3Load {
             root: resident.root,
@@ -2217,11 +2384,10 @@ pub(super) fn resolve_imported_minimax_h3_load(
     ))
 }
 
-/// Materialize the imported DiT's load directory: `<data>/cache/minimax-h3-assemblies/<key>/` with
-/// `transformer` → the plan's DiT directory and `transformer_ref` → the resident reference
-/// partition. Keyed on all three identities, so a changed binding is a different directory, and
-/// re-linked on every render so a stale link can never outlive the binding it was made for.
-#[cfg(target_os = "macos")]
+/// Stage both task paths according to the declared compatibility. The key includes plan identity,
+/// semantic digest, partition and source directories; Windows uses snapshot-style file hardlinks
+/// rather than privilege-gated directory links, and Unix uses directory symlinks. No tensor copies.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn stage_imported_minimax_h3_assembly(
     settings: &Settings,
     dit: &ImportedMiniMaxH3Dit,
@@ -2231,6 +2397,12 @@ fn stage_imported_minimax_h3_assembly(
     let mut hasher = Sha256::new();
     for part in [
         dit.checkpoint_id.as_bytes(),
+        dit.plan_id.as_bytes(),
+        dit.semantic_digest
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+        dit.partition.as_str().as_bytes(),
         dit.transformer_dir.as_os_str().as_encoded_bytes(),
         reference.as_os_str().as_encoded_bytes(),
     ] {
@@ -2245,27 +2417,63 @@ fn stage_imported_minimax_h3_assembly(
         .join(&key[..32]);
     std::fs::create_dir_all(&staged)?;
     for (name, target) in [
-        (MINIMAX_H3_DIT_COMPONENT, dit.transformer_dir.as_path()),
-        (MINIMAX_H3_REFERENCE_DIT_DIR, reference),
+        (
+            MINIMAX_H3_DIT_COMPONENT,
+            if dit.partition.supports_base() {
+                dit.transformer_dir.as_path()
+            } else {
+                reference
+            },
+        ),
+        (
+            MINIMAX_H3_REFERENCE_DIT_DIR,
+            if dit.partition.supports_references() {
+                dit.transformer_dir.as_path()
+            } else {
+                reference
+            },
+        ),
     ] {
         let link = staged.join(name);
         if std::fs::read_link(&link).ok().as_deref() == Some(target) {
             continue;
         }
         match std::fs::symlink_metadata(&link) {
+            #[cfg(unix)]
             Ok(_) => std::fs::remove_file(&link)?,
+            #[cfg(windows)]
+            Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        #[cfg(unix)]
         std::os::unix::fs::symlink(target, &link)?;
+        #[cfg(windows)]
+        {
+            // Snapshot-style file hardlinks avoid both copying tensors and requiring directory
+            // symlink privileges. Source inventory is pinned before this function is called.
+            std::fs::create_dir_all(&link)?;
+            for entry in std::fs::read_dir(target)? {
+                let entry = entry?;
+                if !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let destination = link.join(entry.file_name());
+                match std::fs::remove_file(&destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                std::fs::hard_link(entry.path(), &destination).map_err(|error| WorkerError::InvalidPayload(format!("cannot stage imported H3 file {}: {error}; keep the import and component cache on the same hardlink-capable volume", destination.display())))?;
+            }
+        }
     }
     Ok(staged)
 }
 
-/// Resolve an imported DiT's Candle load: the resident `MiniMaxAI/MiniMax-H3` snapshot as the shared
-/// root (VAEs, tokenizer, `FL2VA/`), the text encoder at the request's tier, and the plan's DiT as
-/// the `transformer` component. Candle derives the reference partition only for a Ref2VA task, so a
-/// base-partition request needs no companion staging here.
+/// Candle shares the installed conditioner/VAEs and derives Ref2VA's DiT by the same sibling rule.
+/// Base-only imports need no sibling staging; reference-capable imports stage the declared task
+/// paths, retaining the imported bytes for every admitted operation.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn resolve_candle_imported_minimax_h3_load(
     settings: &Settings,
@@ -2293,10 +2501,46 @@ pub(super) fn resolve_candle_imported_minimax_h3_load(
         candle_minimax_h3_component_dir(&root, "text_encoder").map_err(missing)?;
         None
     };
+    let encoder = text_encoder_dir
+        .as_deref()
+        .map_or_else(|| root.join("text_encoder"), Path::to_path_buf);
+    let probes =
+        sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(&root, &encoder);
+    if !probes.is_empty() {
+        return Err(missing(WorkerError::InvalidPayload(format!(
+            "missing shared component files: {}",
+            probes
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))));
+    }
+    validate_imported_minimax_h3_shared(&root, &encoder)?;
+    let dit_dir = if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va
+    {
+        dit.transformer_dir.clone()
+    } else {
+        let companion =
+            if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va {
+                let base_root = if quant.is_some() {
+                    candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)
+                        .map_err(missing)?
+                        .join(tier)
+                } else {
+                    root.clone()
+                };
+                candle_minimax_h3_component_dir(&base_root, "transformer").map_err(missing)?
+            } else {
+                dit.transformer_dir.clone()
+            };
+        stage_imported_minimax_h3_assembly(settings, dit, &companion)?
+            .join(MINIMAX_H3_DIT_COMPONENT)
+    };
     Ok((
         CandleMiniMaxH3Load {
             root,
-            dit_dir: Some(dit.transformer_dir.clone()),
+            dit_dir: Some(dit_dir),
             text_encoder_dir,
             // Dense imported DiT; the packed text encoder's tier is auto-detected by the provider.
             quant: None,

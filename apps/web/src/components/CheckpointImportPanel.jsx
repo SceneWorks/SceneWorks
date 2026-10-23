@@ -22,6 +22,7 @@ import {
   managedImportBody,
   managedSourceProblem,
   modelCheckpointId,
+  modelCompatibilityProblem,
   removeLibraryRoot,
   rescanLibraryCheckpoint,
   rootRemovalCopy,
@@ -126,10 +127,10 @@ export function CheckpointImportPanel({
   const [addLabelDraft, setAddLabelDraft] = useState("");
   const [renameLabelDraft, setRenameLabelDraft] = useState("");
   const [renaming, setRenaming] = useState("");
+  const [linkedDeclarations, setLinkedDeclarations] = useState({});
 
-  // Managed state. `type` is image-only for the same reason the pre-epic form fixed it: the import
-  // route writes this type verbatim into the user manifest and never reconciles it against the
-  // detected family, so offering the others would let an image checkpoint be mis-typed (sc-14020).
+  // H3 is the supported video import. Architecture detection cannot establish its trained
+  // conditioning partition, so both compatibility fields start unselected.
   const [managed, setManaged] = useState({
     kind: "upload",
     file: null,
@@ -143,11 +144,19 @@ export function CheckpointImportPanel({
     name: "",
     family: "",
     type: "image",
+    baseModel: "",
+    minimaxH3Partition: "",
   });
   const [fileInputKey, setFileInputKey] = useState(0);
   // The last submission, kept so "Try again" re-sends exactly what failed rather than whatever the
   // form happens to hold by then.
   const [lastAttempt, setLastAttempt] = useState(null);
+  const importFamilies = useMemo(
+    () => Array.from(new Set([...families, ...models.filter((model) => model.family === "minimax-h3").map((model) => model.family)])).sort(),
+    [families, models],
+  );
+  const isH3Import = managed.family === "minimax-h3";
+  const compatibleH3Bases = models.filter((model) => ["minimax_h3", "minimax_h3_ref"].includes(model.id));
 
   const modelsByCheckpoint = useMemo(() => {
     const index = new Map();
@@ -360,20 +369,29 @@ export function CheckpointImportPanel({
     }
   }
 
-  // A linked import carries no family override: the family select lives in the managed pane, which
-  // is not on screen here, so reading it would let a value the user cannot see decide how their
-  // checkpoint is classified. The compile detects it from the bytes, which is the better answer
-  // anyway.
+  // Linked compatibility belongs to the rendered candidate, never to hidden managed form state.
+  // The scan establishes architecture only; its H3 partition remains an explicit user declaration.
   //
   // The root id comes from the RENDERED scan, never from `activeRootId`: starting a second root's
   // scan moves `activeRootId` immediately, and a click landing in that window would otherwise post
   // the candidate the user is looking at under the other root's id.
   function submitLinked(candidate) {
+    const rootId = scan?.root?.rootId ?? "";
+    const relativePath = candidate.candidate.relativePath;
+    const declaration = candidate.candidate.headerFamily === "minimax-h3"
+      ? { family: "minimax-h3", type: "video", ...linkedDeclarations[JSON.stringify([rootId, relativePath])] }
+      : {};
+    const problem = modelCompatibilityProblem(declaration);
+    if (problem) {
+      setImportMessage({ ...NEUTRAL, tone: "error", text: problem });
+      return;
+    }
     return submit({
       body: linkedImportBody({
         rootId: scan?.root?.rootId ?? "",
         relativePath: candidate.candidate.relativePath,
         name: candidate.candidate.relativePath.split("/").pop(),
+        ...declaration,
       }),
     });
   }
@@ -630,6 +648,7 @@ export function CheckpointImportPanel({
     const model = entry.status ? modelsByCheckpoint.get(entry.status.checkpointId) : null;
     const chips = model ? modelCapabilityChips(model) : [];
     const block = model ? macModelBlock(model, macCapabilities) : null;
+    const declarationKey = JSON.stringify([renderedRootId, candidate.relativePath]);
     return (
       <li className="checkpoint-candidate" key={entry.checkpointId ?? candidate.relativePath}>
         <div className="checkpoint-candidate-head">
@@ -674,6 +693,14 @@ export function CheckpointImportPanel({
             </button>
           </div>
         ) : null}
+        {candidate.headerFamily === "minimax-h3" ? renderH3Declaration(
+          linkedDeclarations[declarationKey] ?? {},
+          (field, value) => setLinkedDeclarations((current) => ({
+            ...current,
+            [declarationKey]: { ...current[declarationKey], [field]: value },
+          })),
+          `${candidate.relativePath} compatibility`,
+        ) : null}
         {entry.selectable ? (
           <button disabled={importBusy} onClick={() => submitLinked(entry)} type="button">
             Use this checkpoint
@@ -688,6 +715,36 @@ export function CheckpointImportPanel({
           </p>
         )}
       </li>
+    );
+  }
+
+  function renderH3Declaration(declaration, onChange, label = "MiniMax-H3 compatibility") {
+    return (
+      <div aria-label={label} className="models-import-grid checkpoint-h3-declaration" role="group">
+        <label>
+          Compatible base model
+          <select onChange={(event) => onChange("baseModel", event.target.value)} value={declaration.baseModel ?? ""}>
+            <option value="">Select baseModel</option>
+            {compatibleH3Bases.map((model) => (
+              <option key={model.id} value={model.id}>{model.name ?? model.id}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          MiniMax-H3 partition
+          <select onChange={(event) => onChange("minimaxH3Partition", event.target.value)} value={declaration.minimaxH3Partition ?? ""}>
+            <option value="">Select minimaxH3Partition</option>
+            <option value="fl2va">fl2va — first/last frame</option>
+            <option value="ref2va">ref2va — reference images</option>
+            <option value="hybrid">hybrid — base or references</option>
+          </select>
+        </label>
+        <p className="inline-note checkpoint-h3-compatibility-note">
+          Declare the fine-tune’s trained compatibility; tensor shapes identify architecture only.
+          fl2va and hybrid require baseModel minimax_h3; ref2va requires minimax_h3_ref.
+          Hybrid supports either operation, not simultaneous keyframes and references.
+        </p>
+      </div>
     );
   }
 
@@ -808,24 +865,28 @@ export function CheckpointImportPanel({
           ) : null}
           <label>
             Type
-            {/* Image-only, exactly as the pre-epic form was: the import route writes this value
-                verbatim into the user manifest and never reconciles it against the detected family
-                (sc-14020). */}
-            <select aria-readonly="true" disabled value="image">
+            <select aria-readonly="true" disabled value={managed.type}>
               <option value="image">Image</option>
+              <option value="video">Video</option>
             </select>
           </label>
           <label>
             Family
             <select
-              disabled={!families.length}
-              onChange={(event) => setManaged((current) => ({ ...current, family: event.target.value }))}
+              disabled={!importFamilies.length}
+              onChange={(event) => setManaged((current) => ({
+                ...current,
+                family: event.target.value,
+                type: event.target.value === "minimax-h3" ? "video" : "image",
+                baseModel: "",
+                minimaxH3Partition: "",
+              }))}
               value={managed.family}
             >
-              {families.length ? (
+              {importFamilies.length ? (
                 <>
                   <option value="">Auto-detect</option>
-                  {families.map((family) => (
+                  {importFamilies.map((family) => (
                     <option key={family} value={family}>
                       {family}
                     </option>
@@ -836,6 +897,9 @@ export function CheckpointImportPanel({
               )}
             </select>
           </label>
+          {isH3Import ? renderH3Declaration(managed, (field, value) =>
+            setManaged((current) => ({ ...current, [field]: value })),
+          ) : null}
           <label>
             Name
             <input

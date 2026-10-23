@@ -1520,9 +1520,9 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
 /// * **id** — never a builtin video id. A builtin id names the shipped weights; a plan forwarded
 ///   under one would render the imported bytes under another checkpoint's name (or, on a lane that
 ///   ignored the plan, the shipped bytes under the imported one).
-/// * **shape** — exactly the base partition's (`text_to_video` / `image_to_video` /
-///   `first_last_frame`, no references), the one partition the stamped assembly binds. The SAME
-///   predicate the builtin `minimax_h3` candle arm uses, so the two cannot drift.
+/// * **shape** — the explicitly declared FL2VA, Ref2VA, or hybrid operation union. Tensor shapes
+///   and model names never imply task compatibility. Builtin predicates validate conditioning,
+///   while the imported entry and plan remain the weight identity.
 /// * **adapters** — none. LoRA and turbo support on imported H3 checkpoints is a later story; the
 ///   entry advertises no adapters and the worker route refuses them.
 ///
@@ -1554,7 +1554,12 @@ pub(crate) fn plan_backed_minimax_h3_video_eligible(
     {
         return false;
     }
-    super::candle::minimax_h3_base_partition_shape(payload)
+    let has_references = payload.get("mode").and_then(Value::as_str) == Some("reference_to_video");
+    let Ok(partition) = crate::minimax_h3_import::entry_partition_model(entry, has_references)
+    else {
+        return false;
+    };
+    super::candle::video_request_candle_eligible(partition, payload)
 }
 
 /// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the

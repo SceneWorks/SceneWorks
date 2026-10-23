@@ -5795,7 +5795,7 @@ pub(crate) fn linked_checkpoint_manifest_entry(
     // has already refused a plan that is not a complete assembly, so an `Err` here leaves the entry
     // without a binding — which every consumer reads as "not an imported H3 model".
     if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
-        if let Ok(assembly) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+        if let Ok(assembly) = MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan, &entry) {
             stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         }
     }
@@ -5810,6 +5810,23 @@ pub(crate) fn linked_checkpoint_manifest_entry(
         .map(str::to_owned);
     apply_model_manifest_defaults(&mut entry, &model_type, family.as_deref());
     entry
+}
+
+fn minimax_h3_source_family_error(payload: &JsonObject, detected: Option<&str>) -> Option<String> {
+    for entry in [
+        Some(payload),
+        payload.get("manifestEntry").and_then(Value::as_object),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(reason) =
+            sceneworks_core::minimax_h3_import::validate_declared_source_family(entry, detected)
+        {
+            return Some(format!("[checkpoint-plan:family-mismatch] {reason}"));
+        }
+    }
+    None
 }
 
 /// Compile a linked checkpoint under an approved root and register it as a selectable model.
@@ -5881,6 +5898,23 @@ async fn run_linked_checkpoint_import_job(
                 .await;
             }
         };
+    if let Some(reason) = minimax_h3_source_family_error(&job.payload, Some(&compiled.plan.family))
+    {
+        CheckpointPlanStore::open(&settings.data_dir)
+            .invalidate(&compiled.checkpoint_id)
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "{reason}; could not invalidate refused linked plan: {error}"
+                ))
+            })?;
+        return fail_job(
+            api,
+            &job.id,
+            "Linked checkpoint import failed.",
+            Some(reason),
+        )
+        .await;
+    }
 
     if let Some(manifest_entry) = job
         .payload
@@ -5900,7 +5934,9 @@ async fn run_linked_checkpoint_import_job(
         };
         // sc-26680: an H3 DiT that is not a complete assembly is refused rather than registered.
         if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
-            if let Err(reason) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+            if let Err(reason) =
+                MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan, &manifest_entry)
+            {
                 return fail_job(
                     api,
                     &job.id,
@@ -6411,6 +6447,9 @@ pub(crate) async fn run_model_import_job(
             .await;
         }
     };
+    if let Some(reason) = minimax_h3_source_family_error(&job.payload, detected_family.as_deref()) {
+        return fail_job(api, &job.id, "Model import failed.", Some(reason)).await;
+    }
     let supplied_family = optional_payload_string(&job.payload, "family").map(str::to_owned);
     let resolved_family = match reconcile_detected_family(supplied_family, detected_family) {
         Ok(family) => family,
@@ -6491,6 +6530,18 @@ pub(crate) async fn run_model_import_job(
         crate::paths::normalize_existing_or_absolute(&install.install_path).ok(),
         Some(target_dir.clone())
     );
+    if let Some(reason) =
+        minimax_h3_source_family_error(&job.payload, Some(&install.compiled.plan.family))
+    {
+        plan_store
+            .remove_managed(&install.install_id)
+            .map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "{reason}; could not roll back refused managed import: {error}"
+                ))
+            })?;
+        return fail_job(api, &job.id, "Model import failed.", Some(reason)).await;
+    }
     // A CURATED managed NVFP4 variant confirms against its registration (sc-11045, epic 11037).
     //
     // `ManagedCheckpointVariantV1::confirm_installed` compares the committed install id, checkpoint
@@ -6568,8 +6619,11 @@ pub(crate) async fn run_model_import_job(
         // sc-26680: a MiniMax-H3 DiT is a component of an ASSEMBLY, not a whole model. Bind it —
         // validated against the plan the commit just published — before the entry can exist, so
         // an incomplete or ambiguous assembly never becomes a selectable catalog row.
-        if manifest_entry.get("family").and_then(Value::as_str) == Some(MINIMAX_H3_IMPORT_FAMILY) {
-            match MiniMaxH3ImportAssembly::from_plan(&install.compiled.plan) {
+        if install.compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
+            match MiniMaxH3ImportAssembly::from_declared_plan(
+                &install.compiled.plan,
+                &manifest_entry,
+            ) {
                 Ok(assembly) => {
                     manifest_entry.insert(
                         "importPlan".to_owned(),
