@@ -13092,6 +13092,9 @@ details[open] > summary.lora-scope-group-heading::before,
    pixels. Pan is driven by per-pointermove React state, not a CSS animation, so
    the hint bought no smoothness anyway. */
 .preview-zoom-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   height: 100%;
   transform-origin: 0 0;
 }
