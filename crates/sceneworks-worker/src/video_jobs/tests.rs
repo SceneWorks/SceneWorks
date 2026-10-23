@@ -7314,13 +7314,19 @@ fn mochi_raw_settings_record_the_loaded_tier() {
 // `offline_settings` is the one way to build a `Settings` for a test whose path could reach a
 // download: it pins every network field unroutable, so no call site has to remember that
 // `huggingface_base_url` (not `api_url`) is what a tier fetch dials. See its doc comment.
-// Its consumers include the candle Mochi twins, so it rides the same `any(macos, candle)` gate
-// as the helpers above rather than the macOS-only one below.
+// It rides NO gate, because its consumers don't: the two reference-audio decode tests below are
+// ungated (they need ffmpeg, not a backend) and build their settings from it. Gating this import
+// while they stay compiled is exactly the wider-narrower mismatch the note above warns about —
+// it just fails as E0425 rather than unused_imports.
+use crate::test_env::offline_settings;
+
+// The consumers that WRITE vars — the candle Mochi twins among them — so this keeps the
+// `any(macos, candle)` gate of the helpers above rather than the macOS-only one below.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
+use crate::test_env::{temp_env_var, temp_env_vars};
 
 // The macOS-gated adapter fixtures (wan Lightning + ltx distill) pin a var for a whole test body —
 // see the cfg note above.
