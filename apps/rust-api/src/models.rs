@@ -16988,7 +16988,9 @@ mod imported_checkpoint_product_surface_tests {
 
     /// A data dir that cannot exist, so every component-presence probe answers ABSENT without the
     /// test reading or writing anything on this host.
-    fn empty_data_dir() -> FsPath {
+    /// Returned by reference: `Path` is unsized, so returning it by value is a compile error, and
+    /// `apply_imported_checkpoint_product_surface` takes `&FsPath` anyway.
+    fn empty_data_dir() -> &'static FsPath {
         std::path::Path::new("/nonexistent-sc26687-product-surface")
     }
 
