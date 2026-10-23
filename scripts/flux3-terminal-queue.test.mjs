@@ -5,11 +5,12 @@ import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFile, mkdtemp, rm, mkdir, writeFile, rename, readdir } from 'node:fs/promises';
 import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob } from './flux3-terminal-queue.mjs';
-import { executionGroups, assertGroupPassed } from './flux3-terminal-queue-campaign.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES } from './flux3-terminal-queue.mjs';
+import { executionGroups, assertGroupPassed, validateQueueOperation, executeAdmittedQueueOperation } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
 const source = 'a'.repeat(40), inference = 'b'.repeat(40), digest = 'c'.repeat(64), NOW = 1000000;
@@ -409,4 +410,88 @@ test('startup mutations admitting queued readiness or ignoring peer failures vio
   const requiresAbort = check => assert.rejects(check(dir, EXECUTOR), /peer failed/);
   await requiresAbort(assertNoPeerFailure);
   await assert.rejects(requiresAbort(ignored.assertNoPeerFailure), /Missing expected rejection/);
+});
+
+test('explicit admission-only operation cannot call ledger, provider, model or generation callbacks', async () => {
+  const calls = [];
+  const forbidden = name => async () => { calls.push(name); assert.fail('diagnostic must not execute side effects'); };
+  const result = await executeAdmittedQueueOperation('admission-only', { initialize: forbidden('ledger'), execute: forbidden('provider/model/generation'), finalize: forbidden('ledger audit') });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(result, { operation: 'admission-only', status: 'DIAGNOSTIC_ONLY', generationCount: 0, campaignPermitsConsumed: 0, ledgerInitialized: false });
+  assert.notEqual(result.status, 'PASSED');
+});
+test('normal run initializes exactly once after admission and finalizes on success or model failure', async () => {
+  for (const fail of [false, true]) {
+    const order = ['admitted'];
+    const task = executeAdmittedQueueOperation('run', {
+      initialize: async () => { assert.deepEqual(order, ['admitted']); order.push('initialize'); },
+      execute: async () => { order.push('execute'); if (fail) throw Error('declared synthetic failure'); },
+      finalize: async () => { order.push('finalize'); },
+    });
+    if (fail) await assert.rejects(task, /synthetic failure/); else assert.equal((await task).status, 'COMPLETED');
+    assert.deepEqual(order, ['admitted', 'initialize', 'execute', 'finalize']);
+  }
+  let executed = false;
+  await assert.rejects(executeAdmittedQueueOperation('run', { initialize: async () => { throw Error('init failed'); }, execute: async () => { executed = true; }, finalize: async () => assert.fail('no ledger was initialized') }), /init failed/);
+  assert.equal(executed, false);
+});
+test('missing/malformed operation refuses before admission or execution and diagnostic never skips production admission', async () => {
+  for (const operation of [undefined, null, '', 'RUN', 'diagnostic', 'admission-only\n', {}, ['run']]) {
+    assert.throws(() => validateQueueOperation(operation), /explicit queue operation/);
+    await assert.rejects(executeAdmittedQueueOperation(operation, { initialize: () => assert.fail(), execute: () => assert.fail(), finalize: () => assert.fail() }), /explicit queue operation/);
+  }
+  const source = await readFile(new URL('./flux3-terminal-queue-campaign.mjs', import.meta.url), 'utf8');
+  const body = source.slice(source.indexOf('async function runCampaignInner'));
+  assert(body.indexOf('validateQueueOperation(control.operation)') < body.indexOf('loadProductTargets()'));
+  assert(body.indexOf("phase('admission_write')") < body.indexOf('executeAdmittedQueueOperation(control.operation'));
+  assert(body.indexOf('guardHardware(admission') < body.indexOf('executeAdmittedQueueOperation(control.operation'));
+  assert(body.indexOf('executeAdmittedQueueOperation(control.operation') < body.indexOf('initializeLedger('));
+  assert.doesNotMatch(body.slice(0, body.indexOf('executeAdmittedQueueOperation(control.operation')), /if\s*\(\s*(?:control\.)?operation === ['"]admission-only/);
+});
+test('failure reporting exposes only fixed phase/code, fixed exception class and numeric whitelisted metrics', () => {
+  const hidden = 'PRIVATE_SENTINEL_UNTRUSTED_PAYLOAD';
+  const injected = Object.assign(Error(hidden), { code: hidden, name: hidden, stack: hidden, command: hidden, env: { arbitrary: hidden } });
+  const failure = new QueuePhaseFailure(injected, hidden, { diskFreeBytes: 123, diskRequiredBytes: hidden, foreignDedicatedBytes: -1, arbitrary: hidden, physicalCapacityBytes: 456 });
+  assert.deepEqual(safeQueueFailure(failure), { phase: 'startup', code: 'QUEUE_PRE_ADMISSION_FAILED' });
+  assert.deepEqual(failure.report, { phase: 'startup', code: 'QUEUE_PRE_ADMISSION_FAILED', exceptionClass: 'Error', metrics: { diskFreeBytes: 123, physicalCapacityBytes: 456 } });
+  assert(!JSON.stringify(failure.report).includes(hidden));
+  for (const phase of QUEUE_PHASES) {
+    const report = queueFailureReport(Object.assign(Error(hidden), { code: 'ENOENT' }), phase);
+    assert.equal(report.phase, phase); assert.equal(report.code, 'QUEUE_FS_ENOENT');
+    assert(!JSON.stringify(report).includes(hidden));
+  }
+  failure.report.phase = hidden; failure.report.code = hidden;
+  assert.deepEqual(safeQueueFailure(failure), { phase: 'startup', code: 'QUEUE_PRE_ADMISSION_FAILED' });
+  assert.deepEqual(safeQueueFailure(injected), { phase: 'startup', code: 'QUEUE_PRE_ADMISSION_FAILED' });
+});
+test('actual CLI failure prints only allowlisted phase and code, never exception text or environment', async () => {
+  for (const mode of ['invalid-operation', 'campaign']) {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('./flux3-terminal-queue.mjs', import.meta.url)), mode], { env: { ...process.env, CUDA_VISIBLE_DEVICES: '-1', QUEUE_TEST_UNTRUSTED: 'PRIVATE_SENTINEL_CLI', FLUX3_QUEUE_BINDING: 'PRIVATE_SENTINEL_CLI' }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let text = ''; child.stdout.on('data', b => { text += b; }); child.stderr.on('data', b => { text += b; });
+    const [code] = await once(child, 'exit'); assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(text.trim()), { phase: mode === 'campaign' ? 'queue_ownership' : 'startup', code: 'QUEUE_PRE_ADMISSION_FAILED' });
+    assert.doesNotMatch(text, /PRIVATE_SENTINEL|AssertionError|stack|node:|invalid-operation/);
+  }
+});
+test('fixed guard phase observation does not change any checks, command environments or result', async () => {
+  const gpu = 'GPU-' + '1'.repeat(8) + '-' + '1'.repeat(4) + '-' + '1'.repeat(4) + '-' + '1'.repeat(4) + '-' + '1'.repeat(12);
+  const exercise = async onPhase => {
+    const calls = [];
+    const result = await guardHardware({ backend: 'candle', gpuUuid: gpu }, [], {
+      platform: 'win32', env: {}, controllerPid: 1, processTable: async () => [{ pid: 1, ppid: 0, command: 'node.exe' }], onPhase,
+      exec: async (command, args, options) => {
+        calls.push({ command, args, options });
+        if (command === 'powershell.exe') return { stdout: gpu + ' luid=0x00000001_0x00000002' };
+        if (args.includes('--query-gpu=index,uuid')) return { stdout: '1, ' + gpu };
+        if (args.includes('-x')) return { stdout: '<uuid>' + gpu + '</uuid><processes></processes>' };
+        if (args.includes('--query-compute-apps=pid,gpu_uuid')) return { stdout: '' };
+        assert.fail('unexpected probe');
+      },
+    });
+    return { calls, result };
+  };
+  const phases = [], observed = await exercise(p => { assert(QUEUE_PHASES.includes(p)); phases.push(p); });
+  assert.deepEqual(observed, await exercise(undefined));
+  assert.deepEqual(phases, ['queue_ownership', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom']);
+  assert.equal(observed.calls.find(c => c.command === 'powershell.exe').options.env.CUDA_VISIBLE_DEVICES, '1');
 });

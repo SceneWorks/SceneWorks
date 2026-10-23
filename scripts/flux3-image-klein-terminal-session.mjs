@@ -86,7 +86,8 @@ export async function readMacWorkloadLease(a) {
   assert(a.macWorkloadLease?.path && a.macWorkloadLease.root && digestPattern.test(a.macWorkloadLease.sha256), 'secondary Mac requires coordinator exclusive-workload attestation lease');
   const file = await contained(a.macWorkloadLease.path, a.macWorkloadLease.root), bytes = await readFile(file); assert(bytes.length <= 1024 * 1024 && createHash('sha256').update(bytes).digest('hex') === a.macWorkloadLease.sha256, 'coordinator lease bytes changed'); return JSON.parse(bytes);
 }
-export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env, processTable, leaseReader = readMacWorkloadLease, controllerPid = process.pid, now = Date.now } = {}) {
+export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env, processTable, leaseReader = readMacWorkloadLease, controllerPid = process.pid, now = Date.now, onPhase = () => {} } = {}) {
+  onPhase('queue_ownership');
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
   const table = await (processTable ? processTable() : observeProcessTable(checked, platform)); assert(Array.isArray(table) && table.some(p => p.pid === controllerPid), 'cannot prove controller process ancestry');
   const ancestors = processAncestors(table, controllerPid), runners = table.filter(p => /^Runner\.Worker(?:\.exe)?$/i.test(path.basename(p.command)));
@@ -116,11 +117,14 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   }
   assert.equal(platform, 'win32');
     const smi = async args => (await checked('nvidia-smi', args, { timeout: 5000 })).stdout.trim();
+  onPhase('physical_gpu_uuid');
   const [index, uuid] = (await smi(['-i', '1', '--query-gpu=index,uuid', '--format=csv,noheader'])).split(',').map(s => s.trim());
   assert.equal(index, '1'); assert.equal(uuid.toLowerCase(), a.gpuUuid.toLowerCase());
+  onPhase('masked_cuda_uuid');
   const [masked = '', luidField] = (await checked('powershell.exe', ['-NoProfile', '-Command', cudaUuidProbe], { timeout: 30_000, env: { CUDA_VISIBLE_DEVICES: '1', CUDA_DEVICE_ORDER: 'PCI_BUS_ID' } })).stdout.trim().split(/\s+/);
   assert.equal(masked.toLowerCase(), uuid.toLowerCase(), 'masked CUDA0 must be physical GPU1');
   const luid = /^luid=(0x[0-9a-f]{8}_0x[0-9a-f]{8})$/i.exec(luidField ?? '')?.[1]?.toLowerCase();
+  onPhase('gpu_process_identity');
   const xml = await smi(['-i', '1', '-q', '-x']); assert(xml.includes('<processes>') && xml.includes(uuid), 'GPU1 process identity unavailable');
   const types = new Map();
   for (const [, block] of xml.matchAll(/<process_info>([\s\S]*?)<\/process_info>/g)) {
@@ -135,6 +139,7 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     if (ownPids.includes(Number(pid))) assert.equal(device.toLowerCase(), uuid.toLowerCase(), 'owned process touched reserved GPU0');
     else if (device.toLowerCase() === uuid.toLowerCase()) { assert.equal(types.get(Number(pid)), 'C+G', 'foreign process actually computing on GPU1 (pure compute or unidentified type)'); foreign.push(Number(pid)); }
   }
+  onPhase('gpu_headroom');
   let memory = new Map();
   if (foreign.length) {
     assert(luid, 'foreign desktop C+G on GPU1 is unmeasurable: CUDA reported no adapter LUID; refusing');

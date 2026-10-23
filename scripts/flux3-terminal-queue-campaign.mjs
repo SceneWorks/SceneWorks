@@ -6,7 +6,7 @@ import { execFile as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { userInfo } from 'node:os';
 import path from 'node:path';
-import { CONTROL_FILE, QUEUE_ROOT, SOURCE_ROOT, digest, verifyQueueReservation } from './flux3-terminal-queue.mjs';
+import { CONTROL_FILE, QUEUE_ROOT, SOURCE_ROOT, digest, verifyQueueReservation, QueuePhaseFailure, QUEUE_PHASES } from './flux3-terminal-queue.mjs';
 import { observeProcessTable, guardHardware, validateAdmission, fileHash } from './flux3-image-klein-terminal-session.mjs';
 import { validateApprovedPlan, planHash, initializeLedger, auditLedger } from './flux3-image-klein-terminal-budget.mjs';
 import { verifyTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
@@ -42,16 +42,44 @@ export function assertGroupPassed(report, ids) {
   assert.equal(selected.length, ids.length);
   assert(!report.error && !report.cleanupError && !report.ledgerError && selected.every(c => c.executionStatus === 'PASSED'), 'FIRST_FAILURE_STOP: preserve local report and spent permits, never retry');
 }
+export function validateQueueOperation(operation) {
+  assert(['run', 'admission-only'].includes(operation), 'explicit queue operation must be run or admission-only');
+  return operation;
+}
+// Both modes reach this gate only AFTER the SAME production admission path. Diagnostic mode
+// never even invokes ledger/provider/model callbacks, and is not terminal image evidence.
+export async function executeAdmittedQueueOperation(operation, { initialize, execute, finalize }) {
+  validateQueueOperation(operation);
+  if (operation === 'admission-only') return { operation, status: 'DIAGNOSTIC_ONLY', generationCount: 0, campaignPermitsConsumed: 0, ledgerInitialized: false };
+  let initialized = false;
+  try { await initialize(); initialized = true; await execute(); }
+  finally { if (initialized) await finalize(); }
+  return { operation, status: 'COMPLETED', ledgerInitialized: true };
+}
 export async function runQueuedCandleCampaign(env) {
+  const trace = { phase: 'queue_ownership', metrics: {} };
+  try { return await runCampaignInner(env, trace); }
+  catch (error) {
+    const failure = new QueuePhaseFailure(error, trace.phase, trace.metrics);
+    if (trace.failureFile) await writeFile(trace.failureFile, JSON.stringify(failure.report) + '\n', { flag: 'wx' }).catch(() => {});
+    throw failure;
+  }
+}
+async function runCampaignInner(env, trace) {
+  const phase = value => { assert(QUEUE_PHASES.includes(value)); trace.phase = value; };
   assert.equal(process.platform, 'win32');
   const ref = JSON.parse(env.FLUX3_QUEUE_BINDING ?? 'null'); assert(ref, 'supervisor-bound queue child only');
   const initial = JSON.parse(await readFile(ref.path, 'utf8')); assert.equal(digest(JSON.stringify(initial)), ref.sha256);
   const identity = initial.identity;
   // Full four-slot barrier before opening ANY control artifact/model, ledger or CUDA context.
   await verifyQueueReservation({ sourceSha: identity.sourceSha, inferenceMainSha: identity.inferenceMainSha, queueReservation: ref }, await observeProcessTable(exec, 'win32'), process.pid);
+  trace.failureFile = path.join(QUEUE_ROOT, `${identity.runId}-${identity.attempt}`, 'campaign.failure.json');
+  phase('control');
   const bytes = await readFile(CONTROL_FILE); assert.equal(digest(bytes), identity.controlSha256);
   const control = JSON.parse(bytes); assert.equal(control.kind, 'flux3-queued-candle-control');
+  validateQueueOperation(control.operation);
   assert.equal(control.sourceSha, identity.sourceSha); assert.equal(control.inferenceMainSha, identity.inferenceMainSha);
+  phase('metadata');
   const approval = await controlArtifact(control.approval), inputSpec = await controlArtifact(control.inputSpec);
   const approved = validateApprovedPlan(approval); assert.equal(approval.sourceSha, identity.sourceSha); assert.equal(approval.inferenceMainSha, identity.inferenceMainSha);
   assert.equal(planHash(inputSpec), approval.inputSpecSha256.candle);
@@ -60,9 +88,11 @@ export async function runQueuedCandleCampaign(env) {
   const outputRoot = path.join(QUEUE_ROOT, `${identity.runId}-${identity.attempt}`, 'outputs'); await mkdir(outputRoot);
   const milestoneFile = path.join(path.dirname(outputRoot), 'milestones.jsonl');
   const milestone = async v => { await appendFile(milestoneFile, JSON.stringify(v) + '\n'); console.log(JSON.stringify(v)); };
+  phase('license');
   const admitted = control.admission;
   assert(admitted && admitted.trainingLicenseAcknowledged === true && typeof admitted.trainingLicenseAcceptance === 'string' && admitted.trainingLicenseAcceptance.includes('And I accept the license'), 'actual user training-license acceptance must be recorded verbatim');
   assert.equal(admitted.physicalGpuId, '1'); assert.equal(admitted.cudaVisibleDevices, '1'); assert.equal(admitted.logicalCudaOrdinal, 0);
+  phase('disk_metadata');
   const present = {}, conversionOutputBytes = {};
   for (const t of registry.filter(t => t.backend === 'candle')) for (const d of t.model.downloads) {
     if (Object.values(inputSpec.packages).some(p => p.repository === d.repo && p.resolvedRevision === d.revision)) present[`${d.repo}@${d.revision}`] = d.estimatedSizeBytes;
@@ -72,7 +102,9 @@ export async function runQueuedCandleCampaign(env) {
   for (const p of artifactStagingPlan(cells, registry, inputSpec).derivedPackages) conversionOutputBytes[p.artifactKey] = Math.max(conversionOutputBytes[p.artifactKey] ?? 0, p.copyBytes);
   const available = async directory => { const fs = await statfs(directory, { bigint: true }); return Number(fs.bavail * fs.bsize); };
   const disk = { present, conversionOutputBytes, freeBytes: Math.min(await available(outputRoot), await available(admitted.hfHome)) };
-  requestedDiskBudget(registry, cells, disk);
+  trace.metrics.diskFreeBytes = disk.freeBytes;
+  phase('disk_budget');
+  trace.metrics.diskRequiredBytes = requestedDiskBudget(registry, cells, disk).requiredBytes;
   const sealed = result => ({ binary: result.receipt.binary.path, binarySha256: result.receipt.binary.sha256, binarySourceSha: result.receipt.sourceSha, binaryBuildReceipt: { path: result.receiptPath, root: path.dirname(result.receiptPath), sha256: result.receiptSha256 } });
   const base = { actualRun: true, backend: 'candle', admissionId: control.admissionId, approvedBy: control.approvedBy, phases: plan.phases, runner: 'cuda-windows', runnerAccount: userInfo().username,
     sourceSha: approval.sourceSha, inferenceMainSha: approval.inferenceMainSha, inferenceRepository: admitted.inferenceRepository, inferenceMainTipSha: admitted.inferenceMainTipSha,
@@ -80,51 +112,67 @@ export async function runQueuedCandleCampaign(env) {
     inputSpecSha256: planHash(inputSpec), physicalGpuId: '1', cudaVisibleDevices: '1', logicalCudaOrdinal: 0, gpuUuid: admitted.gpuUuid, disk,
     trainingLicenseAcknowledged: true, trainingLicenseAcceptance: admitted.trainingLicenseAcceptance, queueReservation: ref };
   const admission = { ...base, ...sealed(api) }, resourceAdmission = { ...base, ...sealed(resource) };
-  await validateAdmission(admission, 'candle'); await verifyTerminalBuild(admission); await verifyTerminalBuild(resourceAdmission, { role: 'resource-adapter' });
-  const device = await guardHardware(admission, []);
+  phase('source_pins'); await validateAdmission(admission, 'candle');
+  phase('api_receipt'); await verifyTerminalBuild(admission);
+  phase('resource_receipt'); await verifyTerminalBuild(resourceAdmission, { role: 'resource-adapter' });
+  phase('queue_ownership'); const device = await guardHardware(admission, [], { onPhase: phase });
   // CUDA1 capacity excludes measured foreign desktop memory; do not subtract it from already-free
   // VRAM a second time. Every native resource capture also carries its live foreign-memory proof.
+  phase('gpu_capacity');
   const smi = (await exec('nvidia-smi', ['-i', '1', '--query-gpu=memory.total', '--format=csv,noheader,nounits'], { timeout: 5000 })).stdout.trim();
   assert(/^\d+$/.test(smi));
   const capacityBytes = Number(smi) * 1024 ** 2, foreignBytes = device.foreignGraphics.totalBytes;
+  trace.metrics.physicalCapacityBytes = capacityBytes; trace.metrics.foreignDedicatedBytes = foreignBytes;
   assert(capacityBytes > foreignBytes);
-  await writeFile(path.join(path.dirname(outputRoot), 'admission.json'), JSON.stringify({ ...admission, deviceAtAdmission: device, resourceHeadroom: { physicalCapacityBytes: capacityBytes, foreignDedicatedBytes: foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, alreadyFreeVramMustNotBeSubtractedAgain: true } }, null, 2), { flag: 'wx' });
-  await milestone({ kind: 'admission', physicalGpuId: '1', gpuUuid: admitted.gpuUuid, foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, diskFreeBytes: disk.freeBytes });
-  // Claim survives deletion of ledger dir. Neither an existing claim nor a journal is reset.
-  for (const file of [base.ledgerRoot, path.join(path.dirname(base.ledgerRoot), `.flux3-${approval.ledgerId}-candle.initialized`)]) {
-    try { await stat(file); throw new Error('existing ledger/claim requires coordinator reconciliation; no reset or reinit'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-  }
-  await mkdir(path.dirname(base.ledgerRoot), { recursive: true });
-  await verifyQueueReservation(admission, await observeProcessTable(exec, 'win32'), process.pid);
-  let initialized = false;
-  try {
-    await initializeLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot }); initialized = true;
-    const calibration = await json(path.join(SOURCE_ROOT, 'config/memory-calibration-plan.json'));
-    for (const group of groups) {
-      const start = Date.now(), invocation = group[0];
-      if (invocation.kind === 'product_generation') {
-        const ids = [...new Set(group.map(i => i.caseId))];
-        const { report } = await runTerminal({ admission, inputSpec, sources, caseIds: ids, approvedPlan: approval }, { print: () => {} });
-        const ledger = await auditLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot });
-        for (const i of group) {
-          const c = report.cases.find(c => c.caseId === i.caseId), index = group.filter(j => j.caseId === i.caseId).indexOf(i);
-          const outputs = c?.kind === 'replay' ? (c.outputs ?? []).slice(index, index + 1) : c?.outputs ?? [];
-          await milestone({ invocationId: i.invocationId, result: c?.executionStatus ?? report.status, spent: ledger.state.consumedIds.includes(i.invocationId), outputs: outputs.map(o => ({ sha256: o.pngSha256, width: o.width, height: o.height })), wallSeconds: (Date.now() - start) / 1000 });
-        }
-        assertGroupPassed(report, ids);
-      } else {
-        const pkg = inputSpec.packages[`${invocation.modelId}:candle:${invocation.tier}`], dense = inputSpec.packages[`${invocation.modelId}:candle:bf16`];
-        assert.equal(control.resourceInputRoot, 'D:/tmp/sc26243-run/resource-inputs');
-        const result = await launchFlux3Resource({ admission: resourceAdmission, request: productionResourceRequest(calibration, plan, invocation), invocationId: invocation.invocationId,
-          resourceEnvironment: { SCENEWORKS_FLUX3_KLEIN_ROOT: pkg.root, SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT: dense.root, SCENEWORKS_FLUX3_KLEIN_REPOSITORY: dense.repository, SCENEWORKS_FLUX3_KLEIN_REVISION: dense.resolvedRevision, SCENEWORKS_FLUX3_RESOURCE_INPUT_ROOT: control.resourceInputRoot } });
-        await milestone({ invocationId: invocation.invocationId, result: 'PASSED', spent: true, captureId: result.captureId, wallSeconds: (Date.now() - start) / 1000 });
+  phase('admission_write');
+  await writeFile(path.join(path.dirname(outputRoot), 'admission.json'), JSON.stringify({ ...admission, operation: control.operation, diagnosticOnly: control.operation === 'admission-only', deviceAtAdmission: device, resourceHeadroom: { physicalCapacityBytes: capacityBytes, foreignDedicatedBytes: foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, alreadyFreeVramMustNotBeSubtractedAgain: true } }, null, 2), { flag: 'wx' });
+  await milestone({ kind: 'admission', operation: control.operation, physicalGpuId: '1', gpuUuid: admitted.gpuUuid, foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, diskFreeBytes: disk.freeBytes });
+  const result = await executeAdmittedQueueOperation(control.operation, {
+    initialize: async () => {
+      phase('ledger_boundary');
+      // Claim survives deletion of ledger dir. Neither an existing claim nor a journal is reset.
+      for (const file of [base.ledgerRoot, path.join(path.dirname(base.ledgerRoot), `.flux3-${approval.ledgerId}-candle.initialized`)]) {
+        try { await stat(file); throw new Error('existing ledger/claim requires coordinator reconciliation; no reset or reinit'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
       }
-    }
-  } finally {
-    if (initialized) {
+      await mkdir(path.dirname(base.ledgerRoot), { recursive: true });
+      phase('queue_ownership');
+      await verifyQueueReservation(admission, await observeProcessTable(exec, 'win32'), process.pid);
+      phase('ledger_init');
+      await initializeLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot });
+    },
+    execute: async () => {
+      phase('execution');
+      const calibration = await json(path.join(SOURCE_ROOT, 'config/memory-calibration-plan.json'));
+      for (const group of groups) {
+        const start = Date.now(), invocation = group[0];
+        if (invocation.kind === 'product_generation') {
+          const ids = [...new Set(group.map(i => i.caseId))];
+          const { report } = await runTerminal({ admission, inputSpec, sources, caseIds: ids, approvedPlan: approval }, { print: () => {} });
+          const ledger = await auditLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot });
+          for (const i of group) {
+            const c = report.cases.find(c => c.caseId === i.caseId), index = group.filter(j => j.caseId === i.caseId).indexOf(i);
+            const outputs = c?.kind === 'replay' ? (c.outputs ?? []).slice(index, index + 1) : c?.outputs ?? [];
+            await milestone({ invocationId: i.invocationId, result: c?.executionStatus ?? report.status, spent: ledger.state.consumedIds.includes(i.invocationId), outputs: outputs.map(o => ({ sha256: o.pngSha256, width: o.width, height: o.height })), wallSeconds: (Date.now() - start) / 1000 });
+          }
+          assertGroupPassed(report, ids);
+        } else {
+          const pkg = inputSpec.packages[`${invocation.modelId}:candle:${invocation.tier}`], dense = inputSpec.packages[`${invocation.modelId}:candle:bf16`];
+          assert.equal(control.resourceInputRoot, 'D:/tmp/sc26243-run/resource-inputs');
+          const result = await launchFlux3Resource({ admission: resourceAdmission, request: productionResourceRequest(calibration, plan, invocation), invocationId: invocation.invocationId,
+            resourceEnvironment: { SCENEWORKS_FLUX3_KLEIN_ROOT: pkg.root, SCENEWORKS_FLUX3_KLEIN_ORIGINAL_ROOT: dense.root, SCENEWORKS_FLUX3_KLEIN_REPOSITORY: dense.repository, SCENEWORKS_FLUX3_KLEIN_REVISION: dense.resolvedRevision, SCENEWORKS_FLUX3_RESOURCE_INPUT_ROOT: control.resourceInputRoot } });
+          await milestone({ invocationId: invocation.invocationId, result: 'PASSED', spent: true, captureId: result.captureId, wallSeconds: (Date.now() - start) / 1000 });
+        }
+      }
+    },
+    finalize: async () => {
+      const precedingPhase = trace.phase;
+      phase('ledger_finalize');
       const receipt = await auditLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot });
       await writeFile(path.join(path.dirname(outputRoot), 'final-ledger-receipt.json'), JSON.stringify(receipt), { flag: 'wx' });
       await milestone({ kind: 'final-ledger', sequence: receipt.state.sequence, generationCount: receipt.state.generationCount, headSha256: receipt.state.headSha256 });
-    }
-  }
+      phase(precedingPhase); // Successful cleanup must not mislabel an earlier execution failure.
+    },
+  });
+  if (result.status === 'DIAGNOSTIC_ONLY') await milestone({ kind: 'admission-only', ...result, ...trace.metrics });
+  return result;
 }

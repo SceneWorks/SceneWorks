@@ -30,6 +30,22 @@ const normalized = p => String(p).replaceAll('\\', '/').toLowerCase();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
 const log = value => console.log(JSON.stringify(value));
+export const QUEUE_PHASES = Object.freeze(['startup', 'queue_ownership', 'control', 'metadata', 'license', 'disk_metadata', 'disk_budget', 'source_pins', 'api_receipt', 'resource_receipt', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom', 'gpu_capacity', 'admission_write', 'ledger_boundary', 'ledger_init', 'execution', 'ledger_finalize']);
+const SAFE_FS_CODES = ['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO', 'EBUSY', 'ETIMEDOUT'];
+const FAILURE_CODES = ['QUEUE_PRE_ADMISSION_FAILED', ...SAFE_FS_CODES.map(c => `QUEUE_FS_${c}`)];
+export function queueFailureReport(error, phase, metrics = {}) {
+  const report = { phase: QUEUE_PHASES.includes(phase) ? phase : 'startup', code: SAFE_FS_CODES.includes(error?.code) ? `QUEUE_FS_${error.code}` : 'QUEUE_PRE_ADMISSION_FAILED', exceptionClass: ['Error', 'AssertionError', 'TypeError', 'RangeError', 'SyntaxError'].includes(error?.name) ? error.name : 'Error' };
+  const numeric = {};
+  for (const key of ['diskFreeBytes', 'diskRequiredBytes', 'physicalCapacityBytes', 'freeVramBytes', 'foreignDedicatedBytes']) if (Number.isSafeInteger(metrics[key]) && metrics[key] >= 0) numeric[key] = metrics[key];
+  return { ...report, metrics: numeric };
+}
+export class QueuePhaseFailure extends Error {
+  constructor(error, phase, metrics) { super('Queued admission/execution failed; inspect the owned safe failure receipt'); this.report = queueFailureReport(error, phase, metrics); }
+}
+export function safeQueueFailure(error) {
+  const report = error instanceof QueuePhaseFailure ? error.report : {};
+  return { phase: QUEUE_PHASES.includes(report.phase) ? report.phase : 'startup', code: FAILURE_CODES.includes(report.code) ? report.code : 'QUEUE_PRE_ADMISSION_FAILED' };
+}
 export function queueInputs(env) {
   assert(revision.test(env.FLUX3_QUEUE_SOURCE ?? '') && revision.test(env.FLUX3_QUEUE_INFERENCE ?? ''), 'queue requires exact source/inference SHAs');
   assert(sha.test(env.FLUX3_QUEUE_CONTROL_SHA256 ?? ''), 'queue control sentinel none/empty refused: supply exact sha256');
@@ -487,4 +503,4 @@ export async function main(args = process.argv.slice(2), env = process.env) {
   assert(args[0] === 'reserve' && args.length === 1, 'one homogeneous queue reservation role required');
   await supervisor(env);
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(() => { console.error('BLOCKED: queued terminal reservation refused/failed; preserve local diagnostics and spent permits, no automatic retry'); process.exitCode = 1; });
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main().catch(error => { console.error(JSON.stringify(safeQueueFailure(error))); process.exitCode = 1; });
