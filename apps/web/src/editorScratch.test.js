@@ -184,3 +184,39 @@ describe("keep-alive nav vs. close/discard reconciliation (sc-11968)", () => {
     expect(registry._size()).toBe(0);
   });
 });
+
+describe("durable MOSS edit artifacts", () => {
+  it("retains the exact source and all four typed outputs after release, unmount sweep and registry restart", () => {
+    const purgeAsset = vi.fn();
+    const registry = createEditorScratchRegistry({ purgeAsset });
+    const outputs = Array.from({ length: 4 }, (_, index) => ({ id: `tensor-${index}`, projectId: "project-1", type: "tensor" }));
+    const job = completedJob({ result: { assets: outputs } });
+    registry.track(job.id, [scratchAsset], { retainCompleted: true });
+    const unregister = registry.registerClaim(() => new Set(), () => [job]);
+    unregister();
+    registry.release(job.id, job);
+    expect(registry._size()).toBe(0);
+    expect(purgeAsset).not.toHaveBeenCalled();
+    createEditorScratchRegistry({ purgeAsset }).sweep([job]);
+    expect(purgeAsset).not.toHaveBeenCalled();
+  });
+  it.each(["failed", "canceled"])("cleans only owned staged/result artifacts on %s, leaving user tensor inputs untouched", (status) => {
+    const purgeAsset = vi.fn(); const registry = createEditorScratchRegistry({ purgeAsset });
+    registry.track("job-1", [scratchAsset], { retainCompleted: true });
+    registry.sweep([completedJob({ status })]);
+    expect(purgeAsset.mock.calls.map(([asset]) => asset.id)).toEqual(["scratch-1", "result-1"]);
+  });
+});
+
+// A completed render is not a completed publication until the API owns the full batch.
+it("keeps pending-publication scratch ownership until canonical outputs arrive", () => {
+  const purged = [];
+  const registry = createEditorScratchRegistry({ purgeAsset: (asset) => purged.push(asset.id) });
+  registry.track("pending", [{ id: "source", projectId: "p" }], { retainCompleted: true });
+  registry.sweep([{ id: "pending", status: "completed", result: { outputPublication: { state: "pending" } } }]);
+  expect(registry._size()).toBe(1);
+  expect(purged).toEqual([]);
+  registry.sweep([{ id: "pending", status: "completed", result: { assets: [{ id: "output", projectId: "p" }] } }]);
+  expect(registry._size()).toBe(0);
+  expect(purged).toEqual([]);
+});

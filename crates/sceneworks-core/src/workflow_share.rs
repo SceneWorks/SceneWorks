@@ -495,6 +495,8 @@ pub enum AdvancedDisposition {
 pub enum AdvancedKeySource {
     /// `buildImageJobAdvanced` — the Image Studio's ~30-knob builder.
     StudioBuilder,
+    /// The shared MOSS edit controls, also used by the eager Library/editor request builder.
+    MossEditBuilder,
     /// `buildEditJobBody` — the Image Editor's prompt-edit body (sc-15948 follow-up: it emits
     /// `advanced.guidanceScale` and feeds an embedding lane, so it is registered even though
     /// every key it emits was already classified).
@@ -553,6 +555,7 @@ impl AdvancedKeySource {
     /// nobody registered fails [`ADVANCED_BUILDERS`]'s round-trip test.
     pub const ALL: &'static [Self] = &[
         Self::StudioBuilder,
+        Self::MossEditBuilder,
         Self::EditBuilder,
         Self::DetailBuilder,
         Self::CharacterBuilder,
@@ -647,6 +650,16 @@ pub struct AdvancedBuilder {
 /// `apps/web/src` and refuses any `advanced`-map producer that is in neither this registry nor
 /// [`DEFERRED_ADVANCED_BUILDERS`].
 pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
+    AdvancedBuilder {
+        source: AdvancedKeySource::MossEditBuilder,
+        path: "apps/web/src/mossImage.js",
+        function: "buildMossEditJobAdvanced",
+        shape: AdvancedBuilderShape::ReturnedObject,
+        lane: "POST /api/v1/image/jobs — shared MOSS edit controls for Studio, Library and Image Editor, written by `write_image_asset`",
+        anchors: &["mossImage", "mossImageEdit", "steps", "guidanceScale", "schedulerShift"],
+        minimum_keys: 6,
+        spread_of: &[],
+    },
     AdvancedBuilder {
         source: AdvancedKeySource::StudioBuilder,
         path: "apps/web/src/imageJobAdvanced.js",
@@ -1019,6 +1032,12 @@ pub struct WorkflowWriteSeam {
 /// the proof is that SOME deferred builder is refused, not that one particular one is.
 pub const WORKFLOW_WRITE_SEAMS: &[WorkflowWriteSeam] = &[
     WorkflowWriteSeam {
+        path: "crates/sceneworks-worker/src/image_jobs/moss.rs",
+        function: "write_moss_tensor_companion",
+        lane: "MOSS edit latent output — bounded existing WorkflowShare JSON companion next to the exact NPY artifact",
+        disposition: SeamDisposition::Embeds(IMAGE_JOB_BUILDERS),
+    },
+    WorkflowWriteSeam {
         path: "crates/sceneworks-worker/src/image_jobs.rs",
         function: "write_image_asset",
         lane: "POST /api/v1/image/jobs (text_to_image / edit_image / character_image) and \
@@ -1218,6 +1237,10 @@ const GENERATE_JOB_BUILDERS: &[WebBuilderRef] = &[
 /// The interleave lane has no inline-upscale sub-step, so it is not in [`GENERATE_JOB_BUILDERS`].
 const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
+        path: "apps/web/src/mossImage.js",
+        function: "buildMossEditJobAdvanced",
+    },
+    WebBuilderRef {
         path: "apps/web/src/imageJobAdvanced.js",
         function: "buildImageJobAdvanced",
     },
@@ -1267,6 +1290,9 @@ pub enum AdvancedShape {
     MossImageReport,
     MossImageEditOptions,
     MossImageEditReport,
+    MossImageAdvanced,
+    PromptBatch,
+    SampleIndex,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
@@ -1355,8 +1381,11 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
-    allow_from("mossImageEdit", AdvancedShape::MossImageEditOptions, AdvancedKeySource::Server, "API-canonicalized native edit reference edge and cache policy."),
+    allow("mossImageEdit", AdvancedShape::MossImageEditOptions, "Authored native edit reference edge and cache policy, emitted and restored by Studio."),
     allow_from("mossImageEditExecutionReport", AdvancedShape::MossImageEditReport, AdvancedKeySource::Server, "Actual edit adapter and ordered reference identity; imported receipts are scrubbed before execution."),
+    allow_from("mossImageAdvanced", AdvancedShape::MossImageAdvanced, AdvancedKeySource::MossEditBuilder, "Edit-only authored tensor identities/shape, negative batch and output kind. Local asset IDs are removed; exact artifacts must be reacquired."),
+    allow_from("promptBatch", AdvancedShape::PromptBatch, AdvancedKeySource::MossEditBuilder, "The full bounded native edit text batch, retained with exact tensor row bindings for replay."),
+    allow_from("mossImageSampleIndex", AdvancedShape::SampleIndex, AdvancedKeySource::Server, "Output ordinal within the original native edit batch; display provenance only, scrubbed before a new execution."),
     allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
     deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
     allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
@@ -2021,7 +2050,7 @@ const PROSE_MAX_BYTES: usize = 16 * 1024;
 /// character is pushed only if it fits whole, and the loop stops at the first that does not. A
 /// `String` cannot hold invalid UTF-8 anyway — what this avoids is the byte-slicing form of the
 /// same bound, which panics on a multi-byte boundary rather than producing invalid output.
-fn shareable_prose(value: &str) -> String {
+pub(crate) fn shareable_prose(value: &str) -> String {
     let mut stripped = String::new();
     for character in value.chars().filter(|&character| {
         matches!(character, '\n' | '\t')
@@ -2167,7 +2196,7 @@ impl WorkflowAssetFacts {
             model: asset.recipe.model.clone(),
             prompt: asset.recipe.prompt.clone(),
             negative_prompt: asset.recipe.negative_prompt.clone(),
-            seed: asset.recipe.seed,
+            seed: asset.recipe.seed.unwrap_or_default(),
             width: asset.file.width,
             height: asset.file.height,
         }
@@ -2270,7 +2299,33 @@ fn build_share_of_kind(
     // The produced image's seed — not the payload's. `payload.seed` is the batch BASE and
     // `payload.seeds` is the whole batch; only whoever wrote one file knows which one rendered
     // it. The batch list never travels: the other images are not this share's business.
-    let seed = Some(facts.seed);
+    let advanced_edit = crate::moss_image::is_edit(job_payload)
+        && job_payload
+            .get("advanced")
+            .and_then(|v| v.get(crate::moss_image_advanced::KEY))
+            .is_some();
+    let seed = if job_payload
+        .get("advanced")
+        .and_then(|v| v.get("mossImageAdvanced"))
+        .and_then(|v| v.get("noise"))
+        .is_some_and(|v| !v.is_null())
+    {
+        None
+    } else if advanced_edit {
+        job_payload
+            .get("seed")
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                job_payload
+                    .get("advanced")
+                    .and_then(|v| v.get(crate::moss_image::EDIT_REPORT_KEY))
+                    .and_then(|v| v.pointer("/base/samples/0/seed"))
+                    .and_then(Value::as_i64)
+            })
+            .or(Some(facts.seed))
+    } else {
+        Some(facts.seed)
+    };
 
     // Raw on purpose: `reduce_workflow_share` runs `sanitize_advanced`, and sanitizing here as
     // well would be the same pass twice — harmless only for as long as every rule stays
@@ -2285,6 +2340,13 @@ fn build_share_of_kind(
     // (`reduce_workflow_share`), so the build side cannot grow a field the parse side does not
     // guard — which is exactly how the top-level labels below escaped the path check before.
     let is_video = kind == WORKFLOW_KIND_VIDEO;
+    let moss_edit = crate::moss_image::is_moss(&model) && mode == "edit_image";
+    let invalid_moss_references = moss_edit
+        && crate::moss_image::edit_reference_slots(job_payload)
+            .is_ok_and(|ids| ids.is_empty() || ids.len() > 4);
+    let invalid_moss_references = invalid_moss_references
+        || (moss_edit && crate::moss_image::edit_reference_slots(job_payload).is_err());
+    let inputs = describe_inputs(job_payload, moss_edit);
     reduce_workflow_share(WorkflowShare {
         kind: kind.to_owned(),
         schema_version: WORKFLOW_SHARE_SCHEMA_VERSION,
@@ -2313,11 +2375,15 @@ fn build_share_of_kind(
         fit_mode: string_field("fitMode"),
         upscale: sanitize_upscale(job_payload.get("upscale")),
         loras: sanitize_loras(job_payload.get("loras")),
-        inputs: describe_inputs(job_payload),
+        inputs,
         advanced,
         // Nothing to carry in: the marker is derived by `reduce_workflow_share` from what the
         // sanitizer actually dropped, in this direction exactly as in the other.
-        omitted: Vec::new(),
+        omitted: if invalid_moss_references {
+            vec![OMITTED_INPUTS.to_owned()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -2362,7 +2428,7 @@ pub fn embeddable_video_workflow_share(
 }
 
 /// Input images by shape. Reads the ids only to count them; no id ever reaches the envelope.
-fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
+fn describe_inputs(job_payload: &JsonObject, moss_edit: bool) -> Vec<WorkflowInput> {
     let has_id = |key: &str| {
         job_payload
             .get(key)
@@ -2386,7 +2452,8 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
     // `lastFrameAssetId` is the video lane's end-frame target: a STILL, like `sourceAssetId`, so it
     // counts here rather than as a clip. An image payload never carries it, so this is a no-op for
     // the image lane.
-    let sources = usize::from(has_id("sourceAssetId")) + usize::from(has_id("lastFrameAssetId"));
+    let sources = usize::from(!moss_edit && has_id("sourceAssetId"))
+        + usize::from(has_id("lastFrameAssetId"));
     if sources > 0 {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_SOURCE.to_owned(),
@@ -2394,7 +2461,11 @@ fn describe_inputs(job_payload: &JsonObject) -> Vec<WorkflowInput> {
             control_mode: None,
         });
     }
-    let references = usize::from(has_id("referenceAssetId")) + id_list_len("referenceAssetIds");
+    let references = if moss_edit {
+        crate::moss_image::edit_reference_slots(job_payload).map_or(0, |ids| ids.len())
+    } else {
+        usize::from(has_id("referenceAssetId")) + id_list_len("referenceAssetIds")
+    };
     if references > 0 {
         inputs.push(WorkflowInput {
             kind: INPUT_KIND_REFERENCE.to_owned(),
@@ -2997,6 +3068,32 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
                     .and_then(|v| serde_json::to_value(v).ok())
             }
             AdvancedShape::MossImageEditReport => sanitize_moss_edit_execution_report(value),
+            AdvancedShape::MossImageAdvanced => crate::moss_image_advanced::share_options(value),
+            AdvancedShape::PromptBatch => value
+                .as_array()
+                .filter(|p| {
+                    !p.is_empty()
+                        && p.len() <= 8
+                        && p.iter().all(|v| {
+                            v.as_str()
+                                .is_some_and(|s| !s.is_empty() && s.chars().count() <= 4000)
+                        })
+                })
+                .map(|values| {
+                    Value::Array(
+                        values
+                            .iter()
+                            .map(|value| {
+                                Value::String(shareable_prose(
+                                    value.as_str().expect("validated prose"),
+                                ))
+                            })
+                            .collect(),
+                    )
+                }),
+            AdvancedShape::SampleIndex => {
+                value.as_u64().filter(|index| *index < 8).map(Value::from)
+            }
             AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {

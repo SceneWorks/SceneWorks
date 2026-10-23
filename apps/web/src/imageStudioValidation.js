@@ -64,6 +64,7 @@ export function imageGenerateValidation({
   activeProject,
   structuredActive,
   captionHasContent,
+  tensorConditioning = false,
   prompt,
   mode,
   characterId,
@@ -112,7 +113,7 @@ export function imageGenerateValidation({
     if (!captionHasContent) {
       issues.push(issue.requirement("caption", "Describe your shot in the builder"));
     }
-  } else if (!prompt?.trim()) {
+  } else if (!tensorConditioning && !prompt?.trim()) {
     issues.push(issue.requirement("prompt", "Write a prompt"));
   }
   // Composed-prompt budget guard (sc-13133 / sc-13224). ONLY when a style is active: styleless

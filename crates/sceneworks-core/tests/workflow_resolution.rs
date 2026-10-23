@@ -675,6 +675,7 @@ fn nothing_resolves_to_something_the_envelope_did_not_name() {
         ],
         styles: vec![CatalogEntry::new("ghibli-style").with_name("Ghibli Style")],
         recipe_presets: vec![CatalogEntry::new("preset_noir").with_name("Ghibli Style")],
+        conditional_components: vec![],
     };
 
     // A model slug differing only in case or separator is a DIFFERENT slug: the catalogs are

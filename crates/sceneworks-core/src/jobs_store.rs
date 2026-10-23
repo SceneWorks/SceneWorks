@@ -1532,6 +1532,20 @@ impl JobsStore {
         Ok(jobs)
     }
 
+    /// Exact reverse lookup for API publication readiness. Cleared rows remain authoritative.
+    pub fn jobs_for_generation_set(
+        &self,
+        project_id: &str,
+        generation_set_id: &str,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement=connection.prepare("select * from jobs where project_id=?1 and json_extract(result_json,'$.generationSetId')=?2 limit 2")?;
+        let jobs = statement
+            .query_map(params![project_id, generation_set_id], row_to_job)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(jobs)
+    }
+
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
         // Read-only single-SELECT: no write mutex, relies on WAL reader isolation
         // (sc-8950 / F-148 — see list_jobs for the full rationale).
