@@ -6221,7 +6221,8 @@ pub(crate) async fn run_model_import_job(
         .await;
     }
 
-    let imported_model_file = imported_model_primary_weight_file(&staging_dir);
+    let imported_model_file = imported_model_primary_weight_file(&staging_dir)
+        .or_else(|| sceneworks_core::base_weights::minimax_h3_import_primary(&staging_dir));
     let mut model_file_sha256 = None;
     let mut verified_model_file_identity = None;
 
@@ -6272,7 +6273,10 @@ pub(crate) async fn run_model_import_job(
     let (base_weight_family, import_source_shape, import_quant_format) = match imported_model_file
         .as_ref()
     {
-        Some(weight_file) => match detect_base_weight_file(weight_file) {
+        Some(weight_file) => match sceneworks_core::base_weights::detect_import_source_weights(
+            &staging_dir,
+            weight_file,
+        ) {
             Ok(detection) => {
                 if let Err(reason) = import_detection_supported(&detection) {
                     return fail_job(
@@ -6303,25 +6307,22 @@ pub(crate) async fn run_model_import_job(
                     )
                     .await;
                 }
-                // sc-26680: the MiniMax-H3 twin of the Mage-Flow gate above, with one more clause:
-                // the directory must carry NO other weight file, because both native providers map
-                // every safetensors in the DiT directory (`Weights::from_dir`).
+                // H3 source normalization owns native single files and complete indexed shards.
                 if matches!(
                     &detection,
                     BaseWeightDetection::Recognized(verdict)
                         if verdict.family.as_deref() == Some(MINIMAX_H3_IMPORT_FAMILY)
-                ) && !sceneworks_core::base_weights::is_minimax_h3_transformer_dir(&staging_dir)
+                ) && !(sceneworks_core::base_weights::is_minimax_h3_import_source(&staging_dir)
+                    || sceneworks_core::base_weights::is_minimax_h3_single_file(weight_file))
                 {
                     return fail_job(
                         api,
                         &job.id,
                         "Model import is not supported for this file.",
                         Some(
-                            "Model import for the 'minimax-h3' family requires a complete \
-                             transformer directory containing a MiniMaxH3Transformer3DModel \
-                             config.json and exactly one diffusion_pytorch_model.safetensors; a \
-                             bare weights file, a sharded directory, or a directory with other \
-                             weight files is refused."
+                            "MiniMax-H3 import requires a dense native/ComfyUI single-file or a complete \
+                             dense/sharded MiniMaxH3Transformer3DModel component directory. Unknown \
+                             quantized dialects and unplanned weight files are refused."
                                 .to_owned(),
                         ),
                     )

@@ -3156,13 +3156,16 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
 fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
-    let weight_file = imported_model_primary_weight_file(source);
+    let weight_file = imported_model_primary_weight_file(source)
+        .or_else(|| sceneworks_core::base_weights::minimax_h3_import_primary(source));
     let Some(weight_file) = weight_file else {
         return Err(ApiError::bad_request(
             "No safetensors base-weight file was found to import; single-file base-checkpoint import expects a .safetensors transformer.",
         ));
     };
-    let detection = detect_base_weight_file(&weight_file).map_err(model_family_inspection_error)?;
+    let detection =
+        sceneworks_core::base_weights::detect_import_source_weights(source, &weight_file)
+            .map_err(model_family_inspection_error)?;
     import_detection_supported(&detection).map_err(ApiError::bad_request)?;
     if matches!(
         &detection,
@@ -3177,21 +3180,18 @@ fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
              is refused because the loader cannot derive its architecture.",
         ));
     }
-    // sc-26680: a dense MiniMax-H3 DiT imports only as its complete transformer component directory
-    // — the `MiniMaxH3Transformer3DModel` config beside exactly one weight file — because both
-    // native providers open the directory whole.
+    // H3 source shapes are codec-owned: dense/sharded diffusers or native single-file. The worker
+    // canonicalizes native bytes through the shared derivative cache before the provider opens it.
     if matches!(
         &detection,
         BaseWeightDetection::Recognized(verdict)
             if verdict.family.as_deref() == Some("minimax-h3")
-    ) && (!source.is_dir()
-        || !sceneworks_core::base_weights::is_minimax_h3_transformer_dir(source))
+    ) && !sceneworks_core::base_weights::is_minimax_h3_import_source(source)
     {
         return Err(ApiError::bad_request(
-            "Model import for the 'minimax-h3' family requires a complete transformer directory \
-             containing a MiniMaxH3Transformer3DModel config.json and exactly one \
-             diffusion_pytorch_model.safetensors; a bare weights file, a sharded directory, or a \
-             directory with other weight files is refused.",
+            "MiniMax-H3 import requires a dense native/ComfyUI single-file or a complete dense/sharded \
+             MiniMaxH3Transformer3DModel transformer directory; unknown quantized dialects and \
+             directories with unplanned weights are refused.",
         ));
     }
     Ok(())

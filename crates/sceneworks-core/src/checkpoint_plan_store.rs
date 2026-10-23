@@ -1910,7 +1910,7 @@ impl CheckpointPlanStore {
         let install_path = self.resolve_install(install_id)?;
         validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
-        let request = CheckpointInspectionRequestV1::managed(
+        let mut request = CheckpointInspectionRequestV1::managed(
             checkpoint_id.clone(),
             install_path.clone(),
             relative_path,
@@ -1921,6 +1921,23 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
+        // H3 providers open the whole component directory, not just the digest's primary file.
+        // Bind its architecture and shard index/closure too. The primary remains the transfer-
+        // digest target; changing the inspection target never changes its integrity check.
+        let parent = Path::new(relative_path).parent().unwrap_or(Path::new(""));
+        let config = install_path.join(parent).join("config.json");
+        let declares_h3 = fs::read(&config)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|v| {
+                v.get("_class_name").and_then(serde_json::Value::as_str)
+                    == Some("MiniMaxH3Transformer3DModel")
+            });
+        if declares_h3 {
+            // Empty here means the already-confined managed install root. It is not serialized as
+            // a locator: discovery emits nonempty relative paths for every contained artifact.
+            request.relative_path = parent.to_path_buf();
+        }
         self.compile(&request, &install_path, "managed")
     }
 

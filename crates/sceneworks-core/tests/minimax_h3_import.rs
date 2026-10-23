@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 use sceneworks_core::base_weights::{
     classify_base_header, detect_base_weight_file, import_detection_supported,
     imported_model_primary_weight_file, is_minimax_h3_transformer_dir, BaseWeightDetection,
-    ComponentRole, QuantFormat, MINIMAX_H3_TRANSFORMER_CLASS,
+    ComponentRole, QuantFormat,
 };
 use sceneworks_core::checkpoint_import::ManagedProvenanceV1;
 use sceneworks_core::checkpoint_ingest::ManagedIngest;
@@ -59,16 +59,44 @@ fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
 }
 
 fn write_h3_dit_dir(dir: &Path) {
-    write_safetensors(
-        &dir.join("diffusion_pytorch_model.safetensors"),
-        H3_DIT_KEYS,
-        0x3a,
-    );
-    fs::write(
-        dir.join("config.json"),
-        json!({ "_class_name": MINIMAX_H3_TRANSFORMER_CLASS, "num_layers": 1 }).to_string(),
-    )
-    .unwrap();
+    let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
+    for (key, value) in [
+        ("num_layers", 1),
+        ("num_refiner_layers", 1),
+        ("num_attention_heads", 2),
+        ("attention_head_dim", 6),
+        ("hidden_size", 8),
+        ("ffn_dim", 8),
+        ("in_channels", 2),
+        ("audio_in_channels", 2),
+        ("text_dim", 8),
+        ("freq_dim", 4),
+        ("time_embed_hidden_dim", 8),
+        ("time_embed_dim", 4),
+        ("rope_freq_dim", 1),
+    ] {
+        config[key] = json!(value);
+    }
+    let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
+        .shapes()
+        .unwrap();
+    let mut header = Map::new();
+    let mut offset = 0_u64;
+    for (name, shape) in shapes {
+        let size = shape.iter().product::<usize>() as u64 * 2;
+        header.insert(
+            name,
+            json!({"dtype":"BF16","shape":shape,"data_offsets":[offset,offset+size]}),
+        );
+        offset += size;
+    }
+    let encoded = serde_json::to_vec(&header).unwrap();
+    let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(encoded);
+    bytes.resize(bytes.len() + offset as usize, 0x3a);
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("diffusion_pytorch_model.safetensors"), bytes).unwrap();
+    fs::write(dir.join("config.json"), config.to_string()).unwrap();
 }
 
 fn header_of(entries: &[(&str, &str)]) -> Value {

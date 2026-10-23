@@ -12,6 +12,7 @@
 ))]
 
 use super::*;
+use crate::video_jobs::minimax_h3::with_imported_h3_source_seals;
 
 /// A text-to-video request for the imported entry under `model`.
 fn imported_minimax_h3_request(
@@ -104,6 +105,70 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
         raw["importPlan"]["assembly"],
         imported.entry["importPlan"]["assembly"]
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_and_sharded_plans_reach_the_real_h3_provider_load_seam() {
+    for layout in ["native", "sharded"] {
+        let tiers =
+            minimax_h3_tier_root("mm_layout_", &["q4"], &["transformer", "transformer_ref"]);
+        let base = minimax_h3_base_root("mm_layout_base_");
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+            &minimax_h3_data_dir(tiers.path()),
+            "arbitrarily_renamed_h3",
+            layout,
+        );
+        let request = imported_minimax_h3_request("arbitrarily_renamed_h3", &imported.entry);
+        let probe = ArmProbe::default();
+        let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+            .expect("layout must load");
+        let spec = probe
+            .spec
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider received LoadSpec");
+        let WeightsSource::Dir(directory) = spec.components.get("transformer").unwrap() else {
+            panic!("provider requires component directory")
+        };
+        let mut weights = 0;
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "safetensors") {
+                weights += 1;
+            }
+            files.push((entry.file_name().to_string_lossy().into_owned(), path));
+        }
+        let canonical_inventory =
+            sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
+                .expect("provider input is complete canonical tensors");
+        assert!(
+            !canonical_inventory.native,
+            "native source was actually normalized, not merely recognized"
+        );
+        assert_eq!(weights, if layout == "native" { 1 } else { 2 });
+        assert_eq!(raw["model"], json!("arbitrarily_renamed_h3"));
+        assert_eq!(
+            raw["importPlan"]["checkpointId"],
+            json!(imported.checkpoint_id)
+        );
+        assert_eq!(
+            raw["importPlan"]["semanticDigest"],
+            json!(imported.semantic_digest)
+        );
+        assert_eq!(
+            raw["importPlan"]["assembly"],
+            imported.entry["importPlan"]["assembly"]
+        );
+        if layout == "native" {
+            assert_ne!(canonical(directory), canonical(&imported.install_dir));
+        } else {
+            assert_eq!(canonical(directory), canonical(&imported.install_dir));
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -345,4 +410,23 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             "{model}: refused before any load"
         );
     }
+}
+
+#[test]
+fn source_mutation_before_or_during_normalization_cannot_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.safetensors");
+    std::fs::write(&source, b"original").unwrap();
+    let pin = gen_core::PinnedWeightsFile::pin(&source).unwrap();
+    assert!(with_imported_h3_source_seals(std::slice::from_ref(&pin), || Ok(())).is_ok());
+    let error = with_imported_h3_source_seals(std::slice::from_ref(&pin), || {
+        std::fs::write(&source, b"mutated!").unwrap();
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("seal mismatch"), "{error}");
+    assert!(with_imported_h3_source_seals::<()>(&[pin], || panic!(
+        "stale source must refuse before read"
+    ))
+    .is_err());
 }

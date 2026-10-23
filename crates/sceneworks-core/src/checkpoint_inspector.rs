@@ -723,6 +723,29 @@ fn inspect_discovered_pass(
         .collect::<BTreeMap<_, _>>();
     let mut tensor_tables = BTreeMap::new();
     let mut indices = Vec::new();
+    // A shard need not carry the family's marker tensors. Its component role is supplied by the
+    // explicit H3 config (or another shard's H3 signature), then the COMPLETE tensor inventory is
+    // validated below. This is aggregate content evidence, never a shard filename heuristic.
+    let h3_context = discovery
+        .candidates
+        .iter()
+        .any(|c| c.header_family.as_deref() == Some("minimax-h3"))
+        || discovery.descriptor_paths.iter().any(|relative| {
+            if Path::new(relative).file_name().and_then(|s| s.to_str()) != Some("config.json") {
+                return false;
+            }
+            let Some(path) = resolve_confined_artifact(resolved, relative, &mut pass.diagnostics)
+            else {
+                return false;
+            };
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .is_some_and(|v| {
+                    v.get("_class_name").and_then(Value::as_str)
+                        == Some("MiniMaxH3Transformer3DModel")
+                })
+        });
 
     for candidate in &discovery.candidates {
         let Some(path) =
@@ -777,6 +800,14 @@ fn inspect_discovered_pass(
                 tensor_names = validated.tensor_names;
             }
             Err(mut diagnostics) => pass.diagnostics.append(&mut diagnostics),
+        }
+        if h3_context && candidate.container == CheckpointContainerV1::Safetensors {
+            // A complete H3 inventory below proves every canonical tensor, including shards whose
+            // local `adaln_proj` subset resembles another family in isolation.
+            family = Some("minimax-h3".into());
+            if validated_role.is_none() {
+                validated_role = Some("transformer".into());
+            }
         }
         if candidate.container == CheckpointContainerV1::Gguf
             && path_role.is_none()
@@ -900,6 +931,29 @@ fn inspect_discovered_pass(
         &tensor_tables,
         &mut pass.diagnostics,
     );
+    if h3_context {
+        let files: Vec<_> = pass
+            .observations
+            .iter()
+            .map(|artifact| {
+                (
+                    discovery
+                        .internal_paths
+                        .get(&artifact.relative_path)
+                        .cloned()
+                        .unwrap_or_else(|| artifact.relative_path.clone()),
+                    artifact.canonical_path.clone(),
+                )
+            })
+            .collect();
+        if let Err(message) = crate::minimax_h3_codec::H3SourceInventory::from_files(&files) {
+            pass.diagnostics.push(CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::ContractViolation,
+                None,
+                message,
+            ));
+        }
+    }
     pass.evidence
         .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     pass.observations

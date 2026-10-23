@@ -286,10 +286,10 @@ pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow",
 /// key on it — while a video import is claimed by its own entry-keyed lane
 /// (`jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible`).
 ///
-/// `minimax-h3` is a dense MiniMax-H3 DiT fine-tune: a diffusers transformer component directory
-/// ([`is_minimax_h3_transformer_dir`]) whose shared components — text encoder, tokenizer, both VAEs
-/// and the reference partition — are bound to the resident MiniMax-H3 install
-/// ([`crate::minimax_h3_import`]), never carried by the import itself.
+/// `minimax-h3` is a dense MiniMax-H3 DiT fine-tune: a native single file or canonical Diffusers
+/// component inventory. The source codec normalizes native layout while preserving precision;
+/// shared encoders/tokenizer/VAEs stay explicitly bound to the resident MiniMax-H3 install
+/// ([`crate::minimax_h3_import`]), never silently substituted for tensors carried by the import.
 pub const VIDEO_IMPORT_SUPPORTED_FAMILIES: &[&str] = &["minimax-h3"];
 
 /// The file a Mage-Flow transformer component directory carries its weights in (the diffusers
@@ -368,6 +368,185 @@ pub fn is_minimax_h3_transformer_dir(dir: &Path) -> bool {
                 ext.eq_ignore_ascii_case("safetensors") || ext.eq_ignore_ascii_case("gguf")
             })
     })
+}
+
+/// Whether `source` is one dense native/ComfyUI or canonical MiniMax-H3 single-file artifact.
+/// Header family/precision recognition is followed by exhaustive source-inventory validation when
+/// the shared inspector compiles the runnable plan; no filename or publisher is consulted.
+pub fn is_minimax_h3_single_file(source: &Path) -> bool {
+    let Ok(header) = read_safetensors_header(source) else {
+        return false;
+    };
+    matches!(
+        classify_base_header(&header),
+        BaseWeightDetection::Recognized(BaseWeightVerdict {
+            family: Some(family),
+            component: ComponentRole::Transformer,
+            quant: QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
+        }) if family == "minimax-h3"
+    )
+}
+
+/// The H3 sharded component's fixed index name, produced by the native providers' converters.
+pub const MINIMAX_H3_TRANSFORMER_INDEX_FILE: &str =
+    "diffusion_pytorch_model.safetensors.index.json";
+
+/// Whether `dir` is a sharded diffusers MiniMax-H3 DiT component: a declaring config, a valid index,
+/// and exactly the safetensors shard files the index names (no unplanned extra weights). The shared
+/// inspector performs the strict index↔tensor validation; this is the cheap structural admission
+/// half used before import jobs are scheduled.
+pub fn is_minimax_h3_sharded_transformer_dir(dir: &Path) -> bool {
+    let config_path = dir.join(MINIMAX_H3_TRANSFORMER_CONFIG_FILE);
+    let index_path = dir.join(MINIMAX_H3_TRANSFORMER_INDEX_FILE);
+    let regular_file = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    };
+    if !regular_file(&config_path) || !regular_file(&index_path) {
+        return false;
+    }
+    let declares_h3 = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("_class_name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|class| class == MINIMAX_H3_TRANSFORMER_CLASS);
+    if !declares_h3 {
+        return false;
+    }
+    let Some(index) = std::fs::read_to_string(&index_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return false;
+    };
+    let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
+        return false;
+    };
+    if weight_map.is_empty() {
+        return false;
+    }
+    let mut named_shards = BTreeSet::new();
+    for value in weight_map.values() {
+        let Some(shard) = value.as_str() else {
+            return false;
+        };
+        if shard.contains('/') || shard.contains('\\') || shard == "." || shard == ".." {
+            return false;
+        }
+        let path = dir.join(shard);
+        if !regular_file(&path) || !crate::safetensors::file_is_structurally_valid(&path) {
+            return false;
+        }
+        named_shards.insert(path);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().all(|entry| {
+        let path = entry.path();
+        if is_hidden_file(&path) || named_shards.contains(&path) {
+            return true;
+        }
+        !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("safetensors") || ext.eq_ignore_ascii_case("gguf")
+            })
+    })
+}
+
+/// Any source shape the H3 import codec can canonicalize: S1 dense diffusers directory, S2 sharded
+/// diffusers directory, or a dense native single-file. Shared by API, import job and load seam.
+pub fn is_minimax_h3_import_source(source: &Path) -> bool {
+    declares_h3_component(source) || is_minimax_h3_single_file(source)
+}
+
+fn declares_h3_component(source: &Path) -> bool {
+    fs::read(source.join("config.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|value| {
+            value.get("_class_name").and_then(Value::as_str) == Some(MINIMAX_H3_TRANSFORMER_CLASS)
+        })
+}
+
+/// A transfer-integrity primary for a declared H3 directory, not a load selection. Recognition
+/// deliberately precedes completeness validation so missing/truncated/unplanned shards retain
+/// their precise inventory diagnostics rather than becoming "no file found". A one-file native
+/// variant may use ANY filename beside its bound config.
+pub fn minimax_h3_import_primary(source: &Path) -> Option<PathBuf> {
+    if !declares_h3_component(source) {
+        return None;
+    }
+    let mut weights: Vec<_> = fs::read_dir(source)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            !is_hidden_file(path) && path.extension().is_some_and(|e| e == "safetensors")
+        })
+        .collect();
+    weights.sort();
+    weights
+        .into_iter()
+        .next()
+        .or_else(|| Some(source.join("config.json")))
+}
+
+/// Classify an H3 directory through its COMPLETE tensor inventory, not the first shard's subset.
+/// Every other family retains its existing single-file gate.
+pub fn detect_import_source_weights(
+    source: &Path,
+    primary: &Path,
+) -> Result<BaseWeightDetection, SafetensorsHeaderError> {
+    if declares_h3_component(source) {
+        let files: Vec<_> = fs::read_dir(source)
+            .map_err(SafetensorsHeaderError::Io)?
+            .filter_map(Result::ok)
+            .filter(|entry| !is_hidden_file(&entry.path()))
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e == "json" || e == "safetensors" || e == "gguf")
+            })
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                )
+            })
+            .collect();
+        return Ok(
+            match crate::minimax_h3_codec::H3SourceInventory::from_files(&files) {
+                Ok(_) => {
+                    let mut aggregate = serde_json::Map::new();
+                    for (_, path) in &files {
+                        if path.extension().is_some_and(|e| e == "safetensors") {
+                            if let Some(header) = read_safetensors_header(path)?.as_object() {
+                                aggregate.extend(
+                                    header
+                                        .iter()
+                                        .filter(|(k, _)| k.as_str() != "__metadata__")
+                                        .map(|(k, v)| (k.clone(), v.clone())),
+                                );
+                            }
+                        }
+                    }
+                    classify_base_header(&Value::Object(aggregate))
+                }
+                Err(reason) => BaseWeightDetection::Unrecognized { reason },
+            },
+        );
+    }
+    detect_base_weight_file(primary)
 }
 
 /// Resolve the one weight file carried by a user-import source without guessing across a model
@@ -1077,8 +1256,9 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     // other family. MUST precede the Ideogram arm below: every H3 `transformer_blocks.N` carries an
     // `adaln_proj.linear`, which Ideogram's bare `adaln_proj.` marker would otherwise claim — an H3
     // DiT used to classify as `ideogram`.
-    if any_key_contains(keys, "token_refiner.refiner_blocks.")
-        && any_key_contains(keys, "audio_proj_in.")
+    if (any_key_contains(keys, "token_refiner.refiner_blocks.")
+        || any_key_contains(keys, "token_refiner.blocks."))
+        && (any_key_contains(keys, "audio_proj_in.") || any_key_contains(keys, "audio_patch_proj."))
     {
         return Some("minimax-h3");
     }

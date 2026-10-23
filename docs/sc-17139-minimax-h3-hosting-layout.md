@@ -47,12 +47,14 @@ Downstream consumers of this document:
 | sc-17158 | the `downloads[]` shape (§4), two manifest ids, the license gate (§8) |
 | sc-17149 | `transformer_ref` lands as its own catalog entry (§7) |
 
-## Dense community DiT imports (sc-26680)
+## Dense community DiT imports (sc-26680, sc-26681)
 
-The existing model Add/Import workflow also accepts an unsharded, dense F16/BF16/F32 H3
-Diffusers transformer component directory: `config.json` declaring
-`MiniMaxH3Transformer3DModel` beside `diffusion_pytorch_model.safetensors`. Tensor content
-identifies H3; the directory name and user-selected model type do not select the engine.
+The existing model Add/Import workflow accepts dense F16/BF16/F32 H3 Diffusers component
+directories (single-file or indexed shards) and native/ComfyUI single-file checkpoints.
+Diffusers directories carry `config.json` declaring `MiniMaxH3Transformer3DModel`; a sharded
+directory also carries `diffusion_pytorch_model.safetensors.index.json`, whose exact tensor-to-file
+map must agree with every shard header. Shard and checkpoint names are arbitrary; tensor content
+identifies H3, not a publisher/name allowlist.
 The shared inspector persists an import plan and a component assembly binding on the new
 video model entry. Select that imported entry in Video Studio and generate normally; its
 model id and plan identity remain attached to the job and resulting asset.
@@ -65,8 +67,25 @@ MLX also requires the installed reference partition as a load-time companion. In
 components through Model Manager before generating. A missing or changed plan binding, an
 incomplete DiT directory, or unavailable resident components refuses before provider loading,
 never substitutes the built-in DiT or produces procedural video. Both native MLX and
-Candle/CUDA routes stage the imported transformer explicitly. Single-file, sharded, quantized,
-Ref2VA/hybrid imports and adapters on imported H3 entries are outside this story's surface.
+Candle/CUDA routes stage the imported transformer explicitly. Native files are streamed into the
+existing content-addressed checkpoint derivative cache as canonical component directories; original
+precision and checkpoint identity are retained, with a fixed 1 MiB copy buffer and no whole-model
+dense transient. Missing, duplicate, conflicting, unknown or unconsumed backbone tensors fail with
+the tensor/file name before provider loading. Managed plans bind config and index files as well as
+weights, so changing architecture metadata invalidates the source binding.
+
+Native mapping follows the executable converter at
+[`604306cab8694584e6096b32a1c1731bee22c43e`](https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py),
+cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`:
+raw QKV is **per-head interleaved**, not contiguous thirds; the canonical projections gather each
+head's Q/K/V rows separately. Native `mlp.fc1` is **gate-first**, so its row halves are swapped to
+canonical **value-first** SwiGLU. Reference-runtime state-dict exports whose QKV is already reordered
+must declare string metadata `h3_qkv_layout=contiguous`; raw files may declare `interleaved` (the
+raw format default). Unrecognized layout declarations refuse rather than guessing. Native variants
+provide the full architecture as JSON string metadata `h3_config` or a bound config sidecar; absent
+that document, every tensor must match the pinned published H3 architecture. Metadata never chooses
+FL2VA/Ref2VA task semantics. Quantized ConvRot/pruned/W4A8 dialects, Ref2VA/hybrid operation policy
+and adapters are separate epic slices; this source codec does not claim their execution.
 
 ---
 
