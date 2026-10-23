@@ -73,6 +73,10 @@ precision and checkpoint identity are retained, with a fixed 1 MiB copy buffer a
 dense transient. Missing, duplicate, conflicting, unknown or unconsumed backbone tensors fail with
 the tensor/file name before provider loading. Managed plans bind config and index files as well as
 weights, so changing architecture metadata invalidates the source binding.
+Accepted mixed-case `.SAFETENSORS`/`.SafeTensors` source filenames are normalized to lowercase
+canonical derivative filenames because both pinned providers enumerate lowercase suffixes only.
+Config and shard-index documents share the inspector's 16 MiB limit, enforced before parsing
+even on API/managed admission paths; oversized descriptors refuse with their filename and limit.
 
 Native mapping follows the executable converter at
 [`604306cab8694584e6096b32a1c1731bee22c43e`](https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py),

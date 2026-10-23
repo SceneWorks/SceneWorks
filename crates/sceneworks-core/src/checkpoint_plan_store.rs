@@ -1926,9 +1926,8 @@ impl CheckpointPlanStore {
         // digest target; changing the inspection target never changes its integrity check.
         let parent = Path::new(relative_path).parent().unwrap_or(Path::new(""));
         let config = install_path.join(parent).join("config.json");
-        let declares_h3 = fs::read(&config)
+        let declares_h3 = crate::minimax_h3_codec::read_h3_descriptor(&config)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .is_some_and(|v| {
                 v.get("_class_name").and_then(serde_json::Value::as_str)
                     == Some("MiniMaxH3Transformer3DModel")

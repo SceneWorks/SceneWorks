@@ -30,6 +30,34 @@ pub const H3_MAPPING_ID: &str = "minimax-h3-native-v1";
 pub const H3_CONFIG_FILE: &str = "config.json";
 pub const H3_INDEX_FILE: &str = "diffusion_pytorch_model.safetensors.index.json";
 
+/// Apply the inspector's descriptor policy before allocating or deserializing untrusted JSON.
+pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
+    let limit = crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES;
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len();
+    let oversized = || {
+        format!(
+            "H3 descriptor {} exceeds {limit} byte descriptor limit",
+            path.display()
+        )
+    };
+    if len > limit {
+        return Err(oversized());
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    // Also reject growth between metadata and read without consuming the whole file.
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if bytes.len() as u64 > limit {
+        return Err(oversized());
+    }
+    serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// The full architecture document providers read. Nothing here declares FL2VA/Ref2VA semantics.
 #[derive(Debug, Clone)]
 pub struct H3Config(pub Value);
@@ -268,8 +296,8 @@ impl H3SourceInventory {
             }
             directory = Some(parent);
             match Path::new(name).file_name().and_then(|s| s.to_str()) {
-                Some(H3_CONFIG_FILE) => config = Some(H3Config(serde_json::from_reader(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)),
-                Some(H3_INDEX_FILE) => index = Some(serde_json::from_reader::<_,Value>(File::open(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?),
+                Some(H3_CONFIG_FILE) => config = Some(H3Config(read_h3_descriptor(path)?)),
+                Some(H3_INDEX_FILE) => index = Some(read_h3_descriptor(path)?),
                 _ if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("safetensors")) => weights.push((name,path)),
                 _ => return Err(format!("unconsumed MiniMax-H3 artifact {name:?}; expected DiT safetensors/config/index")),
             }
@@ -293,6 +321,8 @@ impl H3SourceInventory {
             })
         });
         let requires_normalization = native
+            // Exact-pin providers enumerate only lowercase suffixes; normalize accepted variants.
+            || weights.iter().any(|(_,path)| path.extension().is_none_or(|ext| ext != "safetensors"))
             || !files.iter().any(|(name, _)| {
                 Path::new(name).file_name().and_then(|s| s.to_str()) == Some(H3_CONFIG_FILE)
             })
@@ -304,6 +334,13 @@ impl H3SourceInventory {
         for header in &headers {
             if let Some(meta) = header.get("__metadata__") {
                 if let Some(embedded) = meta.get("h3_config").and_then(Value::as_str) {
+                    if embedded.len() as u64
+                        > crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES
+                    {
+                        return Err(
+                            "H3 h3_config metadata exceeds 16777216 byte descriptor limit".into(),
+                        );
+                    }
                     let embedded = H3Config(
                         serde_json::from_str(embedded).map_err(|e| format!("h3_config: {e}"))?,
                     );

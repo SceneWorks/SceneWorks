@@ -340,9 +340,8 @@ pub fn is_minimax_h3_transformer_dir(dir: &Path) -> bool {
     if !regular_file(&config) || !regular_file(&weights) {
         return false;
     }
-    let declares_h3 = std::fs::read_to_string(&config)
+    let declares_h3 = crate::minimax_h3_codec::read_h3_descriptor(&config)
         .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|value| {
             value
                 .get("_class_name")
@@ -406,9 +405,8 @@ pub fn is_minimax_h3_sharded_transformer_dir(dir: &Path) -> bool {
     if !regular_file(&config_path) || !regular_file(&index_path) {
         return false;
     }
-    let declares_h3 = std::fs::read_to_string(&config_path)
+    let declares_h3 = crate::minimax_h3_codec::read_h3_descriptor(&config_path)
         .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|value| {
             value
                 .get("_class_name")
@@ -419,10 +417,7 @@ pub fn is_minimax_h3_sharded_transformer_dir(dir: &Path) -> bool {
     if !declares_h3 {
         return false;
     }
-    let Some(index) = std::fs::read_to_string(&index_path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-    else {
+    let Some(index) = crate::minimax_h3_codec::read_h3_descriptor(&index_path).ok() else {
         return false;
     };
     let Some(weight_map) = index.get("weight_map").and_then(Value::as_object) else {
@@ -469,9 +464,8 @@ pub fn is_minimax_h3_import_source(source: &Path) -> bool {
 }
 
 fn declares_h3_component(source: &Path) -> bool {
-    fs::read(source.join("config.json"))
+    crate::minimax_h3_codec::read_h3_descriptor(&source.join("config.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .is_some_and(|value| {
             value.get("_class_name").and_then(Value::as_str) == Some(MINIMAX_H3_TRANSFORMER_CLASS)
         })
@@ -482,6 +476,14 @@ fn declares_h3_component(source: &Path) -> bool {
 /// their precise inventory diagnostics rather than becoming "no file found". A one-file native
 /// variant may use ANY filename beside its bound config.
 pub fn minimax_h3_import_primary(source: &Path) -> Option<PathBuf> {
+    let config = source.join("config.json");
+    if config
+        .metadata()
+        .is_ok_and(|m| m.len() > crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES)
+    {
+        // Preserve the bounded-descriptor diagnostic even when classification cannot parse config.
+        return Some(config);
+    }
     if !declares_h3_component(source) {
         return None;
     }
@@ -490,7 +492,10 @@ pub fn minimax_h3_import_primary(source: &Path) -> Option<PathBuf> {
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
-            !is_hidden_file(path) && path.extension().is_some_and(|e| e == "safetensors")
+            !is_hidden_file(path)
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
         })
         .collect();
     weights.sort();
@@ -506,16 +511,28 @@ pub fn detect_import_source_weights(
     source: &Path,
     primary: &Path,
 ) -> Result<BaseWeightDetection, SafetensorsHeaderError> {
+    for name in ["config.json", MINIMAX_H3_TRANSFORMER_INDEX_FILE] {
+        let path = source.join(name);
+        if path
+            .metadata()
+            .is_ok_and(|m| m.len() > crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES)
+        {
+            if let Err(reason) = crate::minimax_h3_codec::read_h3_descriptor(&path) {
+                return Ok(BaseWeightDetection::Unrecognized { reason });
+            }
+        }
+    }
     if declares_h3_component(source) {
         let files: Vec<_> = fs::read_dir(source)
             .map_err(SafetensorsHeaderError::Io)?
             .filter_map(Result::ok)
             .filter(|entry| !is_hidden_file(&entry.path()))
             .filter(|entry| {
-                entry
-                    .path()
-                    .extension()
-                    .is_some_and(|e| e == "json" || e == "safetensors" || e == "gguf")
+                entry.path().extension().is_some_and(|e| {
+                    e.eq_ignore_ascii_case("json")
+                        || e.eq_ignore_ascii_case("safetensors")
+                        || e.eq_ignore_ascii_case("gguf")
+                })
             })
             .map(|entry| {
                 (
@@ -529,7 +546,10 @@ pub fn detect_import_source_weights(
                 Ok(_) => {
                     let mut aggregate = serde_json::Map::new();
                     for (_, path) in &files {
-                        if path.extension().is_some_and(|e| e == "safetensors") {
+                        if path
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
+                        {
                             if let Some(header) = read_safetensors_header(path)?.as_object() {
                                 aggregate.extend(
                                     header

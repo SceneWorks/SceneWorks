@@ -34,7 +34,7 @@ use crate::checkpoint_plan_store::portable_relative_path_parts;
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 const MAX_DISCOVERY_DEPTH: usize = 8;
 const MAX_SAFETENSORS_HEADER_BYTES: u64 = 100_000_000;
-const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
 const MAX_GGUF_STRING_BYTES: u64 = 16 * 1024 * 1024;
@@ -738,9 +738,8 @@ fn inspect_discovered_pass(
             else {
                 return false;
             };
-            std::fs::read(path)
+            crate::minimax_h3_codec::read_h3_descriptor(&path)
                 .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
                 .is_some_and(|v| {
                     v.get("_class_name").and_then(Value::as_str)
                         == Some("MiniMaxH3Transformer3DModel")

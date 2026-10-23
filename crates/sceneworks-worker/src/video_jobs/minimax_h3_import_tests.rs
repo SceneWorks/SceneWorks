@@ -430,3 +430,81 @@ fn source_mutation_before_or_during_normalization_cannot_publish() {
     ))
     .is_err());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn linked_mixed_case_shards_reach_the_provider_as_lowercase_canonical_files() {
+    let tiers = minimax_h3_tier_root("mm_upper_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_upper_base_");
+    let data = minimax_h3_data_dir(tiers.path());
+    let original = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+        &data,
+        "uppercase_h3",
+        "sharded",
+    );
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("linked-h3");
+    std::fs::create_dir_all(&source).unwrap();
+    for file in std::fs::read_dir(&original.install_dir).unwrap() {
+        let file = file.unwrap();
+        std::fs::copy(file.path(), source.join(file.file_name())).unwrap();
+    }
+    let index_file = source.join("diffusion_pytorch_model.safetensors.index.json");
+    let mut index: Value =
+        serde_json::from_reader(std::fs::File::open(&index_file).unwrap()).unwrap();
+    for (old, new) in [
+        ("renamed-part-0.safetensors", "part-0.SAFETENSORS"),
+        ("renamed-part-1.safetensors", "part-1.SafeTensors"),
+    ] {
+        std::fs::rename(source.join(old), source.join(new)).unwrap();
+        for shard in index["weight_map"].as_object_mut().unwrap().values_mut() {
+            if shard.as_str() == Some(old) {
+                *shard = json!(new);
+            }
+        }
+    }
+    std::fs::write(&index_file, index.to_string()).unwrap();
+    let plans = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
+    let root = plans.approve_root(library.path()).unwrap();
+    let compiled = plans.compile_linked(&root.root_id, "linked-h3").unwrap();
+    let assembly =
+        sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_plan(&compiled.plan)
+            .unwrap();
+    let mut entry = original.entry.clone();
+    entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}));
+    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+    let request = imported_minimax_h3_request("uppercase_h3", &entry);
+    let probe = ArmProbe::default();
+    let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
+    let spec = probe.spec.lock().unwrap().clone().unwrap();
+    let WeightsSource::Dir(directory) = &spec.components["transformer"] else {
+        panic!("expected canonical directory")
+    };
+    let files: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        files
+            .iter()
+            .filter(|(name, _)| name.ends_with(".safetensors"))
+            .count(),
+        2
+    );
+    assert!(
+        !sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
+            .unwrap()
+            .requires_normalization
+    );
+    assert_eq!(
+        raw["importPlan"]["checkpointId"],
+        json!(compiled.checkpoint_id)
+    );
+    assert_ne!(canonical(directory), canonical(&source));
+}

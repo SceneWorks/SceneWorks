@@ -538,3 +538,75 @@ fn managed_h3_config_is_bound_and_mutation_refuses() {
     .unwrap();
     assert!(plans.resolve(&install.checkpoint_id).is_err());
 }
+
+#[test]
+fn oversized_descriptors_refuse_before_json_allocation_in_admission_and_codec() {
+    for descriptor in [H3_CONFIG_FILE, H3_INDEX_FILE] {
+        let dir = tempfile::tempdir().unwrap();
+        let files = sharded(dir.path());
+        // Sparse 1 GiB descriptor: metadata alone must reject it, without allocating/reading 1 GiB.
+        let file = File::create(dir.path().join(descriptor)).unwrap();
+        file.set_len(1 << 30).unwrap();
+        let error = H3SourceInventory::from_files(&files).unwrap_err();
+        assert!(
+            error.contains(descriptor) && error.contains("16777216 byte descriptor limit"),
+            "{error}"
+        );
+        let primary = crate::base_weights::minimax_h3_import_primary(dir.path()).unwrap();
+        let detection =
+            crate::base_weights::detect_import_source_weights(dir.path(), &primary).unwrap();
+        let error = crate::base_weights::import_detection_supported(&detection).unwrap_err();
+        assert!(
+            error.contains(descriptor) && error.contains("descriptor limit"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn uppercase_shards_normalize_to_provider_enumerable_names_with_exact_values() {
+    let data = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("mixed-case");
+    std::fs::create_dir_all(&source).unwrap();
+    sharded(&source);
+    let mut index: Value =
+        serde_json::from_reader(File::open(source.join(H3_INDEX_FILE)).unwrap()).unwrap();
+    for (old, new) in [
+        ("renamed-a.safetensors", "part-A.SAFETENSORS"),
+        ("renamed-b.safetensors", "part-B.SafeTensors"),
+    ] {
+        std::fs::rename(source.join(old), source.join(new)).unwrap();
+        for shard in index["weight_map"].as_object_mut().unwrap().values_mut() {
+            if shard.as_str() == Some(old) {
+                *shard = json!(new);
+            }
+        }
+    }
+    std::fs::write(source.join(H3_INDEX_FILE), index.to_string()).unwrap();
+    let plans = CheckpointPlanStore::open(data.path());
+    let root = plans.approve_root(library.path()).unwrap();
+    let compiled = plans.compile_linked(&root.root_id, "mixed-case").unwrap();
+    let resolved = plans.resolve(&compiled.checkpoint_id).unwrap();
+    let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+    assert!(!inventory.native);
+    assert!(inventory.requires_normalization);
+    let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+    let request = inventory.derivative_request();
+    cache
+        .ensure(&compiled.checkpoint_id, &request, |out| {
+            inventory.produce(out)
+        })
+        .unwrap();
+    let output = cache
+        .cache()
+        .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
+        .unwrap();
+    let mut actual = Entries::new();
+    for i in 0..2 {
+        let name = inventory.shard_name(i);
+        assert!(name.ends_with(".safetensors"));
+        actual.extend(read_file(&output.join(name)));
+    }
+    assert_eq!(actual, canonical("F32"));
+}
