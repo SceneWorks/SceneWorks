@@ -2014,8 +2014,13 @@ pub(super) fn resolve_imported_minimax_h3_dit(
             Ok(pin)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    let bound_config = sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
+        .map_err(|reason| refuse("invalid-bound-config", reason))?;
     let inventory = with_imported_h3_source_seals(&pins, || {
-        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved(&resolved)
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config(
+            &resolved,
+            bound_config,
+        )
     })
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
     let (directory, derivative) =
@@ -2342,6 +2347,9 @@ fn resolve_imported_h3_components(
         &request.model_manifest_entry,
     )
     .map_err(refuse)?;
+    let dit_config: Value =
+        serde_json::from_slice(&std::fs::read(dit.transformer_dir.join("config.json"))?)
+            .map_err(|error| refuse(format!("bound transformer config: {error}")))?;
     if let Some(value) = request.advanced.get("mlxQuantize") {
         let bits = value
             .as_i64()
@@ -2401,6 +2409,16 @@ fn resolve_imported_h3_components(
                 "{repo}@{revision}: bound component is incomplete"
             )));
         }
+        sceneworks_core::minimax_h3_import::import_component_configuration_compatible(
+            &snapshot,
+            row,
+            &dit_config,
+        )
+        .map_err(|reason| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:incompatible-component] {reason}"
+            ))
+        })?;
         let files = row
             .get("files")
             .and_then(Value::as_array)

@@ -429,3 +429,174 @@ fn shared_h3_component_globs_cannot_hide_incomplete_weights_or_constructor_files
     put("FL2VA/audio_vae/metadata.json", b"{}");
     assert!(import_component_files_complete(temp.path(), &constructor));
 }
+
+fn base_config_context(config: Value) -> std::collections::BTreeMap<String, Value> {
+    [("transformerConfig".into(), sceneworks_core::minimax_h3_import::config_binding(config,
+        json!({"kind":"selected-base","baseModel":"minimax_h3","repo":"fixture/h3","revision":"1111111111111111111111111111111111111111","path":"bf16/transformer/config.json","componentTier":"bf16"})))].into()
+}
+
+#[test]
+fn weight_only_config_is_immutable_semantic_context_across_ownership_restart_and_normalization() {
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+    use sceneworks_core::minimax_h3_codec::H3SourceInventory;
+    let data = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    write_h3_dit_dir(library.path());
+    let mut config: Value =
+        serde_json::from_slice(&fs::read(library.path().join("config.json")).unwrap()).unwrap();
+    config["rope_theta"] = json!(123456.0);
+    config["future_provider_field"] = json!({"schedule":[0.125, 0.375],"precision":"trained-bf16"});
+    fs::remove_file(library.path().join("config.json")).unwrap();
+    let file = "diffusion_pytorch_model.safetensors";
+    let original = fs::read(library.path().join(file)).unwrap();
+    let store = CheckpointPlanStore::open(data.path());
+    let root = store.approve_root(library.path()).unwrap();
+    assert!(store.compile_linked(&root.root_id, file).is_err());
+    let mut context = base_config_context(config.clone());
+    context.insert("sourceEncoding".into(), json!("convrot_int8"));
+    let linked = store
+        .compile_linked_with_context(&root.root_id, file, context.clone())
+        .unwrap();
+    assert!(
+        !linked.plan.context.contains_key("sourceEncoding"),
+        "precision is derived from actual tensors"
+    );
+    context.insert("sourceEncoding".into(), json!("unknown_future_codec"));
+    assert!(store
+        .compile_linked_with_context(&root.root_id, file, context)
+        .is_err());
+    let ingest = ManagedIngest::begin(&store, "bound_h3", provenance()).unwrap();
+    ingest
+        .stage_copy_file(&library.path().join(file), file)
+        .unwrap();
+    let managed = ingest
+        .finalize_with_context(file, None, base_config_context(config.clone()))
+        .unwrap();
+    assert_eq!(
+        linked.plan.semantic_digest().unwrap(),
+        managed.compiled.plan.semantic_digest().unwrap()
+    );
+    drop(store);
+    let store = CheckpointPlanStore::open(data.path());
+    for id in [&linked.checkpoint_id, &managed.checkpoint_id] {
+        let resolved = store.resolve(id).unwrap();
+        let bound =
+            sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context).unwrap();
+        let inventory = H3SourceInventory::from_resolved_with_config(&resolved, bound).unwrap();
+        assert_eq!(inventory.config.0, config);
+        let derivatives = CheckpointDerivativeStore::open(data.path()).unwrap();
+        let request = inventory.derivative_request();
+        derivatives
+            .ensure(id, &request, |out| inventory.produce(out))
+            .unwrap();
+        let key = derivatives.cache_key(&resolved, &request).unwrap();
+        let output = derivatives.cache().bundle_path(&key).unwrap();
+        let normalized: Value =
+            serde_json::from_slice(&fs::read(output.join("config.json")).unwrap()).unwrap();
+        assert_eq!(normalized, config);
+    }
+    // A rescan reuses the persisted binding without access to a foreign base file.
+    let rescanned = store.compile_linked(&root.root_id, file).unwrap();
+    assert_eq!(
+        rescanned.plan.semantic_digest().unwrap(),
+        linked.plan.semantic_digest().unwrap()
+    );
+    let mut changed = config.clone();
+    changed["future_provider_field"]["schedule"] = json!([0.25]);
+    let changed_plan = store
+        .compile_linked_with_context(&root.root_id, file, base_config_context(changed))
+        .unwrap();
+    assert_ne!(
+        linked.plan.semantic_digest().unwrap(),
+        changed_plan.plan.semantic_digest().unwrap()
+    );
+    let mut wrong = config.clone();
+    wrong["hidden_size"] = json!(16);
+    assert!(store
+        .compile_linked_with_context(&root.root_id, file, base_config_context(wrong))
+        .is_err());
+    assert_eq!(fs::read(library.path().join(file)).unwrap(), original);
+}
+
+#[test]
+fn source_configuration_wins_and_conflicting_source_claims_refuse() {
+    let data = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("source");
+    write_h3_dit_dir(&source);
+    let own: Value =
+        serde_json::from_slice(&fs::read(source.join("config.json")).unwrap()).unwrap();
+    let mut fallback = own.clone();
+    fallback["rope_theta"] = json!(987654.0);
+    let store = CheckpointPlanStore::open(data.path());
+    let root = store.approve_root(library.path()).unwrap();
+    let compiled = store
+        .compile_linked_with_context(
+            &root.root_id,
+            "source",
+            base_config_context(fallback.clone()),
+        )
+        .unwrap();
+    assert_eq!(compiled.plan.context["transformerConfig"]["config"], own);
+    assert_eq!(
+        compiled.plan.context["transformerConfig"]["provenance"]["kind"],
+        "source"
+    );
+    let file = source.join("diffusion_pytorch_model.safetensors");
+    let bytes = fs::read(&file).unwrap();
+    let length = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&bytes[8..8 + length]).unwrap();
+    header["__metadata__"] = json!({"h3_config":fallback.to_string()});
+    let encoded = serde_json::to_vec(&header).unwrap();
+    let mut conflict = (encoded.len() as u64).to_le_bytes().to_vec();
+    conflict.extend(encoded);
+    conflict.extend_from_slice(&bytes[8 + length..]);
+    fs::write(&file, conflict).unwrap();
+    assert!(store.compile_linked(&root.root_id, "source").is_err());
+}
+
+#[test]
+fn bound_architecture_rejects_actual_resident_interface_mismatches_not_trained_geometry() {
+    use sceneworks_core::minimax_h3_import::import_component_configuration_compatible;
+    let snapshot = tempfile::tempdir().unwrap();
+    let config = json!({"text_dim":8,"in_channels":2,"audio_in_channels":4,"hidden_size":128,"rope_theta":123456.0,"trained_schedule":[0.125]});
+    for (component, directory, document, field) in [
+        (
+            "text_encoder",
+            "q4/text_encoder",
+            json!({"text_config":{"hidden_size":8}}),
+            "text_dim",
+        ),
+        (
+            "video_vae",
+            "vae",
+            json!({"latent_channels":2}),
+            "in_channels",
+        ),
+        (
+            "audio_vae",
+            "audio_vae",
+            json!({"latent_channels":4}),
+            "audio_in_channels",
+        ),
+    ] {
+        fs::create_dir_all(snapshot.path().join(directory)).unwrap();
+        fs::write(
+            snapshot.path().join(directory).join("config.json"),
+            document.to_string(),
+        )
+        .unwrap();
+        let row =
+            json!({"componentId":component,"subdir":directory,"files":[format!("{directory}/*")]});
+        import_component_configuration_compatible(snapshot.path(), &row, &config).unwrap();
+        let mut incompatible = config.clone();
+        incompatible[field] = json!(999);
+        assert!(
+            import_component_configuration_compatible(snapshot.path(), &row, &incompatible)
+                .unwrap_err()
+                .contains("incompatible")
+        );
+        fs::write(snapshot.path().join(directory).join("config.json"), "{}").unwrap();
+        assert!(import_component_configuration_compatible(snapshot.path(), &row, &config).is_err());
+    }
+}

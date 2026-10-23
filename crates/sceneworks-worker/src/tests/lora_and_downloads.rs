@@ -2742,6 +2742,64 @@ async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_byt
 }
 
 #[tokio::test]
+async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports() {
+    let _env = isolate_hf_cache();
+    let seed = tempdir().unwrap();
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(seed.path());
+    let original = std::fs::read(seed.path().join("diffusion_pytorch_model.safetensors")).unwrap();
+    let mut config: Value = serde_json::from_slice(&std::fs::read(seed.path().join("config.json")).unwrap()).unwrap();
+    config["rope_theta"] = json!(123456.0);
+    config["provider_extension"] = json!({"trained_schedule":[0.125,0.75],"precision":"bf16"});
+    let (hf_url, _) = spawn_tree_stub_with_bodies(vec![
+        ("community.safetensors".into(), original.clone()),
+        ("bf16/transformer/config.json".into(), serde_json::to_vec(&config).unwrap()),
+    ]).await;
+    let binary_url = spawn_binary_stub(original.clone()).await;
+    let mut semantic = None;
+    for transport in ["copy", "upload", "url", "civitai", "huggingface", "linked"] {
+        let fixture = managed_import_fixture_with_id(hf_url.clone(), &format!("weight_only_{transport}")).await;
+        let source = fixture.settings.data_dir.join("models/incoming/community.safetensors");
+        std::fs::write(&source, &original).unwrap();
+        let mut job = h3_import_job(&fixture, &source);
+        job.payload["manifestEntry"]["downloads"] = json!([{"provider":"huggingface","repo":"fixture/base-config","revision":"1111111111111111111111111111111111111111","files":["bf16/transformer/config.json"],"coRequisite":true,"componentId":"import_transformer_config","variant":"bf16"}]);
+        job.payload["manifestEntry"]["importComponentTier"] = json!("bf16");
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+        if transport == "upload" {
+            let upload = fixture.settings.data_dir.join("cache/model-uploads/fixture/community.safetensors");
+            std::fs::create_dir_all(upload.parent().unwrap()).unwrap();
+            std::fs::write(&upload, &original).unwrap();
+            job.payload.insert("sourcePath".into(), json!(upload.display().to_string()));
+            job.payload.insert("uploadedSourcePath".into(), json!(true));
+        } else if matches!(transport, "url" | "civitai") {
+            job.payload.remove("sourcePath");
+            job.payload.insert("sourceUrl".into(), json!(format!("{binary_url}/community.safetensors")));
+            if transport == "civitai" { job.payload.insert("importProvenance".into(),json!({"source":"civitai","versionId":"71","fileId":"9"})); }
+        } else if transport == "huggingface" {
+            job.payload.remove("sourcePath");
+            job.payload.insert("repo".into(), json!("fixture/weights"));
+            job.payload.insert("revision".into(), json!("fixture-sha"));
+            job.payload.insert("files".into(), json!(["community.safetensors"]));
+        } else if transport == "linked" {
+            let root = store.approve_root(source.parent().unwrap()).unwrap();
+            job.payload.remove("sourcePath");
+            job.payload.insert("ownershipMode".into(), json!("linked"));
+            job.payload.insert("linkedRootId".into(),json!(root.root_id));
+            job.payload.insert("linkedRelativePath".into(),json!("community.safetensors"));
+        }
+        super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap();
+        let entry = fixture.manifest_entry().unwrap_or_else(|| panic!("{transport} was not published"));
+        let restarted = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+        let resolved = restarted.resolve(entry["importPlan"]["checkpointId"].as_str().unwrap()).unwrap();
+        assert_eq!(resolved.plan.context["transformerConfig"]["config"], config);
+        assert_eq!(resolved.plan.context["transformerConfig"]["provenance"]["revision"], "1111111111111111111111111111111111111111");
+        assert_eq!(entry["downloads"], json!([]), "config-only provisioning is not a resident component");
+        let digest = resolved.plan.semantic_digest().unwrap();
+        if let Some(expected) = &semantic { assert_eq!(&digest, expected, "{transport}"); } else { semantic = Some(digest); }
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+}
+
+#[tokio::test]
 async fn interrupted_h3_postcommit_publication_recovers_only_the_original_job() {
     let _env = isolate_hf_cache();
     let (url, _) = spawn_tree_stub_with_files(vec![]).await;
@@ -2856,4 +2914,35 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
     assert!(!upload.exists(),"completed publication releases the owned upload cache");
     });
     }).unwrap().join().unwrap();
+}
+
+#[tokio::test]
+async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision() {
+    let _env = isolate_hf_cache();
+    let seed = tempdir().unwrap();
+    let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(seed.path(), "seed", "convrot", "fl2va");
+    let original = std::fs::read(native.install_dir.join("renamed-user-checkpoint.safetensors")).unwrap();
+    let (url, _) = spawn_tree_stub_with_files(vec![]).await;
+    for transport in ["copy", "linked"] {
+        let fixture = managed_import_fixture_with_id(url.clone(), &format!("convrot_{transport}")).await;
+        let source = fixture.settings.data_dir.join("models/incoming/community.safetensors");
+        std::fs::write(&source, &original).unwrap();
+        assert_eq!(super::model_jobs::base_weight_manifest_classification(&source), Some(("transformer_file", "int8_tensorwise_per_row")));
+        let mut job = h3_import_job(&fixture, &source);
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+        if transport == "linked" {
+            let root = store.approve_root(source.parent().unwrap()).unwrap();
+            job.payload.remove("sourcePath");
+            job.payload.insert("ownershipMode".into(), json!("linked"));
+            job.payload.insert("linkedRootId".into(), json!(root.root_id));
+            job.payload.insert("linkedRelativePath".into(), json!("community.safetensors"));
+        }
+        super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap();
+        let entry = fixture.manifest_entry().expect("validated native checkpoint publishes");
+        let resolved = store.resolve(entry["importPlan"]["checkpointId"].as_str().unwrap()).unwrap();
+        assert_eq!(resolved.plan.context["sourceEncoding"], "convrot_int8");
+        assert_eq!(entry["importPlan"]["assembly"]["sourceEncoding"], "convrot_int8");
+        assert_eq!(entry["importQuantFormat"], "convrot_int8");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
 }

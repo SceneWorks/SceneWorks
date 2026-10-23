@@ -3980,6 +3980,14 @@ pub(crate) async fn queue_model_import_job(
                 }
             }
         }
+        rows.push(
+            sceneworks_core::minimax_h3_import::import_config_download(
+                &base,
+                &selected_tier,
+                std::env::consts::OS,
+            )
+            .map_err(ApiError::bad_request)?,
+        );
         let repos: Vec<_> = rows
             .iter()
             .map(|row| row.get("repo").and_then(Value::as_str))
@@ -4089,6 +4097,11 @@ pub(crate) async fn queue_model_import_job(
     payload.insert("manifestEntry".to_owned(), manifest_entry);
     if let Some((base, rows, _)) = import_components {
         for row in rows {
+            // The import worker fetches this literal config through the shared installer only if
+            // inspection finds no source-owned claim. It writes no primary download receipt.
+            if row.get("componentId").and_then(Value::as_str) == Some("import_transformer_config") {
+                continue;
+            }
             if imported_component_presence(&state.settings.data_dir, &row)
                 == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
                 continue;
@@ -7848,6 +7861,7 @@ fn install_state_for(
         let resolved = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
             .resolve(checkpoint_id);
         let mut missing = Vec::new();
+        let mut bound_config = None;
         match resolved {
             Ok(resolved) => {
                 if let Err(reason) =
@@ -7855,6 +7869,11 @@ fn install_state_for(
                 {
                     missing.push(reason);
                 }
+                bound_config =
+                    sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
+                        .ok()
+                        .flatten()
+                        .map(|config| config.0);
             }
             Err(error) => missing.push(error.to_string()),
         }
@@ -7870,11 +7889,28 @@ fn install_state_for(
                     .to_owned(),
             );
         }
+        let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+            sceneworks_core::hf_home::model_source_library(data_dir),
+        );
         for row in rows {
             if imported_component_presence(data_dir, &row)
                 != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
                 missing.push(format!("{}: {}", row.get("repo").and_then(Value::as_str).unwrap_or("component"),
                     string_array_field(&row, "files").join(", ")));
+            }
+            if let Some(config) = &bound_config {
+                if let (Some(repo), Some(revision)) = (
+                    row.get("repo").and_then(Value::as_str),
+                    row.get("revision").and_then(Value::as_str),
+                ) {
+                    if let Ok((_, snapshot)) =
+                        resolver.discover_source_snapshot(repo, Some(revision))
+                    {
+                        if let Err(reason) = sceneworks_core::minimax_h3_import::import_component_configuration_compatible(&snapshot, &row, config) {
+                            missing.push(reason);
+                        }
+                    }
+                }
             }
         }
         return ModelCatalogEntryState {
@@ -16085,11 +16121,13 @@ mod minimax_h3_import_declaration_tests {
                 { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] },
                   "downloads":[
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer_ref/*"]},
                     {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
                 { "id":"minimax_h3_ref", "type":"video", "family":"minimax-h3", "downloads":[
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer_ref/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer/*"]},
                     {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
@@ -16127,7 +16165,23 @@ mod minimax_h3_import_declaration_tests {
             assert_eq!(entry["minimaxH3Partition"], partition);
             assert_eq!(entry["type"], "video");
             let rows = entry["downloads"].as_array().unwrap();
-            assert_eq!(rows.len(), if partition == "hybrid" { 1 } else { 2 });
+            assert_eq!(rows.len(), if partition == "hybrid" { 2 } else { 3 });
+            let config = rows
+                .iter()
+                .find(|row| row["componentId"] == "import_transformer_config")
+                .unwrap();
+            assert_eq!(
+                config["revision"],
+                "1111111111111111111111111111111111111111"
+            );
+            assert_eq!(
+                config["files"],
+                json!([if partition == "ref2va" {
+                    "bf16/transformer_ref/config.json"
+                } else {
+                    "bf16/transformer/config.json"
+                }])
+            );
             assert!(rows.iter().all(super::is_co_requisite_download));
             let imported_slot = if partition == "ref2va" {
                 "q4/transformer_ref/*"
@@ -16622,7 +16676,7 @@ mod minimax_h3_import_declaration_tests {
         let revision = "1111111111111111111111111111111111111111";
         let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
             {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
-            {"provider":"huggingface","repo":"fixture/tiers","variant":"bf16","files":["bf16/transformer/*"]},
+            {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"bf16","files":["bf16/transformer/*"]},
             {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"q4","files":["q4/encoder.bin"]},
             {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"bf16","files":["bf16/encoder.bin"]}
         ]});
@@ -16662,6 +16716,38 @@ mod minimax_h3_import_declaration_tests {
             surface["runtimeQuantTiers"],
             json!(["bf16"]),
             "normal picker defaults can only select the bound closure"
+        );
+    }
+
+    #[test]
+    fn config_only_provisioning_never_marks_the_stock_dit_installed() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let revision = "1111111111111111111111111111111111111111";
+        let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
+            {"provider":"huggingface","repo":"fixture/base","revision":revision,"variant":"bf16","default":true,"files":["bf16/transformer/*"]}
+        ]});
+        let row = sceneworks_core::minimax_h3_import::import_config_download(
+            &base,
+            "q4",
+            std::env::consts::OS,
+        )
+        .unwrap();
+        assert_eq!(row["files"], json!(["bf16/transformer/config.json"]));
+        assert_eq!(row["coRequisite"], true);
+        let snapshot = super::huggingface_repo_cache_path(temp.path(), "fixture/base")
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(snapshot.join("bf16/transformer")).unwrap();
+        std::fs::write(snapshot.join("bf16/transformer/config.json"), b"{}").unwrap();
+        assert!(
+            !super::install_state_for(
+                super::model_download_context(&base).unwrap(),
+                &base,
+                temp.path()
+            )
+            .installed
         );
     }
 }

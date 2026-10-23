@@ -1039,7 +1039,7 @@ fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
 
 #[test]
 fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
-    for layout in ["dense", "native", "sharded"] {
+    for layout in ["dense", "native", "sharded", "convrot"] {
         let data = tempfile::tempdir().unwrap();
         let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
             data.path(),
@@ -1068,6 +1068,68 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
             .remove_managed_install("leased_h3")
             .unwrap();
         assert!(!imported.install_dir.exists());
+    }
+}
+
+#[test]
+fn provider_stages_the_persisted_weight_only_config_and_source_owned_config_wins() {
+    for source_owned in [false, true] {
+        let data = tempfile::tempdir().unwrap();
+        let mut imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+            data.path(),
+            "configured_h3",
+            "dense",
+        );
+        let config_path = imported.install_dir.join("config.json");
+        let own: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let mut fallback = own.clone();
+        fallback["rope_theta"] = json!(123456.0);
+        fallback["provider_extension"] = json!({"trained_schedule":[0.125,0.75]});
+        if !source_owned {
+            std::fs::remove_file(&config_path).unwrap();
+        }
+        let context = [("transformerConfig".into(), sceneworks_core::minimax_h3_import::config_binding(fallback.clone(),
+            json!({"kind":"selected-base","baseModel":"minimax_h3","repo":"fixture/config","revision":"1111111111111111111111111111111111111111","path":"bf16/transformer/config.json","componentTier":"bf16"})))].into();
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data.path());
+        let compiled = store
+            .compile_managed_with_context(
+                "configured_h3",
+                "diffusion_pytorch_model.safetensors",
+                sceneworks_core::checkpoint_import::ManagedProvenanceV1 {
+                    source: "fixture".into(),
+                    ..Default::default()
+                },
+                context,
+            )
+            .unwrap();
+        imported.entry["importPlan"] = json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.plan.semantic_digest().unwrap()});
+        let assembly =
+            sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                &compiled.plan,
+                &imported.entry,
+            )
+            .unwrap();
+        sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(
+            &mut imported.entry,
+            &assembly,
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let request = imported_minimax_h3_request("configured_h3", &imported.entry);
+        let provider =
+            crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
+                .unwrap();
+        let actual: Value = serde_json::from_slice(
+            &std::fs::read(provider.transformer_dir.join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(actual, if source_owned { own } else { fallback });
+        assert!(
+            store.remove_managed("configured_h3").is_err(),
+            "configuration binding retains the source lease"
+        );
     }
 }
 

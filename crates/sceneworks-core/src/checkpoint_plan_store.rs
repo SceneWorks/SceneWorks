@@ -1921,6 +1921,27 @@ impl CheckpointPlanStore {
         self.compile_linked_with_hook(root_id, relative_path, |_| {})
     }
 
+    pub fn compile_linked_with_context(
+        &self,
+        root_id: &str,
+        relative_path: &str,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let root_path = self.resolve_root(root_id)?;
+        let mut request = CheckpointInspectionRequestV1::linked(
+            linked_checkpoint_id(root_id, relative_path),
+            &root_path,
+            relative_path,
+            root_id,
+        )
+        .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
+            relative_path: relative_path.into(),
+            reason,
+        })?;
+        request.context = context;
+        self.compile(&request, &root_path, "linked")
+    }
+
     /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
     /// layer's persisted source stamp has been sampled and before its bytes are hashed.
     #[doc(hidden)]
@@ -1966,6 +1987,16 @@ impl CheckpointPlanStore {
         relative_path: &str,
         provenance: ManagedProvenanceV1,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        self.compile_managed_with_context(install_id, relative_path, provenance, Default::default())
+    }
+
+    pub fn compile_managed_with_context(
+        &self,
+        install_id: &str,
+        relative_path: &str,
+        provenance: ManagedProvenanceV1,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let install_path = self.resolve_install(install_id)?;
         validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
@@ -1980,6 +2011,7 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
+        request.context = context;
         // H3 providers open the whole component directory, not just the digest's primary file.
         // Bind its architecture and shard index/closure too. The primary remains the transfer-
         // digest target; changing the inspection target never changes its integrity check.
@@ -2022,7 +2054,21 @@ impl CheckpointPlanStore {
         hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
-        let inspection = inspect_checkpoint(request);
+        // Rescans/recovery retain the immutable binding, never rediscover a mutable base config.
+        let mut request = request.clone();
+        if request.context.is_empty() {
+            if let Ok(record) = self.record(&checkpoint_id) {
+                let plan = self.plan(&checkpoint_id, &record.plan.plan_id)?;
+                record.validate_loaded_plan(&plan).map_err(|error| {
+                    CheckpointPlanError::PlanTampered {
+                        checkpoint_id: checkpoint_id.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                request.context = plan.context;
+            }
+        }
+        let inspection = inspect_checkpoint(&request);
         let errors: Vec<CheckpointDiagnosticV1> = inspection
             .diagnostics
             .iter()
