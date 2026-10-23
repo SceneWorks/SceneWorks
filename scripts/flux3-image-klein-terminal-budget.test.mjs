@@ -5,8 +5,9 @@ import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan, terminalCatalog } from './flux3-image-klein-terminal-plan.mjs';
-import { validateApprovedPlan, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, planHash, verifyLedgerReceipt, candleNextApprovalBaseSha256, validateCandleSourceCompatibility, validateCandleDeviceTransitionBinding, validateCandleMeasurementTransitionBinding, candleReplayPrefix, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, planHash, verifyLedgerReceipt, candleNextApprovalBaseSha256, validateCandleSourceCompatibility, validateCandleDeviceTransitionBinding, validateCandleMeasurementTransitionBinding, validateCandleDependencySecurityUpdate, validateCandleDependencySecurityLocks, verifyCandleDependencySecurityArchive, candleReplayPrefix, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { produceTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
 import { prepareReplayRequestFixture, makeReplayBaselineFixture } from './lib/flux3-replay-prefix-fixtures.mjs';
@@ -228,13 +229,16 @@ const replayCase = 'candle.distilled.representative-repro.bf16';
 const consumedId = `${replayCase}.generation-1`, nextId = `${replayCase}.generation-2`;
 const oldApiBinary = 'd264bf21ba5e5a19012388041da92bc54764d2b3144c3d10065505b1a383e52d';
 const oldResourceBinary = '4795a3e8fd5d0ee2d60c6586a72153759133209403d6b15120af7d50fcc48df5';
-async function pureTransitionFixture(t, {measurement = false} = {}) {
+const previousSecurityLock = '96feb71e685fa37faa01509108824463d09e88ed057ac7079ba0f11ea2b60e92';
+const nextSecurityLock = 'c33fba4fef58de889073666728c920a67c04687f7b24f4d4aaf5657cccd9a0c7';
+async function pureTransitionFixture(t, {measurement = false, security = false} = {}) {
   const {root,approval:previousApproval} = await fixture(t);
   previousApproval.sourceSha = originalSource;
   previousApproval.ledgerRoots = {mlx:path.join(root,'ledgers','mlx'),candle:path.join(root,'ledgers','candle')};
   await mkdir(path.join(root,'ledgers'));
   previousApproval.buildReceipts = {candle:{receiptSha256:digest,transcriptSha256:digest,binarySha256:measurement ? oldApiBinary : digest,cargoLockSha256:digest}};
   declaredSyntheticReadyBackend(previousApproval,'candle',measurement ? {binarySha256:oldResourceBinary} : {});
+  if (security) for(const key of ['buildReceipts','resourceBuildReceipts']) previousApproval[key].candle.cargoLockSha256=previousSecurityLock;
   await initializeLedger({approval:previousApproval,backend:'candle',ledgerRoot:previousApproval.ledgerRoots.candle});
   const first = previousApproval.plan.generationInvocations.find(i=>i.invocationId===consumedId);
   await reserveInvocation(reservation(previousApproval,'candle',first));
@@ -243,6 +247,7 @@ async function pureTransitionFixture(t, {measurement = false} = {}) {
   approval.buildReceipts.candle.receiptSha256='e'.repeat(64); approval.buildReceipts.candle.transcriptSha256='f'.repeat(64);
   if (measurement) approval.buildReceipts.candle.binarySha256 = '1'.repeat(64);
   declaredSyntheticReadyBackend(approval,'candle',{buildReceiptSha256:'e'.repeat(64),...(measurement ? {binarySha256:'2'.repeat(64)} : {})});
+  if (security) for(const key of ['buildReceipts','resourceBuildReceipts']) approval[key].candle.cargoLockSha256=nextSecurityLock;
   const binding = name => ({path:path.join(root,name),sha256:digest});
   const previousApprovalJson=JSON.stringify(previousApproval,null,2)+'\n', previousReceiptJson=JSON.stringify(previousReceipt,null,2)+'\n';
   const authorization={schemaVersion:1,kind:'flux3-candle-source-transition-authorization',authorizationId:'SYNTHETIC_ONLY',approvedBy:'synthetic CPU test',producersStopped:true,previousSourceSha:originalSource,previousApprovedPlanSha256:planHash(previousApproval),previousHeadSha256:previousReceipt.state.headSha256,previousSequence:1,previousGenerationCount:1,previousConsumedIds:[consumedId],previousClaimSha256:digest,previousApproval:{...binding('old-approval.json'),sha256:rawSha(previousApprovalJson)},previousReceipt:{...binding('old-receipt.json'),sha256:rawSha(previousReceiptJson)},previousBuilds:{api:binding('old-api.json'),resource:binding('old-resource.json')},nextBuilds:{api:binding('new-api.json'),resource:binding('new-resource.json')},nextSourceSha:approval.sourceSha,nextApprovalBaseSha256:candleNextApprovalBaseSha256(approval),baseline:{caseId:replayCase,consumedInvocationId:consumedId,nextInvocationId:nextId,png:binding('old.png'),sidecar:binding('sidecar.json'),report:binding('report.json'),readback:binding('readback.json'),firstRequestSha256:digest,secondRecordedRequestSha256:digest,oldJobId:'synthetic-job',oldWorkerId:'synthetic-worker',oldWorkerPid:123,allowedLineageRemap:['projectId']}};
@@ -318,6 +323,13 @@ function bindMeasurementTransition(f) {
     previousBuilds:builds(f.previousApproval),nextBuilds:builds(f.approval)};
   f.authorization.measurementTransition = structuredClone(f.approval.candleMeasurementTransition);
   for (const side of ['previousBuilds','nextBuilds']) for (const role of ['api','resource']) f.authorization[side][role].sha256 = f.approval.candleMeasurementTransition[side][role].receiptSha256;
+}
+function bindSecurityTransition(f) {
+  bindMeasurementTransition(f);
+  f.approval.candleMeasurementTransition.dependencySecurityUpdate={schemaVersion:1,advisory:'RUSTSEC-2026-0386',package:'tokio',previousVersion:'1.53.1',nextVersion:'1.53.3',previousSourceSha:originalSource,nextSourceSha:f.approval.sourceSha,previousCargoLockSha256:previousSecurityLock,nextCargoLockSha256:nextSecurityLock};
+  f.approval.candleMeasurementTransition.reason='measurement owned-process producer/consumer accounting and RUSTSEC-2026-0386 Tokio security update; renderer source and inference pin unchanged';
+  f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);
+  f.authorization.previousCargoLock={path:path.join(f.root,'historical-source-7090','Cargo.lock'),sha256:previousSecurityLock};
 }
 function resealCarriedTransition(f) {
   f.authorization.nextApprovalBaseSha256 = candleNextApprovalBaseSha256(f.approval);
@@ -425,6 +437,41 @@ test('measurement transition rejects unknown fields generic remaps wrong role re
   for(const mutate of mutations){const f=structuredClone(original);mutate(f);resealCarriedTransition(f);assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt));}
   const f=structuredClone(original);f.approval.candleMeasurementTransition.previousBuilds.api.receiptSha256='0'.repeat(64);f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);f.authorization.previousBuilds.api.sha256='0'.repeat(64);resealCarriedTransition(f);
   assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt),/old approval/);
+});
+test('fixed Tokio security update binds exact old/new sources locks receipts and immutable Git archive', async t => {
+  const f=await pureTransitionFixture(t,{measurement:true,security:true});bindSecurityTransition(f);resealCarriedTransition(f);
+  assert.equal(validateCandleDependencySecurityUpdate(f.approval).advisory,'RUSTSEC-2026-0386');
+  assert.equal(verifyLedgerReceipt(f.approval,f.receipt).state.generationCount,1);
+  const sourceRoot=fileURLToPath(new URL('..',import.meta.url));
+  const oldBytes=execFileSync('git',['-C',sourceRoot,'show',`${originalSource}:Cargo.lock`],{maxBuffer:16*1024*1024});
+  const nextBytes=await readFile(path.join(sourceRoot,'Cargo.lock'));
+  assert.equal(validateCandleDependencySecurityLocks(oldBytes,nextBytes),true);
+  await mkdir(path.dirname(f.authorization.previousCargoLock.path));await writeFile(f.authorization.previousCargoLock.path,oldBytes);
+  assert.equal(await verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root),path.dirname(f.authorization.previousCargoLock.path));
+  for(const bytes of [nextBytes,Buffer.from(oldBytes.toString().replace('1.53.1','1.53.2')),Buffer.concat([oldBytes,Buffer.from('\n')])]) {
+    await writeFile(f.authorization.previousCargoLock.path,bytes);
+    await assert.rejects(verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root));
+  }
+  await writeFile(f.authorization.previousCargoLock.path,oldBytes);
+  for(const bytes of [oldBytes,Buffer.from(nextBytes.toString().replace('1.53.3','1.53.4')),Buffer.from(nextBytes.toString().replace('name = "tokio-macros"','name = "unexpected-macro"')),Buffer.concat([nextBytes,Buffer.from('\n')])])assert.throws(()=>validateCandleDependencySecurityLocks(oldBytes,bytes));
+});
+test('security transition rejects stripped exception unknown keys reason advisory versions source and arbitrary lock remaps', async t => {
+  const original=await pureTransitionFixture(t,{measurement:true,security:true});bindSecurityTransition(original);resealCarriedTransition(original);
+  const mutations=[
+    f=>delete f.authorization.previousCargoLock,
+    f=>f.authorization.previousCargoLock.extra=true,
+    f=>f.authorization.previousCargoLock.sha256=nextSecurityLock,
+    f=>f.authorization.previousCargoLock.path=path.join(f.root,'not-Cargo.lock'),
+    f=>f.authorization.measurementTransition.dependencySecurityUpdate.extra=true,
+    f=>{delete f.approval.candleMeasurementTransition.dependencySecurityUpdate;delete f.authorization.measurementTransition.dependencySecurityUpdate;f.approval.candleMeasurementTransition.reason=f.authorization.measurementTransition.reason='measurement-only owned-process producer/consumer accounting; renderer and inference unchanged';delete f.authorization.previousCargoLock;},
+    f=>f.approval.candleMeasurementTransition.reason='measurement-only owned-process producer/consumer accounting; renderer and inference unchanged',
+    f=>f.approval.buildReceipts.candle.cargoLockSha256=previousSecurityLock,
+    f=>f.approval.resourceBuildReceipts.candle.cargoLockSha256='0'.repeat(64),
+    f=>f.approval.resourceBuildReceipts.candle.manifestSha256='0'.repeat(64),
+  ];
+  for(const key of ['advisory','package','previousVersion','nextVersion','previousSourceSha','nextSourceSha','previousCargoLockSha256','nextCargoLockSha256'])mutations.push(f=>{f.approval.candleMeasurementTransition.dependencySecurityUpdate[key]='unknown';f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);});
+  for(const mutate of mutations){const f=structuredClone(original);mutate(f);resealCarriedTransition(f);assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt));}
+  await assert.rejects(initializeLedger({approval:original.approval,backend:'candle',ledgerRoot:original.approval.ledgerRoots.candle}),/cannot initialize/);
 });
 test('cross-device append preserves old claim and refuses forged claim and reset without ledger changes', async t => {
   const f=await appendTransitionFixture(t,{crossDevice:true});bindDeviceTransition(f);

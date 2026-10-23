@@ -1,6 +1,9 @@
 // No service/distributed allocation. One immutable GLOBAL plan assigns disjoint backend permits.
 // Product/resource/resume sessions consume their backend's SAME stable local atomic ledger.
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, unlink, realpath, stat } from 'node:fs/promises';
@@ -168,6 +171,45 @@ export function validateCandleDeviceTransitionBinding(approval) {
 }
 const MEASUREMENT_KIND = 'windows-owned-process-accounting-v1';
 const MEASUREMENT_REASON = 'measurement-only owned-process producer/consumer accounting; renderer and inference unchanged';
+const SECURITY_REASON = 'measurement owned-process producer/consumer accounting and RUSTSEC-2026-0386 Tokio security update; renderer source and inference pin unchanged';
+const PREVIOUS_LOCK_SHA256 = '96feb71e685fa37faa01509108824463d09e88ed057ac7079ba0f11ea2b60e92';
+const NEXT_LOCK_SHA256 = 'c33fba4fef58de889073666728c920a67c04687f7b24f4d4aaf5657cccd9a0c7';
+const PREVIOUS_LOCK_GIT_BLOB = '93b2c6e0634b1493ae8621f85e5154fc25ca2aab';
+const SECURITY_KEYS = ['schemaVersion','advisory','package','previousVersion','nextVersion','previousSourceSha','nextSourceSha','previousCargoLockSha256','nextCargoLockSha256'];
+export function validateCandleDependencySecurityUpdate(approval) {
+  const measurement = approval.candleMeasurementTransition;
+  if (!measurement || !Object.hasOwn(measurement, 'dependencySecurityUpdate')) return undefined;
+  const update = measurement.dependencySecurityUpdate;
+  exactKeys(update, SECURITY_KEYS, 'fixed Candle dependency security update');
+  assert.deepEqual(update, {schemaVersion:1,advisory:'RUSTSEC-2026-0386',package:'tokio',previousVersion:'1.53.1',nextVersion:'1.53.3',
+    previousSourceSha:CANDLE_PREVIOUS_SOURCE,nextSourceSha:approval.sourceSha,previousCargoLockSha256:PREVIOUS_LOCK_SHA256,nextCargoLockSha256:NEXT_LOCK_SHA256}, 'only the fixed approved Tokio security update is permitted');
+  for (const role of ['api','resource']) {
+    const approved = approval[role === 'api' ? 'buildReceipts' : 'resourceBuildReceipts']?.candle;
+    assert.equal(approved?.cargoLockSha256, NEXT_LOCK_SHA256, 'security destination build lock differs from fixed current lock');
+  }
+  return update;
+}
+/** Pure exact-byte/package validation: no other package/source/dependency/checksum can change. */
+export function validateCandleDependencySecurityLocks(previousBytes, nextBytes) {
+  const previous = Buffer.from(previousBytes), next = Buffer.from(nextBytes);
+  assert.equal(rawHash(previous), PREVIOUS_LOCK_SHA256, 'historical lock is not the fixed original source lock');
+  assert.equal(rawHash(next), NEXT_LOCK_SHA256, 'current lock is not the fixed Tokio security lock');
+  const split = bytes => bytes.toString('utf8').split(/(?=^\[\[package\]\])/m);
+  const before = split(previous), after = split(next);
+  assert.equal(before.length, after.length, 'security update changed package count');
+  let changed = 0;
+  for (const [index, block] of before.entries()) {
+    if (!/^name = "tokio"$/m.test(block)) { assert.equal(after[index], block, 'security update changed another package or lock metadata'); continue; }
+    changed++;
+    assert(/^version = "1\.53\.1"$/m.test(block));
+    assert(/^checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"$/m.test(block));
+    const expected = block.replace(/^version = "1\.53\.1"$/m, 'version = "1.53.3"')
+      .replace(/^checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"$/m, 'checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"');
+    assert.equal(after[index], expected, 'Tokio security update changed source/dependencies or an unapproved field');
+  }
+  assert.equal(changed, 1, 'exactly one fixed Tokio package update required');
+  return true;
+}
 const OLD_CANDLE_BINARIES = {api:'d264bf21ba5e5a19012388041da92bc54764d2b3144c3d10065505b1a383e52d',resource:'4795a3e8fd5d0ee2d60c6586a72153759133209403d6b15120af7d50fcc48df5'};
 /** Approval-bound fixed measurement producer/consumer replacement, never a generic binary remap.
  * Authentication and the previous approval's bindings are checked by compatibility/append. */
@@ -175,8 +217,9 @@ export function validateCandleMeasurementTransitionBinding(approval) {
   if (!Object.hasOwn(approval, 'candleMeasurementTransition')) return undefined;
   const binding = approval.candleMeasurementTransition, device = validateCandleDeviceTransitionBinding(approval);
   assert(device, 'measurement transition requires the fixed device/source transition');
-  exactKeys(binding, ['schemaVersion','previousSourceSha','nextSourceSha','measurementKind','reason','previousBuilds','nextBuilds'], 'Candle measurement transition');
-  assert.equal(binding.schemaVersion, 1); assert.equal(binding.measurementKind, MEASUREMENT_KIND); assert.equal(binding.reason, MEASUREMENT_REASON);
+  const security = validateCandleDependencySecurityUpdate(approval);
+  exactKeys(binding, ['schemaVersion','previousSourceSha','nextSourceSha','measurementKind','reason','previousBuilds','nextBuilds', ...(security ? ['dependencySecurityUpdate'] : [])], 'Candle measurement transition');
+  assert.equal(binding.schemaVersion, 1); assert.equal(binding.measurementKind, MEASUREMENT_KIND); assert.equal(binding.reason, security ? SECURITY_REASON : MEASUREMENT_REASON);
   assert.equal(binding.previousSourceSha, CANDLE_PREVIOUS_SOURCE); assert.equal(binding.nextSourceSha, approval.sourceSha);
   for (const side of ['previousBuilds','nextBuilds']) {
     exactKeys(binding[side], ['api','resource'], `measurement ${side}`);
@@ -212,6 +255,8 @@ export function validateCandleSourceCompatibility(previousApproval, approval, au
       binarySha256:a.resourceBuildReceipts?.candle?.binarySha256,buildReceiptSha256:a.resourceBuildReceipts?.candle?.receiptSha256,sourceSha:a.sourceSha,inferenceMainSha:a.inferenceMainSha});
   }
   const deviceBinding = validateCandleDeviceTransitionBinding(approval), measurementBinding = validateCandleMeasurementTransitionBinding(approval);
+  const security = validateCandleDependencySecurityUpdate(approval);
+  if (security) for (const key of ['buildReceipts','resourceBuildReceipts']) assert.equal(previousApproval[key]?.candle?.cargoLockSha256, PREVIOUS_LOCK_SHA256, 'security original build lock differs from fixed old source lock');
   if (measurementBinding) for (const role of ['api','resource']) {
     const previous = previousApproval[role === 'api' ? 'buildReceipts' : 'resourceBuildReceipts']?.candle;
     assert.equal(measurementBinding.previousBuilds[role].binarySha256, previous?.binarySha256, 'measurement original binary differs from old approval');
@@ -234,6 +279,7 @@ export function validateCandleSourceCompatibility(previousApproval, approval, au
       assert(result[key]?.candle, 'both sealed Candle builds required');
       delete result[key].candle.receiptSha256; delete result[key].candle.transcriptSha256;
       if (measurementBinding) delete result[key].candle.binarySha256;
+      if (security) delete result[key].candle.cargoLockSha256;
     }
     if (result.plan.nativeBoundaryReceipts?.candle) {
       delete result.plan.nativeBoundaryReceipts.candle.sourceSha;
@@ -251,7 +297,7 @@ export function validateCandleSourceCompatibility(previousApproval, approval, au
 }
 const AUTH_KEYS = ['schemaVersion','kind','authorizationId','approvedBy','producersStopped','previousSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256','previousApproval','previousReceipt','previousBuilds','nextBuilds','nextSourceSha','nextApprovalBaseSha256','baseline'];
 function transitionAuthorizationKeys(approval) {
-  return [...AUTH_KEYS, ...(validateCandleDeviceTransitionBinding(approval) ? ['deviceTransition'] : []), ...(validateCandleMeasurementTransitionBinding(approval) ? ['measurementTransition'] : [])];
+  return [...AUTH_KEYS, ...(validateCandleDeviceTransitionBinding(approval) ? ['deviceTransition'] : []), ...(validateCandleMeasurementTransitionBinding(approval) ? ['measurementTransition'] : []), ...(validateCandleDependencySecurityUpdate(approval) ? ['previousCargoLock'] : [])];
 }
 const BASELINE_KEYS = ['caseId','consumedInvocationId','nextInvocationId','png','sidecar','report','readback','firstRequestSha256','secondRecordedRequestSha256','oldJobId','oldWorkerId','oldWorkerPid','allowedLineageRemap'];
 function artifactBinding(binding) {
@@ -262,6 +308,11 @@ function validateTransitionAuthorization(authorization, previousApproval, approv
   const deviceBinding = validateCandleDeviceTransitionBinding(approval);
   exactKeys(authorization, transitionAuthorizationKeys(approval), 'source transition authorization');
   const measurementBinding = validateCandleMeasurementTransitionBinding(approval);
+  if (validateCandleDependencySecurityUpdate(approval)) {
+    artifactBinding(authorization.previousCargoLock);
+    assert.equal(authorization.previousCargoLock.sha256, PREVIOUS_LOCK_SHA256, 'historical lock binding differs from fixed Git source');
+    assert.equal(path.basename(authorization.previousCargoLock.path), 'Cargo.lock', 'historical metadata root must contain exact Cargo.lock');
+  }
   if (measurementBinding) {
     assert.deepEqual(authorization.measurementTransition, measurementBinding, 'authorization measurement transition differs from approval');
     for (const [side, builds] of [['previousBuilds', authorization.previousBuilds], ['nextBuilds', authorization.nextBuilds]]) for (const role of ['api','resource']) {
@@ -336,9 +387,22 @@ async function ownedArtifact(binding, ownedRoot, text = true) {
   }
   const bytes = await readFile(file); assert.equal(rawHash(bytes), binding.sha256, 'owned artifact raw bytes mismatch'); return bytes.toString('utf8');
 }
+export async function verifyCandleDependencySecurityArchive(approval, authorization, ownedRoot) {
+  if (!validateCandleDependencySecurityUpdate(approval)) return undefined;
+  const archived = Buffer.from(await ownedArtifact(authorization.previousCargoLock, ownedRoot), 'utf8');
+  const sourceRoot = fileURLToPath(new URL('..', import.meta.url));
+  // Fixed command/commit/path: caller artifacts cannot select a Git epoch or repository.
+  const {stdout} = await promisify(execFile)('git', ['-C', sourceRoot, 'show', `${CANDLE_PREVIOUS_SOURCE}:Cargo.lock`], {encoding:'buffer',maxBuffer:16*1024*1024});
+  assert.equal(createHash('sha1').update(`blob ${stdout.length}\0`).update(stdout).digest('hex'), PREVIOUS_LOCK_GIT_BLOB, 'original source lock Git blob changed');
+  assert.deepEqual(archived, stdout, 'archived lock differs from immutable original source Git blob');
+  validateCandleDependencySecurityLocks(archived, await readFile(new URL('../Cargo.lock', import.meta.url)));
+  const file = await realpath(authorization.previousCargoLock.path);
+  assert.equal(path.basename(file), 'Cargo.lock', 'historical metadata must resolve to Cargo.lock');
+  return path.dirname(file);
+}
 // previousBuilds/nextBuilds api/resource bindings name the RAW producer-receipt.json:
 // use produceTerminalBuild's receiptPath + receiptSha256, never an outer *-build-result.json.
-async function verifyTransitionBuilds(approval, bindings, ownedRoot) {
+async function verifyTransitionBuilds(approval, bindings, ownedRoot, historicalSourceRoot) {
   const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs');
   const results = {};
   for (const [key, role] of [['api','api-worker'],['resource','resource-adapter']]) {
@@ -346,7 +410,7 @@ async function verifyTransitionBuilds(approval, bindings, ownedRoot) {
     // Check the binary is also owned before delegating the FULL real verifier (default checked code root).
     await ownedArtifact({path:receipt.binary.path,sha256:receipt.binary.sha256}, ownedRoot, false);
     const verified = await verifyTerminalBuild({approvedPlan:approval,backend:'candle',sourceSha:approval.sourceSha,inferenceMainSha:approval.inferenceMainSha,
-      binaryBuildReceipt:{...bindings[key],root:ownedRoot},binary:receipt.binary.path,binarySha256:receipt.binary.sha256}, {role});
+      binaryBuildReceipt:{...bindings[key],root:ownedRoot},binary:receipt.binary.path,binarySha256:receipt.binary.sha256}, {role,...(historicalSourceRoot ? {sourceRoot:historicalSourceRoot} : {})});
     const transcript = JSON.parse(await ownedArtifact({path:path.join(path.dirname(bindings[key].path), 'producer-transcript.json'),sha256:verified.transcriptSha256}, ownedRoot));
     results[key] = {receipt:verified,receiptSha256:rawHash(json),transcript};
   }
@@ -366,7 +430,8 @@ export async function appendCandleSourceTransition({approval, ledgerRoot, contin
   const claimFile = path.join(path.dirname(root), `.flux3-${approval.ledgerId}-candle.initialized`);
   const claimJson = await ownedArtifact({path:claimFile,sha256:authorization.previousClaimSha256}, ownedRoot);
   assert.deepEqual(JSON.parse(claimJson), {ledgerId:previousApproval.ledgerId,backend:'candle',root,approvedPlanSha256:planHash(previousApproval)}, 'old initialization claim mismatch');
-  const beforeBuilds = await verifyTransitionBuilds(previousApproval, authorization.previousBuilds, ownedRoot), afterBuilds = await verifyTransitionBuilds(approval, authorization.nextBuilds, ownedRoot);
+  const historicalSourceRoot = await verifyCandleDependencySecurityArchive(approval, authorization, ownedRoot);
+  const beforeBuilds = await verifyTransitionBuilds(previousApproval, authorization.previousBuilds, ownedRoot, historicalSourceRoot), afterBuilds = await verifyTransitionBuilds(approval, authorization.nextBuilds, ownedRoot);
   for (const key of ['api','resource']) {
     const before = beforeBuilds[key], after = afterBuilds[key];
     assert.deepEqual(before.receipt.recipe, after.receipt.recipe, 'build recipe changed');
@@ -378,7 +443,13 @@ export async function appendCandleSourceTransition({approval, ledgerRoot, contin
       }
     } else assert.equal(before.receipt.binary.sha256, after.receipt.binary.sha256, 'sealed binary changed');
     for (const field of ['recipe','cargoExecutableSha256','rustcExecutableSha256','rustcSha256','rustflags','msvcVersion','msvcObserved','cudaObserved']) assert.deepEqual(before.transcript[field], after.transcript[field], `build toolchain ${field} changed`);
-    for (const field of ['cargoLockSha256','manifestSha256']) assert.deepEqual(before.transcript.sourceBefore[field], after.transcript.sourceBefore[field], `build ${field} changed`);
+    if (historicalSourceRoot) {
+      for (const [build, expected] of [[before,PREVIOUS_LOCK_SHA256],[after,NEXT_LOCK_SHA256]]) {
+        assert.equal(build.receipt.cargoLockSha256, expected, 'actual producer security lock mismatch');
+        assert.equal(build.transcript.sourceBefore.cargoLockSha256, expected, 'actual transcript security lock mismatch');
+      }
+    } else assert.equal(before.transcript.sourceBefore.cargoLockSha256, after.transcript.sourceBefore.cargoLockSha256, 'build cargoLockSha256 changed');
+    assert.deepEqual(before.transcript.sourceBefore.manifestSha256, after.transcript.sourceBefore.manifestSha256, 'build manifestSha256 changed');
   }
   for (const binding of Object.values(authorization.baseline).filter(v => v && typeof v === 'object' && !Array.isArray(v))) await ownedArtifact(binding, ownedRoot);
   const { validateReplayPrefixBaseline } = await import('./flux3-image-klein-terminal-driver.mjs');
