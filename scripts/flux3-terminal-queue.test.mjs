@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateKeyPairSync } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { readFile, mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, mkdir, writeFile, rename, readdir } from 'node:fs/promises';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -204,4 +206,100 @@ test('every holder must attest real query access to the same empty container bef
     const mutated={...proofs,[runner]:signed({...proofs[runner].value,...change},f.keys[runner].privateKey)};assert.throws(()=>verifyAccessProofs(f.binding,mutated));
   }
   const { [runner]:_omitted,...missing }=proofs;assert.throws(()=>verifyAccessProofs(f.binding,missing));
+});
+
+// Real same-account Windows reader without FileShare.Delete, only on an owned CPU fixture.
+async function lockedPulse(t) {
+  const root = 'D:/tmp/sc26243-run/queue';
+  await mkdir(root, { recursive: true });
+  const dir = await mkdtemp(path.join(root, 'atomic-cpu-fixture-'));
+  const file = path.join(dir, 'cuda-windows-4.pulse.json'), release = path.join(dir, 'reader-release');
+  const keys = generateKeyPairSync('ed25519'), old = signed({ sequence: 0, status: 'holding' }, keys.privateKey);
+  await writeFile(file, JSON.stringify(old));
+  const script = '$ErrorActionPreference="Stop"; $s=[IO.File]::Open($env:ATOMIC_TEST_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read); try { [Console]::WriteLine("LOCKED"); $end=[DateTime]::UtcNow.AddSeconds(10); while (!(Test-Path -LiteralPath $env:ATOMIC_TEST_RELEASE)) { if ([DateTime]::UtcNow -gt $end) { throw "owned reader fixture deadline" }; Start-Sleep -Milliseconds 10 } } finally { $s.Dispose() }';
+  const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, CUDA_VISIBLE_DEVICES: '-1', ATOMIC_TEST_FILE: file, ATOMIC_TEST_RELEASE: release } });
+  let stderr = ''; child.stderr.on('data', b => { stderr += b; });
+  const ended = once(child, 'exit');
+  t.after(async () => { await writeFile(release, 'release'); const [code] = await ended; assert.equal(code, 0, stderr); await rm(dir, { recursive: true, force: true }); });
+  let ready = ''; for await (const b of child.stdout) { ready += b; if (ready.includes('LOCKED')) break; }
+  assert.match(ready, /LOCKED/, stderr);
+  const probe = path.join(dir, 'rename-probe.tmp'); await writeFile(probe, JSON.stringify(old));
+  await assert.rejects(rename(probe, file), { code: 'EPERM' }); await rm(probe);
+  return { dir, file, keys, old, unlock: () => writeFile(release, 'release') };
+}
+const windowsOnly = { skip: process.platform !== 'win32', timeout: 15000 };
+test('atomic publisher real Windows 150ms sharing hold retries EPERM; readers see complete signed JSON', windowsOnly, async t => {
+  const f = await lockedPulse(t), publish = createAtomicPublisher();
+  const next = signed({ sequence: 1, status: 'holding' }, f.keys.privateKey);
+  const started = performance.now(), task = publish(f.file, () => next);
+  task.catch(() => {}); // Attach immediately while the test deliberately holds the reader.
+  await delay(150);
+  assert.deepEqual(JSON.parse(await readFile(f.file, 'utf8')), f.old);
+  await f.unlock();
+  // A bounded set of normal promptly-closed readers, not a continuous lock campaign.
+  for (let i = 0; i < 3; i++) {
+    const seen = authenticated(JSON.parse(await readFile(f.file, 'utf8')), f.keys.publicKey);
+    assert([0, 1].includes(seen.sequence)); await delay(37);
+  }
+  await task;
+  assert(performance.now() - started < 1200, 'publication must remain within heartbeat margin');
+  assert.deepEqual(authenticated(JSON.parse(await readFile(f.file, 'utf8')), f.keys.publicKey), next.value);
+  assert.deepEqual(await readdir(f.dir), ['cuda-windows-4.pulse.json', 'reader-release']);
+});
+test('atomic publisher persistent Windows lock fails bounded, keeps old pulse and removes only its temp', windowsOnly, async t => {
+  const f = await lockedPulse(t), started = performance.now();
+  await assert.rejects(createAtomicPublisher()(f.file, { sequence: 1 }), { code: 'EPERM' });
+  const elapsed = performance.now() - started;
+  assert(elapsed >= ATOMIC_RENAME_BUDGET_MS - 50 && elapsed < 1200, `bounded rename took ${elapsed}ms`);
+  assert.deepEqual(JSON.parse(await readFile(f.file, 'utf8')), f.old);
+  assert.deepEqual(await readdir(f.dir), ['cuda-windows-4.pulse.json']);
+});
+test('atomic publisher cancellation interrupts Windows sharing wait without touching old pulse', windowsOnly, async t => {
+  const f = await lockedPulse(t); let cancelled = false;
+  const started = performance.now(), task = createAtomicPublisher()(f.file, { sequence: 1 }, { cancelled: () => cancelled });
+  const rejection = assert.rejects(task, /publication cancelled/);
+  await delay(100); cancelled = true; await rejection;
+  assert(performance.now() - started < 400);
+  assert.deepEqual(JSON.parse(await readFile(f.file, 'utf8')), f.old);
+  assert.deepEqual(await readdir(f.dir), ['cuda-windows-4.pulse.json']);
+});
+test('atomic publisher serializes overlapping foreground/timer factories, signatures and sequences', windowsOnly, async t => {
+  const f = await lockedPulse(t), publish = createAtomicPublisher(); let sequence = 0;
+  const foreground = publish(f.file, () => signed({ sequence: ++sequence, status: 'holding' }, f.keys.privateKey));
+  await delay(30);
+  const timer = publish(f.file, () => signed({ sequence: ++sequence, status: 'safe_to_release' }, f.keys.privateKey));
+  await delay(100); assert.equal(sequence, 1, 'queued factory must not run before preceding rename');
+  await f.unlock(); await Promise.all([foreground, timer]);
+  assert.deepEqual(authenticated(JSON.parse(await readFile(f.file, 'utf8')), f.keys.publicKey), { sequence: 2, status: 'safe_to_release' });
+});
+async function mutatedPublisher(mutate) {
+  const source = await readFile(new URL('./flux3-terminal-queue.mjs', import.meta.url), 'utf8');
+  const helper = source.slice(source.indexOf('export const ATOMIC_RENAME_BUDGET_MS'), source.indexOf('const atomic = createAtomicPublisher();'));
+  const imports = 'import assert from "node:assert/strict"; import path from "node:path"; import {randomBytes} from "node:crypto"; import {writeFile,rename,unlink} from "node:fs/promises"; const sleep=ms=>new Promise(r=>setTimeout(r,ms));';
+  const changed = mutate(helper); assert.notEqual(changed, helper, 'mutation must change actual publisher source');
+  return (await import('data:text/javascript;base64,' + Buffer.from(imports + changed).toString('base64'))).createAtomicPublisher();
+}
+test('mutation removing per-target serialization violates ordered factory contract on real Windows lock', windowsOnly, async t => {
+  const f = await lockedPulse(t);
+  const publish = await mutatedPublisher(s => s.replace('previous.catch(() => {}).then', 'Promise.resolve().then'));
+  let sequence = 0;
+  const first = publish(f.file, () => ({ sequence: ++sequence })); first.catch(() => {});
+  const second = publish(f.file, () => ({ sequence: ++sequence })); second.catch(() => {});
+  await delay(100);
+  assert.throws(() => assert.equal(sequence, 1), /2 !== 1/, 'same ordering assertion rejects missing serialization');
+  await f.unlock(); await Promise.all([first, second]);
+});
+test('mutation removing the sub-second retry bound violates persistent-lock contract', windowsOnly, async t => {
+  const f = await lockedPulse(t);
+  const publish = await mutatedPublisher(s => s.replace('ATOMIC_RENAME_BUDGET_MS = 800', 'ATOMIC_RENAME_BUDGET_MS = 2000'));
+  const started = performance.now(), task = publish(f.file, { sequence: 1 }); task.catch(() => {});
+  await delay(1100);
+  assert.deepEqual(JSON.parse(await readFile(f.file, 'utf8')), f.old);
+  await f.unlock(); await task;
+  assert.throws(() => assert(performance.now() - started < 1000), 'same wall-budget assertion rejects extended/unbounded retries');
+});
+test('atomic rename retry margin does not relax heartbeat freshness or backoff thresholds', () => {
+  assert.equal(ATOMIC_RENAME_BUDGET_MS, 800); assert.equal(ATOMIC_RENAME_BACKOFF_MS, 50);
+  assert.equal(HEARTBEAT_MS, 2000); assert.equal(STALE_MS, 20000);
+  assert(ATOMIC_RENAME_BUDGET_MS < HEARTBEAT_MS && HEARTBEAT_MS + ATOMIC_RENAME_BUDGET_MS < STALE_MS);
 });

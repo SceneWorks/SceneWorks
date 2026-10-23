@@ -130,7 +130,47 @@ export function verifyAccessProofs(binding, proofs) {
     assert.deepEqual(p.context, binding.container.context); assert.equal(p.queryAccess, true); assert.equal(p.zeroBeforeStart, true);
   }
 }
-async function atomic(file, value) { const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`; await writeFile(tmp, JSON.stringify(value), { flag: 'wx' }); await rename(tmp, file); }
+export const ATOMIC_RENAME_BUDGET_MS = 800, ATOMIC_RENAME_BACKOFF_MS = 50;
+// Windows readers/scanners can briefly deny replacement. Never remove the old target or
+// rewrite it in place: retry ONLY rename of our already-complete, exclusively-owned temp.
+// Serialize the value factory too, so overlapping timer/foreground pulses cannot publish
+// an older signed sequence after a newer one. A failed publication does not poison cleanup.
+export function createAtomicPublisher() {
+  const pending = new Map();
+  return (file, value, { cancelled = () => false } = {}) => {
+    const key = path.resolve(file), previous = pending.get(key) ?? Promise.resolve();
+    const task = previous.catch(() => {}).then(async () => {
+      const checkCancellation = () => { assert(!cancelled(), 'atomic publication cancelled'); };
+      checkCancellation();
+      const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+      let created = false, published = false;
+      try {
+        const next = typeof value === 'function' ? value() : value;
+        await writeFile(tmp, JSON.stringify(next), { flag: 'wx' }); created = true;
+        const deadline = performance.now() + ATOMIC_RENAME_BUDGET_MS;
+        while (true) {
+          checkCancellation();
+          try { await rename(tmp, file); published = true; return; }
+          catch (error) {
+            if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+            const remaining = deadline - performance.now();
+            if (remaining <= 0) throw error;
+            await sleep(Math.min(ATOMIC_RENAME_BACKOFF_MS, remaining));
+            checkCancellation();
+            if (performance.now() >= deadline) throw error;
+          }
+        }
+      } finally {
+        if (created && !published) await unlink(tmp).catch(() => {}); // Never touch the old target.
+      }
+    });
+    pending.set(key, task);
+    const forget = () => { if (pending.get(key) === task) pending.delete(key); };
+    task.then(forget, forget);
+    return task;
+  };
+}
+const atomic = createAtomicPublisher();
 // Publish a COMPLETE immutable document atomically, refusing any prior target. Readers never
 // see an empty/part-written nonce/member/binding while siblings rendezvous on the same NTFS volume.
 export async function publishNew(file, value) {
@@ -217,7 +257,7 @@ async function supervisor(env) {
     await atomic(path.join(dir, `${runner}.cleanup.json`), value); cleanupProofSha256 = digest(value);
   };
   const abort = () => { aborted = true; }; process.on('SIGTERM', abort); process.on('SIGINT', abort);
-  const pulse = () => atomic(path.join(dir, `${runner}.pulse.json`), signed({ identity, runner, jobId: member.jobId, at: Date.now(), apiValidUntil: api.observedAt + API_FRESH_MS, sequence: ++sequence, status: state, containerCreated: Boolean(container), cleanupProofSha256: cleanupProofSha256 ?? null }, privateKey));
+  const pulse = () => atomic(path.join(dir, `${runner}.pulse.json`), () => signed({ identity, runner, jobId: member.jobId, at: Date.now(), apiValidUntil: api.observedAt + API_FRESH_MS, sequence: ++sequence, status: state, containerCreated: Boolean(container), cleanupProofSha256: cleanupProofSha256 ?? null }, privateKey), { cancelled: () => aborted && state === 'holding' });
   const requestFailure = async () => { state = 'failure_requested'; if (member) await pulse(); };
   const release = async () => {
     if (released) return;
