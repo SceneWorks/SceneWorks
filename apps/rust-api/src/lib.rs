@@ -4072,11 +4072,30 @@ async fn create_generation_job_with_status(
     // trusting anything a request wrote. A job with no bound plan behind it gets `None` — the
     // honest answer for a builtin entry, and the same one a legacy job already carries.
     let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
-        Some(entry) => sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
-            &state.settings.data_dir,
-            entry,
-        )
-        .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?,
+        Some(entry) => {
+            // sc-26687 / sc-26690: the inherited component licence terms of an imported
+            // checkpoint's assembly must be acknowledged before the job they feed is admitted, at
+            // the same boundary the fine-tune's own terms are and independently of them.
+            //
+            // `entry` is the SERVER-resolved one `ensure_runtime_model_sources` just re-derived, so
+            // this checks the terms the catalog actually binds rather than any caller claim. It
+            // covers every generation route, and it is idempotent with the component-download gate
+            // in `queue_model_import_job`.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
         None => None,
     };
     let job = store_call(state.clone(), move |store, _timeout| {

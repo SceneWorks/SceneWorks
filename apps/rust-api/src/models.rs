@@ -4088,6 +4088,21 @@ pub(crate) async fn queue_model_import_job(
     );
     payload.insert("manifestEntry".to_owned(), manifest_entry);
     if let Some((base, rows, _)) = import_components {
+        // sc-26687 / sc-26690: the SAME inherited-component gate at the DOWNLOAD boundary. Closing
+        // only the generation door would still let an unacknowledged component's bytes land, so a
+        // resident component is fetched only once its own terms are acknowledged. Idempotent with
+        // the generation-admission gate in `create_generation_job_with_status`.
+        if let Some(entry) = payload.get("manifestEntry").and_then(Value::as_object) {
+            ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+        }
         for row in rows {
             if imported_component_presence(&state.settings.data_dir, &row)
                 == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
