@@ -2310,8 +2310,16 @@ fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
 #[tokio::test]
 async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
-    settings.data_dir = data_dir.path().to_path_buf();
+    // `offline_settings`, not `Settings::from_env()`: this decode heartbeats through `ApiClient`
+    // while ffmpeg runs, and `from_env` defaults `api_url` to the real local API. On a machine
+    // with anything else listening on that port the heartbeat gets a real non-2xx and — unlike a
+    // transport error, which `heartbeat` swallows — aborts the decode before it asserts anything.
+    // Pinned unroutable, the request fails locally and is ignored, so the ffmpeg path under test
+    // is the only thing that decides the result.
+    let settings = Settings {
+        data_dir: data_dir.path().to_path_buf(),
+        ..offline_settings()
+    };
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc17160");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -2581,8 +2589,11 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     }
 
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
-    settings.data_dir = data_dir.path().to_path_buf();
+    // Pinned unroutable for the same reason as the sibling decode test — see the note there.
+    let settings = Settings {
+        data_dir: data_dir.path().to_path_buf(),
+        ..offline_settings()
+    };
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc24070");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
