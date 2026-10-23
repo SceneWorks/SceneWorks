@@ -19036,6 +19036,11 @@ button.audio-wave {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
 }
 
+.checkpoint-h3-declaration {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
 .checkpoint-h3-compatibility-note {
   grid-column: 1 / -1;
 }

@@ -25,6 +25,7 @@ import {
   linkedStatusIndex,
   managedImportBody,
   managedSourceProblem,
+  modelCompatibilityProblem,
   modelCheckpointId,
   modelLinkedStatus,
   modelOwnership,
@@ -185,6 +186,18 @@ describe("request bodies", () => {
     [{ minimaxH3Partition: "hybrid", baseModel: "minimax_h3_ref" }, "baseModel minimax_h3"],
   ])("rejects missing or incompatible declarations %j", (declaration, field) => {
     expect(managedSourceProblem({ kind: "huggingFace", repo: "owner/custom", family: "minimax-h3", ...declaration })).toContain(field);
+  });
+
+  it.each([
+    ["fl2va", "minimax_h3"],
+    ["ref2va", "minimax_h3_ref"],
+    ["hybrid", "minimax_h3"],
+  ])("uses the same explicit %s declaration for linked imports", (minimaxH3Partition, baseModel) => {
+    const declaration = { family: "minimax-h3", type: "video", minimaxH3Partition, baseModel };
+    expect(modelCompatibilityProblem(declaration)).toBe("");
+    expect(linkedImportBody({ rootId: "root-a", relativePath: "custom/transformer", ...declaration })).toEqual({
+      linkedRootId: "root-a", linkedRelativePath: "custom/transformer", ...declaration,
+    });
   });
 });
 

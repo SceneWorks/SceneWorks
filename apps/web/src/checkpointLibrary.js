@@ -116,14 +116,16 @@ export function rescanLibraryCheckpoint(token, rootId, relativePath) {
 // Request bodies
 // ---------------------------------------------------------------------------------------------
 
-// A linked import names its checkpoint by `(rootId, relativePath)` and NOTHING else. It must not
-// carry `ownershipMode` — the served enum has only `managed`, and `"linked"` is deliberately
+// A linked import names its source only by `(rootId, relativePath)`, plus catalog compatibility.
+// It must not carry `ownershipMode` — the served enum has only `managed`, and `"linked"` is deliberately
 // refused there (dto.rs `OwnershipModeV1`) — nor a repo/URL/path/discriminated source, which the
 // route rejects outright.
-export function linkedImportBody({ rootId, relativePath, name, type = "image", family } = {}) {
+export function linkedImportBody({ rootId, relativePath, name, type = "image", family, baseModel, minimaxH3Partition } = {}) {
   const body = { linkedRootId: rootId, linkedRelativePath: relativePath, type };
   if (name) body.name = name;
   if (family) body.family = family;
+  if (baseModel) body.baseModel = baseModel;
+  if (minimaxH3Partition) body.minimaxH3Partition = minimaxH3Partition;
   return body;
 }
 
@@ -166,9 +168,8 @@ export function managedImportBody(input = {}) {
   return body;
 }
 
-// What the submit button must not let through, stated per source so the user is told WHICH field is
-// missing instead of watching a disabled button and guessing. Returns "" when the form can be sent.
-export function managedSourceProblem(input = {}) {
+// Both ownerships require explicit H3 compatibility; architecture is not a partition declaration.
+export function modelCompatibilityProblem(input = {}) {
   if (input.family === "minimax-h3" || input.minimaxH3Partition || ["minimax_h3", "minimax_h3_ref"].includes(input.baseModel)) {
     if (!["fl2va", "ref2va", "hybrid"].includes(input.minimaxH3Partition)) {
       return "Choose minimaxH3Partition: fl2va, ref2va, or hybrid. Tensor shapes cannot determine it.";
@@ -178,6 +179,13 @@ export function managedSourceProblem(input = {}) {
       return `minimaxH3Partition ${input.minimaxH3Partition} requires baseModel ${expectedBase}.`;
     }
   }
+  return "";
+}
+
+// Name the missing source field rather than leaving the user with a disabled button and no reason.
+export function managedSourceProblem(input = {}) {
+  const compatibilityProblem = modelCompatibilityProblem(input);
+  if (compatibilityProblem) return compatibilityProblem;
   switch (input.kind) {
     case "upload":
       return input.file ? "" : "Choose a checkpoint file to upload.";

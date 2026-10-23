@@ -15927,4 +15927,45 @@ mod minimax_h3_import_declaration_tests {
             super::cleanup_staged_model_upload(&path).await;
         }
     }
+
+    #[tokio::test]
+    async fn linked_h3_imports_keep_explicit_partitions_and_reject_missing_or_incompatible_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = app(&temp);
+        let library = temp.path().join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let (status, root) = request_with_peer(app.clone(), "POST", "/api/v1/models/library-roots", json!({
+            "path": library.to_str().unwrap(),
+        }), "127.0.0.1:54321").await;
+        assert_eq!(status, StatusCode::CREATED, "{root}");
+        for (declaration, accepted, field) in [
+            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "fl2va" }), true, ""),
+            (json!({ "baseModel": "minimax_h3_ref", "minimaxH3Partition": "ref2va" }), true, ""),
+            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "hybrid" }), true, ""),
+            (json!({}), false, "minimaxH3Partition"),
+            (json!({ "minimaxH3Partition": "ref2va" }), false, "baseModel"),
+            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "ref2va" }), false, "baseModel"),
+        ] {
+            let mut body = json!({
+                "linkedRootId": root["rootId"],
+                "linkedRelativePath": "custom/transformer",
+                "family": "minimax-h3",
+            });
+            body.as_object_mut().unwrap().extend(declaration.as_object().unwrap().clone());
+            let (status, response) = request(app.clone(), "POST", "/api/v1/models/import", body).await;
+            if accepted {
+                assert_eq!(status, StatusCode::CREATED, "{response}");
+                let entry = &response["payload"]["manifestEntry"];
+                assert_eq!(entry["baseModel"], declaration["baseModel"]);
+                assert_eq!(entry["minimaxH3Partition"], declaration["minimaxH3Partition"]);
+                assert_eq!(entry["type"], "video");
+                assert_eq!(entry["source"]["rootId"], root["rootId"]);
+                assert!(entry.get("paths").is_none());
+                assert!(response["payload"].get("targetDir").is_none());
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+                assert!(response["detail"].as_str().unwrap().contains(field), "{response}");
+            }
+        }
+    }
 }

@@ -254,6 +254,56 @@ describe("CheckpointImportPanel", () => {
     expect(onImportModel.mock.calls[0][0].minimaxH3Partition).toBeUndefined();
   });
 
+  function h3Scan(paths = ["custom-h3/transformer"]) {
+    return readyScan({ candidates: paths.map((relativePath) => ({
+      checkpointId: `linked/root-a/${relativePath}`,
+      candidate: { relativePath, container: "directory", headerFamily: "minimax-h3" },
+      selectable: false,
+      status: null,
+    })) });
+  }
+
+  it.each([
+    ["fl2va", "minimax_h3"],
+    ["ref2va", "minimax_h3_ref"],
+    ["hybrid", "minimax_h3"],
+  ])("submits explicit linked %s compatibility without transferring the checkpoint", async (partition, baseModel) => {
+    const onImportModel = vi.fn(async () => ({ payload: { modelId: "linked-h3" } }));
+    await render({ onImportModel, models: h3Models, library: libraryStub({ scan: vi.fn(async () => h3Scan()) }) });
+    expect(labelled("Compatible base model").value).toBe("");
+    expect(labelled("MiniMax-H3 partition").value).toBe("");
+    await click(buttonNamed("Validate and use"));
+    expect(importStatus()).toContain("minimaxH3Partition");
+    expect(onImportModel).not.toHaveBeenCalled();
+    await setSelect(labelled("Compatible base model"), baseModel);
+    await setSelect(labelled("MiniMax-H3 partition"), partition);
+    await click(buttonNamed("Validate and use"));
+    expect(onImportModel).toHaveBeenCalledWith({
+      linkedRootId: "root-a",
+      linkedRelativePath: "custom-h3/transformer",
+      name: "transformer",
+      type: "video",
+      family: "minimax-h3",
+      baseModel,
+      minimaxH3Partition: partition,
+    });
+  });
+
+  it("keeps linked declarations candidate-local and names an incompatible base", async () => {
+    const onImportModel = vi.fn();
+    await render({ onImportModel, models: h3Models, library: libraryStub({ scan: vi.fn(async () => h3Scan(["first/transformer", "second/transformer"])) }) });
+    const [first, second] = container.querySelectorAll(".checkpoint-candidate");
+    const [firstBase, firstPartition] = first.querySelectorAll("select");
+    await setSelect(firstBase, "minimax_h3");
+    await setSelect(firstPartition, "ref2va");
+    await click(first.querySelector("button"));
+    expect(importStatus()).toContain("baseModel minimax_h3_ref");
+    await click(second.querySelector("button"));
+    expect(importStatus()).toContain("minimaxH3Partition");
+    expect([...second.querySelectorAll("select")].map((select) => select.value)).toEqual(["", ""]);
+    expect(onImportModel).not.toHaveBeenCalled();
+  });
+
   // ------------------------------------------------------- AC1: linked-library management
 
   it("adds, rescans, relinks, renames and removes a library root", async () => {
