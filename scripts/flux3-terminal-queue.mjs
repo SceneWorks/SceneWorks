@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign, verify } from 'node:crypto';
 import { execFile as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, mkdir, rename, open, link, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, open, link, unlink, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { hostname } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -45,26 +45,49 @@ export function authenticated(envelope, publicKey) {
   assert(envelope?.value && typeof envelope.signature === 'string' && verify(null, Buffer.from(JSON.stringify(envelope.value)), publicKey, Buffer.from(envelope.signature, 'base64')), 'queue heartbeat signature mismatch');
   return envelope.value;
 }
-export function validateApi(run, jobs, identity, { complete = true } = {}) {
+const STARTUP_STATES = ['queued', 'waiting', 'pending', 'requested', 'in_progress'];
+function inspectApi(run, jobs, identity, startup) {
   assert.equal(run.repository?.full_name, identity.repository); assert.equal(run.id, identity.runId);
   assert.equal(run.run_attempt, identity.attempt); assert.equal(run.head_sha, identity.sourceSha);
-  assert.equal(run.event, 'workflow_dispatch'); assert.equal(run.status, 'in_progress');
+  assert.equal(run.event, 'workflow_dispatch'); assert.equal(run.conclusion == null, true, 'terminal run conclusion');
+  assert(STARTUP_STATES.includes(run.status), 'queue run ended or has invalid status');
+  if (!startup) assert.equal(run.status, 'in_progress');
   assert.equal(run.path?.split('@')[0], '.github/workflows/memory-catalog-campaign.yml');
-  const rows = jobs.filter(j => /^flux3-terminal-queue \/ reserve \([1-4]\)$/.test(j.name));
+  assert(Array.isArray(jobs), 'queue jobs observation missing');
+  const rows = jobs.filter(j => {
+    assert(j && typeof j.name === 'string', 'malformed job observation');
+    if (!j.name.startsWith('flux3-terminal-queue / ') || j.name === 'flux3-terminal-queue / gate') return false;
+    assert(/^flux3-terminal-queue \/ reserve \([1-4]\)$/.test(j.name), 'unexpected queue role'); return true;
+  });
   assert(rows.length <= 4, 'unexpected extra queue jobs');
-  assert(rows.every(j => ['queued','waiting','pending','requested','in_progress'].includes(j.status)), 'queue peer ended before release; all reservations must stop');
   assert.equal(new Set(rows.map(j => j.id)).size, rows.length, 'duplicate job ID');
   assert.equal(new Set(rows.map(j => j.name)).size, rows.length, 'duplicate matrix slot');
-  const found = {};
-  for (const job of rows.filter(j => j.status === 'in_progress')) {
-    assert.equal(job.run_id, identity.runId); assert.equal(job.head_sha, identity.sourceSha);
-    assert(Object.hasOwn(SLOTS, job.runner_name ?? ''), 'unrecognized queue runner');
-    assert.equal(job.runner_id, SLOTS[job.runner_name].id, 'queue runner ID mismatch');
-    assert(!Object.hasOwn(found, job.runner_name), 'duplicate queue runner placement');
-    assert(Number.isSafeInteger(job.id) && job.id > 0); found[job.runner_name] = job.id;
+  const found = {}, assigned = new Set();
+  for (const job of rows) {
+    assert(Number.isSafeInteger(job.id) && job.id > 0, 'invalid queue job ID');
+    assert(STARTUP_STATES.includes(job.status) && job.conclusion == null, 'queue peer ended before release; all reservations must stop');
+    if (job.run_id != null) assert.equal(job.run_id, identity.runId);
+    if (job.head_sha != null) assert.equal(job.head_sha, identity.sourceSha);
+    const named = job.runner_name != null && job.runner_name !== '', numbered = job.runner_id != null && job.runner_id !== 0;
+    if (named) assert(Object.hasOwn(SLOTS, job.runner_name), 'unrecognized queue runner');
+    if (numbered) assert(Number.isSafeInteger(job.runner_id) && Object.values(SLOTS).some(s => s.id === job.runner_id), 'queue runner ID mismatch');
+    if (named && numbered) {
+      assert.equal(job.runner_id, SLOTS[job.runner_name].id, 'queue runner ID mismatch');
+      assert(!assigned.has(job.runner_name), 'duplicate queue runner placement'); assigned.add(job.runner_name);
+    }
+    const coherent = named && numbered && job.run_id === identity.runId && job.head_sha === identity.sourceSha;
+    if (job.status === 'in_progress' && coherent) found[job.runner_name] = job.id;
+    else if (!startup && job.status === 'in_progress') assert.fail('running queue job has incomplete identity');
   }
-  if (complete) assert.deepEqual(Object.keys(found).sort(), Object.keys(SLOTS).sort(), 'all four distinct runner jobs must be running before the barrier');
-  return found;
+  return { assignments: found, ready: run.status === 'in_progress' && rows.length === 4 && Object.keys(found).length === 4 };
+}
+// Registration may proceed for an individually coherent job while the overall run lags queued.
+// This NEVER certifies active readiness: validateApi/verifyRoster still require all four + running.
+export function assessStartupApi(run, jobs, identity) { return inspectApi(run, jobs, identity, true); }
+export function validateApi(run, jobs, identity, { complete = true } = {}) {
+  const { assignments, ready } = inspectApi(run, jobs, identity, false);
+  if (complete) assert(ready, 'all four distinct runner jobs must be running before the barrier');
+  return assignments;
 }
 export function ancestors(table, pid) { const seen = new Set(); while (pid > 0 && !seen.has(pid)) { seen.add(pid); pid = table.find(p => p.pid === pid)?.ppid ?? 0; } return seen; }
 export function processIdentity(table, pid) {
@@ -179,11 +202,44 @@ export async function publishNew(file, value) {
   try { await link(tmp, file); } finally { await unlink(tmp); }
 }
 async function optional(file) { try { return await json(file); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } }
+export const API_REFRESH_MS = 15000;
+// ONE CPU executor owns the GET pair. Holders use only its signed local observation.
+export function createExecutorApiRefresh(observe, clock = Date.now) {
+  let snapshot, fetchedAt, failure;
+  return async () => {
+    if (failure) throw failure; // No auth/API-error retries, including accidental repeated callers.
+    if (!snapshot || clock() - fetchedAt >= API_REFRESH_MS) {
+      try { snapshot = await observe(); fetchedAt = clock(); } catch (error) { failure = error; throw error; }
+    }
+    return snapshot;
+  };
+}
+export async function assertNoPeerFailure(dir, runner, read = optional) {
+  for (const peer of Object.keys(SLOTS).filter(n => n !== runner)) {
+    assert.equal(await read(path.join(dir, `${peer}.failure.json`)), undefined, 'queue peer failed before release; abort reservation');
+  }
+}
+export async function unregisteredMemberAbsent(member, file, statFile = stat) {
+  if (member) return false;
+  try { await statFile(file); return false; } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+}
+export function assertStartupDeadline(now, deadline, aborted) {
+  assert(!aborted, 'queue supervisor interrupted'); assert(now < deadline, 'queue bounded deadline requests cleanup');
+}
+export async function waitForOwnJob(runner, identity, observe, wait = sleep) {
+  electedRole(runner);
+  while (true) {
+    const api = await observe();
+    const job = api && assessStartupApi(api.run, api.jobs, identity).assignments[runner];
+    if (job) return job;
+    await wait(HEARTBEAT_MS); // observe enforces the existing deadline/cancel/failure checks.
+  }
+}
 async function apiSnapshot(identity, env) {
   const call = async suffix => JSON.parse((await exec('gh', ['api', `repos/${identity.repository}/actions/runs/${identity.runId}/attempts/${identity.attempt}${suffix}`], { env, timeout: 15000, maxBuffer: 4 * 1024 * 1024 })).stdout);
   const run = await call(''), jobs = (await call('/jobs?per_page=100')).jobs;
-  return { run: { id: run.id, repository: { full_name: run.repository?.full_name }, run_attempt: run.run_attempt, head_sha: run.head_sha, event: run.event, status: run.status, path: run.path },
-    jobs: jobs.map(j => ({ id: j.id, name: j.name, run_id: j.run_id, head_sha: j.head_sha, status: j.status, runner_name: j.runner_name, runner_id: j.runner_id })), observedAt: Date.now() };
+  return { run: { id: run.id, repository: { full_name: run.repository?.full_name }, run_attempt: run.run_attempt, head_sha: run.head_sha, event: run.event, status: run.status, conclusion: run.conclusion, path: run.path },
+    jobs: jobs.map(j => ({ id: j.id, name: j.name, run_id: j.run_id, head_sha: j.head_sha, status: j.status, conclusion: j.conclusion, runner_name: j.runner_name, runner_id: j.runner_id })), observedAt: Date.now() };
 }
 async function census() { const { observeProcessTable } = await import('./flux3-image-klein-terminal-session.mjs'); return observeProcessTable(exec, 'win32'); }
 export async function verifyObservedRoster(observe, controllerPid, clock = Date.now) {
@@ -266,12 +322,39 @@ async function supervisor(env) {
     released = true; clearInterval(heartbeatTimer); await heartbeatTask?.catch(() => {});
     state = 'safe_to_release'; if (member) await pulse(); log({ runner, cleanupAcknowledged: true, released: true });
   };
+  let publishedApi;
+  const refresh = role === 'executor' ? createExecutorApiRefresh(async () => {
+    const observed = await apiSnapshot(identity, env);
+    const { ready } = assessStartupApi(observed.run, observed.jobs, identity);
+    if (campaignDeadline) validateApi(observed.run, observed.jobs, identity);
+    return { ...observed, ready };
+  }) : undefined;
   const check = async () => {
-    assert(!aborted, 'queue supervisor interrupted'); if (heartbeatError) throw heartbeatError;
-    assert(Date.now() < (campaignDeadline ?? waitDeadline), 'queue bounded deadline requests cleanup');
-    if (!api || Date.now() - api.observedAt > 15000) api = await apiSnapshot(identity, env);
-    validateApi(api.run, api.jobs, identity, { complete: false });
-    assert(Date.now() - api.observedAt <= API_FRESH_MS, 'queue API observation expired');
+    assertStartupDeadline(Date.now(), campaignDeadline ?? waitDeadline, aborted);
+    if (heartbeatError) throw heartbeatError;
+    await assertNoPeerFailure(dir, runner);
+    if (!identity.nonce) return; // The elected executor must announce the attempt nonce first.
+    if (role === 'executor') {
+      api = await refresh();
+      if (member && api !== publishedApi) {
+        await atomic(path.join(dir, 'api.json'), () => signed({ identity, api }, privateKey)); publishedApi = api;
+      }
+    } else {
+      const executor = members[EXECUTOR] ?? await optional(path.join(dir, `${EXECUTOR}.member.json`));
+      if (executor) {
+        sameIdentity(executor.identity, identity); members[EXECUTOR] = executor;
+        const envelope = await optional(path.join(dir, 'api.json'));
+        if (envelope) {
+          const update = authenticated(envelope, executor.publicKey); sameIdentity(update.identity, identity);
+          const { ready } = assessStartupApi(update.api.run, update.api.jobs, identity);
+          assert.equal(update.api.ready, ready, 'signed API readiness mismatch'); api = update.api;
+        }
+      }
+    }
+    if (api) {
+      assert(Date.now() >= api.observedAt && Date.now() - api.observedAt <= API_FRESH_MS, 'queue API observation expired');
+      if (campaignDeadline) validateApi(api.run, api.jobs, identity);
+    }
     if (member) await pulse();
   };
   // Only container readiness/cleanup keys attested by our actual executor supervisor count.
@@ -285,6 +368,9 @@ async function supervisor(env) {
     const { cleanupStatus } = await import('./flux3-queue-container.mjs');
     await holdUntilSafe({ probe: async () => {
       // Do not run the ordinary aborted/API/deadline checks here: they requested cleanup, NOT release.
+      // Only proven absence of OUR immutable member makes a full barrier impossible. An
+      // uncertain publication, parse error or access denial must retain the ordinary cleanup path.
+      if (await unregisteredMemberAbsent(member, path.join(dir, `${runner}.member.json`))) return true;
       const binding = await optional(path.join(dir, 'binding.json'));
       if (binding) { const owned = await containerFrom(binding), proof = await cleanupStatus(owned, identity); if (proof) { await recordCleanup(proof); return true; } }
       else {
@@ -315,8 +401,8 @@ async function supervisor(env) {
     const table = await census(), worker = workerIdentity(table, process.pid, runner), supervisorProcess = processIdentity(table, process.pid);
     const context = await (await import('./flux3-queue-container.mjs')).currentSecurityContext();
     assert.equal(worker.sessionId, context.sessionId); assert.equal(supervisorProcess.sessionId, context.sessionId);
-    await check(); const ownJobs = validateApi(api.run, api.jobs, identity, { complete: false }); assert(ownJobs[runner]);
-    member = { role, identity, runner, context, hostName: hostname(), jobId: ownJobs[runner], worker, supervisor: supervisorProcess, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }) };
+    const ownJob = await waitForOwnJob(runner, identity, async () => { await check(); return api; });
+    member = { role, identity, runner, context, hostName: hostname(), jobId: ownJob, worker, supervisor: supervisorProcess, publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }) };
     await publishNew(path.join(dir, `${runner}.member.json`), member); await pulse();
     heartbeatTimer = setInterval(() => {
       if (heartbeatTask || released) return;
@@ -326,9 +412,8 @@ async function supervisor(env) {
     while (!complete) {
       await check();
       for (const name of Object.keys(SLOTS)) members[name] = await optional(path.join(dir, `${name}.member.json`));
-      if (Object.values(members).every(Boolean)) {
-        const running = api.jobs.filter(j => /^flux3-terminal-queue \/ reserve \([1-4]\)$/.test(j.name) && j.status === 'in_progress');
-        if (running.length === 4) { validateApi(api.run, api.jobs, identity); complete = true; }
+      if (Object.values(members).every(Boolean) && api?.ready) {
+        validateApi(api.run, api.jobs, identity); complete = true;
       }
       if (!complete) await sleep(HEARTBEAT_MS);
     }
@@ -355,7 +440,6 @@ async function supervisor(env) {
       }
       const tick = async () => {
         await check(); validateApi(api.run, api.jobs, identity);
-        await atomic(path.join(dir, 'api.json'), signed({ identity, api }, privateKey));
         await verifyQueueReservation({ sourceSha: identity.sourceSha, inferenceMainSha: identity.inferenceMainSha, queueReservation: ref }, await census(), process.pid);
       };
       await tick(); log({ barrier: 'verified', runId: identity.runId, attempt: identity.attempt, jobs: Object.fromEntries(Object.entries(members).map(([r, m]) => [r, m.jobId])) });
