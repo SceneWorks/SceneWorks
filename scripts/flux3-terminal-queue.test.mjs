@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -302,4 +302,111 @@ test('atomic rename retry margin does not relax heartbeat freshness or backoff t
   assert.equal(ATOMIC_RENAME_BUDGET_MS, 800); assert.equal(ATOMIC_RENAME_BACKOFF_MS, 50);
   assert.equal(HEARTBEAT_MS, 2000); assert.equal(STALE_MS, 20000);
   assert(ATOMIC_RENAME_BUDGET_MS < HEARTBEAT_MS && HEARTBEAT_MS + ATOMIC_RENAME_BUDGET_MS < STALE_MS);
+});
+
+test('queued global run permits own coherent membership, never active readiness or circular all-member dependency', async () => {
+  const f = fixture(), { run, jobs } = f.binding.api;
+  run.status = 'queued';
+  const ownOnly = jobs.filter(j => j.runner_name === EXECUTOR);
+  const state = assessStartupApi(run, ownOnly, f.binding.identity);
+  assert.equal(state.ready, false); assert.equal(state.assignments[EXECUTOR], ownOnly[0].id);
+  const job = await waitForOwnJob(EXECUTOR, f.binding.identity, async () => ({ run, jobs: ownOnly }), async () => assert.fail('own assignment must not wait for other members'));
+  assert.equal(job, ownOnly[0].id);
+  assert.throws(() => validateApi(run, jobs, f.binding.identity), /in_progress/);
+  assert.equal(assessStartupApi(run, jobs, f.binding.identity).ready, false);
+  run.status = 'in_progress'; assert.equal(assessStartupApi(run, jobs, f.binding.identity).ready, true);
+  assert.equal(Object.keys(validateApi(run, jobs, f.binding.identity)).length, 4);
+});
+test('startup fake frames wait for missing/null/zero assignment then register; deadline and cancellation stop waiting', async () => {
+  const f = fixture(), runner = 'cuda-windows-3', own = f.binding.api.jobs.find(j => j.runner_name === runner);
+  const run = { ...f.binding.api.run, status: 'queued' };
+  const frames = [undefined, { run, jobs: [] }, { run, jobs: [{ ...own, status: 'requested', runner_name: '', runner_id: 0, run_id: null, head_sha: null }] }, { run, jobs: [{ ...own, runner_name: null, runner_id: null }] }, { run, jobs: [own] }];
+  let now = 0, cursor = 0;
+  const got = await waitForOwnJob(runner, f.binding.identity, async () => { assertStartupDeadline(now, 10000, false); return frames[cursor++]; }, async ms => { now += ms; });
+  assert.equal(got, own.id); assert.equal(now, 8000);
+  now = 0;
+  await assert.rejects(waitForOwnJob(runner, f.binding.identity, async () => { assertStartupDeadline(now, 4000, false); return { run, jobs: [] }; }, async ms => { now += ms; }), /deadline/);
+  assert.equal(now, 4000);
+  assert.throws(() => assertStartupDeadline(0, 4000, true), /interrupted/);
+});
+test('startup hard identities, malformed frames, conclusions, terminal slots and unknown roles never become wait frames', () => {
+  for (const mutate of [
+    f => { f.binding.api.run.status = 'cancelled'; }, f => { f.binding.api.run.status = 'completed'; },
+    f => { f.binding.api.run.conclusion = 'cancelled'; }, f => { f.binding.api.run.head_sha = 'f'.repeat(40); },
+    f => { f.binding.api.run.run_attempt++; }, f => { f.binding.api.run.repository.full_name = 'wrong/repository'; },
+    f => { f.binding.api.run.event = 'push'; }, f => { f.binding.api.run.path = 'wrong.yml'; },
+    f => { f.binding.api.jobs[0].status = 'completed'; }, f => { f.binding.api.jobs[0].conclusion = 'failure'; },
+    f => { f.binding.api.jobs[0].name = 'flux3-terminal-queue / reserve (5)'; },
+    f => { f.binding.api.jobs[0].name = 'flux3-terminal-queue / wrong-role'; },
+    f => { f.binding.api.jobs[0].runner_name = 'unknown'; }, f => { f.binding.api.jobs[0].runner_id = 999; },
+    f => { f.binding.api.jobs[0].runner_id = 0; f.binding.api.jobs[0].runner_name = 'wrong'; },
+    f => { f.binding.api.jobs[0].runner_name = null; f.binding.api.jobs[0].runner_id = 999; },
+    f => { f.binding.api.jobs[0].runner_id = -1; }, f => { f.binding.api.jobs[0].run_id++; },
+    f => { f.binding.api.jobs[0].head_sha = 'f'.repeat(40); }, f => { f.binding.api.jobs[0].id = null; },
+    f => { f.binding.api.jobs[0].name = null; }, f => { f.binding.api.jobs = null; },
+  ]) {
+    const f = fixture(); f.binding.api.run.status = 'queued'; mutate(f);
+    assert.throws(() => assessStartupApi(f.binding.api.run, f.binding.api.jobs, f.binding.identity));
+  }
+});
+test('one executor GET pair per 15s stays below repository rate budget; all three holders consume only signed cached frames', async () => {
+  const f = fixture(); let now = 0, gets = 0;
+  const refresh = createExecutorApiRefresh(async () => { gets += 2; return { ...f.binding.api, observedAt: now, ready: true }; }, () => now);
+  const first = await refresh(); now = API_REFRESH_MS - 1; assert.equal(await refresh(), first); assert.equal(first.observedAt, 0);
+  for (now = API_REFRESH_MS; now < 3600000; now += HEARTBEAT_MS) {
+    const frame = await refresh(), proof = signed({ identity: f.binding.identity, api: frame }, f.keys[EXECUTOR].privateKey);
+    for (let holder = 0; holder < 3; holder++) {
+      const read = authenticated(proof, f.binding.members[EXECUTOR].publicKey);
+      validateApi(read.api.run, read.api.jobs, read.identity);
+    }
+  }
+  assert(gets >= 448 && gets <= 482, `one hour used ${gets} GETs, not four independent 1800+ request loops`);
+  assert(gets < 1000); assert.equal(API_FRESH_MS, 90000); assert.equal(STALE_MS, 20000);
+});
+test('API errors have no automatic retries and rejected pending frames never renew coherent active proof age', async () => {
+  for (const message of ['HTTP 401', 'HTTP 403', 'HTTP 500', 'malformed JSON']) {
+    let calls = 0, now = 0;
+    const refresh = createExecutorApiRefresh(async () => { calls++; throw Error(message); }, () => now);
+    await assert.rejects(refresh(), new RegExp(message)); now = 90000;
+    await assert.rejects(refresh(), new RegExp(message)); assert.equal(calls, 1);
+  }
+  const f = fixture(); let now = 0, latest = f.binding.api, published;
+  const refresh = createExecutorApiRefresh(async () => {
+    validateApi(latest.run, latest.jobs, f.binding.identity);
+    return { ...latest, observedAt: now, ready: true };
+  }, () => now);
+  published = await refresh();
+  now = 15000; latest = structuredClone(latest); latest.run.status = 'queued';
+  await assert.rejects(refresh(), /in_progress/); assert.equal(published.observedAt, 0);
+  now = 90001; assert(now - published.observedAt > API_FRESH_MS);
+});
+test('pre-member peer failure aborts startup; immediate release needs actual immutable member absence, not uncertain publication', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flux3-startup-cpu-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  const own = path.join(dir, 'cuda-windows-3.member.json');
+  assert.equal(await unregisteredMemberAbsent(undefined, own), true);
+  await writeFile(own, 'partial-not-json');
+  assert.equal(await unregisteredMemberAbsent(undefined, own), false, 'existing partial publication must retain cleanup rules');
+  await assert.rejects(unregisteredMemberAbsent(undefined, own, async () => { throw Object.assign(Error('denied'), { code: 'EACCES' }); }), /denied/);
+  assert.equal(await unregisteredMemberAbsent({}, path.join(dir, 'missing')), false, 'known member still needs registered cleanup');
+  await assertNoPeerFailure(dir, EXECUTOR);
+  await writeFile(path.join(dir, 'cuda-windows-3.failure.json'), JSON.stringify({ error: 'registration failed' }));
+  const f = fixture(); let waited = false;
+  await assert.rejects(waitForOwnJob(EXECUTOR, f.binding.identity, async () => { await assertNoPeerFailure(dir, EXECUTOR); return undefined; }, async () => { waited = true; }), /peer failed/);
+  assert.equal(waited, false, 'failure marker stops executor without waiting for a missing member');
+});
+test('startup mutations admitting queued readiness or ignoring peer failures violate the safety assertions', async t => {
+  const source = await readFile(new URL('./flux3-terminal-queue.mjs', import.meta.url), 'utf8');
+  const load = async (from, to) => {
+    assert(source.includes(from));
+    return import('data:text/javascript;base64,' + Buffer.from(source.replace(from, to)).toString('base64'));
+  };
+  const early = await load("ready: run.status === 'in_progress' && rows.length === 4", 'ready: rows.length === 4');
+  const f = fixture(); f.binding.api.run.status = 'queued';
+  assert.throws(() => assert.equal(early.assessStartupApi(f.binding.api.run, f.binding.api.jobs, f.binding.identity).ready, false));
+  const ignored = await load('for (const peer of Object.keys(SLOTS).filter(n => n !== runner))', 'for (const peer of [])');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flux3-failure-mutation-')); t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(path.join(dir, 'cuda-windows-3.failure.json'), '{}');
+  const requiresAbort = check => assert.rejects(check(dir, EXECUTOR), /peer failed/);
+  await requiresAbort(assertNoPeerFailure);
+  await assert.rejects(requiresAbort(ignored.assertNoPeerFailure), /Missing expected rejection/);
 });
