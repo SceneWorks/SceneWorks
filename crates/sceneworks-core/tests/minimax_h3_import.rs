@@ -255,3 +255,177 @@ fn managed_and_linked_imports_persist_a_plan_the_h3_assembly_binds() {
     .expect("complete assembly");
     assert_eq!(linked.descriptor_layer_ids.len(), 1, "{linked:?}");
 }
+
+#[test]
+fn h3_interruption_retry_drift_relink_duplicates_and_leases_preserve_ownership() {
+    let data = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("custom");
+    write_h3_dit_dir(&source);
+    let original = fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap();
+    let store = CheckpointPlanStore::open(data.path());
+    let root = store.approve_root(library.path()).unwrap();
+    let linked = store.compile_linked(&root.root_id, "custom").unwrap();
+    // Drop an interrupted transfer: neither published state nor partial install can survive.
+    {
+        let ingest = ManagedIngest::begin(&store, "retry_h3", provenance()).unwrap();
+        ingest
+            .stage_copy_file(&source.join("config.json"), "config.json")
+            .unwrap();
+    }
+    assert!(!store.install_dir("retry_h3").unwrap().exists());
+    assert!(store.record("managed/retry_h3").is_err());
+    let ingest = ManagedIngest::begin(&store, "retry_h3", provenance()).unwrap();
+    for file in ["config.json", "diffusion_pytorch_model.safetensors"] {
+        ingest.stage_copy_file(&source.join(file), file).unwrap();
+    }
+    let managed = ingest
+        .finalize("diffusion_pytorch_model.safetensors", None)
+        .unwrap();
+    assert_eq!(
+        managed.duplicate_checkpoint_ids(),
+        std::slice::from_ref(&linked.checkpoint_id)
+    );
+    // Shared read leases admit concurrent renders; unrelated sources do not contend.
+    let lease = store.lease_source(&managed.checkpoint_id).unwrap();
+    let second = store.lease_source(&managed.checkpoint_id).unwrap();
+    let unrelated = store.lock_source_for_removal("managed/unrelated").unwrap();
+    assert!(store
+        .remove_managed("retry_h3")
+        .unwrap_err()
+        .to_string()
+        .contains("in use"));
+    assert_eq!(
+        fs::read(
+            managed
+                .install_path
+                .join("diffusion_pytorch_model.safetensors")
+        )
+        .unwrap(),
+        original
+    );
+    assert!(store.resolve(&managed.checkpoint_id).is_ok());
+    drop((lease, second, unrelated));
+    assert!(store.remove_managed("retry_h3").unwrap());
+    assert_eq!(
+        fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap(),
+        original
+    );
+    // Drift cannot remain ready, even if the container/header and file length are unchanged.
+    let mut changed = original.clone();
+    *changed.last_mut().unwrap() ^= 1;
+    fs::write(source.join("diffusion_pytorch_model.safetensors"), &changed).unwrap();
+    assert_eq!(
+        store.resolve(&linked.checkpoint_id).unwrap_err().code(),
+        "source-drifted"
+    );
+    let rescanned = store.compile_linked(&root.root_id, "custom").unwrap();
+    assert_ne!(rescanned.plan.plan_id, linked.plan.plan_id);
+    let moved = library.path().join("relocated");
+    fs::create_dir(&moved).unwrap();
+    fs::rename(&source, moved.join("custom")).unwrap();
+    store.relink_root(&root.root_id, &moved).unwrap();
+    assert!(store.resolve(&linked.checkpoint_id).is_ok());
+    let lease = store.lease_source(&linked.checkpoint_id).unwrap();
+    assert!(store.remove_root(&root.root_id).is_err());
+    assert!(store.record(&linked.checkpoint_id).is_ok());
+    drop(lease);
+    store.remove_root(&root.root_id).unwrap();
+    assert_eq!(
+        fs::read(moved.join("custom/diffusion_pytorch_model.safetensors")).unwrap(),
+        changed
+    );
+}
+
+#[test]
+fn compatible_base_downloads_never_replace_imported_task_partitions() {
+    use sceneworks_core::minimax_h3_import::import_component_downloads;
+    let base = |id: &str, companion: &str| {
+        json!({
+            "id":id,"family":"minimax-h3","downloads":[
+                {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","files":["q4/primary/*"]},
+                {"provider":"huggingface","repo":"fixture/tiers","coRequisite":true,"variant":"q4","files":[format!("q4/{companion}/*")]},
+                {"provider":"huggingface","repo":"fixture/tiers","coRequisite":true,"variant":"q8","componentId":"text_encoder","files":["q8/text_encoder/*"]},
+                {"provider":"huggingface","repo":"fixture/tiers","coRequisite":true,"variant":"q4","componentId":"text_encoder","files":["q4/text_encoder/*"]},
+                {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/*"]},
+                {"provider":"huggingface","repo":"fixture/optional","coRequisite":true,"required":"soft","files":["predictor.bin"]}
+            ]
+        })
+    };
+    for (partition, id, companion) in [
+        ("fl2va", "minimax_h3", "transformer_ref"),
+        ("ref2va", "minimax_h3_ref", "transformer"),
+        ("hybrid", "minimax_h3", "transformer_ref"),
+    ] {
+        let entry = json!({"baseModel":id,"minimaxH3Partition":partition});
+        let rows = import_component_downloads(
+            entry.as_object().unwrap(),
+            &base(id, companion),
+            Some("q4"),
+            "macos",
+        )
+        .unwrap();
+        assert_eq!(rows.len(), if partition == "hybrid" { 2 } else { 3 });
+        let encoded = json!(rows).to_string();
+        assert!(!encoded.contains("primary"));
+        assert!(!encoded.contains("q8"));
+        assert!(!encoded.contains("predictor"));
+        assert_eq!(encoded.contains(companion), partition != "hybrid");
+        assert!(
+            import_component_downloads(
+                entry.as_object().unwrap(),
+                &base(id, companion),
+                Some("q8"),
+                "macos"
+            )
+            .is_err(),
+            "a stray encoder row cannot establish a compatible base tier or omit its companion"
+        );
+    }
+}
+
+#[test]
+fn shared_h3_component_globs_cannot_hide_incomplete_weights_or_constructor_files() {
+    use sceneworks_core::minimax_h3_import::import_component_files_complete;
+    let temp = tempfile::tempdir().unwrap();
+    let put = |relative: &str, bytes: &[u8]| {
+        let path = temp.path().join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, bytes).unwrap();
+    };
+    let row = |id: &str, subdir: &str| json!({"componentId":id,"subdir":subdir,"files":[format!("{subdir}/*")]});
+    let encoder = row("text_encoder", "q4/text_encoder");
+    put("q4/text_encoder/config.json", b"{}");
+    put(
+        "q4/text_encoder/model.safetensors.index.json",
+        br#"{"weight_map":{"a":"part1.safetensors","b":"part2.safetensors"}}"#,
+    );
+    put("q4/text_encoder/part1.safetensors", b"one");
+    assert!(!import_component_files_complete(temp.path(), &encoder));
+    put("q4/text_encoder/part2.safetensors", b"two");
+    assert!(import_component_files_complete(temp.path(), &encoder));
+    put(
+        "q4/text_encoder/model.safetensors.index.json",
+        br#"{"weight_map":{"a":"../foreign.safetensors"}}"#,
+    );
+    put("q4/foreign.safetensors", b"foreign");
+    assert!(!import_component_files_complete(temp.path(), &encoder));
+    for (id, subdir) in [("video_vae", "vae"), ("audio_vae", "audio_vae")] {
+        let component = row(id, subdir);
+        put(&format!("{subdir}/config.json"), b"{}");
+        assert!(!import_component_files_complete(temp.path(), &component));
+        put(&format!("{subdir}/weights.safetensors"), b"weights");
+        assert!(import_component_files_complete(temp.path(), &component));
+    }
+    let tokenizer = row("tokenizer", "tokenizer");
+    put("tokenizer/tokenizer.json", b"{}");
+    assert!(!import_component_files_complete(temp.path(), &tokenizer));
+    put("tokenizer/tokenizer_config.json", b"{}");
+    assert!(import_component_files_complete(temp.path(), &tokenizer));
+    let constructor = json!({"componentId":"fl2va_audio_vae_config","subdir":"FL2VA/audio_vae","files":["FL2VA/audio_vae/config.json","FL2VA/audio_vae/config.yaml","FL2VA/audio_vae/metadata.json"]});
+    put("FL2VA/audio_vae/config.json", b"{}");
+    put("FL2VA/audio_vae/config.yaml", b"fixture: true");
+    assert!(!import_component_files_complete(temp.path(), &constructor));
+    put("FL2VA/audio_vae/metadata.json", b"{}");
+    assert!(import_component_files_complete(temp.path(), &constructor));
+}

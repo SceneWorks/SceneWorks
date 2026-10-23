@@ -39,6 +39,7 @@ beforeEach(async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
   apiFetchMock.mockReset();
   apiFetchMock.mockResolvedValue({ id: "model-import-job-1", type: "model_import", status: "running" });
+  window.localStorage.clear();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -101,5 +102,25 @@ describe("createModelImportJob type-field contract (sc-14020)", () => {
     expect(multipart.get("baseModel")).toBe(baseModel);
     expect(multipart.get("minimaxH3Partition")).toBe(minimaxH3Partition);
     expect(JSON.parse(apiFetchMock.mock.calls[1][2].body)).toMatchObject(metadata);
+  });
+  it.each(["json", "multipart", "linked"])("reuses selected-base license consent for %s imports without accepting implicitly", async (kind) => {
+    await act(async () => hookApi.setModels([
+      { id: "minimax_h3", name: "MiniMax-H3", requiresLicenseAcknowledgment: true },
+      { id: "minimax_h3_ref", name: "MiniMax-H3 Reference", requiresLicenseAcknowledgment: true },
+    ]));
+    const metadata = { baseModel: "minimax_h3_ref", minimaxH3Partition: "ref2va", type: "video" };
+    const payload = kind === "multipart"
+      ? { ...metadata, file: new File(["h3"], "h3.safetensors") }
+      : kind === "linked" ? { ...metadata, linkedRootId: "root", linkedRelativePath: "h3.safetensors" }
+        : { ...metadata, source: { kind: "url", url: "https://example.com/h3.safetensors" } };
+    // Accepting the opposite task's card is not consent for the explicitly selected base.
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3", "true");
+    await expect(hookApi.createModelImportJob(payload)).rejects.toThrow("MiniMax-H3 Reference requires accepting its license first");
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    window.localStorage.setItem("sceneworks-license-ack:minimax_h3_ref", "true");
+    await act(async () => { await hookApi.createModelImportJob(payload); });
+    const body = apiFetchMock.mock.calls[0][2].body;
+    expect(kind === "multipart" ? body.get("licenseAcknowledged") : JSON.parse(body).licenseAcknowledged).toBe(kind === "multipart" ? "true" : true);
+    expect(kind === "multipart" ? body.get("baseModel") : JSON.parse(body).baseModel).toBe("minimax_h3_ref");
   });
 });

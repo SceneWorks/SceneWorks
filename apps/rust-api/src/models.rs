@@ -2051,6 +2051,29 @@ async fn forget_linked_checkpoint(state: &AppState, entry: &Value) -> Vec<String
     else {
         return Vec::new();
     };
+    let manifest = state
+        .settings
+        .config_dir
+        .join("manifests/user.models.jsonc");
+    match load_manifest_entries(state, &manifest, "models").await {
+        Ok(entries)
+            if entries.iter().any(|entry| {
+                entry
+                    .as_object()
+                    .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+                    == Some(checkpoint_id.as_str())
+            }) =>
+        {
+            return Vec::new()
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return vec![format!(
+            "Retained the checkpoint plan because remaining model ownership could not be read: {}",
+            error.detail
+        )]
+        }
+    }
     let data_dir = state.settings.data_dir.clone();
     let outcome = tokio::task::spawn_blocking(move || {
         sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(&data_dir)?
@@ -2103,6 +2126,24 @@ pub(crate) async fn delete_model(
         .into_iter()
         .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id.as_str()));
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
+    // Keep a cross-process source guard through the actual trash/delete operation, not merely a
+    // preflight. Dense imports have no derivative lease, but are just as in-use as normalized ones.
+    let source_guard = cleanup_source
+        .as_object()
+        .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+        .map(|checkpoint_id| {
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+                &state.settings.data_dir,
+            )
+            .lock_source_for_removal(checkpoint_id)
+        })
+        .transpose()
+        .map_err(|error| ApiError {
+            status: StatusCode::CONFLICT,
+            detail: error.to_string(),
+            context: None,
+            code: Some("checkpoint_source_in_use"),
+        })?;
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
         sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
@@ -2136,6 +2177,7 @@ pub(crate) async fn delete_model(
             return Err(error);
         }
     };
+    drop(source_guard);
     // Some owned files could not reach the OS trash and nothing was permanently
     // deleted. Leave the registry entry in place and ask the client to confirm.
     if !permanent && !removal.trash_failed_paths.is_empty() {
@@ -3897,6 +3939,55 @@ pub(crate) async fn queue_model_import_job(
         model_type = "video".to_owned();
         payload.model_type = Some(model_type.clone());
     }
+    // Reuse the selected base's existing co-requisite/download/license workflow. The imported
+    // DiT is never a catalog download: only the shared closure and declared load-only companion
+    // are provisioned, identically for managed transfers and approved linked sources.
+    let import_components = if payload.family.as_deref() == Some("minimax-h3") {
+        let base_id = payload.base_model.as_deref().expect("validated H3 base");
+        let base = model_catalog(&state)
+            .await?
+            .into_iter()
+            .find(|entry| entry.get("id").and_then(Value::as_str) == Some(base_id))
+            .ok_or_else(|| ApiError::bad_request("The selected compatible base is unavailable"))?;
+        let default = sceneworks_core::model_artifacts::artifact_selection::model_download(&base)
+            .ok_or_else(|| {
+            ApiError::bad_request("The compatible base has no installable components")
+        })?;
+        let declaration =
+            json!({"baseModel":base_id,"minimaxH3Partition":payload.minimax_h3_partition});
+        let default_tier = default.get("variant").and_then(Value::as_str);
+        let mut rows = sceneworks_core::minimax_h3_import::import_component_downloads(
+            declaration.as_object().expect("declaration"),
+            &base,
+            default_tier,
+            std::env::consts::OS,
+        )
+        .map_err(ApiError::bad_request)?;
+        // Reuse a complete resident closure even when it is not the base's default tier.
+        for tier in ["q4", "q8", "bf16"] {
+            if let Ok(candidate) = sceneworks_core::minimax_h3_import::import_component_downloads(
+                declaration.as_object().expect("declaration"),
+                &base,
+                Some(tier),
+                std::env::consts::OS,
+            ) {
+                if candidate.iter().all(|row| imported_component_presence(&state.settings.data_dir, row)
+                    == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed) {
+                    rows = candidate;
+                    break;
+                }
+            }
+        }
+        let repos: Vec<_> = rows
+            .iter()
+            .map(|row| row.get("repo").and_then(Value::as_str))
+            .collect();
+        ensure_license_acknowledged_for_source(&state, &repos, None, payload.license_acknowledged)
+            .await?;
+        Some((base, rows))
+    } else {
+        None
+    };
     let timestamp = now_rfc3339();
     // A linked entry names its library by root id and relative path and carries NO install path:
     // nothing is copied, and the plan-driven route reads the plan's own layers. The worker stamps
@@ -3959,6 +4050,9 @@ pub(crate) async fn queue_model_import_job(
                 Value::String(partition.clone()),
             );
         }
+        if let Some((_, rows)) = &import_components {
+            object.insert("downloads".to_owned(), json!(rows));
+        }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
     let ownership_mode = payload.ownership_mode;
@@ -3990,6 +4084,35 @@ pub(crate) async fn queue_model_import_job(
         Value::String(manifest_path.display().to_string()),
     );
     payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some((base, rows)) = import_components {
+        for row in rows {
+            if imported_component_presence(&state.settings.data_dir, &row)
+                == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+                continue;
+            }
+            let component = build_model_download_job_payload(
+                &base,
+                &model_id,
+                &row,
+                None,
+                false,
+                payload
+                    .get("licenseAcknowledged")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                &state.settings.data_dir,
+            )?;
+            create_generation_job(
+                state.clone(),
+                JobType::ModelDownload,
+                None,
+                None,
+                component,
+                "auto".to_owned(),
+            )
+            .await?;
+        }
+    }
     let job = create_generation_job(
         state,
         JobType::ModelImport,
@@ -7710,6 +7833,52 @@ fn install_state_for(
     model: &Value,
     data_dir: &FsPath,
 ) -> ModelCatalogEntryState {
+    if model.get("family").and_then(Value::as_str) == Some("minimax-h3")
+        && model
+            .as_object()
+            .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+            .is_some()
+    {
+        let entry = model.as_object().expect("imported entry");
+        let checkpoint_id = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+            .expect("imported plan");
+        let resolved = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+            .resolve(checkpoint_id);
+        let mut missing = Vec::new();
+        match resolved {
+            Ok(resolved) => {
+                if let Err(reason) =
+                    sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
+                {
+                    missing.push(reason);
+                }
+            }
+            Err(error) => missing.push(error.to_string()),
+        }
+        let rows = model_co_requisite_downloads(model);
+        if rows.is_empty() {
+            missing.push(
+                "The import has no compatible component closure; re-import with the selected base"
+                    .to_owned(),
+            );
+        }
+        for row in rows {
+            if imported_component_presence(data_dir, &row)
+                != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+                missing.push(format!("{}: {}", row.get("repo").and_then(Value::as_str).unwrap_or("component"),
+                    string_array_field(&row, "files").join(", ")));
+            }
+        }
+        return ModelCatalogEntryState {
+            downloadable: false,
+            installed_path: model_manifest_installed_path(model, data_dir)
+                .map(|path| path.display().to_string()),
+            installed: missing.is_empty(),
+            cache_incomplete: !missing.is_empty(),
+            missing_required_files: missing,
+            update_available: false,
+        };
+    }
     if let Some(download_context) = download_context {
         let managed_path = data_dir
             .join("models")
@@ -8007,6 +8176,37 @@ pub(crate) fn pinned_component_presence(
         CoRequisitePresence::Incomplete
     } else {
         CoRequisitePresence::Absent
+    }
+}
+
+fn imported_component_presence(
+    data_dir: &FsPath,
+    download: &Value,
+) -> sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let presence = if download.get("revision").and_then(Value::as_str).is_some() {
+        pinned_component_presence(data_dir, download)
+    } else {
+        co_requisite_presence(data_dir, download)
+    };
+    if presence != CoRequisitePresence::Installed {
+        return presence;
+    }
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return CoRequisitePresence::Absent;
+    };
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let complete = resolver
+        .discover_source_snapshot(repo, download.get("revision").and_then(Value::as_str))
+        .is_ok_and(|(_, snapshot)| {
+            sceneworks_core::minimax_h3_import::import_component_files_complete(&snapshot, download)
+        });
+    if complete {
+        CoRequisitePresence::Installed
+    } else {
+        CoRequisitePresence::Incomplete
     }
 }
 
@@ -9724,11 +9924,20 @@ fn apply_model_catalog_entry(
             .as_deref()
             .map(FsPath::new)
             .is_some_and(|path| path.starts_with(&managed_models));
-    let (availability, availability_resolution) = if installed_in_app_owned_path
+    let (availability, availability_resolution) = if state.cache_incomplete
+        && model.get("family").and_then(Value::as_str) == Some("minimax-h3")
+        && model
+            .as_object()
+            .and_then(sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id)
+            .is_some()
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else if installed_in_app_owned_path
         && !matches!(
             availability_resolution.availability,
             ModelAvailability::LocalReady
-        ) {
+        )
+    {
         (ModelAvailability::LocalReady, None)
     } else if availability_resolution.availability == ModelAvailability::Missing
         && state.cache_incomplete
@@ -15859,7 +16068,17 @@ mod minimax_h3_import_declaration_tests {
         std::fs::write(manifests.join("builtin.models.jsonc"), json!({
             "schemaVersion": 1,
             "models": [
-                { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] } },
+                { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] },
+                  "downloads":[
+                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
+                  ] },
+                { "id":"minimax_h3_ref", "type":"video", "family":"minimax-h3", "downloads":[
+                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
+                  ] },
                 { "id": "sdxl", "type": "image", "family": "sdxl" }
             ]
         }).to_string()).unwrap();
@@ -15893,6 +16112,18 @@ mod minimax_h3_import_declaration_tests {
             assert_eq!(entry["baseModel"], base);
             assert_eq!(entry["minimaxH3Partition"], partition);
             assert_eq!(entry["type"], "video");
+            let rows = entry["downloads"].as_array().unwrap();
+            assert_eq!(rows.len(), if partition == "hybrid" { 1 } else { 2 });
+            assert!(rows.iter().all(super::is_co_requisite_download));
+            let imported_slot = if partition == "ref2va" {
+                "q4/transformer_ref/*"
+            } else {
+                "q4/transformer/*"
+            };
+            assert!(!rows
+                .iter()
+                .any(|row| super::string_array_field(row, "files")
+                    .contains(&imported_slot.to_owned())));
         }
     }
 
@@ -16164,5 +16395,206 @@ mod minimax_h3_import_declaration_tests {
         assert_eq!(status, StatusCode::CREATED, "{response}");
         assert_eq!(response["payload"]["manifestEntry"]["family"], "sdxl");
         assert_eq!(response["payload"]["manifestEntry"]["type"], "image");
+    }
+
+    fn write_lifecycle_h3(dir: &std::path::Path) {
+        let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
+        for (key, value) in [
+            ("num_layers", 1),
+            ("num_refiner_layers", 1),
+            ("num_attention_heads", 2),
+            ("attention_head_dim", 6),
+            ("hidden_size", 8),
+            ("ffn_dim", 8),
+            ("in_channels", 2),
+            ("audio_in_channels", 2),
+            ("text_dim", 8),
+            ("freq_dim", 4),
+            ("time_embed_hidden_dim", 8),
+            ("time_embed_dim", 4),
+            ("rope_freq_dim", 1),
+        ] {
+            config[key] = json!(value);
+        }
+        let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
+            .shapes()
+            .unwrap();
+        let mut header = serde_json::Map::new();
+        let mut offset = 0;
+        for (name, shape) in shapes {
+            let size = shape.iter().product::<usize>() * 2;
+            header.insert(
+                name,
+                json!({"dtype":"BF16","shape":shape,"data_offsets":[offset,offset+size]}),
+            );
+            offset += size;
+        }
+        let encoded = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset, 0x31);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn h3_public_rescan_readiness_and_removal_keep_component_and_source_ownership() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let _ = app(&temp);
+        let settings = test_settings(&temp);
+        let library = temp.path().join("library");
+        let source = library.join("custom");
+        write_lifecycle_h3(&source);
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        let root = store.approve_root(&library).unwrap();
+        let compiled = store.compile_linked(&root.root_id, "custom").unwrap();
+        let required = [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors",
+            "tokenizer/tokenizer.json",
+            "tokenizer/tokenizer_config.json",
+            "vae/config.json",
+            "vae/weights.safetensors",
+            "audio_vae/config.json",
+            "audio_vae/weights.safetensors",
+            "FL2VA/audio_vae/config.yaml",
+        ];
+        let revision = "0123456789012345678901234567890123456789";
+        let mut entry = json!({"id":"lifecycle_h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va", "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}, "downloads":[{"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"files":required}]}).as_object().unwrap().clone();
+        let assembly =
+            sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                &compiled.plan,
+                &entry,
+            )
+            .unwrap();
+        sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        let mut model = Value::Object(entry);
+        let missing = super::install_state_for(None, &model, &settings.data_dir);
+        assert!(!missing.installed);
+        assert!(missing.cache_incomplete);
+        let cache =
+            super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared").unwrap();
+        let snapshot = cache.join("snapshots").join(revision);
+        for file in required {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        assert!(super::install_state_for(None, &model, &settings.data_dir).installed);
+        let mut unbound = model.clone();
+        unbound["importPlan"]
+            .as_object_mut()
+            .unwrap()
+            .remove("assembly");
+        assert!(!super::install_state_for(None, &unbound, &settings.data_dir).installed);
+        let mut stale = model.clone();
+        stale["importPlan"]["planId"] = json!("checkpoint-plan-stale");
+        assert!(!super::install_state_for(None, &stale, &settings.data_dir).installed);
+        // Every component participates in readiness; a complete unrelated snapshot cannot mask a
+        // missing file in the bound revision. Restoring it recovers without re-importing the DiT.
+        for file in required {
+            std::fs::remove_file(snapshot.join(file)).unwrap();
+            let sibling = cache.join("snapshots/other").join(file);
+            std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+            std::fs::write(sibling, b"wrong revision").unwrap();
+            let state = super::install_state_for(None, &model, &settings.data_dir);
+            assert!(!state.installed, "{file}");
+            assert!(state
+                .missing_required_files
+                .iter()
+                .any(|missing| missing.contains(file)));
+            std::fs::write(snapshot.join(file), b"fixture").unwrap();
+        }
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        let mut alias = model.clone();
+        alias["id"] = json!("lifecycle_h3_alias");
+        std::fs::write(
+            &manifest,
+            json!({"schemaVersion":1,"models":[model, alias]}).to_string(),
+        )
+        .unwrap();
+        let app = create_app(settings.clone()).unwrap();
+        let lease = store.lease_source(&compiled.checkpoint_id).unwrap();
+        let (status, response) = request(
+            app.clone(),
+            "DELETE",
+            "/api/v1/models/lifecycle_h3?permanent=true",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(response["code"], "checkpoint_source_in_use");
+        assert!(store.resolve(&compiled.checkpoint_id).is_ok());
+        drop(lease);
+        let weight = source.join("diffusion_pytorch_model.safetensors");
+        let mut changed = std::fs::read(&weight).unwrap();
+        *changed.last_mut().unwrap() ^= 1;
+        std::fs::write(&weight, &changed).unwrap();
+        assert!(!super::install_state_for(None, &model, &settings.data_dir).installed);
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/library-roots/{}/rescan", root.root_id),
+            json!({"relativePath":"custom"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let saved: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            &std::fs::read_to_string(&manifest).unwrap(),
+        ))
+        .unwrap();
+        model = saved["models"][0].clone();
+        assert_ne!(model["importPlan"]["planId"], compiled.plan.plan_id);
+        assert!(super::install_state_for(None, &model, &settings.data_dir).installed);
+        let (status, response) = request(
+            app.clone(),
+            "DELETE",
+            "/api/v1/models/lifecycle_h3?permanent=true",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert!(
+            store.resolve(&compiled.checkpoint_id).is_ok(),
+            "another catalog alias still owns this plan"
+        );
+        let (status, response) = request(
+            app,
+            "DELETE",
+            "/api/v1/models/lifecycle_h3_alias?permanent=true",
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(
+            std::fs::read(&weight).unwrap(),
+            changed,
+            "linked removal never owns original bytes"
+        );
+        assert!(store.record(&compiled.checkpoint_id).is_err());
+    }
+
+    #[tokio::test]
+    async fn custom_h3_import_requires_the_selected_base_component_license_acknowledgment() {
+        let temp = tempfile::tempdir().unwrap();
+        let _ = app(&temp);
+        let path = temp.path().join("config/manifests/builtin.models.jsonc");
+        let mut catalog: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        catalog["models"][0]["requiresLicenseAcknowledgment"] = json!(true);
+        catalog["models"][0]["licenseNotice"] = json!("Fixture restricted components");
+        std::fs::write(path, catalog.to_string()).unwrap();
+        let app = create_app(test_settings(&temp)).unwrap();
+        let mut body = json!({"modelId":"licensed_h3","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"});
+        let (status, error) =
+            request(app.clone(), "POST", "/api/v1/models/import", body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        body["licenseAcknowledged"] = json!(true);
+        let (status, job) = request(app, "POST", "/api/v1/models/import", body).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["manifestEntry"]["baseModel"], "minimax_h3");
     }
 }

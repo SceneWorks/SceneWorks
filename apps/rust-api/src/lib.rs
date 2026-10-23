@@ -1326,6 +1326,14 @@ fn create_app_with_state_mode(
         // sc-8882 (F-080): a failed sweep leaves leaked multi-GB upload temps unreclaimed
         // and was previously silent. WARN (never fatal) so the operator can investigate.
         warn_on_sweep_err("lora", sweep_stale_lora_uploads(&settings.data_dir));
+        warn_on_sweep_err(
+            "model",
+            sweep_stale_uploads(
+                &settings.data_dir,
+                "model-uploads",
+                SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
+            ),
+        );
         warn_on_sweep_err("pose", sweep_stale_pose_uploads(&settings.data_dir));
         warn_on_sweep_err("keypoint", sweep_stale_keypoint_uploads(&settings.data_dir));
         // sc-4204 (F-API-6): asset-import temp files (cache/uploads) had no startup sweep.

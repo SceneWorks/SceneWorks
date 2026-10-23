@@ -1938,6 +1938,7 @@ pub(super) struct ImportedMiniMaxH3Dit {
     _pins: Vec<gen_core::PinnedWeightsFile>,
     /// Shared resolved-cache lease keeps normalized native tensors unevictable through rendering.
     _derivative: Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheLease>,
+    _source_lease: sceneworks_core::file_lock::FileLock,
 }
 
 /// Bracket all header/payload reads; mutation errors win before derivative publication.
@@ -2002,6 +2003,9 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     let entry = &request.model_manifest_entry;
     let store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let source_lease = store
+        .lease_source(&checkpoint_id)
+        .map_err(|e| refuse("source-in-use", e.to_string()))?;
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
@@ -2139,6 +2143,7 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         assembly: assembly.to_json(),
         _pins: pins,
         _derivative: derivative,
+        _source_lease: source_lease,
     })
 }
 

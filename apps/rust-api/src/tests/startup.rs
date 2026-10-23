@@ -65,6 +65,21 @@ async fn slow_background_upload_sweep_keeps_health_and_access_ready_then_cleans_
     // is configured; the pre-existing `directories` field is omitted in this mode.
     settings.access_token = "secret".to_owned();
     let stale = write_stale_asset_upload(&settings.data_dir);
+    let model_root = settings.data_dir.join("cache/model-uploads");
+    std::fs::create_dir_all(&model_root).unwrap();
+    let stale_model = model_root.join("upload-stale.tmp");
+    std::fs::write(&stale_model, b"model retry input").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale_model)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::now() - Duration::from_secs(25 * 60 * 60)),
+        )
+        .unwrap();
+    let fresh_model = model_root.join("upload-fresh.tmp");
+    std::fs::write(&fresh_model, b"current retry input").unwrap();
     let hook = crate::startup::test_startup_maintenance_hook(settings.data_dir.clone(), false);
     let (app, state) =
         crate::create_app_with_deferred_startup_maintenance(settings, Duration::from_secs(2))
@@ -107,13 +122,21 @@ async fn slow_background_upload_sweep_keeps_health_and_access_ready_then_cleans_
     .await
     .expect("background sweep completes");
     assert_eq!(completed.status, "complete");
-    assert_eq!(completed.removed_uploads, 1);
+    assert_eq!(completed.removed_uploads, 2);
     assert_eq!(completed.failure_count, 0);
     assert!(!stale.exists(), "eventual cleanup removes the stale upload");
+    assert!(
+        !stale_model.exists(),
+        "expired model retry inputs share the upload-age backstop"
+    );
+    assert!(
+        fresh_model.exists(),
+        "current retry inputs remain recoverable"
+    );
 
     let (_, health) = request(app, "GET", "/api/v1/health", Value::Null).await;
     assert_eq!(health["startupMaintenance"]["status"], "complete");
-    assert_eq!(health["startupMaintenance"]["removedUploads"], 1);
+    assert_eq!(health["startupMaintenance"]["removedUploads"], 2);
     assert!(
         !serde_json::to_string(&health)
             .expect("health serializes")

@@ -229,6 +229,15 @@ export function useModelsAndLoras({
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
     const { file, ...metadata } = payload;
+    // Fine-tune component acquisition is the selected base's ordinary download workflow. Reuse
+    // consent taken on its existing model card, for both JSON/link and multipart/upload requests.
+    const base = models.find((model) => model.id === metadata.baseModel);
+    if (requiresLicenseAcknowledgment(base)) {
+      if (licenseAcknowledgmentBlocked(base)) {
+        throw new Error(licenseAckRefusalMessage(base));
+      }
+      metadata.licenseAcknowledged = true;
+    }
     if (file?.size > maxModelUploadBytes) {
       throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
     }
@@ -265,7 +274,7 @@ export function useModelsAndLoras({
     setError("");
     return job;
     },
-    [token, setJobs, setActiveView, setError],
+    [token, models, setJobs, setActiveView, setError],
   );
 
   const createLoraImportJob = useCallback(

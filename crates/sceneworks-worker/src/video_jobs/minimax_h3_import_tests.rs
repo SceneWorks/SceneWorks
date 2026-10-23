@@ -1022,3 +1022,37 @@ fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
     assert!(error.to_string().contains("krea_2"), "{error}");
     assert!(probe.spec.lock().unwrap().is_none());
 }
+
+#[test]
+fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
+    for layout in ["dense", "native", "sharded"] {
+        let data = tempfile::tempdir().unwrap();
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+            data.path(),
+            "leased_h3",
+            layout,
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let request = imported_minimax_h3_request("leased_h3", &imported.entry);
+        let provider =
+            crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
+                .unwrap();
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data.path());
+        let refusal = store.remove_managed("leased_h3").unwrap_err();
+        assert!(
+            refusal.to_string().contains("in use"),
+            "{layout}: {refusal}"
+        );
+        assert!(imported.install_dir.is_dir());
+        assert!(store.resolve(&imported.checkpoint_id).is_ok());
+        drop(provider);
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
+            .unwrap()
+            .remove_managed_install("leased_h3")
+            .unwrap();
+        assert!(!imported.install_dir.exists());
+    }
+}

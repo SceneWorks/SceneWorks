@@ -309,6 +309,26 @@ pub fn verify_entry_assembly(
     plan: &ImportPlanV1,
 ) -> Result<MiniMaxH3ImportAssembly, String> {
     let assembly = MiniMaxH3ImportAssembly::from_declared_plan(plan, entry)?;
+    if let Some(binding) = entry.get("importPlan").and_then(Value::as_object) {
+        if binding
+            .get("planId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != plan.plan_id)
+            || binding
+                .get("semanticDigest")
+                .and_then(Value::as_str)
+                .is_some_and(|digest| {
+                    !plan
+                        .semantic_digest()
+                        .is_ok_and(|current| current == digest)
+                })
+        {
+            return Err(
+                "the catalog entry's plan identity changed; rescan or re-import the checkpoint"
+                    .into(),
+            );
+        }
+    }
     let Some(stamped) = entry_assembly(entry) else {
         return Err(
             "the catalog entry carries no importPlan.assembly binding; re-import the checkpoint"
@@ -404,6 +424,129 @@ fn builtin_partition_entry(id: &str) -> Option<&'static Map<String, Value>> {
 
 fn builtin_reference_partition_entry() -> Option<&'static Map<String, Value>> {
     builtin_partition_entry(MINIMAX_H3_REFERENCE_PARTITION_MODEL)
+}
+
+/// Tighten co-requisite globs to the files H3 providers actually consume. A landed config or one
+/// shard cannot make a partially downloaded component ready. Literal-only rows retain the shared
+/// downloader's all-files check; provider configuration compatibility is checked again at load.
+pub fn import_component_files_complete(snapshot: &std::path::Path, row: &Value) -> bool {
+    use crate::mlx_tier_completeness as tc;
+    let first_pattern = row
+        .get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .find(|file| file.ends_with("/*"))
+        });
+    let subdir = row
+        .get("subdir")
+        .and_then(Value::as_str)
+        .or_else(|| first_pattern.map(|file| file.trim_end_matches("/*")));
+    let Some(subdir) = subdir else { return true };
+    let Ok(parts) = crate::checkpoint_plan_store::portable_relative_path_parts(subdir) else {
+        return false;
+    };
+    let dir = snapshot.join(parts);
+    let component = row
+        .get("componentId")
+        .and_then(Value::as_str)
+        .or_else(|| dir.file_name().and_then(|name| name.to_str()))
+        .unwrap_or_default();
+    let json_present =
+        |name: &str| crate::minimax_h3_codec::read_h3_descriptor(&dir.join(name)).is_ok();
+    let indexed = |name: &str, omit_dense_tail: bool| {
+        let Ok(index) = crate::minimax_h3_codec::read_h3_descriptor(&dir.join(name)) else {
+            return false;
+        };
+        let Some(map) = index
+            .get("weight_map")
+            .and_then(Value::as_object)
+            .filter(|map| !map.is_empty())
+        else {
+            return false;
+        };
+        map.values().all(|file| {
+            file.as_str().is_some_and(|file| {
+                if omit_dense_tail && file == "model-00013-of-00014.safetensors" {
+                    return true;
+                }
+                crate::checkpoint_plan_store::portable_relative_path_parts(file)
+                    .is_ok_and(|parts| dir.join(parts).is_file())
+            })
+        })
+    };
+    match component {
+        "transformer" => dir.parent().is_some_and(tc::minimax_h3_tier_complete),
+        "transformer_ref" => dir.parent().is_some_and(tc::minimax_h3_ref_tier_complete),
+        "text_encoder" => {
+            json_present("config.json")
+                && indexed("model.safetensors.index.json", subdir == "text_encoder")
+        }
+        "tokenizer" => json_present("tokenizer.json") && json_present("tokenizer_config.json"),
+        "video_vae" | "vae" | "audio_vae" => {
+            json_present("config.json")
+                && tc::dir_has_visible_file_ending(&dir, ".safetensors")
+                && (!dir.join(crate::minimax_h3_codec::H3_INDEX_FILE).exists()
+                    || indexed(crate::minimax_h3_codec::H3_INDEX_FILE, false))
+        }
+        "fl2va_audio_vae_config" => {
+            tc::MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
+                .iter()
+                .all(|file| dir.join(file).is_file())
+                && (first_pattern.is_none()
+                    || tc::dir_has_visible_file_ending(&dir, ".safetensors"))
+        }
+        _ => true,
+    }
+}
+
+/// Select the explicitly compatible base's reusable download closure, never its primary DiT.
+/// The caller selects a resident tier (reusing an installed tier before the catalog default).
+/// Platform filtering uses the same catalog mechanism as ordinary model installation.
+pub fn import_component_downloads(
+    entry: &Map<String, Value>,
+    base: &Value,
+    tier: Option<&str>,
+    os: &str,
+) -> Result<Vec<Value>, String> {
+    use crate::model_artifacts::artifact_selection::{
+        model_co_requisite_downloads_for_variant, model_download_for_variant,
+        retain_downloads_for_os,
+    };
+    let partition = MiniMaxH3Partition::from_entry(entry)?;
+    if base.get("id").and_then(Value::as_str) != entry_str(entry, "baseModel")
+        || base.get("family").and_then(Value::as_str) != Some(MINIMAX_H3_IMPORT_FAMILY)
+    {
+        return Err("the selected base does not supply the declared MiniMax-H3 contract".into());
+    }
+    let mut base = base.clone();
+    retain_downloads_for_os(&mut base, os);
+    if tier.is_some_and(|tier| model_download_for_variant(&base, tier).is_none()) {
+        return Err(
+            "the selected base does not declare this resident component tier on this platform"
+                .into(),
+        );
+    }
+    let mut rows = model_co_requisite_downloads_for_variant(&base, tier);
+    rows.retain(|row| {
+        row.get("required").and_then(Value::as_str) != Some("soft")
+            && !(partition == MiniMaxH3Partition::Hybrid
+                && row
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| {
+                        files.iter().filter_map(Value::as_str).any(|file| {
+                            file.split('/')
+                                .any(|part| matches!(part, "transformer" | "transformer_ref"))
+                        })
+                    }))
+    });
+    if rows.is_empty() {
+        return Err("the selected base declares no reusable MiniMax-H3 components".into());
+    }
+    Ok(rows)
 }
 
 /// Give an imported H3 entry the generation surface its explicit task declaration supports.

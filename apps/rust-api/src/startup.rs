@@ -341,6 +341,7 @@ fn run_upload_sweeps(data_dir: &Path, cancelled: &AtomicBool) -> UploadSweepResu
     let cutoff = std::time::SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS);
     for (area, subdir) in [
         ("lora", "lora-uploads"),
+        ("model", "model-uploads"),
         ("pose", POSE_UPLOADS_CACHE_DIR),
         ("keypoint", KEYPOINT_UPLOADS_CACHE_DIR),
         ("asset", "uploads"),

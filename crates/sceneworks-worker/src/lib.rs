@@ -2540,7 +2540,9 @@ async fn run_utility_job(
         }
     })
     .await;
-    if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
+    // Model uploads are retry inputs: the model importer releases them only after durable
+    // successful publication. LoRA imports retain their existing cleanup policy.
+    if job.job_type == JobType::LoraImport {
         let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
     }
     if let Err((message, error)) = result {
