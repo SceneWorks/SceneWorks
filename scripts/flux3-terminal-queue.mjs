@@ -30,7 +30,7 @@ const normalized = p => String(p).replaceAll('\\', '/').toLowerCase();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async file => JSON.parse(await readFile(file, 'utf8'));
 const log = value => console.log(JSON.stringify(value));
-export const QUEUE_PHASES = Object.freeze(['startup', 'queue_ownership', 'control', 'metadata', 'license', 'disk_metadata', 'disk_budget', 'source_pins', 'api_receipt', 'resource_receipt', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom', 'gpu_capacity', 'admission_write', 'ledger_boundary', 'ledger_init', 'execution', 'ledger_finalize']);
+export const QUEUE_PHASES = Object.freeze(['startup', 'queue_ownership', 'control', 'metadata', 'license', 'disk_metadata', 'disk_budget', 'source_pins', 'api_receipt', 'resource_receipt', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom', 'gpu_capacity', 'admission_write', 'ledger_boundary', 'ledger_transition', 'ledger_init', 'execution', 'ledger_finalize']);
 const SAFE_FS_CODES = ['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO', 'EBUSY', 'ETIMEDOUT'];
 const FAILURE_CODES = ['QUEUE_PRE_ADMISSION_FAILED', ...SAFE_FS_CODES.map(c => `QUEUE_FS_${c}`)];
 export function queueFailureReport(error, phase, metrics = {}) {

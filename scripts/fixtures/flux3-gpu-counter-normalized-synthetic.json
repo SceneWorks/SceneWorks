@@ -1,0 +1,718 @@
+{
+  "declaredSynthetic": true,
+  "hardwareEvidence": false,
+  "description": "Normalized diagnostic topology only: two independent 29-row all-status-0 sets, 24 required and 5 unrequired PIDs per set. All PIDs, LUID, bytes and identity times are synthetic. Raw diagnostic alive flags were invalid (PS5 nested-array bug) and are deliberately omitted. Required identity membership was independently checked against equal before/after CIM start ticks before substituting synthetic start times. physicalNode=0 is a synthetic schema completion, not measured metadata.",
+  "luid": "0xdeadbeef_0x00000001",
+  "requiredProcesses": [
+    {
+      "pid": 900001,
+      "startedAt": "2000-01-01T00:00:00.0000000Z"
+    },
+    {
+      "pid": 900002,
+      "startedAt": "2000-01-01T00:00:01.0000000Z"
+    },
+    {
+      "pid": 900003,
+      "startedAt": "2000-01-01T00:00:02.0000000Z"
+    },
+    {
+      "pid": 900004,
+      "startedAt": "2000-01-01T00:00:03.0000000Z"
+    },
+    {
+      "pid": 900005,
+      "startedAt": "2000-01-01T00:00:04.0000000Z"
+    },
+    {
+      "pid": 900006,
+      "startedAt": "2000-01-01T00:00:05.0000000Z"
+    },
+    {
+      "pid": 900007,
+      "startedAt": "2000-01-01T00:00:06.0000000Z"
+    },
+    {
+      "pid": 900008,
+      "startedAt": "2000-01-01T00:00:07.0000000Z"
+    },
+    {
+      "pid": 900009,
+      "startedAt": "2000-01-01T00:00:08.0000000Z"
+    },
+    {
+      "pid": 900010,
+      "startedAt": "2000-01-01T00:00:09.0000000Z"
+    },
+    {
+      "pid": 900011,
+      "startedAt": "2000-01-01T00:00:10.0000000Z"
+    },
+    {
+      "pid": 900012,
+      "startedAt": "2000-01-01T00:00:11.0000000Z"
+    },
+    {
+      "pid": 900013,
+      "startedAt": "2000-01-01T00:00:12.0000000Z"
+    },
+    {
+      "pid": 900014,
+      "startedAt": "2000-01-01T00:00:13.0000000Z"
+    },
+    {
+      "pid": 900015,
+      "startedAt": "2000-01-01T00:00:14.0000000Z"
+    },
+    {
+      "pid": 900016,
+      "startedAt": "2000-01-01T00:00:15.0000000Z"
+    },
+    {
+      "pid": 900017,
+      "startedAt": "2000-01-01T00:00:16.0000000Z"
+    },
+    {
+      "pid": 900018,
+      "startedAt": "2000-01-01T00:00:17.0000000Z"
+    },
+    {
+      "pid": 900019,
+      "startedAt": "2000-01-01T00:00:18.0000000Z"
+    },
+    {
+      "pid": 900023,
+      "startedAt": "2000-01-01T00:00:19.0000000Z"
+    },
+    {
+      "pid": 900024,
+      "startedAt": "2000-01-01T00:00:20.0000000Z"
+    },
+    {
+      "pid": 900025,
+      "startedAt": "2000-01-01T00:00:21.0000000Z"
+    },
+    {
+      "pid": 900026,
+      "startedAt": "2000-01-01T00:00:22.0000000Z"
+    },
+    {
+      "pid": 900029,
+      "startedAt": "2000-01-01T00:00:23.0000000Z"
+    }
+  ],
+  "collections": [
+    {
+      "samples": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 4096
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 8192
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 12288
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 16384
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 20480
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 24576
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 20480
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 28672
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 32768
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 36864
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 40960
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 45056
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 49152
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 53248
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 57344
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 49152
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 61440
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 65536
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 69632
+        },
+        {
+          "pid": 900020,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 0
+        },
+        {
+          "pid": 900021,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 77824
+        },
+        {
+          "pid": 900022,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 81920
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 86016
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 90112
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 94208
+        },
+        {
+          "pid": 900027,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 98304
+        },
+        {
+          "pid": 900028,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 102400
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 106496
+        }
+      ],
+      "identities": [
+        {
+          "pid": 900001,
+          "startedAt": "2000-01-01T00:00:00.0000000Z"
+        },
+        {
+          "pid": 900002,
+          "startedAt": "2000-01-01T00:00:01.0000000Z"
+        },
+        {
+          "pid": 900003,
+          "startedAt": "2000-01-01T00:00:02.0000000Z"
+        },
+        {
+          "pid": 900004,
+          "startedAt": "2000-01-01T00:00:03.0000000Z"
+        },
+        {
+          "pid": 900005,
+          "startedAt": "2000-01-01T00:00:04.0000000Z"
+        },
+        {
+          "pid": 900006,
+          "startedAt": "2000-01-01T00:00:05.0000000Z"
+        },
+        {
+          "pid": 900007,
+          "startedAt": "2000-01-01T00:00:06.0000000Z"
+        },
+        {
+          "pid": 900008,
+          "startedAt": "2000-01-01T00:00:07.0000000Z"
+        },
+        {
+          "pid": 900009,
+          "startedAt": "2000-01-01T00:00:08.0000000Z"
+        },
+        {
+          "pid": 900010,
+          "startedAt": "2000-01-01T00:00:09.0000000Z"
+        },
+        {
+          "pid": 900011,
+          "startedAt": "2000-01-01T00:00:10.0000000Z"
+        },
+        {
+          "pid": 900012,
+          "startedAt": "2000-01-01T00:00:11.0000000Z"
+        },
+        {
+          "pid": 900013,
+          "startedAt": "2000-01-01T00:00:12.0000000Z"
+        },
+        {
+          "pid": 900014,
+          "startedAt": "2000-01-01T00:00:13.0000000Z"
+        },
+        {
+          "pid": 900015,
+          "startedAt": "2000-01-01T00:00:14.0000000Z"
+        },
+        {
+          "pid": 900016,
+          "startedAt": "2000-01-01T00:00:15.0000000Z"
+        },
+        {
+          "pid": 900017,
+          "startedAt": "2000-01-01T00:00:16.0000000Z"
+        },
+        {
+          "pid": 900018,
+          "startedAt": "2000-01-01T00:00:17.0000000Z"
+        },
+        {
+          "pid": 900019,
+          "startedAt": "2000-01-01T00:00:18.0000000Z"
+        },
+        {
+          "pid": 900023,
+          "startedAt": "2000-01-01T00:00:19.0000000Z"
+        },
+        {
+          "pid": 900024,
+          "startedAt": "2000-01-01T00:00:20.0000000Z"
+        },
+        {
+          "pid": 900025,
+          "startedAt": "2000-01-01T00:00:21.0000000Z"
+        },
+        {
+          "pid": 900026,
+          "startedAt": "2000-01-01T00:00:22.0000000Z"
+        },
+        {
+          "pid": 900029,
+          "startedAt": "2000-01-01T00:00:23.0000000Z"
+        }
+      ],
+      "errors": []
+    },
+    {
+      "samples": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 4096
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 8192
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 12288
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 16384
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 20480
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 24576
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 20480
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 28672
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 32768
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 36864
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 40960
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 45056
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 49152
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 53248
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 57344
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 49152
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 61440
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 65536
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 69632
+        },
+        {
+          "pid": 900020,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 0
+        },
+        {
+          "pid": 900021,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 77824
+        },
+        {
+          "pid": 900022,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 81920
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 86016
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 90112
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 94208
+        },
+        {
+          "pid": 900027,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 98304
+        },
+        {
+          "pid": 900028,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 102400
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0,
+          "status": 0,
+          "cookedBytes": 106496
+        }
+      ],
+      "identities": [
+        {
+          "pid": 900001,
+          "startedAt": "2000-01-01T00:00:00.0000000Z"
+        },
+        {
+          "pid": 900002,
+          "startedAt": "2000-01-01T00:00:01.0000000Z"
+        },
+        {
+          "pid": 900003,
+          "startedAt": "2000-01-01T00:00:02.0000000Z"
+        },
+        {
+          "pid": 900004,
+          "startedAt": "2000-01-01T00:00:03.0000000Z"
+        },
+        {
+          "pid": 900005,
+          "startedAt": "2000-01-01T00:00:04.0000000Z"
+        },
+        {
+          "pid": 900006,
+          "startedAt": "2000-01-01T00:00:05.0000000Z"
+        },
+        {
+          "pid": 900007,
+          "startedAt": "2000-01-01T00:00:06.0000000Z"
+        },
+        {
+          "pid": 900008,
+          "startedAt": "2000-01-01T00:00:07.0000000Z"
+        },
+        {
+          "pid": 900009,
+          "startedAt": "2000-01-01T00:00:08.0000000Z"
+        },
+        {
+          "pid": 900010,
+          "startedAt": "2000-01-01T00:00:09.0000000Z"
+        },
+        {
+          "pid": 900011,
+          "startedAt": "2000-01-01T00:00:10.0000000Z"
+        },
+        {
+          "pid": 900012,
+          "startedAt": "2000-01-01T00:00:11.0000000Z"
+        },
+        {
+          "pid": 900013,
+          "startedAt": "2000-01-01T00:00:12.0000000Z"
+        },
+        {
+          "pid": 900014,
+          "startedAt": "2000-01-01T00:00:13.0000000Z"
+        },
+        {
+          "pid": 900015,
+          "startedAt": "2000-01-01T00:00:14.0000000Z"
+        },
+        {
+          "pid": 900016,
+          "startedAt": "2000-01-01T00:00:15.0000000Z"
+        },
+        {
+          "pid": 900017,
+          "startedAt": "2000-01-01T00:00:16.0000000Z"
+        },
+        {
+          "pid": 900018,
+          "startedAt": "2000-01-01T00:00:17.0000000Z"
+        },
+        {
+          "pid": 900019,
+          "startedAt": "2000-01-01T00:00:18.0000000Z"
+        },
+        {
+          "pid": 900023,
+          "startedAt": "2000-01-01T00:00:19.0000000Z"
+        },
+        {
+          "pid": 900024,
+          "startedAt": "2000-01-01T00:00:20.0000000Z"
+        },
+        {
+          "pid": 900025,
+          "startedAt": "2000-01-01T00:00:21.0000000Z"
+        },
+        {
+          "pid": 900026,
+          "startedAt": "2000-01-01T00:00:22.0000000Z"
+        },
+        {
+          "pid": 900029,
+          "startedAt": "2000-01-01T00:00:23.0000000Z"
+        }
+      ],
+      "errors": []
+    }
+  ]
+}

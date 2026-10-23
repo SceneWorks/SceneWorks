@@ -329,6 +329,86 @@ export function replayRequest(recipe, projectId) {
   assert(Number.isInteger(raw.numInferenceSteps) && typeof raw.sampler === 'string' && typeof guidance === 'number', 'saved sampler/steps/guidance required for replay');
   return { projectId, mode: recipe.mode, model: recipe.model, prompt: recipe.prompt, negativePrompt: recipe.negativePrompt ?? '', seed: recipe.seed, width: settings.width, height: settings.height, count: settings.count, loras: [], advanced: { steps: raw.numInferenceSteps, sampler: raw.sampler, guidanceScale: guidance, enhancePrompt: raw.enhancePrompt === true, quantTier: raw.quantTier } };
 }
+export const RETAINED_REPLAY_CASE = 'candle.distilled.representative-repro.bf16';
+export const RETAINED_REPLAY_FIRST = `${RETAINED_REPLAY_CASE}.generation-1`;
+export const RETAINED_REPLAY_NEXT = `${RETAINED_REPLAY_CASE}.generation-2`;
+export async function validateReplayPrefixBaseline({ previousApproval, previousReceipt, authorization, ownedRoot }) {
+  const b = authorization.baseline;
+  assert(b?.caseId === RETAINED_REPLAY_CASE && b.consumedInvocationId === RETAINED_REPLAY_FIRST && b.nextInvocationId === RETAINED_REPLAY_NEXT, 'only the explicitly approved first Candle replay prefix may be retained');
+  assert.deepEqual(b.allowedLineageRemap, ['projectId'], 'only project lineage may be remapped for this reference-free baseline');
+  const artifact = async binding => {
+    assert(binding && Object.keys(binding).sort().join(',') === 'path,sha256' && path.isAbsolute(binding.path) && digestPattern.test(binding.sha256));
+    const relative = path.relative(path.resolve(ownedRoot), path.resolve(binding.path));
+    assert(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'retained replay artifact escaped lexical owned root');
+    const file = await contained(binding.path, ownedRoot), bytes = await readFile(file);
+    assert.equal(sha256(bytes), binding.sha256, 'retained replay evidence bytes changed'); return { file, bytes };
+  };
+  const reportFile = await artifact(b.report), png = await artifact(b.png), sidecar = await artifact(b.sidecar), readbackFile = await artifact(b.readback);
+  const prior = JSON.parse(reportFile.bytes), readback = JSON.parse(readbackFile.bytes), saved = JSON.parse(sidecar.bytes);
+  assert.equal(prior.sourceSha, previousApproval.sourceSha); assert.equal(prior.inferenceMainSha, previousApproval.inferenceMainSha);
+  assert.equal(prior.approvedPlanSha256, planHash(previousApproval)); assert.equal(prior.ledgerId, previousApproval.ledgerId);
+  assert.deepEqual(prior.ledgerReceipt, previousReceipt, 'render baseline must accompany the trusted final old ledger receipt');
+  const cell = previousApproval.plan.cases.find(c => c.caseId === RETAINED_REPLAY_CASE), recorded = prior.cases.find(c => c.caseId === RETAINED_REPLAY_CASE);
+  assert(cell?.backend === 'candle' && cell.kind === 'replay' && cell.modelId === 'flux3_klein' && cell.tier === 'bf16' && cell.inputBindings.length === 0);
+  for (const [key, value] of Object.entries(cell)) if (key !== 'status') assert.deepEqual(recorded[key], value, 'retained replay case/options changed');
+  assert.equal(recorded.executionStatus, 'FAILED', 'historical supervision failure must remain recorded, not relabeled PASS');
+  assert(typeof recorded.error === 'string' && recorded.error.includes('Get-Counter') && recorded.error.includes('CounterApiError') && recorded.error.includes('performance counter samples is not valid'), 'only the known failed counter-supervision prefix is resumable');
+  assert.equal(recorded.outputs.length, 1); assert.equal(recorded.jobs.length, 1); assert.equal(recorded.requests.length, 2);
+  const output = recorded.outputs[0], job = recorded.jobs[0], first = recorded.requests[0], second = recorded.requests[1];
+  assert.equal(path.resolve(output.retainedPng), path.resolve(b.png.path)); assert.equal(path.resolve(output.retainedSidecar), path.resolve(b.sidecar.path));
+  assert.equal(await realpath(output.retainedPng), png.file); assert.equal(await realpath(output.retainedSidecar), sidecar.file);
+  assert.equal(output.pngSha256, b.png.sha256); assert.equal(output.sidecarSha256, b.sidecar.sha256);
+  assert.equal(first.sha256, b.firstRequestSha256); assert.equal(second.sha256, b.secondRecordedRequestSha256);
+  assert.equal(objectHash(first.body), first.sha256); assert.equal(objectHash(second.body), second.sha256);
+  assert.notEqual(first.sha256, second.sha256, 'retain the two original raw transport hashes; never assert false raw equality');
+  assert.equal(previousReceipt.events[0].requestSha256, first.sha256);
+  assert.deepEqual(first.body, second.body); assert.equal(first.body.count, 1);
+  const expectedTarget = targetRegistry(await loadProductTargets()).find(t => t.backend === 'candle' && t.modelId === cell.modelId);
+  assert(expectedTarget);
+  assert.deepEqual(first.body, imageRequest(cell, expectedTarget, first.body.projectId, {}), 'retained request must match every approved authored inference parameter');
+  assert(!first.body.referenceAssetIds?.length && first.body.loras.length === 0 && !first.body.advanced.enhancePrompt && !first.body.advanced.flux3_layout, 'retained prefix is reference-free/adapter-free/PUP-off only');
+  assertAccepted(job, first.body); assert.equal(job.status, 'completed'); assert.equal(job.stage, 'completed'); assert.equal(job.error ?? null, null);
+  assert.equal(job.backend, '1'); assert.equal(job.workerId, b.oldWorkerId); assert.equal(job.id, b.oldJobId);
+  assert.equal(job.result.adapter, 'candle_flux3'); assert.equal(job.result.model, 'flux3_klein'); assert.equal(job.result.assetIds.length, 1); assert.equal(job.result.assets.length, 1); assert(!Object.hasOwn(job.result, 'assetWrites'));
+  assert.deepEqual(job.result.assets[0], saved); assert.equal(job.result.assetIds[0], saved.id); assert.equal(output.assetId, saved.id);
+  assert.equal(saved.projectId, first.body.projectId); assert.equal(saved.lineage.jobId, job.id); assert.equal(saved.type, 'image'); assert.equal(saved.generationSetId, job.result.generationSetId);
+  assert.deepEqual(saved.recipe, output.recipe);
+  for (const key of ['model', 'mode', 'prompt', 'seed']) assert.equal(saved.recipe[key], first.body[key]);
+  assert.equal(saved.recipe.adapter, 'candle_flux3'); assert.equal(saved.recipe.rawAdapterSettings.realModelInference, true);
+  assert.equal(saved.recipe.rawAdapterSettings.numInferenceSteps, first.body.advanced.steps); assert.equal(saved.recipe.rawAdapterSettings.repo, cell.repository);
+  assert.equal(saved.recipe.normalizedSettings.family, 'flux3'); for (const key of ['width', 'height', 'count']) assert.equal(saved.recipe.normalizedSettings[key], first.body[key]);
+  assertImageObservations(cell, first.body, saved, {});
+  assert.equal(saved.file.mimeType, 'image/png'); assert.equal(saved.file.width, 1024); assert.equal(saved.file.height, 1024);
+  const pixels = assertFinishedPng(png.bytes, 1024, 1024); assert.deepEqual(pixels, output.pixelValidity); assert.deepEqual(pixels, readback.pixelValidity);
+  assert.equal(readback.pngSha256, b.png.sha256); assert.equal(readback.retainedSidecarHashVerified, true); assert.equal(readback.seedAndReplayReconstructionVerified, true);
+  assert.equal(output.semanticAcceptance, 'PENDING'); assert.equal(readback.semanticAcceptance, 'PENDING'); assert.equal(recorded.visualInspection, 'NOT_INSPECTED');
+  assert.equal(output.device.physicalGpuId, '1'); assert.equal(output.device.logicalCudaOrdinal, 0); assert(output.device.ownComputePids.includes(b.oldWorkerPid));
+  assert.deepEqual(replayRequest(saved.recipe, first.body.projectId), first.body);
+  return { caseId: RETAINED_REPLAY_CASE, consumedInvocationId: RETAINED_REPLAY_FIRST, nextInvocationId: RETAINED_REPLAY_NEXT, pngSha256: b.png.sha256, sidecarSha256: b.sidecar.sha256, pngPath: png.file, sidecarPath: sidecar.file, oldJobId: job.id, oldWorkerId: job.workerId, oldWorkerPid: b.oldWorkerPid, oldSourceSha: previousApproval.sourceSha, firstRequestSha256: first.sha256, secondRecordedRequestSha256: second.sha256, firstRequest: first.body, recordedReplayRequest: second.body, recipe: saved.recipe, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING' };
+}
+export function retainedReplayBody(prefix, projectId, authoredBody) {
+  assert(prefix?.caseId === RETAINED_REPLAY_CASE && prefix.consumedInvocationId === RETAINED_REPLAY_FIRST && prefix.nextInvocationId === RETAINED_REPLAY_NEXT);
+  assert(typeof projectId === 'string' && /^[a-zA-Z0-9_-]+$/.test(projectId));
+  assert.deepEqual(authoredBody, { ...prefix.firstRequest, projectId }, 'only project lineage may change from the retained first request');
+  const request = replayRequest(prefix.recipe, projectId);
+  assert.deepEqual(request, { ...prefix.recordedReplayRequest, projectId }, 'retained replay inference parameters changed');
+  assert.deepEqual(request, authoredBody); return request;
+}
+export async function executeRetainedReplayPrefix(session, cell, body, project, report, generate) {
+  const prefix = session.replayPrefix;
+  assert(cell.caseId === RETAINED_REPLAY_CASE && cell.kind === 'replay' && cell.backend === 'candle' && prefix?.caseId === cell.caseId);
+  assert(prefix.authorizationSha256 && prefix.historicalExecutionStatus === 'FAILED' && prefix.semanticAcceptance === 'PENDING');
+  assert(session.identity.workerId !== prefix.oldWorkerId, 'retained replay requires a fresh owned worker identity');
+  assert.equal(report.outputs.length, 0); assert.equal(report.jobs.length, 0);
+  const request = retainedReplayBody(prefix, project.id, body);
+  report.carriedBaseline = { caseId: prefix.caseId, invocationId: prefix.consumedInvocationId, sourceSha: prefix.oldSourceSha, authorizationSha256: prefix.authorizationSha256, jobId: prefix.oldJobId, pngSha256: prefix.pngSha256, sidecarSha256: prefix.sidecarSha256, firstRequestSha256: prefix.firstRequestSha256, secondRecordedRequestSha256: prefix.secondRecordedRequestSha256, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING', evidenceRole: 'RETAINED_RENDER_BASELINE_NOT_NEW_GENERATION' };
+  await generate(request); // Production supplies ONLY runImage; CLI cannot inject a callback.
+  assert.equal(report.outputs.length, 1, 'continuation creates only the actual second output');
+  assert.equal(report.jobs.length, 1); assert.notEqual(report.jobs[0].id, prefix.oldJobId);
+  assert.equal(report.jobs[0].workerId, session.identity.workerId);
+  assert.equal(report.outputs[0].pngSha256, prefix.pngSha256, 'fresh-process replay differs from the parent-approved retained render baseline');
+  report.replayCompletedFromRetainedBaseline = true;
+}
 export async function executeCell(session, cell, target, project, inputs, spec, directory, report) {
   if (cell.kind === 'provision') return provisionCell(session, cell, target, spec, report);
   const body = imageRequest({ ...cell, options: Object.fromEntries(Object.entries(cell.options).filter(([key]) => key !== 'loraScale')) }, target, project.id, inputs);
@@ -372,6 +452,9 @@ export async function executeCell(session, cell, target, project, inputs, spec, 
   }
   const adapterSpec = Object.hasOwn(cell.options, 'loraScale') ? boundAdapterSpec(session, cell, spec.adapters?.[cell.modelId]) : undefined;
   if (adapterSpec) { const lora = await importAdapter(session, adapterSpec, cell, project, report); body.loras = [{ id: lora.id, name: lora.name, weight: cell.options.loraScale }]; }
+  if (session.replayPrefix && cell.caseId === RETAINED_REPLAY_CASE) {
+    return executeRetainedReplayPrefix(session, cell, body, project, report, request => runImage(session, cell, request, project, directory, report, inputs));
+  }
   await runImage(session, cell, body, project, directory, report, inputs);
   if (Object.hasOwn(cell.options, 'loraScale')) {
     const proof = report.outputs.at(-1), specAdapter = adapterSpec; session.loraZeroProof ??= {};

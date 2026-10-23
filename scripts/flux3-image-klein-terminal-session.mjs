@@ -12,7 +12,7 @@ import { userInfo } from 'node:os';
 import { ROOT, shaPattern, digestPattern } from './flux3-image-klein-terminal-plan.mjs';
 import { attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, runnerHfCredential, authorizeFlux3Repository, redactSensitiveText } from './flux3-image-klein-app-lifecycle.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
-import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256, admittedHost } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, auditLedger, reserveInvocation, boundInputSpecSha256, admittedHost, candleReplayPrefix } from './flux3-image-klein-terminal-budget.mjs';
 const execFile = promisify(execFileCb);
 // Physical Macs: runner name -> its GitHub runner target and unique label.
 export const MAC_RUNNERS = Object.freeze({ 'nax-macos': Object.freeze({ runnerTarget: 'primary', runnerLabel: 'rw-starvector' }), 'nax-macos-2': Object.freeze({ runnerTarget: 'secondary', runnerLabel: 'rw-mage' }) });
@@ -59,7 +59,51 @@ const cudaUuidProbe = `Add-Type -TypeDefinition 'using System.Runtime.InteropSer
 // adapter LUID that CUDA itself reports for masked CUDA0 (physical GPU1). Bounded, never ignored.
 export const FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES = 1024 * 1024 ** 2;
 export const FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES = 3 * 1024 ** 3;
-const gpuProcessMemoryScript = luid => `$m=@{}; (Get-Counter '\\GPU Process Memory(*luid_${luid}_phys_*)\\Dedicated Usage' -ErrorAction Stop).CounterSamples | ForEach-Object { $p=[int]($_.InstanceName -split '_')[1]; $m[$p]=[double]$m[$p]+$_.CookedValue }; $m.GetEnumerator() | ForEach-Object { Write-Output ("{0},{1}" -f $_.Key,[int64]$_.Value) }`;
+export function gpuProcessMemoryScript(luid, requiredProcesses) {
+  assert(/^0x[0-9a-f]{8}_0x[0-9a-f]{8}$/i.test(luid));
+  assert(requiredProcesses.length && requiredProcesses.every(p => Number.isSafeInteger(p.pid) && p.pid > 0));
+  // Capture (do not discard) nonterminating provider errors. The JS validator below permits
+  // partial results ONLY when known invalid UNREQUIRED instances explain those errors and
+  // every required PID/start-time/physical-node sample is independently valid.
+  return `$ErrorActionPreference='Stop'; $wanted=@(${requiredProcesses.map(p => p.pid).join(',')}); $counterErrors=@();
+$sets=@(Get-Counter '\\GPU Process Memory(*luid_${luid}_phys_*)\\Dedicated Usage' -MaxSamples 1 -ErrorAction Continue -ErrorVariable counterErrors 2>$null);
+$samples=@($sets | ForEach-Object { $_.CounterSamples } | ForEach-Object {
+  $pidValue=-1; $luidValue=$null; $physicalNode=-1;
+  if ($_.InstanceName -match '^pid_([0-9]+)_luid_(0x[0-9a-f]{8}_0x[0-9a-f]{8})_phys_([0-9]+)$') { $pidValue=[int]$Matches[1]; $luidValue=$Matches[2].ToLowerInvariant(); $physicalNode=[int]$Matches[3] };
+  $row=[ordered]@{pid=$pidValue;luid=$luidValue;physicalNode=$physicalNode;status=[long]$_.Status}; $value=[double]$_.CookedValue;
+  if (($_.Status -eq 0 -or $_.Status -eq 1) -and -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and $value -ge 0) { $row.cookedBytes=$value }; [pscustomobject]$row
+});
+$identities=@(Get-CimInstance Win32_Process | Where-Object { $wanted -contains $_.ProcessId } | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;startedAt=$_.CreationDate.ToUniversalTime().ToString('o')} });
+$errors=@($counterErrors | ForEach-Object { $code='UNKNOWN_COUNTER_PROVIDER_ERROR'; if (([string]$_.FullyQualifiedErrorId).StartsWith('CounterApiError,')) { $code='CounterApiError' }; [pscustomobject]@{category=[string]$_.CategoryInfo.Category;code=$code} });
+[pscustomobject]@{samples=$samples;identities=$identities;errors=$errors} | ConvertTo-Json -Depth 5 -Compress`;
+}
+export function validateGpuProcessMemory(observation, luid, requiredProcesses) {
+  assert(/^0x[0-9a-f]{8}_0x[0-9a-f]{8}$/i.test(luid));
+  assert(requiredProcesses.length && new Set(requiredProcesses.map(p => p.pid)).size === requiredProcesses.length);
+  assert(Array.isArray(observation?.samples) && Array.isArray(observation.identities) && Array.isArray(observation.errors), 'structured GPU counter observation required');
+  const required = new Map(requiredProcesses.map(p => { assert(Number.isSafeInteger(p.pid) && p.pid > 0 && typeof p.startedAt === 'string' && Number.isFinite(Date.parse(p.startedAt)), 'required GPU process start-time proof missing'); return [p.pid, p.startedAt]; }));
+  const identities = new Map();
+  for (const p of observation.identities) { assert(required.has(p.pid) && !identities.has(p.pid), 'unexpected/duplicate GPU counter process identity'); identities.set(p.pid, p.startedAt); }
+  for (const [pid, startedAt] of required) assert.equal(identities.get(pid), startedAt, 'required GPU process missing/reused during counter observation');
+  const memory = new Map(), seen = new Set(); let invalidUnrequired = 0;
+  for (const sample of observation.samples) {
+    assert(Number.isSafeInteger(sample.pid) && sample.pid > 0 && sample.luid === luid.toLowerCase() && Number.isSafeInteger(sample.physicalNode) && sample.physicalNode >= 0 && Number.isSafeInteger(sample.status) && sample.status >= 0 && sample.status <= 0xffffffff, 'malformed GPU counter sample identity/status');
+    const key = `${sample.pid}:${sample.physicalNode}`; assert(!seen.has(key), 'duplicate GPU counter physical-node sample'); seen.add(key);
+    const valid = [0, 1].includes(sample.status) && Number.isFinite(sample.cookedBytes) && sample.cookedBytes >= 0;
+    if (required.has(sample.pid)) {
+      assert(valid, 'required foreign GPU process has invalid counter data');
+      memory.set(sample.pid, (memory.get(sample.pid) ?? 0) + sample.cookedBytes);
+    } else if (!valid) {
+      // SDK PdhMsg.h: per-instance NO_INSTANCE / INVALID_DATA. Unknown provider statuses
+      // never become an exception merely because the affected PID is not required.
+      assert([0x800007d1, 0xc0000bba].includes(sample.status), 'unknown unrequired GPU counter failure'); invalidUnrequired++;
+    }
+  }
+  for (const pid of required.keys()) assert(memory.has(pid) && Number.isSafeInteger(memory.get(pid)) && memory.get(pid) >= 0, 'required foreign GPU counter sample missing/nonintegral');
+  assert(observation.errors.every(e => e?.category === 'InvalidResult' && e.code === 'CounterApiError'), 'GPU counter provider/permission failure');
+  assert((observation.errors.length > 0) === (invalidUnrequired > 0), 'unexplained GPU counter provider error/invalid sample');
+  return memory;
+}
 /** Foreign desktop graphics on GPU1: every foreign C+G must be measured and within bounds; the
  *  measured total is evidence (it reduces the headroom any resource anchor actually had). */
 export function assessForeignGraphics(foreignPids, memoryByPid, { processLimit = FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, totalLimit = FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } = {}) {
@@ -140,12 +184,15 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     else if (device.toLowerCase() === uuid.toLowerCase()) { assert.equal(types.get(Number(pid)), 'C+G', 'foreign process actually computing on GPU1 (pure compute or unidentified type)'); foreign.push(Number(pid)); }
   }
   onPhase('gpu_headroom');
-  let memory = new Map();
+  let memory = new Map(), counterProof;
   if (foreign.length) {
     assert(luid, 'foreign desktop C+G on GPU1 is unmeasurable: CUDA reported no adapter LUID; refusing');
-    memory = new Map((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid)], { timeout: 30_000 })).stdout.split(/\r?\n/).filter(Boolean).map(line => line.trim().split(',').map(Number)));
+    const requiredProcesses = foreign.map(pid => { const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'foreign GPU process identity missing/ambiguous'); return { pid, startedAt: matches[0].startedAt }; });
+    const observation = JSON.parse((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid, requiredProcesses)], { timeout: 30_000 })).stdout);
+    memory = validateGpuProcessMemory(observation, luid, requiredProcesses);
+    counterProof = { requiredProcesses, ...observation };
   }
-  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory) };
+  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory), ...(counterProof ? { counterProof } : {}) };
   return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)), foreignGraphics };
 }
 // Called ONLY by the adapter's synchronous native-boundary child CLI, before reservation.
@@ -173,12 +220,26 @@ export async function verifyResourceProducerHardware(a, context, dependencies = 
   return { kind: 'flux3-resource-producer-hardware-observation', backend: a.backend, adapterPid: context.adapterPid, caseId: context.caseId, invocationId: context.invocationId, requestSha256: context.requestSha256, sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt.sha256, approvedPlanSha256: approved.approvedPlanSha256, observedAt: new Date().toISOString(), adapterProcess: producer, proof };
 }
 export class ProvisioningBlocked extends Error {}
+export function selectProductInvocation(approval, cell, index, body, replayPrefix) {
+  assert(Number.isSafeInteger(index) && index >= 0);
+  const invocations = approval.plan.generationInvocations.filter(i => i.backend === cell.backend && i.caseId === cell.caseId && i.kind === 'product_generation');
+  if (replayPrefix && cell.caseId === replayPrefix.caseId) {
+    assert(cell.caseId === 'candle.distilled.representative-repro.bf16' && cell.kind === 'replay' && cell.backend === 'candle');
+    assert.equal(index, 0, 'the fixed replay continuation permits exactly one new render');
+    assert.equal(replayPrefix.authorizationSha256, approval.candleSourceTransitionSha256);
+    assert.equal(invocations.length, 2); assert.equal(invocations[0].invocationId, replayPrefix.consumedInvocationId); assert.equal(invocations[1].invocationId, replayPrefix.nextInvocationId);
+    assert(typeof body.projectId === 'string' && /^[a-zA-Z0-9_-]+$/.test(body.projectId));
+    assert.deepEqual(body, { ...replayPrefix.recordedReplayRequest, projectId: body.projectId }, 'only project lineage may differ from the retained replay request');
+    return invocations[1];
+  }
+  return invocations[index];
+}
 export async function launchTerminalSession(a, dependencies = {}) {
   // Dependency overrides are for weights-free tests; production CLI never accepts a launcher module.
   const io = { mkdir, cp, open, readFile, writeFile, createServer, readCredential: runnerHfCredential, authorize: authorizeFlux3Repository, reserve: reserveInvocation, execWitness: execFile, hash: fileHash, spawn, guard: guardHardware, controller: ownedApiController, sleep: ms => new Promise(r => setTimeout(r, ms)), now: Date.now, env: process.env, ...dependencies };
   a = { ...a, runDeadline: io.now() + a.timeoutSeconds * 1000 };
   const identity = attemptIdentity(a.outputRoot), children = [], handles = [], abort = new AbortController();
-  let artifactMapping;
+  let artifactMapping, replayPrefix, initialLedgerReceipt;
   const execution = { sourceSha: a.sourceSha, inferenceMainSha: a.inferenceMainSha, runner: a.runner, runnerAccount: a.runnerAccount, binarySha256: a.binarySha256, buildReceiptSha256: a.binaryBuildReceipt?.sha256 };
   let endpoint, worker, currentCase, workerPaused = false, generation = 0, monitoring = false, restarting = false, closing = false, monitor, monitorTask, faultServer, faultUrl;
   const invocationIndexes = new Map(), permits = [];
@@ -210,8 +271,20 @@ export async function launchTerminalSession(a, dependencies = {}) {
   try {
     if (!dependencies.fixtureOnly) {
       await validateAdmission(a, a.backend); const budget = validateApprovedPlan(a.approvedPlan); assert.equal(budget.approvedPlanSha256, a.approvedPlanSha256); assert.equal(a.ledgerId, a.approvedPlan.ledgerId); admittedHost(a.approvedPlan, a);
-      await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot, inputSpecAddendum: a.inputSpecAddendum, host: a.runner });
+      initialLedgerReceipt = await auditLedger({ approval: a.approvedPlan, backend: a.backend, ledgerRoot: a.ledgerRoot, inputSpecAddendum: a.inputSpecAddendum, host: a.runner });
       const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a);
+    }
+    if (a.replayPrefixAuthorizationSha256 !== undefined) {
+      assert(a.backend === 'candle' && digestPattern.test(a.replayPrefixAuthorizationSha256) && a.replayPrefixAuthorizationSha256 === a.approvedPlan?.candleSourceTransitionSha256, 'explicit current approval must bind the retained replay prefix');
+      const receipt = initialLedgerReceipt ?? await auditLedger({ approval: a.approvedPlan, backend: 'candle', ledgerRoot: a.ledgerRoot });
+      const carried = candleReplayPrefix(receipt, a.approvedPlan);
+      assert.equal(carried.authorizationSha256, a.replayPrefixAuthorizationSha256);
+      assert.equal(receipt.state.sequence, 2); assert.equal(receipt.state.generationCount, 1);
+      assert.deepEqual(receipt.state.consumedIds, [carried.consumedInvocationId]);
+      assert(!receipt.state.consumedIds.includes(carried.nextInvocationId), 'the retained replay continuation cannot repeat its second generation');
+      const { validateReplayPrefixBaseline } = await import('./flux3-image-klein-terminal-driver.mjs');
+      replayPrefix = await validateReplayPrefixBaseline({ previousApproval: carried.previousApproval, previousReceipt: carried.previousReceipt, authorization: carried.authorization, ownedRoot: path.resolve(a.ledgerRoot, '../..') });
+      replayPrefix.authorizationSha256 = carried.authorizationSha256;
     }
     assert.equal(await io.hash(a.binary), a.binarySha256, 'prebuilt binary mismatch');
     if (!dependencies.skipPinReadForFixture) assertPins(await Promise.all(['Cargo.toml', 'crates/sceneworks-worker/Cargo.toml', 'crates/sceneworks-memory-adapter/Cargo.toml'].map(f => io.readFile(path.join(ROOT, f), 'utf8'))), await io.readFile(path.join(ROOT, 'Cargo.lock'), 'utf8'), a.inferenceMainSha);
@@ -253,7 +326,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
       if (image) {
         await guard();
         assert(!workerPaused && worker.exitCode === null); assert.equal(body.count, 1, 'batch generation requires individually named permits'); assert(!body.hiresFix?.enabled && !body.advanced?.hiresFix?.enabled, 'hidden extra generation passes are forbidden');
-        const index = invocationIndexes.get(currentCase.caseId) ?? 0, invocation = a.approvedPlan.plan.generationInvocations.filter(i => i.backend === a.backend && i.caseId === currentCase.caseId && i.kind === 'product_generation')[index];
+        const index = invocationIndexes.get(currentCase.caseId) ?? 0, invocation = selectProductInvocation(a.approvedPlan, currentCase, index, body, replayPrefix);
         assert(invocation, 'no approved single-use generation permit; no auto retry/repeat/spare allocation'); await consume(invocation.invocationId, invocation.kind, body); invocationIndexes.set(currentCase.caseId, index + 1);
       } else if (/\/training\/jobs$/.test(route) || retry) {
         await guard();
@@ -271,7 +344,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     };
     const started = await startWorker();
     monitor = setInterval(() => { if (monitoring || restarting || closing) return; monitoring = true; monitorTask = (async () => { try { alive(); assert(api.exitCode === null && api.signalCode === null && worker.exitCode === null && worker.signalCode === null, 'owned service exited'); await guard(); } catch (e) { abort.abort(e); } finally { monitoring = false; } })(); }, 2000);
-    return { endpoint, identity, execution, artifactMapping, deviceAtLaunch, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
+    return { endpoint, identity, execution, artifactMapping, deviceAtLaunch, replayPrefix, worker: started.record, workerPid: started.pid, wait, alive, faultProfile: a.faultProfile, faultRequests, authorizations, cleanup, permits, redact: text => redactSensitiveText(text, secrets),
       async trainingWitness(plan) {
         assert(workerPaused, 'CPU witness must run with only our GPU worker paused');
         if (!dependencies.fixtureOnly) { const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs'); await verifyTerminalBuild(a); }
