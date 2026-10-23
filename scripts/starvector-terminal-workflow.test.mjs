@@ -570,7 +570,10 @@ test("product service records setup and log-open failures before removing child-
       if (failure === "setup") await writeFile(fixture.manifestPath, JSON.stringify({ ...fixture.manifest, terminal_service_closure: { ...fixture.manifest.terminal_service_closure, app_data_sha256: "0".repeat(64) } }));
       else if (failure === "hf-hash") await writeFile(path.join(fixture.weightsRoot, "hf", "weights.bin"), "tampered");
       else { await mkdir(fixture.output); await writeFile(productServiceLogPaths(fixture.output).api_stdout, "stale log"); }
-      await assert.rejects(() => runProductServiceCli(fixture, "start", port));
+      // Do not let an unrelated early CLI rejection masquerade as the injected failure; report
+      // its stderr here instead of obscuring it with ENOENT while opening the expected receipt.
+      await assert.rejects(() => runProductServiceCli(fixture, "start", port),
+        failure === "open" ? /EEXIST/ : /materialized receipt\/HF closure hash mismatch/);
       const report = JSON.parse(await readFile(path.join(fixture.output, "product-service-start-failed.json"), "utf8"));
       assert.equal(report.status, "failed");
       assert.equal(report.cleanup.status, "not_needed");

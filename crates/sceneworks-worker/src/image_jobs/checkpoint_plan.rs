@@ -1610,69 +1610,6 @@ pub(crate) fn checkpoint_plan_bespoke_roles(
     Ok(Some(CheckpointPlanBespokeRoles { layers }))
 }
 
-/// A plan-backed checkpoint resolved to the ONE component directory its `transformer` layer lives
-/// in, with every plan layer inside that directory pinned — plus the verified plan itself, so the
-/// caller can check its own family-specific binding against the bytes the store just re-proved.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) struct CheckpointPlanComponentDir {
-    pub(crate) checkpoint_id: String,
-    pub(crate) plan: sceneworks_core::checkpoint_import::ImportPlanV1,
-    pub(crate) dir: CheckpointPlanBespokeDir,
-}
-
-/// Resolve a plan-backed entry to its transformer COMPONENT DIRECTORY, for a VIDEO lane (sc-26680).
-///
-/// The directory form of [`checkpoint_plan_bespoke_roles`] and the video twin of
-/// [`checkpoint_plan_bespoke_primary_dir`]: it takes the manifest ENTRY (a video request is not an
-/// [`ImageRequest`]) and, like the roles seam, consults no checkpoint adapter — the family's lane
-/// already knows it opens a diffusers transformer directory, and the plan is the authority for
-/// which artifact that is. Every other refusal is the shared one: integrity is fatal, a plan
-/// compiled for another family never feeds this lane, the transformer layer must be unique, every
-/// layer in its directory is consumed and pinned (a JSON sidecar may ride; a GGUF never), and a
-/// layer OUTSIDE that directory trips [`checkpoint_plan_unconsumed_layers`] rather than being
-/// silently replaced by a resident component.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(crate) fn checkpoint_plan_bespoke_component_dir(
-    entry: &JsonObject,
-    settings: &Settings,
-    family: &str,
-) -> WorkerResult<Option<CheckpointPlanComponentDir>> {
-    let Some(checkpoint_id) = checkpoint_plan_checkpoint_id(entry) else {
-        return Ok(None);
-    };
-    if !checkpoint_plan_entry_routes_to(entry, family) {
-        return Ok(None);
-    }
-    let checkpoint_id = checkpoint_id.to_owned();
-    let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = store
-        .resolve(&checkpoint_id)
-        .map_err(checkpoint_plan_refusal)?;
-    checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
-    let primary = checkpoint_plan_primary(
-        &resolved,
-        gen_core::ImportedModelSource::TransformerDirectory,
-    )?;
-    checkpoint_plan_unconsumed_layers(&resolved, &primary.consumed)?;
-    let WeightsSource::Dir(directory) = primary.weights else {
-        unreachable!("a TransformerDirectory selection always resolves a directory");
-    };
-    Ok(Some(CheckpointPlanComponentDir {
-        checkpoint_id,
-        plan: resolved.plan.clone(),
-        dir: CheckpointPlanBespokeDir {
-            directory,
-            pins: primary.pins,
-        },
-    }))
-}
-
 /// The shared body of both bespoke-source helpers: resolve and re-verify the plan, prove it belongs
 /// to this family and this backend, read the shape from the adapter, select the primary, and refuse
 /// a plan whose layers this lane would not consume.

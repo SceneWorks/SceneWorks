@@ -47,12 +47,14 @@ Downstream consumers of this document:
 | sc-17158 | the `downloads[]` shape (§4), two manifest ids, the license gate (§8) |
 | sc-17149 | `transformer_ref` lands as its own catalog entry (§7) |
 
-## Dense community DiT imports (sc-26680, sc-26682)
+## Dense community DiT imports (sc-26680, sc-26681, sc-26682)
 
-The existing model Add/Import workflow also accepts an unsharded, dense F16/BF16/F32 H3
-Diffusers transformer component directory: `config.json` declaring
-`MiniMaxH3Transformer3DModel` beside `diffusion_pytorch_model.safetensors`. Tensor content
-identifies H3; the directory name and user-selected model type do not select the engine.
+The existing model Add/Import workflow accepts dense F16/BF16/F32 H3 Diffusers component
+directories (single-file or indexed shards) and native/ComfyUI single-file checkpoints.
+Diffusers directories carry `config.json` declaring `MiniMaxH3Transformer3DModel`; a sharded
+directory also carries `diffusion_pytorch_model.safetensors.index.json`, whose exact tensor-to-file
+map must agree with every shard header. Shard and checkpoint names are arbitrary; tensor content
+identifies H3, not a publisher/name allowlist.
 The shared inspector persists an import plan and a component assembly binding on the new
 video model entry. Select that imported entry in Video Studio and generate normally; its
 model id and plan identity remain attached to the job and resulting asset.
@@ -87,8 +89,28 @@ directories: a single-partition import records the opposite resident DiT as a **
 companion, while an explicitly compatible hybrid binds the imported DiT at both task paths.
 Candle stages the same task-selected imported bytes, with explicit base companionship for Ref2VA.
 Missing or incompatible shared components, a changed plan binding, and unsupported operations
-refuse before provider loading. There is no stock-weight substitution. Quantized imports, tensor
-layout normalization and adapters belong to the other epic slices.
+refuse before provider loading. There is no stock-weight substitution. Quantized execution and
+adapters belong to other epic slices.
+
+Native files and provider-incompatible filename suffixes are streamed into the existing
+content-addressed checkpoint derivative cache as canonical component directories. Original
+F16/BF16/F32 precision and checkpoint identity are retained, using a fixed 1 MiB buffer and no
+whole-model dense transient. Missing, duplicate, conflicting, unknown and unconsumed backbone
+tensors fail by tensor/file name. Managed plans bind config, index and every shard; source seals
+bracket normalization, and a cache lease retains the exact derivative through rendering.
+Accepted `.SAFETENSORS`/`.SafeTensors` filenames become lowercase canonical filenames because
+both pinned providers enumerate lowercase suffixes only. All imported config/index documents
+share the inspector's 16 MiB limit before parsing, including API/managed admission.
+
+Native mapping follows the executable converter at
+[`604306cab8694584e6096b32a1c1731bee22c43e`](https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py),
+cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Raw QKV is per-head
+interleaved; each canonical projection gathers its head rows separately. Native gate-first
+`mlp.fc1` row halves become canonical value-first SwiGLU. Reference-runtime state-dict exports
+whose QKV is already reordered explicitly declare `h3_qkv_layout=contiguous`; raw files default
+to `interleaved`. Native variants supply full architecture JSON in bound `config.json` or string
+metadata `h3_config`; without it, every tensor must match the pinned published H3 architecture.
+The task-neutral codec never derives the explicit partition declaration from names or shapes.
 
 ---
 

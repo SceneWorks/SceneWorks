@@ -1936,6 +1936,27 @@ pub(super) struct ImportedMiniMaxH3Dit {
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
     _pins: Vec<gen_core::PinnedWeightsFile>,
+    /// Shared resolved-cache lease keeps normalized native tensors unevictable through rendering.
+    _derivative: Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheLease>,
+}
+
+/// Bracket all header/payload reads; mutation errors win before derivative publication.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn with_imported_h3_source_seals<T>(
+    pins: &[gen_core::PinnedWeightsFile],
+    read: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let verify = || {
+        pins.iter()
+            .try_for_each(|pin| pin.verify_unchanged().map_err(|e| e.to_string()))
+    };
+    verify()?;
+    let result = read();
+    verify()?;
+    result
 }
 
 /// Resolve and re-verify an imported MiniMax-H3 entry's DiT, or refuse with a typed
@@ -1979,47 +2000,145 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         ));
     }
     let entry = &request.model_manifest_entry;
-    let Some(resolved) = crate::image_jobs::checkpoint_plan_bespoke_component_dir(
-        entry,
-        settings,
-        sceneworks_core::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY,
-    )?
-    else {
-        return Err(refuse(
-            "no-video-lane",
-            "the entry does not route to the MiniMax-H3 lane".to_owned(),
-        ));
-    };
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let resolved = store
+        .resolve(&checkpoint_id)
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
     let assembly = sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
         .map_err(|reason| refuse("ambiguous-component", reason))?;
-    // The directory the provider will open whole must still be exactly the DiT the plan bound —
-    // its H3 config and its one weight file, with no stray safetensors `Weights::from_dir` would
-    // map unbound beside them.
-    let directory = resolved.dir.directory.clone();
-    if !sceneworks_core::base_weights::is_minimax_h3_transformer_dir(&directory) {
-        return Err(refuse(
-            "missing-component",
-            format!(
-                "{} is no longer a complete MiniMax-H3 transformer directory (a {} config.json \
-                 beside exactly one {})",
-                directory.display(),
-                sceneworks_core::base_weights::MINIMAX_H3_TRANSFORMER_CLASS,
-                sceneworks_core::base_weights::MINIMAX_H3_TRANSFORMER_WEIGHTS_FILE
-            ),
-        ));
+    let pins = resolved
+        .layers
+        .iter()
+        .map(|layer| {
+            let pin = gen_core::PinnedWeightsFile::pin(&layer.path)
+                .map_err(|e| refuse("source-drift", e.to_string()))?;
+            let expected = layer
+                .layer
+                .source
+                .content_digest()
+                .map_err(|e| refuse("source-drift", e.to_string()))?;
+            if expected.len() != 64
+                || !(0..32).all(|i| {
+                    u8::from_str_radix(&expected[2 * i..2 * i + 2], 16).ok()
+                        == Some(pin.content_sha256()[i])
+                })
+            {
+                return Err(refuse(
+                    "source-drift",
+                    format!(
+                        "source digest changed before pinning {}",
+                        layer.path.display()
+                    ),
+                ));
+            }
+            Ok(pin)
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    let inventory = with_imported_h3_source_seals(&pins, || {
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved(&resolved)
+    })
+    .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
+    let (directory, derivative) =
+        if inventory.requires_normalization {
+            use sceneworks_core::checkpoint_derivative::{
+                CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore,
+            };
+            let cache = CheckpointDerivativeStore::open(&settings.data_dir)
+                .map_err(|e| refuse("normalization", e.to_string()))?;
+            let normalization = inventory.derivative_request();
+            match cache
+                .ensure(&checkpoint_id, &normalization, |outputs| {
+                    with_imported_h3_source_seals(&pins, || inventory.produce(outputs))
+                })
+                .map_err(|e| refuse("normalization", e.to_string()))?
+            {
+                CheckpointDerivativeOutcomeV1::Contended => return Err(refuse(
+                    "normalization-busy",
+                    "this H3 source is being normalized by another load; retry after it completes"
+                        .into(),
+                )),
+                CheckpointDerivativeOutcomeV1::Produced(_)
+                | CheckpointDerivativeOutcomeV1::AlreadyPresent(_) => {}
+            }
+            let lease = cache
+                .acquire(&resolved, &normalization)
+                .map_err(|e| refuse("normalization", e.to_string()))?
+                .ok_or_else(|| {
+                    refuse(
+                        "normalization",
+                        "normalized H3 artifact disappeared before leasing".into(),
+                    )
+                })?;
+            let key = cache
+                .cache_key(&resolved, &normalization)
+                .map_err(|e| refuse("normalization", e.to_string()))?;
+            let directory = cache
+                .cache()
+                .bundle_path(&key)
+                .map_err(|e| refuse("normalization", e.to_string()))?;
+            (directory, Some(lease))
+        } else {
+            let layer = resolved
+                .layers
+                .iter()
+                .find(|layer| layer.layer.layer_id == assembly.transformer_layer_id)
+                .ok_or_else(|| {
+                    refuse(
+                        "missing-component",
+                        "bound transformer layer is absent".into(),
+                    )
+                })?;
+            (
+                layer
+                    .path
+                    .parent()
+                    .ok_or_else(|| {
+                        refuse(
+                            "missing-component",
+                            "transformer has no component directory".into(),
+                        )
+                    })?
+                    .to_path_buf(),
+                None,
+            )
+        };
+    // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
+    // directory, so a verified shard set alone cannot authorize a foreign file beside it.
+    let planned: std::collections::BTreeSet<_> = if inventory.requires_normalization {
+        inventory.derivative_request().outputs.into_iter().collect()
+    } else {
+        resolved
+            .layers
+            .iter()
+            .filter_map(|l| l.path.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    };
+    for entry in
+        std::fs::read_dir(&directory).map_err(|e| refuse("missing-component", e.to_string()))?
+    {
+        let entry = entry.map_err(|e| refuse("missing-component", e.to_string()))?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|e| e == "safetensors" || e == "gguf")
+            && !planned.contains(&entry.file_name().to_string_lossy().into_owned())
+        {
+            return Err(refuse(
+                "unconsumed-layer",
+                format!("unplanned H3 backbone file {}", path.display()),
+            ));
+        }
     }
-    // The weight file the provider loads is a VERIFIED plan layer, not merely a file that exists.
-    resolved
-        .dir
-        .pin_named(sceneworks_core::base_weights::MINIMAX_H3_TRANSFORMER_WEIGHTS_FILE)?;
     Ok(ImportedMiniMaxH3Dit {
         semantic_digest: resolved.plan.semantic_digest().ok(),
         plan_id: resolved.plan.plan_id.clone(),
-        checkpoint_id: resolved.checkpoint_id,
+        checkpoint_id,
         transformer_dir: directory,
         partition: assembly.partition,
         assembly: assembly.to_json(),
-        _pins: resolved.dir.pins,
+        _pins: pins,
+        _derivative: derivative,
     })
 }
 

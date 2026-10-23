@@ -12,6 +12,7 @@
 ))]
 
 use super::*;
+use crate::video_jobs::minimax_h3::with_imported_h3_source_seals;
 
 /// A text-to-video request for the imported entry under `model`.
 fn imported_minimax_h3_request(
@@ -108,6 +109,74 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
         raw["importPlan"]["assembly"],
         imported.entry["importPlan"]["assembly"]
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_and_sharded_plans_reach_the_real_h3_provider_load_seam() {
+    for layout in ["native", "sharded"] {
+        let tiers =
+            minimax_h3_tier_root("mm_layout_", &["q4"], &["transformer", "transformer_ref"]);
+        let base = minimax_h3_base_root("mm_layout_base_");
+        crate::minimax_h3_import_fixture::write_shared_configs(
+            base.path(),
+            &tiers.path().join("q4/text_encoder"),
+        );
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+            &minimax_h3_data_dir(tiers.path()),
+            "arbitrarily_renamed_h3",
+            layout,
+        );
+        let request = imported_minimax_h3_request("arbitrarily_renamed_h3", &imported.entry);
+        let probe = ArmProbe::default();
+        let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+            .expect("layout must load");
+        let spec = probe
+            .spec
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("provider received LoadSpec");
+        let WeightsSource::Dir(directory) = spec.components.get("transformer").unwrap() else {
+            panic!("provider requires component directory")
+        };
+        let mut weights = 0;
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "safetensors") {
+                weights += 1;
+            }
+            files.push((entry.file_name().to_string_lossy().into_owned(), path));
+        }
+        let canonical_inventory =
+            sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
+                .expect("provider input is complete canonical tensors");
+        assert!(
+            !canonical_inventory.native,
+            "native source was actually normalized, not merely recognized"
+        );
+        assert_eq!(weights, if layout == "native" { 1 } else { 2 });
+        assert_eq!(raw["model"], json!("arbitrarily_renamed_h3"));
+        assert_eq!(
+            raw["importPlan"]["checkpointId"],
+            json!(imported.checkpoint_id)
+        );
+        assert_eq!(
+            raw["importPlan"]["semanticDigest"],
+            json!(imported.semantic_digest)
+        );
+        assert_eq!(
+            raw["importPlan"]["assembly"],
+            imported.entry["importPlan"]["assembly"]
+        );
+        if layout == "native" {
+            assert_ne!(canonical(directory), canonical(&imported.install_dir));
+        } else {
+            assert_eq!(canonical(directory), canonical(&imported.install_dir));
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -363,6 +432,25 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
     }
 }
 
+#[test]
+fn source_mutation_before_or_during_normalization_cannot_publish() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.safetensors");
+    std::fs::write(&source, b"original").unwrap();
+    let pin = gen_core::PinnedWeightsFile::pin(&source).unwrap();
+    assert!(with_imported_h3_source_seals(std::slice::from_ref(&pin), || Ok(())).is_ok());
+    let error = with_imported_h3_source_seals(std::slice::from_ref(&pin), || {
+        std::fs::write(&source, b"mutated!").unwrap();
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error.contains("seal mismatch"), "{error}");
+    assert!(with_imported_h3_source_seals::<()>(&[pin], || panic!(
+        "stale source must refuse before read"
+    ))
+    .is_err());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn imported_declared_partitions_keep_their_weights_for_every_operation() {
@@ -379,12 +467,12 @@ fn imported_declared_partitions_keep_their_weights_for_every_operation() {
             &tiers.path().join("q4/text_encoder"),
         );
         let data = minimax_h3_data_dir(tiers.path());
-        let imported =
-            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
-                &data,
-                "minimax_h3_custom",
-                partition,
-            );
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            &data,
+            "minimax_h3_custom",
+            "dense",
+            partition,
+        );
         let (project_id, project_path, image_id) = stage_minimax_h3_reference_project(&data);
         // The provider cache deliberately reuses one generator across this checkpoint's modes.
         // Keep one positive probe attached to that generator, not a fresh uncalled loader per mode.
@@ -482,6 +570,90 @@ fn imported_declared_partitions_keep_their_weights_for_every_operation() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn linked_mixed_case_shards_reach_the_provider_as_lowercase_canonical_files() {
+    let tiers = minimax_h3_tier_root("mm_upper_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_upper_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
+    let data = minimax_h3_data_dir(tiers.path());
+    let original = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+        &data,
+        "uppercase_h3",
+        "sharded",
+    );
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("linked-h3");
+    std::fs::create_dir_all(&source).unwrap();
+    for file in std::fs::read_dir(&original.install_dir).unwrap() {
+        let file = file.unwrap();
+        std::fs::copy(file.path(), source.join(file.file_name())).unwrap();
+    }
+    let index_file = source.join("diffusion_pytorch_model.safetensors.index.json");
+    let mut index: Value =
+        serde_json::from_reader(std::fs::File::open(&index_file).unwrap()).unwrap();
+    for (old, new) in [
+        ("renamed-part-0.safetensors", "part-0.SAFETENSORS"),
+        ("renamed-part-1.safetensors", "part-1.SafeTensors"),
+    ] {
+        std::fs::rename(source.join(old), source.join(new)).unwrap();
+        for shard in index["weight_map"].as_object_mut().unwrap().values_mut() {
+            if shard.as_str() == Some(old) {
+                *shard = json!(new);
+            }
+        }
+    }
+    std::fs::write(&index_file, index.to_string()).unwrap();
+    let plans = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
+    let root = plans.approve_root(library.path()).unwrap();
+    let compiled = plans.compile_linked(&root.root_id, "linked-h3").unwrap();
+    let mut entry = original.entry.clone();
+    entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}));
+    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+        &compiled.plan,
+        &entry,
+    )
+    .unwrap();
+    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+    let request = imported_minimax_h3_request("uppercase_h3", &entry);
+    let probe = ArmProbe::default();
+    let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).unwrap();
+    let spec = probe.spec.lock().unwrap().clone().unwrap();
+    let WeightsSource::Dir(directory) = &spec.components["transformer"] else {
+        panic!("expected canonical directory")
+    };
+    let files: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                entry.path(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        files
+            .iter()
+            .filter(|(name, _)| name.ends_with(".safetensors"))
+            .count(),
+        2
+    );
+    assert!(
+        !sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
+            .unwrap()
+            .requires_normalization
+    );
+    assert_eq!(
+        raw["importPlan"]["checkpointId"],
+        json!(compiled.checkpoint_id)
+    );
+    assert_ne!(canonical(directory), canonical(&source));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn incomplete_or_incompatible_imported_shared_components_never_reach_provider_load() {
     let tiers = minimax_h3_tier_root(
         "mm_components_",
@@ -557,12 +729,12 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
         ..offline_settings()
     };
     for partition in ["fl2va", "ref2va", "hybrid"] {
-        let imported =
-            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
-                data.path(),
-                &format!("candle_{partition}"),
-                partition,
-            );
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            &format!("candle_{partition}"),
+            "dense",
+            partition,
+        );
         for references in [false, true] {
             let mut request =
                 imported_minimax_h3_request(&format!("candle_{partition}"), &imported.entry);
@@ -658,4 +830,195 @@ fn imported_companion_config_mismatches_are_refused_not_defaulted() {
         );
         assert!(probe.spec.lock().unwrap().is_none());
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn native_and_sharded_managed_and_linked_sources_preserve_explicit_partition_operations() {
+    for layout in ["native", "sharded"] {
+        for partition in ["fl2va", "ref2va", "hybrid"] {
+            for linked in [false, true] {
+                let companions: &[&str] = match partition {
+                    "fl2va" => &["transformer_ref"],
+                    "ref2va" => &["transformer"],
+                    _ => &[],
+                };
+                let tiers = minimax_h3_tier_root("mm_combined_", &["q4"], companions);
+                let base = minimax_h3_base_root("mm_combined_base_");
+                crate::minimax_h3_import_fixture::write_shared_configs(
+                    base.path(),
+                    &tiers.path().join("q4/text_encoder"),
+                );
+                let data = minimax_h3_data_dir(tiers.path());
+                let id = format!("combined_{layout}_{partition}_{linked}");
+                let imported =
+                    crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+                        &data, &id, layout, partition,
+                    );
+                let mut entry = imported.entry.clone();
+                let library = tempfile::tempdir().unwrap();
+                if linked {
+                    let source = library.path().join("arbitrary-checkpoint");
+                    std::fs::create_dir_all(&source).unwrap();
+                    for file in std::fs::read_dir(&imported.install_dir).unwrap() {
+                        let file = file.unwrap();
+                        std::fs::copy(file.path(), source.join(file.file_name())).unwrap();
+                    }
+                    let plans =
+                        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
+                    let root = plans.approve_root(library.path()).unwrap();
+                    let compiled = plans
+                        .compile_linked(&root.root_id, "arbitrary-checkpoint")
+                        .unwrap();
+                    entry.remove("paths");
+                    entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}));
+                    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan,&entry).unwrap();
+                    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(
+                        &mut entry, &assembly,
+                    );
+                }
+                let (project_id, project_path, image_id) =
+                    stage_minimax_h3_reference_project(&data);
+                let positive = ArmProbe::default();
+                let mut normalized = None;
+                for mode in [
+                    "text_to_video",
+                    "image_to_video",
+                    "first_last_frame",
+                    "reference_to_video",
+                ] {
+                    let mut payload = json!({"projectId":project_id,"model":id,"modelManifestEntry":entry,"mode":mode,"prompt":"a courier","duration":6.0,"fps":24});
+                    match mode {
+                        "image_to_video" => payload["sourceAssetId"] = json!(image_id),
+                        "first_last_frame" => {
+                            payload["sourceAssetId"] = json!(image_id);
+                            payload["lastFrameAssetId"] = json!(image_id);
+                        }
+                        "reference_to_video" => payload["referenceAssetIds"] = json!([image_id]),
+                        _ => {}
+                    }
+                    let supported = partition == "hybrid"
+                        || (partition == "ref2va") == (mode == "reference_to_video");
+                    let rejected = ArmProbe::default();
+                    let probe = if supported { &positive } else { &rejected };
+                    let result = drive_minimax_h3_arm_in_project(
+                        tiers.path(),
+                        base.path(),
+                        probe,
+                        &request(payload),
+                        &project_path,
+                    );
+                    if !supported {
+                        assert!(result
+                            .map(|(_, raw)| raw)
+                            .unwrap_err()
+                            .to_string()
+                            .contains("unsupported-operation"));
+                        assert!(probe.spec.lock().unwrap().is_none());
+                        continue;
+                    }
+                    let (_, raw) = result.unwrap_or_else(|error| {
+                        panic!("{layout}/{partition}/linked={linked}/{mode}: {error}")
+                    });
+                    let spec = probe
+                        .spec
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("provider load seam reached");
+                    let WeightsSource::Dir(base_dit) = &spec.components["transformer"] else {
+                        panic!("canonical component required")
+                    };
+                    let selected = if mode == "reference_to_video" {
+                        base_dit.with_file_name("transformer_ref")
+                    } else {
+                        base_dit.clone()
+                    };
+                    let selected = canonical(&selected);
+                    if let Some(expected) = &normalized {
+                        assert_eq!(
+                            &selected, expected,
+                            "every supported operation uses the SAME imported/normalized bytes"
+                        );
+                    } else {
+                        normalized = Some(selected.clone());
+                    }
+                    let files: Vec<_> = std::fs::read_dir(&selected)
+                        .unwrap()
+                        .map(|e| {
+                            let e = e.unwrap();
+                            (e.file_name().to_string_lossy().into_owned(), e.path())
+                        })
+                        .collect();
+                    let inventory =
+                        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
+                            .unwrap();
+                    assert!(!inventory.native && !inventory.requires_normalization);
+                    assert_eq!(raw["model"], json!(id));
+                    assert_eq!(
+                        raw["importPlan"]["assembly"],
+                        entry["importPlan"]["assembly"]
+                    );
+                    assert_eq!(
+                        raw["importPlan"]["checkpointId"],
+                        entry["importPlan"]["checkpointId"]
+                    );
+                }
+                // Identical tensor geometry does not supply an absent semantic declaration.
+                let mut ambiguous = entry.clone();
+                ambiguous.remove("minimaxH3Partition");
+                let probe = ArmProbe::default();
+                let error = drive_minimax_h3_arm(
+                    tiers.path(),
+                    base.path(),
+                    &probe,
+                    &imported_minimax_h3_request(&id, &ambiguous),
+                )
+                .map(|(_, raw)| raw)
+                .unwrap_err();
+                assert!(error.to_string().contains("minimaxH3Partition"), "{error}");
+                assert!(probe.spec.lock().unwrap().is_none());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
+    let tiers = minimax_h3_tier_root("mm_nonh3_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_nonh3_base_");
+    let data = minimax_h3_data_dir(tiers.path());
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+        &data,
+        "declared_h3",
+        "native",
+        "hybrid",
+    );
+    let library = tempfile::tempdir().unwrap();
+    crate::minimax_h3_import_fixture::write_safetensors(
+        &library.path().join("not-h3.safetensors"),
+        &[("model.diffusion_model.txtfusion.projector.weight", "BF16")],
+        0x3a,
+    );
+    let plans = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
+    let root = plans.approve_root(library.path()).unwrap();
+    let compiled = plans
+        .compile_linked(&root.root_id, "not-h3.safetensors")
+        .unwrap();
+    assert_eq!(compiled.plan.family, "krea_2");
+    let mut entry = imported.entry;
+    entry.remove("paths");
+    entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest,"assembly":{"partition":"hybrid"}}));
+    let probe = ArmProbe::default();
+    let error = drive_minimax_h3_arm(
+        tiers.path(),
+        base.path(),
+        &probe,
+        &imported_minimax_h3_request("declared_h3", &entry),
+    )
+    .map(|(_, raw)| raw)
+    .unwrap_err();
+    assert!(error.to_string().contains("krea_2"), "{error}");
+    assert!(probe.spec.lock().unwrap().is_none());
 }

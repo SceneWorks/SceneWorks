@@ -16,8 +16,8 @@ use crate::jsonc::strip_jsonc_comments;
 
 /// The catalog family token of every MiniMax-H3 checkpoint, builtin or imported.
 pub const MINIMAX_H3_IMPORT_FAMILY: &str = "minimax-h3";
-/// The `importSourceShape` an imported dense H3 DiT is stamped with: a transformer component
-/// directory, opened whole by the provider.
+/// The provider-facing `importSourceShape`: a canonical transformer component directory.
+/// Native single files reach that shape through the shared content-addressed derivative cache.
 pub const MINIMAX_H3_IMPORT_SOURCE_SHAPE: &str = "transformer_directory";
 /// Version of the persisted `importPlan.assembly` document.
 pub const MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION: u64 = 1;
@@ -133,10 +133,13 @@ pub struct MiniMaxH3ImportAssembly {
     pub partition: MiniMaxH3Partition,
     /// The plan layer that IS the imported DiT.
     pub transformer_layer_id: String,
-    /// Checkpoint-relative directory holding that layer (`""` for the checkpoint root). The
-    /// provider opens this directory whole.
+    /// Every safetensors layer in the DiT inventory, sorted by plan layer id. The primary is the
+    /// first member; shard completeness and tensor mapping are validated by the source codec.
+    pub transformer_layer_ids: Vec<String>,
+    /// Checkpoint-relative source directory (`""` for the checkpoint root). Native sources are
+    /// normalized into a separate provider directory without changing this binding.
     pub transformer_dir: String,
-    /// The JSON descriptor layers (`config.json`) the plan carries inside that directory.
+    /// Bound JSON descriptors (`config.json` and any shard index) in the source directory.
     pub descriptor_layer_ids: Vec<String>,
 }
 
@@ -157,41 +160,29 @@ impl MiniMaxH3ImportAssembly {
             .iter()
             .filter(|layer| layer.role == TRANSFORMER_ROLE)
             .collect();
-        let transformer = match transformers.as_slice() {
-            [layer] => *layer,
-            [] => {
-                return Err(format!(
-                    "plan {:?} carries no {TRANSFORMER_ROLE:?} layer, so there is no MiniMax-H3 \
-                     DiT to bind",
-                    plan.plan_id
-                ))
+        let transformer = transformers.first().copied().ok_or_else(|| format!(
+            "plan {:?} carries no {TRANSFORMER_ROLE:?} layer, so there is no MiniMax-H3 DiT to bind", plan.plan_id
+        ))?;
+        for layer in &transformers {
+            if layer.container != CheckpointContainerV1::Safetensors {
+                return Err(format!("plan {:?} DiT layer {:?} is a {:?} container; MiniMax-H3 providers open safetensors only", plan.plan_id, layer.target_path, layer.container));
             }
-            many => {
-                return Err(format!(
-                "plan {:?} carries {} {TRANSFORMER_ROLE:?} layers; a dense MiniMax-H3 import is \
-                     exactly one unsharded DiT weight file",
-                plan.plan_id,
-                many.len()
-            ))
-            }
-        };
-        if transformer.container != CheckpointContainerV1::Safetensors {
-            return Err(format!(
-                "plan {:?} DiT layer {:?} is a {:?} container; the MiniMax-H3 providers open \
-                 safetensors only",
-                plan.plan_id, transformer.target_path, transformer.container
-            ));
         }
         let transformer_dir = parent_dir(&transformer.target_path).to_owned();
         let mut descriptor_layer_ids = Vec::new();
         for layer in &plan.layers {
-            if layer.layer_id == transformer.layer_id {
+            if transformers
+                .iter()
+                .any(|source| source.layer_id == layer.layer_id)
+            {
+                if parent_dir(&layer.target_path) != transformer_dir {
+                    return Err(format!(
+                        "unconsumed H3 transformer {:?}: all shards must share a directory",
+                        layer.target_path
+                    ));
+                }
                 continue;
             }
-            // Anything else must be a descriptor INSIDE the DiT directory. A text encoder or VAE
-            // carried by the import would be silently replaced by the resident one, and a second
-            // weight file beside the DiT would be mapped by `Weights::from_dir` without ever being
-            // bound — both are incomplete-or-ambiguous assemblies, refused by name.
             if layer.container != CheckpointContainerV1::JsonDescriptor
                 || parent_dir(&layer.target_path) != transformer_dir
             {
@@ -205,9 +196,26 @@ impl MiniMaxH3ImportAssembly {
             descriptor_layer_ids.push(layer.layer_id.clone());
         }
         descriptor_layer_ids.sort();
+        if transformers.len() > 1
+            && !plan.layers.iter().any(|layer| {
+                layer.container == CheckpointContainerV1::JsonDescriptor
+                    && layer.target_path.rsplit('/').next()
+                        == Some(crate::minimax_h3_codec::H3_INDEX_FILE)
+            })
+        {
+            return Err(format!(
+                "plan {:?} carries {} {TRANSFORMER_ROLE:?} layers without a shard index",
+                plan.plan_id,
+                transformers.len()
+            ));
+        }
+        let mut transformer_layer_ids: Vec<_> =
+            transformers.iter().map(|l| l.layer_id.clone()).collect();
+        transformer_layer_ids.sort();
         Ok(Self {
             partition: MiniMaxH3Partition::from_entry(entry)?,
             transformer_layer_id: transformer.layer_id.clone(),
+            transformer_layer_ids,
             transformer_dir,
             descriptor_layer_ids,
         })
@@ -221,6 +229,7 @@ impl MiniMaxH3ImportAssembly {
             json!({
                 "source": "plan",
                 "layerId": self.transformer_layer_id,
+                "layerIds": self.transformer_layer_ids,
                 "directory": self.transformer_dir,
                 "descriptorLayerIds": self.descriptor_layer_ids,
             }),
