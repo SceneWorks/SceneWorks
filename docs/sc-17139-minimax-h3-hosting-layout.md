@@ -154,6 +154,11 @@ derivatives without changing library bytes. Multiple catalog names referencing o
 retain its plan until the last name is removed; a refused new alias cannot invalidate an existing
 model's unchanged binding.
 
+The Linux parity lane provisions the distro FFmpeg through the canonical signed Ubuntu
+archives rather than the hosted image's Azure-first mirror list. This changes only the
+download route: the image's suites, components, keyring and package verification remain
+intact, and the real encode/decode tests remain mandatory (`SCENEWORKS_REQUIRE_FFMPEG=1`).
+
 ---
 
 ## 1. Summary of decisions
