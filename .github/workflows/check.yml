@@ -113,11 +113,11 @@ jobs:
       # into a failure while this is set, so the install silently disappearing goes red instead of
       # quietly reporting `ok` in 0.03 s (sc-19549; convention inherited from sc-19425).
       SCENEWORKS_REQUIRE_FFMPEG: "1"
-    # A stalled step otherwise rides GitHub's 6-hour default timeout, blocking the PR and
-    # holding a runner for hours — this bit PR #1300 / sc-10354 for ~4 h. Cap well above the
-    # healthy duration so healthy runs are unaffected but a wedge fails in minutes with a
-    # clear timeout (sc-10420).
-    timeout-minutes: 30
+    # Keep this hosted CPU lane bounded below GitHub's 6-hour default (sc-10420).
+    # External apt/ffmpeg provisioning has taken 10m32s and 28m47s; with 16m34s of
+    # successful Rust checks, 30m cancelled a run whose every individual step passed.
+    # Allow that measured provisioning variance; test/API timeouts and assertions stay unchanged.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
