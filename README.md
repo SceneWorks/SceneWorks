@@ -654,6 +654,10 @@ scenario needs its own cache root. Metadata-only tests need no network;
 networked unit fixtures should reach only owned loopback mocks, not running
 SceneWorks services or external hosts. Native synthetic projection smokes still
 require a separately reserved accelerator token; they are not ordinary unit tests.
+Stub-loader metadata tests supply an explicit admission budget and still exercise
+the real rejection gate; they must not depend on a live hardware probe. Production
+continues to resolve a fresh live budget at admission, and native projection
+fixtures still create the actual backend device rather than using that test budget.
 
 Optionally install local Git hooks that run `npm run rust:fmt` before commits
 touching Rust files:

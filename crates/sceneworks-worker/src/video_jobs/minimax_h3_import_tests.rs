@@ -43,6 +43,62 @@ fn without_assembly(entry: &serde_json::Map<String, Value>) -> serde_json::Map<S
     unbound
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+/// Budget for a stub-loader request with no adapters or sparse workspace: exactly the existing
+/// measured dense floor plus the production reserve. This is fixture input, not device evidence.
+fn imported_h3_fixture_budget(
+    entry: &serde_json::Map<String, Value>,
+) -> crate::vram_gate::VramBudget {
+    let free_gb = entry["candle"]["vramGbByTier"]["bf16"]
+        .as_f64()
+        .expect("fixture declares the dense admission floor")
+        + crate::vram_gate::HEADROOM_GB;
+    crate::vram_gate::VramBudget {
+        free_gb,
+        total_gb: free_gb,
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn imported_h3_admission_requires_a_known_sufficient_budget() {
+    let data = tempfile::tempdir().unwrap();
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        data.path(),
+        "admission_fixture",
+    );
+    let sufficient = imported_h3_fixture_budget(&imported.entry);
+    let gate = |budget| {
+        crate::vram_gate::minimax_h3_fit_error_with_sparse(
+            &imported.entry,
+            "bf16",
+            0,
+            "fixture-only",
+            budget,
+            None,
+        )
+    };
+    let missing = gate(None).expect("missing probe must refuse").to_string();
+    assert!(
+        missing.contains("could not read free GPU VRAM"),
+        "{missing}"
+    );
+    let insufficient = gate(Some(crate::vram_gate::VramBudget {
+        free_gb: 0.0,
+        ..sufficient
+    }))
+    .expect("insufficient budget must refuse")
+    .to_string();
+    assert!(
+        insufficient.contains("needs ~") && insufficient.contains("free GPU VRAM"),
+        "{insufficient}"
+    );
+    assert!(
+        gate(Some(sufficient)).is_none(),
+        "the exact measured floor and reserve must fit"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_identity() {
@@ -305,6 +361,7 @@ fn drive_candle_imported_minimax_h3(
     settings: &Settings,
     probe: &ArmProbe,
     request: &VideoRequest,
+    budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<Value> {
     let job: JobSnapshot = serde_json::from_value(json!({
         "id": "job-candle-imported-h3", "type": "video_generate", "status": "running",
@@ -331,6 +388,7 @@ fn drive_candle_imported_minimax_h3(
                 &project_path,
                 "minimax_h3",
                 "candle",
+                std::future::ready(budget),
                 probe.loader(),
             ),
         )
@@ -395,8 +453,13 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         "the candle router claims the imported entry"
     );
     let probe = ArmProbe::default();
-    let raw = drive_candle_imported_minimax_h3(&settings, &probe, &request)
-        .expect("an imported dense DiT with a resident install renders");
+    let raw = drive_candle_imported_minimax_h3(
+        &settings,
+        &probe,
+        &request,
+        Some(imported_h3_fixture_budget(&imported.entry)),
+    )
+    .expect("an imported dense DiT with a resident install renders");
     let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
     let Some(WeightsSource::Dir(transformer)) = spec.components.get("transformer") else {
         panic!("the imported DiT must ride components[\"transformer\"]");
@@ -419,6 +482,27 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         json!(imported.semantic_digest)
     );
 
+    // The real admission gate still rejects absent/insufficient budgets before invoking the loader.
+    for (budget, needle) in [
+        (None, "could not read free GPU VRAM"),
+        (
+            Some(crate::vram_gate::VramBudget {
+                free_gb: 0.0,
+                ..imported_h3_fixture_budget(&imported.entry)
+            }),
+            "needs ~",
+        ),
+    ] {
+        let rejected = ArmProbe::default();
+        let error = drive_candle_imported_minimax_h3(&settings, &rejected, &request, budget)
+            .expect_err("the real gate must refuse before the stub loader");
+        assert!(error.to_string().contains(needle), "{error}");
+        assert!(
+            rejected.spec.lock().unwrap().is_none(),
+            "refused before provider loading"
+        );
+    }
+
     // Controls: the binding removed, or the builtin id substituted, never reach the loader.
     let unbound = without_assembly(&imported.entry);
     for (model, entry, needle) in [
@@ -430,6 +514,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             &settings,
             &probe,
             &imported_minimax_h3_request(model, entry),
+            Some(imported_h3_fixture_budget(&imported.entry)),
         )
         .expect_err("refused");
         assert!(error.to_string().contains(needle), "{model}: {error}");
@@ -1158,7 +1243,12 @@ fn drive_bound_component_import(
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        drive_candle_imported_minimax_h3(settings, probe, request)
+        drive_candle_imported_minimax_h3(
+            settings,
+            probe,
+            request,
+            Some(imported_h3_fixture_budget(&request.model_manifest_entry)),
+        )
     }
 }
 

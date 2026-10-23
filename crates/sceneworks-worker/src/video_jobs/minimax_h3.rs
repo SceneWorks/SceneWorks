@@ -14,6 +14,8 @@ use runtime_macos as platform_runtime;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use std::future::Future;
 
 /// Catalog-only optional component staging shared by both native H3 routes. Never fetches.
 #[cfg(any(
@@ -1707,14 +1709,15 @@ pub(super) async fn generate_candle_minimax_h3(
         project_path,
         engine_id,
         backend,
+        super::candle::candle_video_vram_budget(settings),
         crate::inference_runtime::load,
     )
     .await
 }
 
-/// [`generate_candle_minimax_h3`] with the engine loader supplied by the caller — the MLX arm's
-/// `generate_minimax_h3_using` seam, so a test can assert on the `LoadSpec` and `GenerationRequest`
-/// that actually reach the Candle provider with no weights or GPU (sc-26680).
+/// [`generate_candle_minimax_h3`] with the loader and lazy admission budget supplied by the caller.
+/// Production passes the live probe future; it is polled only at the same pre-load gate below.
+/// Tests can inspect the provider request with explicit budgets, without hardware-dependent probes.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_minimax_h3_using(
@@ -1725,6 +1728,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
+    vram_budget: impl Future<Output = Option<crate::vram_gate::VramBudget>> + Send,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -1802,7 +1806,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
         priced_tier,
         adapter_bytes,
         &settings.gpu_id,
-        super::candle::candle_video_vram_budget(settings).await,
+        vram_budget.await,
         sparse_bound.as_ref(),
     ) {
         return Err(error);
