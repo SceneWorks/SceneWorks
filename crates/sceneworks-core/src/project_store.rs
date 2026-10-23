@@ -6382,6 +6382,85 @@ fn build_depth_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     (file, recipe, lineage)
 }
 
+/// A list-valued id key as an array, even on facts written before the key existed, so a replay
+/// reader never has to distinguish "absent" from "empty" (sc-12345).
+fn fact_id_list(fact: &Value, key: &str) -> Value {
+    match fact.get(key) {
+        Some(value @ Value::Array(_)) => value.clone(),
+        _ => json!([]),
+    }
+}
+
+/// The imported checkpoint a generation selected (sc-26687), or `None` when it ran from a builtin.
+///
+/// `recipe.model` names the selection; this records WHICH import answered it, so a replay or an API
+/// consumer re-resolves the same checkpoint rather than a same-named builtin. Every field is read
+/// off the worker's own fact — the plan identity the imported route stamped into
+/// `rawAdapterSettings.importPlan` at load time, and the assembly partition beside it. Nothing is
+/// synthesized from a catalog entry: a fact carrying no plan identity is not an imported
+/// generation and gets no `importedModelRef` at all, rather than an object claiming "an import,
+/// unnamed".
+fn imported_model_ref(fact: &Value) -> Option<Map<String, Value>> {
+    let model = fact
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let plan = fact
+        .pointer("/rawAdapterSettings/importPlan")
+        .and_then(Value::as_object);
+    let checkpoint_id = plan
+        .and_then(|plan| plan.get("checkpointId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    let mut reference = Map::new();
+    reference.insert("modelId".to_owned(), Value::String(model.to_owned()));
+    if let Some(family) = fact
+        .get("family")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        reference.insert("family".to_owned(), Value::String(family.to_owned()));
+    }
+    // The declared task partition, taken from the bound assembly the route recorded — never from
+    // a filename or a directory name, which prove nothing about task compatibility.
+    if let Some(partition) = fact
+        .pointer("/rawAdapterSettings/importPlan/assembly/partition")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        reference.insert(
+            "declaredPartition".to_owned(),
+            Value::String(partition.to_owned()),
+        );
+    }
+    if let Some(base_model) = fact
+        .get("baseModel")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        reference.insert("baseModel".to_owned(), Value::String(base_model.to_owned()));
+    }
+    reference.insert(
+        "checkpointId".to_owned(),
+        Value::String(checkpoint_id.to_owned()),
+    );
+    if let Some(plan_id) = plan
+        .and_then(|plan| plan.get("planId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        reference.insert("planId".to_owned(), Value::String(plan_id.to_owned()));
+    }
+    Some(reference)
+}
+
+/// Attach the imported-checkpoint identity to a recipe when the generation carried one.
+fn stamp_imported_model_ref(recipe: &mut Value, fact: &Value) {
+    if let (Some(reference), Some(object)) = (imported_model_ref(fact), recipe.as_object_mut()) {
+        object.insert("importedModelRef".to_owned(), Value::Object(reference));
+    }
+}
+
 /// `(file, recipe, lineage)` for a generated image asset, matching the worker's
 /// former `build_asset_sidecar` (story 1656).
 fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
@@ -6402,7 +6481,7 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "duration": Value::Null,
         "fps": Value::Null,
     });
-    let recipe = json!({
+    let mut recipe = json!({
         "mode": get("mode"),
         "model": get("model"),
         "adapter": get("adapter"),
@@ -6420,9 +6499,18 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
             "characterLookId": get("characterLookId"),
             "characterConditioningActive": false,
             "characterConditioningNote": "Character metadata is recorded, but adapter-level character conditioning is not active in this build.",
+            // sc-26687: the ORDERED image conditioning the replay path restores. `referenceAssetIds`
+            // is a list whose element order is semantic — the engine labels the supplied images
+            // positionally — so it is recorded verbatim, never sorted or de-duplicated. The image
+            // recipe recorded neither the edit source nor the reference list before this, so
+            // "re-run this generation" silently rebuilt a job with different conditioning.
+            "sourceAssetId": get("sourceAssetId"),
+            "referenceAssetId": get("referenceAssetId"),
+            "referenceAssetIds": fact_id_list(fact, "referenceAssetIds"),
         },
         "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
     });
+    stamp_imported_model_ref(&mut recipe, fact);
     let lineage = json!({
         "parents": parents,
         "sourceAssetId": get("sourceAssetId"),
@@ -6482,10 +6570,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
     let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
     // List-valued ids keep an array shape even on facts written before sc-12345, so the replay
     // reader never has to distinguish "absent" from "empty".
-    let list_or_empty = |key: &str| match fact.get(key) {
-        Some(value @ Value::Array(_)) => value.clone(),
-        _ => json!([]),
-    };
+    let list_or_empty = |key: &str| fact_id_list(fact, key);
     let source_keys = [
         "sourceAssetId",
         "lastFrameAssetId",
@@ -6595,7 +6680,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
             }
         }
     }
-    let recipe = json!({
+    let mut recipe = json!({
         "mode": get("mode"),
         "model": get("model"),
         "adapter": get("adapter"),
@@ -6606,6 +6691,7 @@ fn build_video_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "normalizedSettings": normalized,
         "rawAdapterSettings": fact.get("rawAdapterSettings").cloned().unwrap_or_else(|| json!({})),
     });
+    stamp_imported_model_ref(&mut recipe, fact);
     let lineage = json!({
         "parents": parents,
         "sourceAssetId": get("sourceAssetId"),
@@ -7752,19 +7838,19 @@ fn move_or_copy_file(source: &Path, destination: &Path) -> ProjectStoreResult<()
 mod tests {
     use super::{
         apply_project_migrations, backfill_upscale_variant_lineage, build_generated_asset_sidecar,
-        connect_project_db, ensure_project_db_ready, fail_next_asset_index_db_mutation,
-        fail_next_asset_poster_db_read, fail_next_asset_sidecar_remove,
-        fail_next_upscale_lineage_db_read, find_timeline_file, guess_mime_from_filename,
-        index_timeline, install_ensure_ready_before_lock_hook, is_safe_relative_path,
-        is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
-        read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
-        write_json, AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput,
-        CharacterLookInput, CharacterReferenceInput, FilmReferenceInput, ProjectStore,
-        ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
-        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
-        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
-        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
-        UPSCALE_LINEAGE_QUERY,
+        build_image_sidecar_parts, build_video_sidecar_parts, connect_project_db,
+        ensure_project_db_ready, fail_next_asset_index_db_mutation, fail_next_asset_poster_db_read,
+        fail_next_asset_sidecar_remove, fail_next_upscale_lineage_db_read, find_timeline_file,
+        guess_mime_from_filename, index_timeline, install_ensure_ready_before_lock_hook,
+        is_safe_relative_path, is_safe_upload_extension, normalize_asset_tags,
+        normalize_image_upload, read_json, read_registry_payload, sniff_image_format,
+        upload_extension, upscale_lineage_group, write_json, AssetIndexMutation, AssetScope,
+        AssetStatusPatch, CharacterCreateInput, CharacterLookInput, CharacterReferenceInput,
+        FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, WorkflowScan,
+        ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID,
+        GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR,
+        PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION,
+        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
@@ -16207,6 +16293,122 @@ mod tests {
             }
             other => panic!("expected StorageNotWritable, got {other:?}"),
         }
+    }
+    // sc-26687: a recorded recipe is the ONLY trace of what a user asked for, so the ordered
+    // conditioning and the imported identity have to survive it exactly. These assert the VALUES a
+    // replay reads back — list ORDER included, because the engine labels the supplied media
+    // positionally — rather than that some field was passed through.
+    fn imported_video_fact() -> Value {
+        json!({
+            "mediaPath": "assets/videos/genset_h3/clip.mp4",
+            "mimeType": "video/mp4",
+            "type": "video",
+            "mode": "reference_to_video",
+            "model": "my_singularity_ref2va",
+            "family": "minimax-h3",
+            "prompt": "walk",
+            "negativePrompt": "",
+            "seed": 7,
+            "loras": [],
+            "duration": 6,
+            "fps": 25,
+            "width": 768,
+            "height": 512,
+            "sourceClipAssetIds": ["clip_c", "clip_a", "clip_b"],
+            "referenceAssetIds": ["img_3", "img_1", "img_2"],
+            "referenceAudioAssetIds": ["aud_2", "aud_1"],
+            "rawAdapterSettings": {
+                "importPlan": {
+                    "checkpointId": "managed/install-42",
+                    "planId": "checkpoint-plan-7",
+                    "semanticDigest": "abc",
+                    "assembly": { "schemaVersion": 1, "partition": "ref2va" }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn video_recipe_round_trips_ordered_conditioning_and_the_imported_identity() {
+        let (_, recipe, _) = build_video_sidecar_parts("job-1", &imported_video_fact());
+        let settings = &recipe["normalizedSettings"];
+        // Deliberately NOT sorted: the recorded order is the order the user picked, and a replay
+        // that re-orders the references conditions the render on different media positions.
+        assert_eq!(
+            settings["sourceClipAssetIds"],
+            json!(["clip_c", "clip_a", "clip_b"])
+        );
+        assert_eq!(
+            settings["referenceAssetIds"],
+            json!(["img_3", "img_1", "img_2"])
+        );
+        assert_eq!(
+            settings["referenceAudioAssetIds"],
+            json!(["aud_2", "aud_1"])
+        );
+        assert_eq!(recipe["model"], json!("my_singularity_ref2va"));
+        assert_eq!(
+            recipe["importedModelRef"]["modelId"],
+            json!("my_singularity_ref2va")
+        );
+        assert_eq!(
+            recipe["importedModelRef"]["checkpointId"],
+            json!("managed/install-42")
+        );
+        assert_eq!(
+            recipe["importedModelRef"]["planId"],
+            json!("checkpoint-plan-7")
+        );
+        assert_eq!(
+            recipe["importedModelRef"]["declaredPartition"],
+            json!("ref2va")
+        );
+    }
+
+    #[test]
+    fn image_recipe_round_trips_the_ordered_reference_list_and_the_edit_source() {
+        let fact = json!({
+            "mediaPath": "assets/images/genset_edit/out.png",
+            "mimeType": "image/png",
+            "type": "image",
+            "mode": "edit_image",
+            "model": "krea_transformer",
+            "family": "krea",
+            "prompt": "make it dusk",
+            "negativePrompt": "",
+            "seed": 3,
+            "loras": [],
+            "normalizedWidth": 1024,
+            "normalizedHeight": 1024,
+            "count": 1,
+            "sourceAssetId": "src_1",
+            "referenceAssetIds": ["ref_b", "ref_a", "ref_c"],
+            "rawAdapterSettings": {}
+        });
+        let (_, recipe, _) = build_image_sidecar_parts("job-2", &fact);
+        let settings = &recipe["normalizedSettings"];
+        assert_eq!(settings["sourceAssetId"], json!("src_1"));
+        assert_eq!(
+            settings["referenceAssetIds"],
+            json!(["ref_b", "ref_a", "ref_c"])
+        );
+    }
+
+    #[test]
+    fn a_builtin_generation_records_no_imported_identity() {
+        let mut fact = imported_video_fact();
+        fact["rawAdapterSettings"] = json!({});
+        let (_, recipe, _) = build_video_sidecar_parts("job-3", &fact);
+        assert!(
+            recipe.get("importedModelRef").is_none(),
+            "a generation with no bound plan must not claim an import"
+        );
+        // The ordered conditioning is a property of the REQUEST, not of the import, so it is
+        // recorded either way — the two must not be lost together.
+        assert_eq!(
+            recipe["normalizedSettings"]["referenceAssetIds"],
+            json!(["img_3", "img_1", "img_2"])
+        );
     }
 }
 
