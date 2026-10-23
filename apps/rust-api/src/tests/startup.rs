@@ -65,6 +65,21 @@ async fn slow_background_upload_sweep_keeps_health_and_access_ready_then_cleans_
     // is configured; the pre-existing `directories` field is omitted in this mode.
     settings.access_token = "secret".to_owned();
     let stale = write_stale_asset_upload(&settings.data_dir);
+    let model_root = settings.data_dir.join("cache/model-uploads");
+    std::fs::create_dir_all(&model_root).unwrap();
+    let stale_model = model_root.join("upload-stale.tmp");
+    std::fs::write(&stale_model, b"model retry input").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&stale_model)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(SystemTime::now() - Duration::from_secs(25 * 60 * 60)),
+        )
+        .unwrap();
+    let fresh_model = model_root.join("upload-fresh.tmp");
+    std::fs::write(&fresh_model, b"current retry input").unwrap();
     let hook = crate::startup::test_startup_maintenance_hook(settings.data_dir.clone(), false);
     let (app, state) =
         crate::create_app_with_deferred_startup_maintenance(settings, Duration::from_secs(2))
@@ -93,9 +108,11 @@ async fn slow_background_upload_sweep_keeps_health_and_access_ready_then_cleans_
     );
     assert!(stale.exists(), "the blocked sweep has not run yet");
     assert!(
-        !state
-            .startup_maintenance
-            .start(temp_dir.path().join("must-not-run"), Duration::from_secs(2)),
+        !state.startup_maintenance.start(
+            temp_dir.path().join("must-not-run"),
+            state.jobs_store.clone(),
+            Duration::from_secs(2)
+        ),
         "startup maintenance is single-flight"
     );
 
@@ -107,13 +124,21 @@ async fn slow_background_upload_sweep_keeps_health_and_access_ready_then_cleans_
     .await
     .expect("background sweep completes");
     assert_eq!(completed.status, "complete");
-    assert_eq!(completed.removed_uploads, 1);
+    assert_eq!(completed.removed_uploads, 2);
     assert_eq!(completed.failure_count, 0);
     assert!(!stale.exists(), "eventual cleanup removes the stale upload");
+    assert!(
+        !stale_model.exists(),
+        "expired model retry inputs share the upload-age backstop"
+    );
+    assert!(
+        fresh_model.exists(),
+        "current retry inputs remain recoverable"
+    );
 
     let (_, health) = request(app, "GET", "/api/v1/health", Value::Null).await;
     assert_eq!(health["startupMaintenance"]["status"], "complete");
-    assert_eq!(health["startupMaintenance"]["removedUploads"], 1);
+    assert_eq!(health["startupMaintenance"]["removedUploads"], 2);
     assert!(
         !serde_json::to_string(&health)
             .expect("health serializes")
@@ -353,4 +378,111 @@ async fn bootstrap_health_is_distinguishable_from_ready_health() {
     assert_eq!(ready["runtime"], "rust");
     assert_eq!(ready["status"], "ok");
     assert_eq!(ready["readiness"]["status"], "ready");
+}
+
+#[tokio::test]
+async fn old_durable_model_uploads_survive_both_restart_sweeps_until_ownership_is_cleared() {
+    use sceneworks_core::contracts::JobType;
+    use sceneworks_core::jobs_store::CreateJob;
+    for deferred in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = test_settings(&temp);
+        let (_, state) = crate::create_app_with_state(settings.clone()).unwrap();
+        let root = settings.data_dir.join("cache/model-uploads");
+        let make_upload = |name: &str| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let source = dir.join("checkpoint.safetensors");
+            std::fs::write(&source, name.as_bytes()).unwrap();
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.custom_flags(0x02000000);
+            }
+            options
+                .open(&dir)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(SystemTime::now() - Duration::from_secs(49 * 60 * 60)),
+                )
+                .unwrap();
+            source
+        };
+        let queued = make_upload("upload-queued-owner");
+        let canceled = make_upload("upload-canceled-owner");
+        let abandoned = make_upload("upload-abandoned");
+        let create = |source: &std::path::Path| {
+            state
+                .jobs_store
+                .create_job(CreateJob {
+                    job_type: JobType::ModelImport,
+                    project_id: None,
+                    project_name: None,
+                    payload:
+                        json!({"uploadedSourcePath":true,"sourcePath":source.display().to_string()})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                })
+                .unwrap()
+        };
+        create(&queued);
+        let canceled_job = create(&canceled);
+        state.jobs_store.cancel_job(&canceled_job.id).unwrap();
+        let original = temp.path().join("user-original.safetensors");
+        std::fs::write(&original, b"user original").unwrap();
+        create(&original); // outside paths cannot protect an unrelated upload entry or be deleted
+        drop(state);
+        let restarted = if deferred {
+            let (_, state) = crate::create_app_with_deferred_startup_maintenance(
+                settings.clone(),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            let complete = tokio::time::timeout(
+                Duration::from_secs(5),
+                state.startup_maintenance.wait_for_terminal(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(complete.status, "complete");
+            state
+        } else {
+            crate::create_app_with_state(settings.clone()).unwrap().1
+        };
+        assert!(
+            queued.is_file(),
+            "queued input survives restart, deferred={deferred}"
+        );
+        assert!(
+            canceled.is_file(),
+            "a retryable canceled import retains its input"
+        );
+        assert!(!abandoned.exists(), "unowned expired upload is reclaimed");
+        assert_eq!(std::fs::read(&original).unwrap(), b"user original");
+        restarted.jobs_store.clear_job(&canceled_job.id).unwrap();
+        crate::sweep_stale_model_uploads(
+            &settings.data_dir,
+            &restarted.jobs_store,
+            SystemTime::now(),
+            || true,
+        )
+        .unwrap();
+        assert!(
+            !canceled.exists(),
+            "explicitly cleared ownership may expire"
+        );
+        assert!(
+            queued.exists(),
+            "clearing another job cannot reclaim this input"
+        );
+    }
 }

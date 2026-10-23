@@ -991,6 +991,50 @@ pub(crate) fn sweep_stale_uploads_cancellable(
     cutoff: SystemTime,
     should_continue: impl Fn() -> bool,
 ) -> std::io::Result<usize> {
+    sweep_stale_uploads_retaining(data_dir, subdir, cutoff, should_continue, &[])
+}
+
+pub(crate) fn sweep_stale_model_uploads(
+    data_dir: &FsPath,
+    jobs: &JobsStore,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+) -> std::io::Result<usize> {
+    // A database failure must never turn an owned retry input into abandoned cache data.
+    let root = data_dir.join("cache/model-uploads");
+    let canonical_root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut retained = Vec::new();
+    for source in jobs
+        .model_upload_sources_for_recovery()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    {
+        match PathBuf::from(source).canonicalize() {
+            Ok(source) if source.starts_with(&canonical_root) => retained.push(source),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    sweep_stale_uploads_retaining(
+        data_dir,
+        "model-uploads",
+        cutoff,
+        should_continue,
+        &retained,
+    )
+}
+
+fn sweep_stale_uploads_retaining(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+    retained: &[PathBuf],
+) -> std::io::Result<usize> {
     let upload_root = data_dir.join("cache").join(subdir);
     let entries = match std::fs::read_dir(upload_root) {
         Ok(entries) => entries,
@@ -1015,6 +1059,13 @@ pub(crate) fn sweep_stale_uploads_cancellable(
             }
         };
         if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        if entry
+            .path()
+            .canonicalize()
+            .is_ok_and(|path| retained.iter().any(|source| source.starts_with(&path)))
+        {
             continue;
         }
         if !should_continue() {
@@ -1262,9 +1313,11 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     timeout: Duration,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let (router, state) = create_app_with_pending_startup_maintenance(settings)?;
-    state
-        .startup_maintenance
-        .start(state.settings.data_dir.clone(), timeout);
+    state.startup_maintenance.start(
+        state.settings.data_dir.clone(),
+        state.jobs_store.clone(),
+        timeout,
+    );
     Ok((router, state))
 }
 
@@ -1350,6 +1403,17 @@ fn create_app_with_state_mode(
         let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
         (jobs_store, interrupted_jobs_on_startup)
     };
+    if !defer_upload_sweeps {
+        warn_on_sweep_err(
+            "model",
+            sweep_stale_model_uploads(
+                &settings.data_dir,
+                &jobs_store,
+                SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
+                || true,
+            ),
+        );
+    }
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),
         settings.app_version.clone(),

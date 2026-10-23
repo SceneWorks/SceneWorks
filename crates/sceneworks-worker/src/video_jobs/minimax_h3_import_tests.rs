@@ -83,10 +83,13 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
         canonical(&transformer.with_file_name("transformer_ref")),
         canonical(&tiers.path().join("q4").join("transformer_ref"))
     );
-    assert_eq!(dir(Some(&spec.weights)), base.path().to_path_buf());
     assert_eq!(
-        dir(spec.components.get("text_encoder")),
-        tiers.path().join("q4").join("text_encoder"),
+        canonical(&dir(Some(&spec.weights)).join("vae")),
+        canonical(&base.path().join("vae"))
+    );
+    assert_eq!(
+        canonical(&dir(spec.components.get("text_encoder"))),
+        canonical(&tiers.path().join("q4").join("text_encoder")),
         "the resident text encoder is reused"
     );
     assert_eq!(spec.quantize, None, "the imported DiT is dense");
@@ -342,7 +345,7 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         ("HUGGINGFACE_HUB_CACHE", ""),
         ("HF_HOME", ""),
     ]);
-    const REVISION: &str = "1111111111111111111111111111111111111111";
+    use crate::minimax_h3_import_fixture::{SHARED_REVISION, TIER_REVISION};
     let data = tempfile::Builder::new()
         .prefix("sw_candle_imported_h3_")
         .tempdir()
@@ -351,12 +354,17 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         let root = huggingface_repo_cache_path(data.path(), repo)
             .expect("repo cache path")
             .join("snapshots")
-            .join(REVISION);
+            .join(if repo == "SceneWorks/minimax-h3-mlx" {
+                TIER_REVISION
+            } else {
+                SHARED_REVISION
+            });
         std::fs::create_dir_all(&root).expect("snapshot dir");
         root
     };
     let upstream = snapshot("MiniMaxAI/MiniMax-H3");
     let rehost = snapshot("SceneWorks/minimax-h3-mlx");
+    crate::minimax_h3_import_fixture::write_companion(&rehost.join("q4/transformer_ref"));
     for component in [
         upstream.join("vae"),
         upstream.join("audio_vae"),
@@ -714,7 +722,11 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
         let root = huggingface_repo_cache_path(data.path(), repo)
             .unwrap()
             .join("snapshots")
-            .join("1111111111111111111111111111111111111111");
+            .join(if repo == "SceneWorks/minimax-h3-mlx" {
+                crate::minimax_h3_import_fixture::TIER_REVISION
+            } else {
+                crate::minimax_h3_import_fixture::SHARED_REVISION
+            });
         std::fs::create_dir_all(&root).unwrap();
         root
     };
@@ -722,6 +734,8 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
     let rehost = snapshot("SceneWorks/minimax-h3-mlx");
     std::fs::create_dir_all(rehost.join("q4/transformer")).unwrap();
     std::fs::write(rehost.join("q4/transformer/config.json"), b"{}").unwrap();
+    crate::minimax_h3_import_fixture::write_companion(&rehost.join("q4/transformer"));
+    crate::minimax_h3_import_fixture::write_companion(&rehost.join("q4/transformer_ref"));
     crate::minimax_h3_import_fixture::write_shared_configs(&root, &rehost.join("q4/text_encoder"));
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
@@ -1021,4 +1035,196 @@ fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
     .unwrap_err();
     assert!(error.to_string().contains("krea_2"), "{error}");
     assert!(probe.spec.lock().unwrap().is_none());
+}
+
+#[test]
+fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
+    for layout in ["dense", "native", "sharded"] {
+        let data = tempfile::tempdir().unwrap();
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
+            data.path(),
+            "leased_h3",
+            layout,
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let request = imported_minimax_h3_request("leased_h3", &imported.entry);
+        let provider =
+            crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
+                .unwrap();
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data.path());
+        let refusal = store.remove_managed("leased_h3").unwrap_err();
+        assert!(
+            refusal.to_string().contains("in use"),
+            "{layout}: {refusal}"
+        );
+        assert!(imported.install_dir.is_dir());
+        assert!(store.resolve(&imported.checkpoint_id).is_ok());
+        drop(provider);
+        sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
+            .unwrap()
+            .remove_managed_install("leased_h3")
+            .unwrap();
+        assert!(!imported.install_dir.exists());
+    }
+}
+
+fn drive_bound_component_import(
+    settings: &Settings,
+    request: &VideoRequest,
+    probe: &ArmProbe,
+) -> WorkerResult<Value> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(crate::video_jobs::minimax_h3::generate_minimax_h3_using(
+                &ApiClient::new(settings),
+                settings,
+                &minimax_h3_job_snapshot(),
+                request,
+                &settings.data_dir.join("unused-project"),
+                "minimax_h3",
+                "mlx",
+                probe.loader(),
+            ))
+            .map(|(_, raw)| raw)
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        drive_candle_imported_minimax_h3(settings, probe, request)
+    }
+}
+
+#[test]
+fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracting_main() {
+    use crate::minimax_h3_import_fixture::{
+        component_downloads, write_companion, write_shared_configs, SHARED_REVISION, TIER_REVISION,
+    };
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    for (tier, main_complete) in [("bf16", false), ("bf16", true), ("q4", false), ("q4", true)] {
+        let data = tempfile::tempdir().unwrap();
+        let snapshot = |repo: &str, revision: &str| {
+            let cache = huggingface_repo_cache_path(data.path(), repo).unwrap();
+            let dir = cache.join("snapshots").join(revision);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::create_dir_all(cache.join("refs")).unwrap();
+            std::fs::write(
+                cache.join("refs/main"),
+                "3333333333333333333333333333333333333333",
+            )
+            .unwrap();
+            dir
+        };
+        let base_a = snapshot("MiniMaxAI/MiniMax-H3", SHARED_REVISION);
+        let tier_a = snapshot("SceneWorks/minimax-h3-mlx", TIER_REVISION);
+        let base_b = snapshot(
+            "MiniMaxAI/MiniMax-H3",
+            "3333333333333333333333333333333333333333",
+        );
+        let tier_b = snapshot(
+            "SceneWorks/minimax-h3-mlx",
+            "3333333333333333333333333333333333333333",
+        );
+        let encoder_a = if tier == "bf16" {
+            base_a.join("text_encoder")
+        } else {
+            tier_a.join(format!("{tier}/text_encoder"))
+        };
+        write_shared_configs(&base_a, &encoder_a);
+        write_companion(&tier_a.join(format!("{tier}/transformer_ref")));
+        std::fs::write(base_b.join("partial.txt"), b"mutable main is partial").unwrap();
+        std::fs::write(tier_b.join("partial.txt"), b"mutable main is partial").unwrap();
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+            data.path(),
+            "bound_h3",
+        );
+        let mut entry = imported.entry.clone();
+        entry.insert("importComponentTier".into(), json!(tier));
+        entry.insert(
+            "downloads".into(),
+            json!(component_downloads(tier, "fl2va")),
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            backend_candle_enabled: true,
+            ..offline_settings()
+        };
+        if main_complete {
+            let encoder_b = if tier == "bf16" {
+                base_b.join("text_encoder")
+            } else {
+                tier_b.join(format!("{tier}/text_encoder"))
+            };
+            write_shared_configs(&base_b, &encoder_b);
+            write_companion(&tier_b.join(format!("{tier}/transformer_ref")));
+            crate::minimax_h3_import_fixture::write_safetensors(
+                &base_b.join("vae/fixture.safetensors"),
+                &[("weight", "F16")],
+                0x7f,
+            );
+        }
+        let probe = ArmProbe::default();
+        for explicit in [None, Some(if tier == "bf16" { 0 } else { 4 })] {
+            let mut request = imported_minimax_h3_request("bound_h3", &entry);
+            if let Some(bits) = explicit {
+                request.advanced.insert("mlxQuantize".into(), json!(bits));
+            }
+            let raw = drive_bound_component_import(&settings,&request,&probe).unwrap_or_else(|error| panic!("tier={tier}, explicit={explicit:?}, main_complete={main_complete}: {error}"));
+            let spec = probe.spec.lock().unwrap().clone().unwrap();
+            assert!(
+                matches!(&spec.weights,WeightsSource::Dir(root) if canonical(root)==canonical(&base_a))
+            );
+            assert!(
+                matches!(spec.components.get("text_encoder"),Some(WeightsSource::Dir(dir)) if canonical(dir)==canonical(&encoder_a))
+            );
+            let Some(WeightsSource::Dir(transformer)) = spec.components.get("transformer") else {
+                panic!("missing imported transformer")
+            };
+            assert_eq!(canonical(transformer), canonical(&imported.install_dir));
+            #[cfg(target_os = "macos")]
+            assert_eq!(
+                canonical(&transformer.with_file_name("transformer_ref")),
+                canonical(&tier_a.join(format!("{tier}/transformer_ref")))
+            );
+            assert_eq!(
+                spec.quantize, None,
+                "shared tier cannot rewrite imported dense precision"
+            );
+            assert_eq!(raw["minimaxH3SharedTier"], tier);
+            assert_eq!(
+                raw["minimaxH3ComponentBindings"]["downloads"],
+                entry["downloads"]
+            );
+        }
+        let mut different = imported_minimax_h3_request("bound_h3", &entry);
+        different.advanced.insert("mlxQuantize".into(), json!(8));
+        let probe = ArmProbe::default();
+        let error = drive_bound_component_import(&settings, &different, &probe).unwrap_err();
+        assert!(
+            error.to_string().contains("no component substitution"),
+            "{error}"
+        );
+        assert!(probe.spec.lock().unwrap().is_none());
+        std::fs::remove_file(base_a.join("vae/config.json")).unwrap();
+        let probe = ArmProbe::default();
+        assert!(
+            drive_bound_component_import(
+                &settings,
+                &imported_minimax_h3_request("bound_h3", &entry),
+                &probe
+            )
+            .is_err(),
+            "a complete mutable main cannot rescue a torn bound snapshot"
+        );
+        assert!(probe.spec.lock().unwrap().is_none());
+    }
 }

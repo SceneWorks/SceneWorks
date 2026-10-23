@@ -391,11 +391,36 @@ pub(crate) async fn rescan_library_checkpoint(
         return Err(ApiError::bad_request("A checkpoint path is required."));
     }
     let store = open_store(&state);
-    let status = blocking(move || {
-        let compiled = store.compile_linked(&root_id, &relative_path)?;
-        store.checkpoint_status(&compiled.checkpoint_id)
-    })
-    .await?;
+    let compiled = blocking(move || store.compile_linked(&root_id, &relative_path)).await?;
+    // A rescan explicitly accepts the new bytes, not a new task declaration. Rebind every model
+    // referencing this checkpoint using its existing compatible base/partition, or refuse it.
+    // Otherwise the store reports Ready while generation permanently rejects the old assembly.
+    let path = state
+        .settings
+        .config_dir
+        .join("manifests/user.models.jsonc");
+    crate::manifest::mutate_manifest_entries(&state, &path, "models", |mut entries| {
+        for entry in &mut entries {
+            let Some(object) = entry.as_object_mut() else { continue };
+            if sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object)
+                != Some(compiled.checkpoint_id.as_str()) {
+                continue;
+            }
+            if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(object) {
+                let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                    &compiled.plan, object,
+                ).map_err(ApiError::bad_request)?;
+                object.insert("importPlan".into(), json!({
+                    "checkpointId":compiled.checkpoint_id, "planId":compiled.plan.plan_id,
+                    "semanticDigest":compiled.record.plan.semantic_digest,
+                }));
+                sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(object, &assembly);
+            }
+        }
+        Ok((entries, ()))
+    }).await?;
+    let store = open_store(&state);
+    let status = blocking(move || store.checkpoint_status(&compiled.checkpoint_id)).await?;
     Ok(Json(status))
 }
 

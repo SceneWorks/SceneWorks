@@ -1342,6 +1342,55 @@ impl CheckpointPlanStore {
         FileLock::exclusive(file).map_err(|error| io_error(&path, error))
     }
 
+    /// Hold verified source ownership through provider use, including dense sources that need no
+    /// derivative. Advisory locks live in the app store, never in a user-owned linked library.
+    /// The caller must acquire this BEFORE resolving/pinning the plan.
+    pub fn lease_source(&self, checkpoint_id: &str) -> Result<FileLock, CheckpointPlanError> {
+        let (path, file) = self.source_lock_file(checkpoint_id)?;
+        FileLock::try_shared(file).map_err(|error| io_error(&path, error))
+    }
+
+    /// Refuse teardown before any source bytes or registry state are removed. Keep the guard
+    /// through filesystem removal; a preflight that drops it would race a new provider load.
+    pub fn lock_source_for_removal(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<FileLock, CheckpointPlanError> {
+        let (path, file) = self.source_lock_file(checkpoint_id)?;
+        FileLock::try_exclusive(file).map_err(|error| CheckpointPlanError::Io {
+            path,
+            message: format!("checkpoint {checkpoint_id:?} is in use; release its source lease before removal: {error}"),
+        })
+    }
+
+    fn source_lock_file(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<(PathBuf, fs::File), CheckpointPlanError> {
+        let directory = self.root.join("source-leases");
+        fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+        let path = directory.join(format!(
+            "{:x}.lock",
+            Sha256::digest(checkpoint_id.as_bytes())
+        ));
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(CheckpointPlanError::Io {
+                    path,
+                    message: "source lease lock is not a regular file".into(),
+                });
+            }
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| io_error(&path, error))?;
+        Ok((path, file))
+    }
+
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
         crate::store_util::atomic_write(path, payload).map_err(|error| CheckpointPlanError::Io {
             path: path.to_path_buf(),
@@ -1555,6 +1604,14 @@ impl CheckpointPlanStore {
     /// leaves a root with no checkpoints — a state a retry of `remove_root` converges from.
     pub fn remove_root(&self, root_id: &str) -> Result<RootRemovalV1, CheckpointPlanError> {
         let _guard = self.lock_store()?;
+        let prefix = format!("linked/{root_id}/");
+        let _source_guards = self
+            .inventory()?
+            .records
+            .iter()
+            .filter(|record| record.checkpoint_id.starts_with(&prefix))
+            .map(|record| self.lock_source_for_removal(&record.checkpoint_id))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut roots = self.approved_roots()?;
         let root = roots
             .get(root_id)
@@ -1823,7 +1880,9 @@ impl CheckpointPlanStore {
     /// path component. Returns `false` when there was nothing to remove.
     pub fn remove_managed(&self, install_id: &str) -> Result<bool, CheckpointPlanError> {
         let install_path = self.install_dir(install_id)?;
-        let removed_record = self.invalidate(&managed_checkpoint_id(install_id))?;
+        let checkpoint_id = managed_checkpoint_id(install_id);
+        let _source = self.lock_source_for_removal(&checkpoint_id)?;
+        let removed_record = self.invalidate_unleased(&checkpoint_id)?;
         let removed_bytes = match fs::remove_dir_all(&install_path) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -2152,6 +2211,11 @@ impl CheckpointPlanStore {
 
     /// Remove a checkpoint's record, plan, and bindings. Never touches the linked source.
     pub fn invalidate(&self, checkpoint_id: &str) -> Result<bool, CheckpointPlanError> {
+        let _source = self.lock_source_for_removal(checkpoint_id)?;
+        self.invalidate_unleased(checkpoint_id)
+    }
+
+    fn invalidate_unleased(&self, checkpoint_id: &str) -> Result<bool, CheckpointPlanError> {
         let _guard = self.lock_store()?;
         let inventory = self.inventory()?;
         let Some(record) = inventory

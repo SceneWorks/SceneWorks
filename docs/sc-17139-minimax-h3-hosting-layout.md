@@ -112,6 +112,53 @@ to `interleaved`. Native variants supply full architecture JSON in bound `config
 metadata `h3_config`; without it, every tensor must match the pinned published H3 architecture.
 The task-neutral codec never derives the explicit partition declaration from names or shapes.
 
+### Reusable managed and linked assembly (sc-26686)
+
+The baseline is the existing LTX/Eros compatible-base conversion and co-requisite workflow
+(`create_model_convert_job`, `resolve_convert_plan`, `convert_ltx_native`), not a claim that
+arbitrary LTX uploads were already supported by the generic checkpoint importer. H3 uses the
+existing Add/Import route for uploads, local copies, URLs, Hugging Face, Civitai download URLs,
+and approved linked roots; every transport retains the same explicit base and task declaration.
+
+Import admission derives reusable download rows from the selected base's existing catalog
+co-requisites, prefers an already complete resident tier, and otherwise provisions the catalog
+default through ordinary component-download jobs. The base's license acknowledgment applies
+even when the imported checkpoint came from an unrelated community repository. The imported
+DiT's task partition is never downloaded over or replaced. Hybrid imports do not acquire a stock
+task companion. Shared component jobs remain independently retryable and shared caches are not
+owned by the imported model. An imported entry is not installed/ready until its source plan and
+assembly resolve and every bound component row is present in its declared revision.
+The selected shared precision is persisted as `importComponentTier`, independently of imported
+DiT precision. Both native providers consume that tier and each persisted repository/revision
+binding directly, never `refs/main`, operator directory overrides, or a stock tier search. Explicit
+precision controls may confirm the selected shared tier but cannot silently substitute another
+closure. Assets retain the exact selected tier and component download bindings.
+
+Interrupted managed transfers discard staging and can retry. A process interrupted after the
+managed commit can replay H3 publication only when the committed install marker belongs to that
+same job and the persisted source plan still verifies; another job's install is never replaced.
+Uploaded model inputs are retained across failed attempts and process restarts (hard-linked into
+staging on the same volume rather than consumed). Successful publication releases the upload;
+only unowned or explicitly cleared/expired retry inputs use the 24-hour stale-upload cleanup policy.
+Queued, active, failed, canceled and interrupted retained model-import jobs protect their exact
+upload input through both synchronous restart and deferred maintenance sweeps, regardless of age.
+Checksum recovery uses the same normalization as initial ingestion, including `sha256:` prefixes.
+Cancellation and manifest-publication failures roll back unpublished managed installs. Linked
+source drift makes the imported entry incomplete; an explicit rescan refreshes the binding while
+retaining its original base/partition declaration. Relinking preserves root and checkpoint identity.
+Duplicate content is reported to the caller for either ownership mode, never automatically deleted.
+Provider resolution retains a cross-process source lease for dense, native and sharded imports,
+in addition to any derivative lease. Removal refuses in-use sources before touching files or the
+model registry. Managed removal owns only the app install; linked removal drops app metadata and
+derivatives without changing library bytes. Multiple catalog names referencing one linked source
+retain its plan until the last name is removed; a refused new alias cannot invalidate an existing
+model's unchanged binding.
+
+The Linux parity lane provisions the distro FFmpeg through the canonical signed Ubuntu
+archives rather than the hosted image's Azure-first mirror list. This changes only the
+download route: the image's suites, components, keyring and package verification remain
+intact, and the real encode/decode tests remain mandatory (`SCENEWORKS_REQUIRE_FFMPEG=1`).
+
 ---
 
 ## 1. Summary of decisions

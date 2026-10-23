@@ -301,6 +301,13 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "minimax-h3-assemblies",
         CacheRole::Scratch,
     ),
+    // Runtime directory links/hardlinks joining already-installed exact component snapshots.
+    (
+        "worker",
+        "video_jobs/minimax_h3.rs",
+        "minimax-h3-shared",
+        CacheRole::Scratch,
+    ),
     // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
     (
         "worker",
@@ -513,6 +520,8 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ),
     ("rust-api", "loras.rs", "lora-uploads", CacheRole::Upload),
     ("rust-api", "models.rs", "model-uploads", CacheRole::Upload),
+    // Ownership-aware reclamation of model upload retry inputs; never a model-weight download.
+    ("rust-api", "lib.rs", "model-uploads", CacheRole::Upload),
     ("rust-api", "poses.rs", "pose-uploads", CacheRole::Upload),
     // Generated media thumbnails.
     ("rust-api", "lib.rs", "media-thumbnails", CacheRole::Scratch),
@@ -526,12 +535,6 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         CacheRole::Parameterized,
     ),
     ("rust-api", "lib.rs", "{subdir}", CacheRole::Parameterized),
-    (
-        "rust-api",
-        "startup.rs",
-        "{subdir}",
-        CacheRole::Parameterized,
-    ),
     // ---- crates/sceneworks-core/src -----------------------------------------------------------
     // Constructs `<data_dir>/cache` itself; no destination inside it.
     ("core", "app_paths.rs", "<cache-root>", CacheRole::CacheRoot),
@@ -592,7 +595,7 @@ const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
     ("normalize_app_managed_cache_path", 2),
     ("resolve_import_source_path", 3),
     ("write_upload_field_to_dir", 2),
-    ("sweep_stale_uploads_cancellable", 1),
+    ("sweep_stale_uploads_retaining", 1),
 ];
 
 /// Functions that hand out the **bare** `<data_dir>/cache` root, as `(crate label, file, fn name)`.

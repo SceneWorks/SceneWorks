@@ -171,6 +171,13 @@ jobs:
         # reported `ok`, so nothing in CI had ever exercised them — the runner image was the only
         # thing deciding. `SCENEWORKS_REQUIRE_FFMPEG` (job env above) makes that state fail loudly.
         run: |
+          # The hosted image's mirror+file source prioritizes Azure, whose package payloads
+          # exhausted this lane twice. Keep its distro suites, components and Signed-By;
+          # change only the mirror list to the canonical Ubuntu archives.
+          printf '%s\t%s\n' \
+            'https://archive.ubuntu.com/ubuntu/' 'priority:1' \
+            'https://security.ubuntu.com/ubuntu/' 'priority:2' \
+            | sudo tee /etc/apt/apt-mirrors.txt
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
           ffmpeg -version | head -1

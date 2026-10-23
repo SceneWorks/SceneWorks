@@ -855,6 +855,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (app, state) = build_result?;
     state.startup_maintenance.start(
         state.settings.data_dir.clone(),
+        state.jobs_store.clone(),
         BACKGROUND_MAINTENANCE_TIMEOUT,
     );
     ready_app

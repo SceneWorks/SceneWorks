@@ -285,15 +285,6 @@ pub(super) fn resolve_minimax_h3_load(
     settings: &Settings,
     request: &VideoRequest,
 ) -> WorkerResult<MiniMaxH3Load> {
-    resolve_minimax_h3_load_for_import(settings, request, None)
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_minimax_h3_load_for_import(
-    settings: &Settings,
-    request: &VideoRequest,
-    imported: Option<sceneworks_core::minimax_h3_import::MiniMaxH3Partition>,
-) -> WorkerResult<MiniMaxH3Load> {
     let order = minimax_h3_tier_order(request);
     let tier_root = match std::env::var(MINIMAX_H3_TIER_DIR_ENV) {
         Ok(dir) => PathBuf::from(dir.trim()),
@@ -326,24 +317,7 @@ fn resolve_minimax_h3_load_for_import(
     };
     let Some(tier) = order.iter().copied().find(|tier| {
         let dir = tier_root.join(tier);
-        match imported {
-            None => minimax_h3_tier_dir_is_complete(&dir),
-            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va) => {
-                sceneworks_core::mlx_tier_completeness::minimax_h3_ref_tier_complete(&dir)
-            }
-            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va) => {
-                sceneworks_core::mlx_tier_completeness::minimax_h3_tier_complete(&dir)
-            }
-            Some(sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Hybrid) => {
-                let encoder = sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
-                    &tier_root, &base_root, tier,
-                );
-                sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(
-                    &base_root, &encoder,
-                )
-                .is_empty()
-            }
-        }
+        minimax_h3_tier_dir_is_complete(&dir)
     }) else {
         // Say WHICH half is missing. The two partitions are separate downloads owned by separate
         // catalog entries, so "no complete tier" alone would send a user who installed one of them
@@ -1933,11 +1907,13 @@ pub(super) struct ImportedMiniMaxH3Dit {
     /// The validated binding, recorded verbatim on the asset.
     pub(super) assembly: Value,
     pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
+    component_bindings: Value,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
     _pins: Vec<gen_core::PinnedWeightsFile>,
     /// Shared resolved-cache lease keeps normalized native tensors unevictable through rendering.
     _derivative: Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheLease>,
+    _source_lease: sceneworks_core::file_lock::FileLock,
 }
 
 /// Bracket all header/payload reads; mutation errors win before derivative publication.
@@ -2002,6 +1978,9 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     let entry = &request.model_manifest_entry;
     let store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let source_lease = store
+        .lease_source(&checkpoint_id)
+        .map_err(|e| refuse("source-in-use", e.to_string()))?;
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
@@ -2137,8 +2116,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         transformer_dir: directory,
         partition: assembly.partition,
         assembly: assembly.to_json(),
+        component_bindings: json!({"tier":entry.get("importComponentTier"),"downloads":entry.get("downloads")}),
         _pins: pins,
         _derivative: derivative,
+        _source_lease: source_lease,
     })
 }
 
@@ -2189,6 +2170,10 @@ fn record_imported_minimax_h3_identity(
         raw.insert(
             "minimaxH3SharedTier".to_owned(),
             Value::String(shared_tier.to_owned()),
+        );
+        raw.insert(
+            "minimaxH3ComponentBindings".to_owned(),
+            dit.component_bindings.clone(),
         );
     }
 }
@@ -2334,6 +2319,187 @@ fn validate_imported_minimax_h3_shared(root: &Path, encoder: &Path) -> WorkerRes
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 const MINIMAX_H3_REFERENCE_DIT_DIR: &str = "transformer_ref";
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+struct ImportedH3Components {
+    root: PathBuf,
+    encoder: PathBuf,
+    companion: PathBuf,
+    tier: &'static str,
+}
+
+/// Imports consume the admitted component closure, not mutable refs/main or the stock model's
+/// default tier search. Explicit precision controls may confirm this closure, never replace it.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn resolve_imported_h3_components(
+    settings: &Settings,
+    request: &VideoRequest,
+    dit: &ImportedMiniMaxH3Dit,
+) -> WorkerResult<ImportedH3Components> {
+    let refuse = |reason: String| {
+        WorkerError::InvalidPayload(format!("[checkpoint-plan:missing-component] {reason}"))
+    };
+    let tier = sceneworks_core::minimax_h3_import::selected_import_component_tier(
+        &request.model_manifest_entry,
+    )
+    .map_err(refuse)?;
+    if let Some(value) = request.advanced.get("mlxQuantize") {
+        let bits = value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .ok_or_else(|| {
+                refuse("explicit mlxQuantize must name the bound shared component precision".into())
+            })?;
+        let explicit = if bits <= 0 {
+            "bf16"
+        } else if bits <= 4 {
+            "q4"
+        } else {
+            "q8"
+        };
+        if explicit != tier {
+            return Err(refuse(format!("explicit {explicit} shared precision differs from the imported checkpoint's bound {tier} closure; no component substitution is permitted")));
+        }
+    }
+    let rows = request
+        .model_manifest_entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or_else(|| refuse("the imported checkpoint has no bound component downloads".into()))?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(&settings.data_dir),
+    );
+    let mut components = std::collections::BTreeMap::new();
+    for row in rows {
+        if row.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+            return Err(refuse(
+                "an imported component binding is not a co-requisite".into(),
+            ));
+        }
+        if row
+            .get("variant")
+            .and_then(Value::as_str)
+            .is_some_and(|selected| selected != tier)
+        {
+            return Err(refuse(
+                "component binding disagrees with the selected shared tier".into(),
+            ));
+        }
+        let repo = row
+            .get("repo")
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse("component binding has no repository".into()))?;
+        let revision = row
+            .get("revision")
+            .and_then(Value::as_str)
+            .ok_or_else(|| refuse(format!("{repo}: component binding has no exact revision")))?;
+        let (_, snapshot) = resolver
+            .discover_source_snapshot(repo, Some(revision))
+            .map_err(|error| refuse(format!("{repo}@{revision}: {error}")))?;
+        if !sceneworks_core::minimax_h3_import::import_component_files_complete(&snapshot, row) {
+            return Err(refuse(format!(
+                "{repo}@{revision}: bound component is incomplete"
+            )));
+        }
+        let files = row
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or_else(|| refuse("component binding has no files".into()))?;
+        for file in files
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|file| !file.contains(['*', '?', '[']))
+        {
+            if !crate::safe_join(&snapshot, file)?.is_file() {
+                return Err(refuse(format!("{repo}@{revision}: missing {file}")));
+            }
+        }
+        let subdir = row
+            .get("subdir")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                files
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find_map(|file| file.strip_suffix("/*"))
+            })
+            .ok_or_else(|| {
+                refuse(format!(
+                    "{repo}@{revision}: component binding has no directory"
+                ))
+            })?;
+        let name = row
+            .get("componentId")
+            .and_then(Value::as_str)
+            .or_else(|| subdir.rsplit('/').next())
+            .unwrap_or_default();
+        let name = match name {
+            "video_vae" => "vae",
+            "fl2va_audio_vae_config" => "FL2VA/audio_vae",
+            other => other,
+        };
+        if components
+            .insert(name.to_owned(), crate::safe_join(&snapshot, subdir)?)
+            .is_some()
+        {
+            return Err(refuse(format!("duplicate bound {name} component")));
+        }
+    }
+    let component = |name: &str| {
+        components
+            .get(name)
+            .cloned()
+            .ok_or_else(|| refuse(format!("the imported closure is missing {name}")))
+    };
+    let tokenizer = component("tokenizer")?;
+    let base = tokenizer
+        .parent()
+        .ok_or_else(|| refuse("tokenizer has no snapshot root".into()))?
+        .to_path_buf();
+    let shared = ["tokenizer", "vae", "audio_vae", "FL2VA/audio_vae"];
+    let root = if shared.iter().all(|name| {
+        components
+            .get(*name)
+            .is_some_and(|dir| *dir == base.join(name))
+    }) {
+        base
+    } else {
+        use sha2::{Digest, Sha256};
+        let mut identity = Sha256::new();
+        for name in shared {
+            identity.update(name.as_bytes());
+            identity.update(component(name)?.as_os_str().as_encoded_bytes());
+            identity.update([0]);
+        }
+        let root = settings
+            .data_dir
+            .join("cache/minimax-h3-shared")
+            .join(format!("{:x}", identity.finalize()));
+        std::fs::create_dir_all(&root)?;
+        for name in shared {
+            stage_h3_component(&root.join(name), &component(name)?)?;
+        }
+        root
+    };
+    let encoder = component("text_encoder")?;
+    validate_imported_minimax_h3_shared(&root, &encoder)?;
+    let companion = match dit.partition {
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va => {
+            component("transformer_ref")?
+        }
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va => component("transformer")?,
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Hybrid => {
+            dit.transformer_dir.clone()
+        }
+    };
+    Ok(ImportedH3Components {
+        root,
+        encoder,
+        companion,
+        tier,
+    })
+}
+
 /// Resolve shared components and the explicitly recorded load-only companion. MLX eagerly probes
 /// both task directories, so an explicit hybrid binds the imported DiT at both paths; a single
 /// partition import binds it only at its declared task path. Unsupported operations refuse before
@@ -2344,36 +2510,14 @@ pub(super) fn resolve_imported_minimax_h3_load(
     request: &VideoRequest,
     dit: &ImportedMiniMaxH3Dit,
 ) -> WorkerResult<(MiniMaxH3Load, &'static str)> {
-    let partition = imported_minimax_h3_partition_request(request)?;
-    let resident = resolve_minimax_h3_load_for_import(settings, &partition, Some(dit.partition))
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:missing-component] checkpoint {:?} reuses the installed MiniMax-H3 \
-             text encoder, tokenizer, VAEs and reference partition, which are not ready: {error}",
-            dit.checkpoint_id
-        ))
-        })?;
-    validate_imported_minimax_h3_shared(
-        &resident.root,
-        resident
-            .text_encoder_dir
-            .as_deref()
-            .unwrap_or(&resident.root.join("text_encoder")),
-    )?;
-    let companion =
-        if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va {
-            resident.dit_dir.clone()
-        } else {
-            resident
-                .dit_dir
-                .with_file_name(MINIMAX_H3_REFERENCE_DIT_DIR)
-        };
+    let resident = resolve_imported_h3_components(settings, request, dit)?;
+    let companion = resident.companion.clone();
     let staged = stage_imported_minimax_h3_assembly(settings, dit, &companion)?;
     Ok((
         MiniMaxH3Load {
             root: resident.root,
             dit_dir: staged.join(MINIMAX_H3_DIT_COMPONENT),
-            text_encoder_dir: resident.text_encoder_dir,
+            text_encoder_dir: Some(resident.encoder),
             // The imported DiT is DENSE: `spec.quantize` asserts the staged DiT's tier, and a dense
             // directory carries no quantization marker. The resident reference partition may be
             // packed; the provider reconciles a packed partition against `None` as agreed.
@@ -2434,41 +2578,47 @@ fn stage_imported_minimax_h3_assembly(
             },
         ),
     ] {
-        let link = staged.join(name);
-        if std::fs::read_link(&link).ok().as_deref() == Some(target) {
-            continue;
-        }
-        match std::fs::symlink_metadata(&link) {
-            #[cfg(unix)]
-            Ok(_) => std::fs::remove_file(&link)?,
-            #[cfg(windows)]
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, &link)?;
-        #[cfg(windows)]
-        {
-            // Snapshot-style file hardlinks avoid both copying tensors and requiring directory
-            // symlink privileges. Source inventory is pinned before this function is called.
-            std::fs::create_dir_all(&link)?;
-            for entry in std::fs::read_dir(target)? {
-                let entry = entry?;
-                if !entry.file_type()?.is_file() {
-                    continue;
-                }
-                let destination = link.join(entry.file_name());
-                match std::fs::remove_file(&destination) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-                std::fs::hard_link(entry.path(), &destination).map_err(|error| WorkerError::InvalidPayload(format!("cannot stage imported H3 file {}: {error}; keep the import and component cache on the same hardlink-capable volume", destination.display())))?;
-            }
-        }
+        stage_h3_component(&staged.join(name), target)?;
     }
     Ok(staged)
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn stage_h3_component(link: &Path, target: &Path) -> WorkerResult<()> {
+    if std::fs::read_link(link).ok().as_deref() == Some(target) {
+        return Ok(());
+    }
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::symlink_metadata(link) {
+        #[cfg(unix)]
+        Ok(_) => std::fs::remove_file(link)?,
+        #[cfg(windows)]
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link)?;
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(link)?;
+        for entry in std::fs::read_dir(target)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let destination = link.join(entry.file_name());
+            match std::fs::remove_file(&destination) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            std::fs::hard_link(entry.path(), &destination).map_err(|error| WorkerError::InvalidPayload(format!("cannot stage imported H3 file {}: {error}; keep the import and component cache on the same hardlink-capable volume", destination.display())))?;
+        }
+    }
+    Ok(())
 }
 
 /// Candle shares the installed conditioner/VAEs and derives Ref2VA's DiT by the same sibling rule.
@@ -2480,72 +2630,22 @@ pub(super) fn resolve_candle_imported_minimax_h3_load(
     request: &VideoRequest,
     dit: &ImportedMiniMaxH3Dit,
 ) -> WorkerResult<(CandleMiniMaxH3Load, &'static str)> {
-    let missing = |error: WorkerError| {
-        WorkerError::InvalidPayload(format!(
-            "[checkpoint-plan:missing-component] checkpoint {:?} reuses the installed MiniMax-H3 \
-             text encoder, tokenizer and VAEs, which are not ready: {error}",
-            dit.checkpoint_id
-        ))
-    };
-    let (tier, quant) = candle_minimax_h3_tier(request);
-    let root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_REPO).map_err(missing)?;
-    for component in ["vae", "audio_vae"] {
-        candle_minimax_h3_component_dir(&root, component).map_err(missing)?;
-    }
-    let text_encoder_dir = if quant.is_some() {
-        let tier_root = candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)
-            .map_err(missing)?
-            .join(tier);
-        Some(candle_minimax_h3_component_dir(&tier_root, "text_encoder").map_err(missing)?)
-    } else {
-        candle_minimax_h3_component_dir(&root, "text_encoder").map_err(missing)?;
-        None
-    };
-    let encoder = text_encoder_dir
-        .as_deref()
-        .map_or_else(|| root.join("text_encoder"), Path::to_path_buf);
-    let probes =
-        sceneworks_core::mlx_tier_completeness::minimax_h3_missing_shared_probes(&root, &encoder);
-    if !probes.is_empty() {
-        return Err(missing(WorkerError::InvalidPayload(format!(
-            "missing shared component files: {}",
-            probes
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))));
-    }
-    validate_imported_minimax_h3_shared(&root, &encoder)?;
+    let bound = resolve_imported_h3_components(settings, request, dit)?;
     let dit_dir = if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va
     {
         dit.transformer_dir.clone()
     } else {
-        let companion =
-            if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Ref2va {
-                let base_root = if quant.is_some() {
-                    candle_minimax_h3_snapshot_dir(settings, CANDLE_MINIMAX_H3_TIER_REPO)
-                        .map_err(missing)?
-                        .join(tier)
-                } else {
-                    root.clone()
-                };
-                candle_minimax_h3_component_dir(&base_root, "transformer").map_err(missing)?
-            } else {
-                dit.transformer_dir.clone()
-            };
-        stage_imported_minimax_h3_assembly(settings, dit, &companion)?
+        stage_imported_minimax_h3_assembly(settings, dit, &bound.companion)?
             .join(MINIMAX_H3_DIT_COMPONENT)
     };
     Ok((
         CandleMiniMaxH3Load {
-            root,
+            root: bound.root,
             dit_dir: Some(dit_dir),
-            text_encoder_dir,
-            // Dense imported DiT; the packed text encoder's tier is auto-detected by the provider.
+            text_encoder_dir: Some(bound.encoder),
             quant: None,
             tier: IMPORTED_MINIMAX_H3_TIER,
         },
-        tier,
+        bound.tier,
     ))
 }
