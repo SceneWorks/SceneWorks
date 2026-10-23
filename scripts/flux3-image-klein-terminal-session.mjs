@@ -66,32 +66,68 @@ export function gpuProcessMemoryScript(luid, requiredProcesses) {
   // partial results ONLY when known invalid UNREQUIRED instances explain those errors and
   // every required PID/start-time/physical-node sample is independently valid.
   return `$ErrorActionPreference='Stop'; $wanted=@(${requiredProcesses.map(p => p.pid).join(',')}); $counterErrors=@();
-$sets=@(Get-Counter '\\GPU Process Memory(*luid_${luid}_phys_*)\\Dedicated Usage' -MaxSamples 1 -ErrorAction Continue -ErrorVariable counterErrors 2>$null);
+function Get-RequiredCounterMetadata {
+  $set=Get-Counter -ListSet 'GPU Process Memory' -ErrorAction Stop;
+  if ($null -eq $set.PathsWithInstances) { throw 'Independent GPU counter path metadata unavailable' };
+  $prefix='\\GPU Process Memory('; $suffix=')\\Dedicated Usage'; $found=@(); $seen=@{};
+  foreach ($counterPath in $set.PathsWithInstances) {
+    $offset=$counterPath.LastIndexOf($prefix,[StringComparison]::OrdinalIgnoreCase);
+    if ($offset -lt 0 -or -not $counterPath.EndsWith($suffix,[StringComparison]::OrdinalIgnoreCase)) { continue };
+    $instance=$counterPath.Substring($offset+$prefix.Length,$counterPath.Length-$offset-$prefix.Length-$suffix.Length);
+    if ($instance -notmatch '^pid_([0-9]+)_luid_(0x[0-9a-f]{8}_0x[0-9a-f]{8})_') { continue };
+    $pidValue=[int]$Matches[1]; $luidValue=$Matches[2].ToLowerInvariant();
+    if ($wanted -notcontains $pidValue -or $luidValue -ne '${luid.toLowerCase()}') { continue };
+    if ($instance -notmatch '^pid_[0-9]+_luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}_phys_([0-9]+)$') { throw 'Required GPU counter instance metadata malformed' };
+    $physicalNode=[int]$Matches[1]; $key=([string]$pidValue)+':'+$physicalNode;
+    if ($seen.ContainsKey($key)) { throw 'Duplicate required GPU counter instance metadata' }; $seen[$key]=$true;
+    $found += [pscustomobject]@{pid=$pidValue;luid=$luidValue;physicalNode=$physicalNode}
+  };
+  foreach ($requiredPid in $wanted) { if (-not @($found | Where-Object { $_.pid -eq $requiredPid }).Count) { throw 'Required GPU counter metadata missing' } };
+  $found
+};
+$expectedBefore=@(Get-RequiredCounterMetadata);
+$queryPaths=@($expectedBefore | ForEach-Object { '\\GPU Process Memory(pid_'+$_.pid+'_luid_'+$_.luid+'_phys_'+$_.physicalNode+')\\Dedicated Usage' });
+$sets=@(Get-Counter -Counter $queryPaths -MaxSamples 1 -ErrorAction Continue -ErrorVariable counterErrors 2>$null);
 $samples=@($sets | ForEach-Object { $_.CounterSamples } | ForEach-Object {
   $pidValue=-1; $luidValue=$null; $physicalNode=-1;
   if ($_.InstanceName -match '^pid_([0-9]+)_luid_(0x[0-9a-f]{8}_0x[0-9a-f]{8})_phys_([0-9]+)$') { $pidValue=[int]$Matches[1]; $luidValue=$Matches[2].ToLowerInvariant(); $physicalNode=[int]$Matches[3] };
   $row=[ordered]@{pid=$pidValue;luid=$luidValue;physicalNode=$physicalNode;status=[long]$_.Status}; $value=[double]$_.CookedValue;
   if (($_.Status -eq 0 -or $_.Status -eq 1) -and -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and $value -ge 0) { $row.cookedBytes=$value }; [pscustomobject]$row
 });
+$expectedAfter=@(Get-RequiredCounterMetadata);
 $identities=@(Get-CimInstance Win32_Process | Where-Object { $wanted -contains $_.ProcessId } | ForEach-Object { [pscustomobject]@{pid=[int]$_.ProcessId;startedAt=$_.CreationDate.ToUniversalTime().ToString('o')} });
 $errors=@($counterErrors | ForEach-Object { $code='UNKNOWN_COUNTER_PROVIDER_ERROR'; if (([string]$_.FullyQualifiedErrorId).StartsWith('CounterApiError,')) { $code='CounterApiError' }; [pscustomobject]@{category=[string]$_.CategoryInfo.Category;code=$code} });
-[pscustomobject]@{samples=$samples;identities=$identities;errors=$errors} | ConvertTo-Json -Depth 5 -Compress`;
+[pscustomobject]@{expectedBefore=$expectedBefore;expectedAfter=$expectedAfter;samples=$samples;identities=$identities;errors=$errors} | ConvertTo-Json -Depth 5 -Compress`;
 }
 export function validateGpuProcessMemory(observation, luid, requiredProcesses) {
   assert(/^0x[0-9a-f]{8}_0x[0-9a-f]{8}$/i.test(luid));
   assert(requiredProcesses.length && new Set(requiredProcesses.map(p => p.pid)).size === requiredProcesses.length);
-  assert(Array.isArray(observation?.samples) && Array.isArray(observation.identities) && Array.isArray(observation.errors), 'structured GPU counter observation required');
+  assert(Array.isArray(observation?.samples) && Array.isArray(observation.identities) && Array.isArray(observation.errors) && Array.isArray(observation.expectedBefore) && Array.isArray(observation.expectedAfter), 'structured GPU counter observation and independent path metadata required');
   const required = new Map(requiredProcesses.map(p => { assert(Number.isSafeInteger(p.pid) && p.pid > 0 && typeof p.startedAt === 'string' && Number.isFinite(Date.parse(p.startedAt)), 'required GPU process start-time proof missing'); return [p.pid, p.startedAt]; }));
+  const expected = metadata => {
+    const keys = new Set(), pids = new Set();
+    for (const row of metadata) {
+      assert(row && Object.keys(row).sort().join(',') === 'luid,physicalNode,pid' && required.has(row.pid) && row.luid === luid.toLowerCase() && Number.isSafeInteger(row.physicalNode) && row.physicalNode >= 0, 'required GPU counter path metadata malformed');
+      const key = `${row.pid}:${row.physicalNode}`; assert(!keys.has(key), 'duplicate required GPU counter path metadata'); keys.add(key); pids.add(row.pid);
+    }
+    for (const pid of required.keys()) assert(pids.has(pid), 'required GPU counter path metadata missing');
+    return keys;
+  };
+  // Independently enumerated before/after via ListSet.PathsWithInstances, NEVER inferred
+  // from a partial value response. A single sample per PID is not completeness evidence.
+  const expectedBefore = expected(observation.expectedBefore), expectedAfter = expected(observation.expectedAfter);
+  assert.deepEqual([...expectedBefore].sort(), [...expectedAfter].sort(), 'required GPU counter physical-node set changed during observation');
   const identities = new Map();
   for (const p of observation.identities) { assert(required.has(p.pid) && !identities.has(p.pid), 'unexpected/duplicate GPU counter process identity'); identities.set(p.pid, p.startedAt); }
   for (const [pid, startedAt] of required) assert.equal(identities.get(pid), startedAt, 'required GPU process missing/reused during counter observation');
-  const memory = new Map(), seen = new Set(); let invalidUnrequired = 0;
+  const memory = new Map(), seen = new Set(), observedRequired = new Set(); let invalidUnrequired = 0;
   for (const sample of observation.samples) {
     assert(Number.isSafeInteger(sample.pid) && sample.pid > 0 && sample.luid === luid.toLowerCase() && Number.isSafeInteger(sample.physicalNode) && sample.physicalNode >= 0 && Number.isSafeInteger(sample.status) && sample.status >= 0 && sample.status <= 0xffffffff, 'malformed GPU counter sample identity/status');
     const key = `${sample.pid}:${sample.physicalNode}`; assert(!seen.has(key), 'duplicate GPU counter physical-node sample'); seen.add(key);
     const valid = [0, 1].includes(sample.status) && Number.isFinite(sample.cookedBytes) && sample.cookedBytes >= 0;
     if (required.has(sample.pid)) {
-      assert(valid, 'required foreign GPU process has invalid counter data');
+      assert(expectedBefore.has(key), 'required GPU counter value has no independently enumerated physical-node path');
+      assert(valid, 'required foreign GPU process has invalid counter data'); observedRequired.add(key);
       memory.set(sample.pid, (memory.get(sample.pid) ?? 0) + sample.cookedBytes);
     } else if (!valid) {
       // SDK PdhMsg.h: per-instance NO_INSTANCE / INVALID_DATA. Unknown provider statuses
@@ -99,6 +135,7 @@ export function validateGpuProcessMemory(observation, luid, requiredProcesses) {
       assert([0x800007d1, 0xc0000bba].includes(sample.status), 'unknown unrequired GPU counter failure'); invalidUnrequired++;
     }
   }
+  assert.deepEqual([...observedRequired].sort(), [...expectedBefore].sort(), 'required GPU counter physical-node coverage incomplete');
   for (const pid of required.keys()) assert(memory.has(pid) && Number.isSafeInteger(memory.get(pid)) && memory.get(pid) >= 0, 'required foreign GPU counter sample missing/nonintegral');
   assert(observation.errors.every(e => e?.category === 'InvalidResult' && e.code === 'CounterApiError'), 'GPU counter provider/permission failure');
   assert((observation.errors.length > 0) === (invalidUnrequired > 0), 'unexplained GPU counter provider error/invalid sample');
@@ -192,7 +229,9 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
     memory = validateGpuProcessMemory(observation, luid, requiredProcesses);
     counterProof = { requiredProcesses, ...observation };
   }
-  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory), ...(counterProof ? { counterProof } : {}) };
+  const foreignGraphics = { luid: luid ?? null, ...assessForeignGraphics(foreign, memory) };
+  // Node-only validation detail: preserve the established JSON/Rust hardware-observation shape.
+  if (counterProof) Object.defineProperty(foreignGraphics, 'counterProof', { value: counterProof, enumerable: false });
   return { physicalGpuId: '1', gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: apps.filter(([pid]) => ownPids.includes(Number(pid))).map(([pid]) => Number(pid)), foreignGraphics };
 }
 // Called ONLY by the adapter's synchronous native-boundary child CLI, before reservation.

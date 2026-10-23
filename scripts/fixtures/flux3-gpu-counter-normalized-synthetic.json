@@ -1,7 +1,7 @@
 {
   "declaredSynthetic": true,
   "hardwareEvidence": false,
-  "description": "Normalized diagnostic topology only: two independent 29-row all-status-0 sets, 24 required and 5 unrequired PIDs per set. All PIDs, LUID, bytes and identity times are synthetic. Raw diagnostic alive flags were invalid (PS5 nested-array bug) and are deliberately omitted. Required identity membership was independently checked against equal before/after CIM start ticks before substituting synthetic start times. physicalNode=0 is a synthetic schema completion, not measured metadata.",
+  "description": "Normalized diagnostic topology only: two independent 29-row all-status-0 sets, 24 required and 5 unrequired PIDs per set. All PIDs, LUID, bytes and identity times are synthetic. Raw diagnostic alive flags were invalid (PS5 nested-array bug) and are deliberately omitted. Required identity membership was independently checked against equal before/after CIM start ticks before substituting synthetic start times. physicalNode=0 is a synthetic schema completion, not measured metadata. expectedBefore/expectedAfter are independently declared synthetic OS instance metadata for the 24 required PIDs on node 0, not derived from counter samples and not hardware observations.",
   "luid": "0xdeadbeef_0x00000001",
   "requiredProcesses": [
     {
@@ -406,7 +406,251 @@
           "startedAt": "2000-01-01T00:00:23.0000000Z"
         }
       ],
-      "errors": []
+      "errors": [],
+      "expectedBefore": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        }
+      ],
+      "expectedAfter": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        }
+      ]
     },
     {
       "samples": [
@@ -712,7 +956,251 @@
           "startedAt": "2000-01-01T00:00:23.0000000Z"
         }
       ],
-      "errors": []
+      "errors": [],
+      "expectedBefore": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        }
+      ],
+      "expectedAfter": [
+        {
+          "pid": 900001,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900002,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900003,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900004,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900005,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900006,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900007,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900008,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900009,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900010,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900011,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900012,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900013,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900014,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900015,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900016,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900017,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900018,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900019,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900023,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900024,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900025,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900026,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        },
+        {
+          "pid": 900029,
+          "luid": "0xdeadbeef_0x00000001",
+          "physicalNode": 0
+        }
+      ]
     }
   ]
 }
