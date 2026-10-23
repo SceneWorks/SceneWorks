@@ -4,6 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use runtime_cuda as platform_runtime;
+#[cfg(target_os = "macos")]
+use runtime_macos as platform_runtime;
 use serde_json::{json, Map, Value};
 
 /// One block of the published DiT grammar: the refiner + joint-audio head that identify the family
@@ -93,6 +97,14 @@ pub(crate) fn stage_managed_minimax_h3_import(
     data_dir: &Path,
     model_id: &str,
 ) -> ManagedMiniMaxH3Import {
+    stage_managed_minimax_h3_import_with_partition(data_dir, model_id, "fl2va")
+}
+
+pub(crate) fn stage_managed_minimax_h3_import_with_partition(
+    data_dir: &Path,
+    model_id: &str,
+    partition: &str,
+) -> ManagedMiniMaxH3Import {
     let source = data_dir.join("models/incoming").join(model_id);
     write_minimax_h3_dit_dir(&source);
     let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir);
@@ -119,16 +131,14 @@ pub(crate) fn stage_managed_minimax_h3_import(
             None,
         )
         .expect("a dense H3 DiT commits");
-    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_plan(
-        &install.compiled.plan,
-    )
-    .expect("complete assembly");
     let semantic_digest = install.compiled.record.plan.semantic_digest.clone();
     let mut entry = json!({
         "id": model_id,
         "name": "Imported H3 fine-tune",
         "type": "image",
         "family": "minimax-h3",
+        "baseModel": if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" },
+        "minimaxH3Partition": partition,
         "importPlan": {
             "checkpointId": install.checkpoint_id,
             "planId": install.compiled.plan.plan_id,
@@ -139,6 +149,11 @@ pub(crate) fn stage_managed_minimax_h3_import(
     .as_object()
     .cloned()
     .expect("object");
+    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+        &install.compiled.plan,
+        &entry,
+    )
+    .expect("explicit complete assembly");
     sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
     sceneworks_core::lora_family::apply_model_manifest_defaults(
         &mut entry,
@@ -152,4 +167,78 @@ pub(crate) fn stage_managed_minimax_h3_import(
         plan_id: install.compiled.plan.plan_id.clone(),
         semantic_digest,
     }
+}
+
+/// Constructor documents at fixture scale; no model weights, downloads, or tensor runtime.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn write_shared_configs(root: &Path, encoder: &Path) {
+    let put = |path: PathBuf, value: Value| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, value.to_string()).unwrap();
+    };
+    put(
+        encoder.join("config.json"),
+        json!({
+            "model_type":"qwen3_vl", "image_token_id":151655, "video_token_id":151656,
+            "vision_start_token_id":151652, "vision_end_token_id":151653,
+            "text_config":{"model_type":"qwen3_vl_text", "hidden_size":5120,
+                "num_hidden_layers":64,"num_attention_heads":64,"num_key_value_heads":8,
+                "head_dim":128,"intermediate_size":25600,"rms_norm_eps":0.000001,
+                "rope_theta":5000000,"vocab_size":151936,
+                "rope_scaling":{"mrope_interleaved":true,"mrope_section":[24,20,20]}}
+        }),
+    );
+    put(
+        encoder.join("model.safetensors.index.json"),
+        json!({"weight_map":{}}),
+    );
+    let video = platform_runtime::providers::minimax_h3::config::MiniMaxH3VaeConfig::default();
+    put(
+        root.join("vae/config.json"),
+        json!({
+            "latent_channels":video.latent_channels,"out_channels":video.out_channels,
+            "decoder_num_layers":video.num_layers,"decoder_num_attention_heads":video.num_heads,
+            "decoder_attention_head_dim":video.head_dim,"decoder_num_register_tokens":video.num_register_tokens,
+            "decoder_ffn_mult":video.ffn_mult,"decoder_rope_theta":video.rope_theta,
+            "decoder_rope_dim_ratio":video.rope_dim_ratio,"decoder_norm_eps":video.norm_eps,
+            "clip_length":video.clip_length,"token_drop":video.token_drop,
+            "latents_mean":video.latents_mean,"latents_std":video.latents_std,
+            "in_channels":video.in_channels,"block_out_channels":video.block_out_channels,
+            "layers_per_block":video.layers_per_block,"spatial_downsample_factors":video.spatial_downsample_factors,
+            "temporal_downsample_factors":video.temporal_downsample_factors,"norm_num_groups":video.norm_num_groups,
+            "norm_eps":video.encoder_norm_eps
+        }),
+    );
+    let source = json!({"_class_name":"MiniMaxH3AudioVAE","output_channel":2,"sample_rate":32000,
+        "source_config_path":"config.yaml","source_metadata_path":"metadata.json",
+        "source_safetensors_path":"model.safetensors","latent_channels":32,
+        "latents_mean":vec![0.0;32],"latents_std":vec![1.0;32]});
+    put(root.join("FL2VA/audio_vae/config.json"), source);
+    std::fs::write(root.join("FL2VA/audio_vae/config.yaml"), "model_config:\n  sr: 32000\n  decoder_dim: 1024\n  audio_channel: 1\n  vae_latent_channels: 32\n").unwrap();
+    put(
+        root.join("FL2VA/audio_vae/metadata.json"),
+        json!({"metadata":{"kwargs":{
+            "attn_proj":true,"decoder_dim":1024,"decoder_rates":[5,5,2,2,2,2,2],"decoder_type":"bigvgan",
+            "encoder_dim":64,"encoder_rates":[2,4,4,5,5],"latent_dim":2048,"sample_rate":32000,"vae_latent_channels":32
+        }}}),
+    );
+    put(
+        root.join("audio_vae/config.json"),
+        json!({"decoder_dim":1024,
+        "decoder_kernel_sizes":[9,9,4,4,4,4,4],"decoder_rates":[5,5,2,2,2,2,2],
+        "encoder_dim":64,"encoder_rates":[2,4,4,5,5],"latent_channels":32,"latent_dim":2048,
+        "num_attention_heads":8,"resblock_dilation_sizes":[[1,3,5],[1,3,5],[1,3,5]],
+        "resblock_kernel_sizes":[3,7,11],"sampling_rate":32000,"latents_mean":vec![0.0;32],"latents_std":vec![1.0;32]}),
+    );
+    put(
+        root.join("tokenizer/tokenizer.json"),
+        json!({"model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[
+            {"content":"<|vision_start|>","id":151652},{"content":"<|vision_end|>","id":151653},
+            {"content":"<|image_pad|>","id":151655},{"content":"<|video_pad|>","id":151656}
+        ]}),
+    );
+    put(
+        root.join("tokenizer/tokenizer_config.json"),
+        json!({"additional_special_tokens":platform_runtime::providers::minimax_h3::text_encoder::MINIMAX_ADDED_SPECIALS}),
+    );
 }

@@ -1,32 +1,11 @@
-//! Dense MiniMax-H3 fine-tune imports (epic 26679, sc-26680).
+//! MiniMax-H3 imported checkpoint semantics (epic 26679, sc-26682).
 //!
-//! A community H3 fine-tune is a new **DiT** and nothing else: the Diffusers transformer component
-//! directory the H3 tooling writes (`config.json` declaring `MiniMaxH3Transformer3DModel` plus one
-//! dense `diffusion_pytorch_model.safetensors`). Every other component the native providers read —
-//! the Qwen3-VL text encoder, the tokenizer, the video and audio VAEs with their `FL2VA` constructor
-//! documents, and the reference DiT partition the MLX provider probes beside the base one — is the
-//! resident MiniMax-H3 install's, reused rather than copied.
-//!
-//! This module is the one place that decides what such an import IS, so the importer that stamps
-//! the catalog entry, the scheduler that claims its jobs and the worker that renders them cannot
-//! disagree:
-//!
-//! * [`MiniMaxH3ImportAssembly::from_plan`] validates a persisted [`ImportPlanV1`] as a COMPLETE
-//!   assembly — exactly one dense safetensors transformer layer, and no layer the provider would not
-//!   read (a second weight file, an encoder, a VAE) — and names every component's source. An
-//!   assembly that fails here is never stamped, so it can never appear selectable.
-//! * The stamped JSON ([`MiniMaxH3ImportAssembly::to_json`], persisted at `importPlan.assembly`) is
-//!   the explicit, recorded binding: which layer is the DiT, which partition it serves, and which
-//!   builtin install supplies each shared component. [`verify_entry_assembly`] re-derives it from the
-//!   plan at render time, so an entry whose binding no longer matches its plan refuses rather than
-//!   rendering something other than what was imported.
-//! * [`apply_minimax_h3_studio_surface_defaults`] gives the imported entry the base partition's
-//!   generation surface (modes, geometry, durations, fps, step floor) read from the SHIPPED builtin
-//!   `minimax_h3` entry, so an imported DiT is offered exactly the operations the provider serves.
-//!
-//! Scope (sc-26680): the dense, unsharded component directory serving the base (FL2VA: t2va + fl2va)
-//! partition. Single-file/sharded layouts, quantized dialects, Ref2VA/hybrid fine-tunes and adapters
-//! are later stories of the epic and are refused rather than approximated.
+//! Architecture recognition is not task compatibility: FL2VA and Ref2VA have identical tensor
+//! shapes. The existing import workflow must record an exact compatible `baseModel` and an explicit
+//! `minimaxH3Partition` (`fl2va`, `ref2va`, or `hybrid`). Hybrid is an explicit promise that the
+//! imported DiT supports both task partitions, not permission to combine keyframes and references.
+//! Every supported operation denoises with the imported bytes; resident components are named
+//! load-time companions only. The worker revalidates this binding before loading.
 
 use std::sync::LazyLock;
 
@@ -42,8 +21,6 @@ pub const MINIMAX_H3_IMPORT_FAMILY: &str = "minimax-h3";
 pub const MINIMAX_H3_IMPORT_SOURCE_SHAPE: &str = "transformer_directory";
 /// Version of the persisted `importPlan.assembly` document.
 pub const MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION: u64 = 1;
-/// The partition an imported dense DiT serves: the base `transformer/` checkpoint (t2va + fl2va).
-pub const MINIMAX_H3_ASSEMBLY_PARTITION: &str = "fl2va";
 /// The builtin catalog entry whose partition — and whose generation surface — an imported dense
 /// DiT takes over. Used for SEMANTICS only (mode set, frame lattice, geometry); the request keeps
 /// the imported model id and the provider loads the imported bytes.
@@ -57,10 +34,8 @@ const TRANSFORMER_ROLE: &str = "transformer";
 /// The shared components an imported dense H3 DiT is assembled with, and the builtin install each
 /// is reused from. Order is the persisted order.
 ///
-/// `transformer_ref` is the one non-obvious row. It is NEVER denoised for a base-partition request;
-/// it is bound because `mlx-gen-minimax-h3::load` probes the reference DiT as the staged DiT's
-/// sibling on every load (Ref2VA is a first-class task of the provider). Recording it here is what
-/// makes that companion explicit rather than an incidental symlink.
+/// The opposite DiT is a load-time companion only for single-partition imports. The assembly
+/// overrides this row for Ref2VA or hybrid explicitly; it is never a stock operation fallback.
 pub const MINIMAX_H3_RESIDENT_COMPONENTS: &[(&str, &str)] = &[
     ("text_encoder", MINIMAX_H3_BASE_PARTITION_MODEL),
     ("tokenizer", MINIMAX_H3_BASE_PARTITION_MODEL),
@@ -69,9 +44,70 @@ pub const MINIMAX_H3_RESIDENT_COMPONENTS: &[(&str, &str)] = &[
     ("transformer_ref", MINIMAX_H3_REFERENCE_PARTITION_MODEL),
 ];
 
+/// Task compatibility declared independently of architecture and tensor shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiniMaxH3Partition {
+    Fl2va,
+    Ref2va,
+    Hybrid,
+}
+
+impl MiniMaxH3Partition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fl2va => "fl2va",
+            Self::Ref2va => "ref2va",
+            Self::Hybrid => "hybrid",
+        }
+    }
+
+    pub fn supports_base(self) -> bool {
+        matches!(self, Self::Fl2va | Self::Hybrid)
+    }
+
+    pub fn supports_references(self) -> bool {
+        matches!(self, Self::Ref2va | Self::Hybrid)
+    }
+
+    pub fn from_entry(entry: &Map<String, Value>) -> Result<Self, String> {
+        let partition = match entry_str(entry, "minimaxH3Partition") {
+            Some("fl2va") => Self::Fl2va,
+            Some("ref2va") => Self::Ref2va,
+            Some("hybrid") => Self::Hybrid,
+            _ => return Err("MiniMax-H3 task compatibility is ambiguous: explicitly declare minimaxH3Partition fl2va, ref2va, or hybrid; shapes and directory names do not prove compatibility".to_owned()),
+        };
+        let expected = if partition == Self::Ref2va {
+            MINIMAX_H3_REFERENCE_PARTITION_MODEL
+        } else {
+            MINIMAX_H3_BASE_PARTITION_MODEL
+        };
+        if entry_str(entry, "baseModel") != Some(expected) {
+            return Err(format!("MiniMax-H3 {} requires exact compatible baseModel {expected}; incompatible or missing base declaration", partition.as_str()));
+        }
+        Ok(partition)
+    }
+}
+
+/// Resolve task semantics only; the returned stock id must NEVER be used as weight identity.
+pub fn entry_partition_model(
+    entry: &Map<String, Value>,
+    has_references: bool,
+) -> Result<&'static str, String> {
+    let partition = MiniMaxH3Partition::from_entry(entry)?;
+    match has_references {
+        true if partition.supports_references() => Ok(MINIMAX_H3_REFERENCE_PARTITION_MODEL),
+        false if partition.supports_base() => Ok(MINIMAX_H3_BASE_PARTITION_MODEL),
+        _ => Err(format!(
+            "declared {} checkpoint does not support the requested operation",
+            partition.as_str()
+        )),
+    }
+}
+
 /// A validated dense MiniMax-H3 import assembly — see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MiniMaxH3ImportAssembly {
+    pub partition: MiniMaxH3Partition,
     /// The plan layer that IS the imported DiT.
     pub transformer_layer_id: String,
     /// Checkpoint-relative directory holding that layer (`""` for the checkpoint root). The
@@ -83,7 +119,10 @@ pub struct MiniMaxH3ImportAssembly {
 
 impl MiniMaxH3ImportAssembly {
     /// Validate `plan` as a complete dense H3 DiT assembly, or say exactly why it is not one.
-    pub fn from_plan(plan: &ImportPlanV1) -> Result<Self, String> {
+    pub fn from_declared_plan(
+        plan: &ImportPlanV1,
+        entry: &Map<String, Value>,
+    ) -> Result<Self, String> {
         if plan.family != MINIMAX_H3_IMPORT_FAMILY {
             return Err(format!(
                 "plan {:?} compiles to the {:?} family, not {MINIMAX_H3_IMPORT_FAMILY:?}",
@@ -144,6 +183,7 @@ impl MiniMaxH3ImportAssembly {
         }
         descriptor_layer_ids.sort();
         Ok(Self {
+            partition: MiniMaxH3Partition::from_entry(entry)?,
             transformer_layer_id: transformer.layer_id.clone(),
             transformer_dir,
             descriptor_layer_ids,
@@ -163,15 +203,27 @@ impl MiniMaxH3ImportAssembly {
             }),
         );
         for (component, model) in MINIMAX_H3_RESIDENT_COMPONENTS {
-            components.insert(
-                (*component).to_owned(),
-                json!({ "source": "resident", "model": model }),
-            );
+            if *component == "transformer_ref" {
+                if self.partition == MiniMaxH3Partition::Hybrid {
+                    components.insert(
+                        "transformer_ref".to_owned(),
+                        components[TRANSFORMER_ROLE].clone(),
+                    );
+                    continue;
+                }
+                if self.partition == MiniMaxH3Partition::Ref2va {
+                    let imported = components.remove(TRANSFORMER_ROLE).expect("inserted DiT");
+                    components.insert("transformer_ref".to_owned(), imported);
+                    components.insert(TRANSFORMER_ROLE.to_owned(), json!({"source":"resident", "model":MINIMAX_H3_BASE_PARTITION_MODEL, "purpose":"load_only"}));
+                    continue;
+                }
+            }
+            components.insert((*component).to_owned(), json!({ "source": "resident", "model": model, "purpose": if *component == "transformer_ref" { "load_only" } else { "shared" } }));
         }
         json!({
             "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION,
             "family": MINIMAX_H3_IMPORT_FAMILY,
-            "partition": MINIMAX_H3_ASSEMBLY_PARTITION,
+            "partition": self.partition.as_str(),
             "components": components,
         })
     }
@@ -211,8 +263,9 @@ pub fn entry_is_imported_minimax_h3(entry: &Map<String, Value>) -> bool {
         && entry_assembly(entry).is_some_and(|assembly| {
             assembly.get("schemaVersion").and_then(Value::as_u64)
                 == Some(MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION)
-                && assembly.get("partition").and_then(Value::as_str)
-                    == Some(MINIMAX_H3_ASSEMBLY_PARTITION)
+                && MiniMaxH3Partition::from_entry(entry).is_ok_and(|partition| {
+                    assembly.get("partition").and_then(Value::as_str) == Some(partition.as_str())
+                })
         })
 }
 
@@ -223,7 +276,7 @@ pub fn verify_entry_assembly(
     entry: &Map<String, Value>,
     plan: &ImportPlanV1,
 ) -> Result<MiniMaxH3ImportAssembly, String> {
-    let assembly = MiniMaxH3ImportAssembly::from_plan(plan)?;
+    let assembly = MiniMaxH3ImportAssembly::from_declared_plan(plan, entry)?;
     let Some(stamped) = entry_assembly(entry) else {
         return Err(
             "the catalog entry carries no importPlan.assembly binding; re-import the checkpoint"
@@ -250,6 +303,18 @@ pub fn stamp_imported_minimax_h3_entry(
     assembly: &MiniMaxH3ImportAssembly,
 ) {
     entry.insert(
+        "minimaxH3Partition".to_owned(),
+        json!(assembly.partition.as_str()),
+    );
+    entry.insert(
+        "baseModel".to_owned(),
+        json!(if assembly.partition == MiniMaxH3Partition::Ref2va {
+            MINIMAX_H3_REFERENCE_PARTITION_MODEL
+        } else {
+            MINIMAX_H3_BASE_PARTITION_MODEL
+        }),
+    );
+    entry.insert(
         "family".to_owned(),
         Value::String(MINIMAX_H3_IMPORT_FAMILY.to_owned()),
     );
@@ -270,30 +335,46 @@ pub fn stamp_imported_minimax_h3_entry(
     }
 }
 
-/// The SHIPPED builtin `minimax_h3` entry, parsed once from the embedded manifest — the same
-/// authority `crate::minimax_h3_turbo` reads its recipes from, because the base partition's surface
-/// is a property of the shipped catalog rather than of the host.
-static BUILTIN_BASE_PARTITION_ENTRY: LazyLock<Option<Map<String, Value>>> = LazyLock::new(|| {
+/// The shipped task surfaces, parsed once. Geometry and operation policy come from the catalog,
+/// while imported bytes and explicit task compatibility retain their independent identities.
+static BUILTIN_PARTITION_ENTRIES: LazyLock<Option<Vec<Map<String, Value>>>> = LazyLock::new(|| {
     let (_, contents) = crate::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
         .find(|(name, _)| *name == "builtin.models.jsonc")?;
     let manifest: Value = serde_json::from_str(&strip_jsonc_comments(contents)).ok()?;
-    manifest
-        .get("models")?
-        .as_array()?
-        .iter()
-        .find(|model| {
-            model.get("id").and_then(Value::as_str) == Some(MINIMAX_H3_BASE_PARTITION_MODEL)
-        })?
-        .as_object()
-        .cloned()
+    Some(
+        manifest
+            .get("models")?
+            .as_array()?
+            .iter()
+            .filter_map(|model| {
+                matches!(
+                    model.get("id").and_then(Value::as_str),
+                    Some(MINIMAX_H3_BASE_PARTITION_MODEL | MINIMAX_H3_REFERENCE_PARTITION_MODEL)
+                )
+                .then(|| model.as_object().cloned())
+                .flatten()
+            })
+            .collect(),
+    )
 });
 
 fn builtin_base_partition_entry() -> Option<&'static Map<String, Value>> {
-    BUILTIN_BASE_PARTITION_ENTRY.as_ref()
+    builtin_partition_entry(MINIMAX_H3_BASE_PARTITION_MODEL)
 }
 
-/// Give an imported H3 entry the shipped base partition's generation surface.
+fn builtin_partition_entry(id: &str) -> Option<&'static Map<String, Value>> {
+    BUILTIN_PARTITION_ENTRIES
+        .as_ref()?
+        .iter()
+        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+}
+
+fn builtin_reference_partition_entry() -> Option<&'static Map<String, Value>> {
+    builtin_partition_entry(MINIMAX_H3_REFERENCE_PARTITION_MODEL)
+}
+
+/// Give an imported H3 entry the generation surface its explicit task declaration supports.
 ///
 /// The ROUTE-OWNED fields — `adapter`, `capabilities`, `video`, `defaults`, `limits` — are replaced,
 /// not filled: they state what the provider serves for this partition (its modes, its 17n+5
@@ -305,7 +386,16 @@ fn builtin_base_partition_entry() -> Option<&'static Map<String, Value>> {
 /// support on imported H3 checkpoints is a later story, and advertising adapters the imported route
 /// refuses would admit jobs nothing can run.
 pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) {
-    let Some(base) = builtin_base_partition_entry() else {
+    let Ok(partition) = MiniMaxH3Partition::from_entry(entry) else {
+        entry.insert("capabilities".to_owned(), json!([]));
+        return;
+    };
+    let base = if partition == MiniMaxH3Partition::Ref2va {
+        builtin_reference_partition_entry()
+    } else {
+        builtin_base_partition_entry()
+    };
+    let Some(base) = base else {
         return;
     };
     for key in ["adapter", "capabilities", "video", "defaults", "limits"] {
@@ -345,6 +435,22 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
                 if let Some(value) = base_ui.get(key) {
                     ui.entry(key.to_owned()).or_insert_with(|| value.clone());
                 }
+            }
+        }
+    }
+    if partition == MiniMaxH3Partition::Hybrid {
+        entry.insert(
+            "capabilities".to_owned(),
+            json!([
+                "text_to_video",
+                "image_to_video",
+                "first_last_frame",
+                "reference_to_video"
+            ]),
+        );
+        if let Some(reference) = builtin_reference_partition_entry() {
+            if let Some(limits) = reference.get("limits") {
+                entry.insert("limits".to_owned(), limits.clone());
             }
         }
     }
@@ -397,8 +503,82 @@ mod tests {
     }
 
     #[test]
+    fn identical_weights_require_explicit_compatible_task_declarations() {
+        let plan = dense_dit_plan();
+        for invalid in [
+            json!({}),
+            json!({"baseModel":"minimax_h3"}),
+            json!({"baseModel":"wan_2_2","minimaxH3Partition":"fl2va"}),
+            json!({"baseModel":"minimax_h3","minimaxH3Partition":"ref2va"}),
+        ] {
+            assert!(MiniMaxH3ImportAssembly::from_declared_plan(
+                &plan,
+                invalid.as_object().unwrap()
+            )
+            .is_err());
+        }
+        for (partition, base, operations) in [
+            (
+                "fl2va",
+                "minimax_h3",
+                vec!["text_to_video", "image_to_video", "first_last_frame"],
+            ),
+            ("ref2va", "minimax_h3_ref", vec!["reference_to_video"]),
+            (
+                "hybrid",
+                "minimax_h3",
+                vec![
+                    "text_to_video",
+                    "image_to_video",
+                    "first_last_frame",
+                    "reference_to_video",
+                ],
+            ),
+        ] {
+            let mut entry = json!({"baseModel":base,"minimaxH3Partition":partition,"importPlan":{"checkpointId":"fixture"}}).as_object().unwrap().clone();
+            let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).unwrap();
+            stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+            apply_minimax_h3_studio_surface_defaults(&mut entry);
+            assert_eq!(entry["capabilities"], json!(operations));
+            assert_eq!(
+                entry_partition_model(&entry, false).is_ok(),
+                partition != "ref2va"
+            );
+            assert_eq!(
+                entry_partition_model(&entry, true).is_ok(),
+                partition != "fl2va"
+            );
+            assert!(verify_entry_assembly(&entry, &plan).is_ok());
+            let components = assembly.to_json()["components"].clone();
+            for component in ["text_encoder", "tokenizer", "vae", "audio_vae"] {
+                assert_eq!(components[component]["model"], "minimax_h3");
+            }
+            for component in ["transformer", "transformer_ref"] {
+                let expected = if partition == "hybrid"
+                    || (partition == "fl2va" && component == "transformer")
+                    || (partition == "ref2va" && component == "transformer_ref")
+                {
+                    "plan"
+                } else {
+                    "resident"
+                };
+                assert_eq!(components[component]["source"], expected);
+            }
+            entry.insert("minimaxH3Partition".to_owned(), json!("undeclared"));
+            assert!(!entry_is_imported_minimax_h3(&entry));
+            assert!(verify_entry_assembly(&entry, &plan).is_err());
+        }
+    }
+
+    #[test]
     fn a_dense_dit_directory_binds_the_plan_dit_and_every_resident_component() {
-        let assembly = MiniMaxH3ImportAssembly::from_plan(&dense_dit_plan()).expect("complete");
+        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(
+            &dense_dit_plan(),
+            serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+                .as_object()
+                .unwrap(),
+        )
+        .expect("complete");
         let json = assembly.to_json();
         assert_eq!(
             json["components"]["transformer"]["source"],
@@ -413,7 +593,7 @@ mod tests {
         for (component, model) in MINIMAX_H3_RESIDENT_COMPONENTS {
             assert_eq!(
                 json["components"][component],
-                json!({ "source": "resident", "model": model }),
+                json!({ "source": "resident", "model": model, "purpose":if *component == "transformer_ref" { "load_only" } else { "shared" } }),
                 "{component} must be an explicit resident binding"
             );
         }
@@ -435,9 +615,11 @@ mod tests {
                 CheckpointContainerV1::JsonDescriptor,
             )],
         );
-        assert!(MiniMaxH3ImportAssembly::from_plan(&no_dit)
-            .unwrap_err()
-            .contains("no \"transformer\" layer"));
+        assert!(
+            MiniMaxH3ImportAssembly::from_declared_plan(&no_dit, &Map::new())
+                .unwrap_err()
+                .contains("no \"transformer\" layer")
+        );
 
         // A second weight file beside the DiT would be mapped unbound by `Weights::from_dir`.
         let mut sharded = dense_dit_plan();
@@ -447,9 +629,11 @@ mod tests {
             "extra.safetensors",
             CheckpointContainerV1::Safetensors,
         ));
-        assert!(MiniMaxH3ImportAssembly::from_plan(&sharded)
-            .unwrap_err()
-            .contains("2 \"transformer\" layers"));
+        assert!(
+            MiniMaxH3ImportAssembly::from_declared_plan(&sharded, &Map::new())
+                .unwrap_err()
+                .contains("2 \"transformer\" layers")
+        );
 
         // An encoder carried by the import would be silently replaced by the resident one.
         let mut with_te = dense_dit_plan();
@@ -459,15 +643,19 @@ mod tests {
             "text_encoder/model.safetensors",
             CheckpointContainerV1::Safetensors,
         ));
-        assert!(MiniMaxH3ImportAssembly::from_plan(&with_te)
-            .unwrap_err()
-            .contains("\"text_encoder\" layer"));
+        assert!(
+            MiniMaxH3ImportAssembly::from_declared_plan(&with_te, &Map::new())
+                .unwrap_err()
+                .contains("\"text_encoder\" layer")
+        );
 
         // Another family's plan is never an H3 assembly.
         let wan = plan("wan-video", dense_dit_plan().layers);
-        assert!(MiniMaxH3ImportAssembly::from_plan(&wan)
-            .unwrap_err()
-            .contains("\"wan-video\" family"));
+        assert!(
+            MiniMaxH3ImportAssembly::from_declared_plan(&wan, &Map::new())
+                .unwrap_err()
+                .contains("\"wan-video\" family")
+        );
     }
 
     fn stamped_entry() -> Map<String, Value> {
@@ -479,7 +667,13 @@ mod tests {
         .as_object()
         .cloned()
         .unwrap();
-        let assembly = MiniMaxH3ImportAssembly::from_plan(&dense_dit_plan()).unwrap();
+        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(
+            &dense_dit_plan(),
+            serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
         stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         entry
     }

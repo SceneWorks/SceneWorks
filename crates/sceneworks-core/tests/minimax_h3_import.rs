@@ -194,7 +194,13 @@ fn managed_and_linked_imports_persist_a_plan_the_h3_assembly_binds() {
         .resolve(&install.checkpoint_id)
         .expect("the persisted plan resolves");
     assert_eq!(resolved.family(), MINIMAX_H3_IMPORT_FAMILY);
-    let managed = MiniMaxH3ImportAssembly::from_plan(&resolved.plan).expect("complete assembly");
+    let managed = MiniMaxH3ImportAssembly::from_declared_plan(
+        &resolved.plan,
+        serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+            .as_object()
+            .unwrap(),
+    )
+    .expect("complete assembly");
     assert_eq!(
         resolved
             .plan
@@ -212,6 +218,12 @@ fn managed_and_linked_imports_persist_a_plan_the_h3_assembly_binds() {
         .compile_linked(&root.root_id, "my-h3")
         .expect("the linked H3 directory compiles");
     assert_eq!(compiled.plan.family, MINIMAX_H3_IMPORT_FAMILY);
-    let linked = MiniMaxH3ImportAssembly::from_plan(&compiled.plan).expect("complete assembly");
+    let linked = MiniMaxH3ImportAssembly::from_declared_plan(
+        &compiled.plan,
+        serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+            .as_object()
+            .unwrap(),
+    )
+    .expect("complete assembly");
     assert_eq!(linked.descriptor_layer_ids.len(), 1, "{linked:?}");
 }

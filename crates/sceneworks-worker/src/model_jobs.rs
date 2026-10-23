@@ -5795,7 +5795,7 @@ pub(crate) fn linked_checkpoint_manifest_entry(
     // has already refused a plan that is not a complete assembly, so an `Err` here leaves the entry
     // without a binding — which every consumer reads as "not an imported H3 model".
     if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
-        if let Ok(assembly) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+        if let Ok(assembly) = MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan, &entry) {
             stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         }
     }
@@ -5900,7 +5900,9 @@ async fn run_linked_checkpoint_import_job(
         };
         // sc-26680: an H3 DiT that is not a complete assembly is refused rather than registered.
         if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
-            if let Err(reason) = MiniMaxH3ImportAssembly::from_plan(&compiled.plan) {
+            if let Err(reason) =
+                MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan, &manifest_entry)
+            {
                 return fail_job(
                     api,
                     &job.id,
@@ -6567,8 +6569,11 @@ pub(crate) async fn run_model_import_job(
         // sc-26680: a MiniMax-H3 DiT is a component of an ASSEMBLY, not a whole model. Bind it —
         // validated against the plan the commit just published — before the entry can exist, so
         // an incomplete or ambiguous assembly never becomes a selectable catalog row.
-        if manifest_entry.get("family").and_then(Value::as_str) == Some(MINIMAX_H3_IMPORT_FAMILY) {
-            match MiniMaxH3ImportAssembly::from_plan(&install.compiled.plan) {
+        if install.compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
+            match MiniMaxH3ImportAssembly::from_declared_plan(
+                &install.compiled.plan,
+                &manifest_entry,
+            ) {
                 Ok(assembly) => {
                     manifest_entry.insert(
                         "importPlan".to_owned(),

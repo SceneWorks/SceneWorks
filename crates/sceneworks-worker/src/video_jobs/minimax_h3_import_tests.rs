@@ -47,6 +47,10 @@ fn without_assembly(entry: &serde_json::Map<String, Value>) -> serde_json::Map<S
 fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_identity() {
     let tiers = minimax_h3_tier_root("mm_imp_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_imp_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
     let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
         &minimax_h3_data_dir(tiers.path()),
         "singularity_fl2va_dense",
@@ -111,6 +115,10 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
 fn an_imported_h3_prefixed_id_routes_and_loads_its_plan_weights() {
     let tiers = minimax_h3_tier_root("mm_prefix_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_prefix_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
     let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
         &minimax_h3_data_dir(tiers.path()),
         "minimax_h3_custom",
@@ -149,6 +157,10 @@ fn an_imported_h3_prefixed_id_routes_and_loads_its_plan_weights() {
 fn an_imported_h3_entry_without_its_binding_or_under_a_builtin_id_never_loads() {
     let tiers = minimax_h3_tier_root("mm_imp_neg_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_imp_neg_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
     let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
         &minimax_h3_data_dir(tiers.path()),
         "singularity_fl2va_dense",
@@ -286,6 +298,10 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         std::fs::create_dir_all(&component).expect("component");
         std::fs::write(component.join("config.json"), b"{}").expect("config");
     }
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        &upstream,
+        &rehost.join("q4/text_encoder"),
+    );
     let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
         data.path(),
         "singularity_fl2va_dense",
@@ -344,5 +360,302 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             probe.spec.lock().unwrap().is_none(),
             "{model}: refused before any load"
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_declared_partitions_keep_their_weights_for_every_operation() {
+    for partition in ["fl2va", "ref2va", "hybrid"] {
+        let companions: &[&str] = match partition {
+            "fl2va" => &["transformer_ref"],
+            "ref2va" => &["transformer"],
+            _ => &[],
+        };
+        let tiers = minimax_h3_tier_root("mm_contract_", &["q4"], companions);
+        let base = minimax_h3_base_root("mm_contract_base_");
+        crate::minimax_h3_import_fixture::write_shared_configs(
+            base.path(),
+            &tiers.path().join("q4/text_encoder"),
+        );
+        let data = minimax_h3_data_dir(tiers.path());
+        let imported =
+            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
+                &data,
+                "minimax_h3_custom",
+                partition,
+            );
+        let (project_id, project_path, image_id) = stage_minimax_h3_reference_project(&data);
+        // The provider cache deliberately reuses one generator across this checkpoint's modes.
+        // Keep one positive probe attached to that generator, not a fresh uncalled loader per mode.
+        let positive_probe = ArmProbe {
+            audio: Some(gen_core::AudioTrack {
+                samples: vec![0.125; 32],
+                sample_rate: 32000,
+                channels: 2,
+                stems: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        for mode in [
+            "text_to_video",
+            "image_to_video",
+            "first_last_frame",
+            "reference_to_video",
+        ] {
+            let mut payload = json!({"projectId":project_id,"model":"minimax_h3_custom","modelManifestEntry":imported.entry,
+                "mode":mode,"prompt":"a courier","duration":6.0,"fps":24});
+            match mode {
+                "image_to_video" => payload["sourceAssetId"] = json!(image_id),
+                "first_last_frame" => {
+                    payload["sourceAssetId"] = json!(image_id);
+                    payload["lastFrameAssetId"] = json!(image_id);
+                }
+                "reference_to_video" => payload["referenceAssetIds"] = json!([image_id]),
+                _ => {}
+            }
+            let request = request(payload);
+            let supported =
+                partition == "hybrid" || (partition == "ref2va") == (mode == "reference_to_video");
+            let refused_probe = ArmProbe::default();
+            let probe = if supported {
+                &positive_probe
+            } else {
+                &refused_probe
+            };
+            let result = drive_minimax_h3_arm_in_project(
+                tiers.path(),
+                base.path(),
+                probe,
+                &request,
+                &project_path,
+            );
+            if !supported {
+                let error = result.map(|(_, raw)| raw).unwrap_err();
+                assert!(
+                    error.to_string().contains("unsupported-operation"),
+                    "{partition}/{mode}: {error}"
+                );
+                assert!(probe.spec.lock().unwrap().is_none());
+                continue;
+            }
+            let (decoded, raw) =
+                result.unwrap_or_else(|error| panic!("{partition}/{mode}: {error}"));
+            assert_eq!(
+                decoded.audio.unwrap().samples,
+                vec![0.125; 32],
+                "synchronized output audio is retained"
+            );
+            let spec = probe
+                .spec
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("native load reached");
+            let Some(WeightsSource::Dir(transformer)) = spec.components.get("transformer") else {
+                panic!("staged transformer");
+            };
+            let selected = if mode == "reference_to_video" {
+                transformer.with_file_name("transformer_ref")
+            } else {
+                transformer.clone()
+            };
+            assert_eq!(
+                canonical(&selected),
+                canonical(&imported.install_dir),
+                "{partition}/{mode} must denoise on the imported checkpoint"
+            );
+            assert_eq!(raw["model"], "minimax_h3_custom");
+            assert_eq!(
+                raw["importPlan"]["assembly"],
+                imported.entry["importPlan"]["assembly"]
+            );
+            if partition == "hybrid" {
+                assert_eq!(
+                    canonical(transformer),
+                    canonical(&transformer.with_file_name("transformer_ref"))
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn incomplete_or_incompatible_imported_shared_components_never_reach_provider_load() {
+    let tiers = minimax_h3_tier_root(
+        "mm_components_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let base = minimax_h3_base_root("mm_components_base_");
+    let encoder = tiers.path().join("q4/text_encoder");
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &minimax_h3_data_dir(tiers.path()),
+        "component_test",
+    );
+    for file in [
+        encoder.join("config.json"),
+        base.path().join("vae/config.json"),
+        base.path().join("audio_vae/config.json"),
+        base.path().join("FL2VA/audio_vae/metadata.json"),
+        base.path().join("tokenizer/tokenizer.json"),
+        base.path().join("tokenizer/tokenizer_config.json"),
+    ] {
+        for missing in [true, false] {
+            crate::minimax_h3_import_fixture::write_shared_configs(base.path(), &encoder);
+            if missing {
+                std::fs::remove_file(&file).unwrap();
+            } else {
+                std::fs::write(&file, b"{}").unwrap();
+            }
+            let probe = ArmProbe::default();
+            let result = drive_minimax_h3_arm(
+                tiers.path(),
+                base.path(),
+                &probe,
+                &imported_minimax_h3_request("component_test", &imported.entry),
+            );
+            assert!(
+                result.is_err(),
+                "{} must refuse, missing={missing}",
+                file.display()
+            );
+            assert!(
+                probe.spec.lock().unwrap().is_none(),
+                "incomplete assembly never reaches load"
+            );
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let data = tempfile::tempdir().unwrap();
+    let snapshot = |repo: &str| {
+        let root = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots")
+            .join("1111111111111111111111111111111111111111");
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    };
+    let root = snapshot("MiniMaxAI/MiniMax-H3");
+    let rehost = snapshot("SceneWorks/minimax-h3-mlx");
+    std::fs::create_dir_all(rehost.join("q4/transformer")).unwrap();
+    std::fs::write(rehost.join("q4/transformer/config.json"), b"{}").unwrap();
+    crate::minimax_h3_import_fixture::write_shared_configs(&root, &rehost.join("q4/text_encoder"));
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        backend_candle_enabled: true,
+        ..offline_settings()
+    };
+    for partition in ["fl2va", "ref2va", "hybrid"] {
+        let imported =
+            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_with_partition(
+                data.path(),
+                &format!("candle_{partition}"),
+                partition,
+            );
+        for references in [false, true] {
+            let mut request =
+                imported_minimax_h3_request(&format!("candle_{partition}"), &imported.entry);
+            if references {
+                request.mode = "reference_to_video".to_owned();
+            }
+            let dit =
+                crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
+                    .unwrap();
+            let supported = partition == "hybrid" || (partition == "ref2va") == references;
+            if !supported {
+                continue;
+            }
+            let (load, _) = crate::video_jobs::minimax_h3::resolve_candle_imported_minimax_h3_load(
+                &settings, &request, &dit,
+            )
+            .unwrap();
+            let transformer = load.dit_dir.unwrap();
+            let selected = if references {
+                transformer.with_file_name("transformer_ref")
+            } else {
+                transformer
+            };
+            // Windows uses snapshot-style hardlinks; compare the exact bytes instead of paths.
+            assert_eq!(
+                std::fs::read(selected.join("diffusion_pytorch_model.safetensors")).unwrap(),
+                std::fs::read(
+                    imported
+                        .install_dir
+                        .join("diffusion_pytorch_model.safetensors")
+                )
+                .unwrap()
+            );
+            assert_eq!(load.quant, None);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn imported_companion_config_mismatches_are_refused_not_defaulted() {
+    let tiers = minimax_h3_tier_root("mm_mismatch_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_mismatch_base_");
+    let encoder = tiers.path().join("q4/text_encoder");
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &minimax_h3_data_dir(tiers.path()),
+        "mismatch_test",
+    );
+    for (file, pointer, value) in [
+        (
+            encoder.join("config.json"),
+            "/text_config/hidden_size",
+            json!(4096),
+        ),
+        (
+            base.path().join("vae/config.json"),
+            "/temporal_downsample_factors",
+            json!([1, 1, 1, 1, 1, 1]),
+        ),
+        (
+            base.path().join("audio_vae/config.json"),
+            "/sampling_rate",
+            json!(16000),
+        ),
+        (
+            base.path().join("tokenizer/tokenizer.json"),
+            "/added_tokens/0/id",
+            json!(42),
+        ),
+        (
+            base.path().join("tokenizer/tokenizer_config.json"),
+            "/additional_special_tokens/0",
+            json!("</d>"),
+        ),
+    ] {
+        crate::minimax_h3_import_fixture::write_shared_configs(base.path(), &encoder);
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        *config.pointer_mut(pointer).unwrap() = value;
+        std::fs::write(&file, config.to_string()).unwrap();
+        let probe = ArmProbe::default();
+        let error = drive_minimax_h3_arm(
+            tiers.path(),
+            base.path(),
+            &probe,
+            &imported_minimax_h3_request("mismatch_test", &imported.entry),
+        )
+        .map(|(_, raw)| raw)
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("incompatible-component"),
+            "{}: {error}",
+            file.display()
+        );
+        assert!(probe.spec.lock().unwrap().is_none());
     }
 }

@@ -3769,15 +3769,18 @@ pub(crate) async fn queue_model_import_job(
     if let Some(family) = payload.family.take() {
         let models = model_catalog(&state).await?;
         let normalized = normalize_lora_family(&family);
-        payload.family = Some(if models.iter().any(|model| {
-            model.get("family").and_then(Value::as_str).is_some_and(|own_family| {
-                normalize_lora_family(own_family) == normalized
-            })
-        }) {
-            normalized
-        } else {
-            validate_lora_family(&models, &family)?
-        });
+        payload.family = Some(
+            if models.iter().any(|model| {
+                model
+                    .get("family")
+                    .and_then(Value::as_str)
+                    .is_some_and(|own_family| normalize_lora_family(own_family) == normalized)
+            }) {
+                normalized
+            } else {
+                validate_lora_family(&models, &family)?
+            },
+        );
     }
     let name = payload
         .name
@@ -3932,7 +3935,10 @@ pub(crate) async fn queue_model_import_job(
             object.insert("baseModel".to_owned(), Value::String(base_model.clone()));
         }
         if let Some(partition) = &payload.minimax_h3_partition {
-            object.insert("minimaxH3Partition".to_owned(), Value::String(partition.clone()));
+            object.insert(
+                "minimaxH3Partition".to_owned(),
+                Value::String(partition.clone()),
+            );
         }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
@@ -3984,8 +3990,7 @@ fn validate_minimax_h3_import_declaration(payload: &ModelImportRequest) -> Resul
     let family = payload.family.as_deref();
     let base = payload.base_model.as_deref();
     let partition = payload.minimax_h3_partition.as_deref();
-    let declares_h3 = partition.is_some()
-        || matches!(base, Some("minimax_h3" | "minimax_h3_ref"));
+    let declares_h3 = partition.is_some() || matches!(base, Some("minimax_h3" | "minimax_h3_ref"));
     if family != Some("minimax-h3") && !declares_h3 {
         return Ok(());
     }
@@ -3994,20 +3999,12 @@ fn validate_minimax_h3_import_declaration(payload: &ModelImportRequest) -> Resul
             "baseModel and minimaxH3Partition declare MiniMax-H3 compatibility, but family is not minimax-h3",
         ));
     }
-    let expected_base = match partition {
-        Some("fl2va" | "hybrid") => "minimax_h3",
-        Some("ref2va") => "minimax_h3_ref",
-        _ => return Err(ApiError::bad_request(
-            "MiniMax-H3 import requires explicit minimaxH3Partition: fl2va, ref2va, or hybrid; tensor shapes cannot determine the partition",
-        )),
-    };
-    if base != Some(expected_base) {
-        return Err(ApiError::bad_request(format!(
-            "MiniMax-H3 minimaxH3Partition '{}' requires baseModel '{expected_base}'; baseModel is missing or incompatible",
-            partition.unwrap_or_default(),
-        )));
-    }
-    Ok(())
+    let declaration = json!({"baseModel":base,"minimaxH3Partition":partition});
+    sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(
+        declaration.as_object().expect("declaration object"),
+    )
+    .map(|_| ())
+    .map_err(ApiError::bad_request)
 }
 
 pub(crate) async fn model_import_request_from_multipart(
@@ -15829,7 +15826,10 @@ mod managed_predictor_queue_tests {
 
 #[cfg(test)]
 mod minimax_h3_import_declaration_tests {
-    use super::{model_import_request_from_multipart, validate_minimax_h3_import_declaration, ModelImportRequest};
+    use super::{
+        model_import_request_from_multipart, validate_minimax_h3_import_declaration,
+        ModelImportRequest,
+    };
     use crate::tests::support::*;
     use axum::extract::FromRequest;
 
@@ -15851,12 +15851,22 @@ mod minimax_h3_import_declaration_tests {
     async fn explicit_three_partitions_are_queued_with_persisted_catalog_fields() {
         let temp = tempfile::tempdir().unwrap();
         let app = app(&temp);
-        for (partition, base) in [("fl2va", "minimax_h3"), ("ref2va", "minimax_h3_ref"), ("hybrid", "minimax_h3")] {
-            let (status, job) = request(app.clone(), "POST", "/api/v1/models/import", json!({
-                "name": format!("Custom H3 {partition}"),
-                "source": { "kind": "huggingFace", "repo": "owner/h3-finetune" },
-                "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition
-            })).await;
+        for (partition, base) in [
+            ("fl2va", "minimax_h3"),
+            ("ref2va", "minimax_h3_ref"),
+            ("hybrid", "minimax_h3"),
+        ] {
+            let (status, job) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/models/import",
+                json!({
+                    "name": format!("Custom H3 {partition}"),
+                    "source": { "kind": "huggingFace", "repo": "owner/h3-finetune" },
+                    "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition
+                }),
+            )
+            .await;
             assert_eq!(status, StatusCode::CREATED, "{job}");
             assert_eq!(job["payload"]["baseModel"], base);
             assert_eq!(job["payload"]["minimaxH3Partition"], partition);
@@ -15874,14 +15884,29 @@ mod minimax_h3_import_declaration_tests {
         for (declaration, field) in [
             (json!({}), "minimaxH3Partition"),
             (json!({ "baseModel": "minimax_h3" }), "minimaxH3Partition"),
-            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "auto" }), "minimaxH3Partition"),
+            (
+                json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "auto" }),
+                "minimaxH3Partition",
+            ),
             (json!({ "minimaxH3Partition": "fl2va" }), "baseModel"),
-            (json!({ "minimaxH3Partition": "fl2va", "baseModel": "minimax_h3_ref" }), "baseModel"),
-            (json!({ "minimaxH3Partition": "ref2va", "baseModel": "minimax_h3" }), "baseModel"),
-            (json!({ "minimaxH3Partition": "hybrid", "baseModel": "minimax_h3_ref" }), "baseModel"),
+            (
+                json!({ "minimaxH3Partition": "fl2va", "baseModel": "minimax_h3_ref" }),
+                "baseModel",
+            ),
+            (
+                json!({ "minimaxH3Partition": "ref2va", "baseModel": "minimax_h3" }),
+                "baseModel",
+            ),
+            (
+                json!({ "minimaxH3Partition": "hybrid", "baseModel": "minimax_h3_ref" }),
+                "baseModel",
+            ),
         ] {
-            let mut body = json!({ "name": "Custom H3", "repo": "owner/custom", "family": "minimax-h3" });
-            body.as_object_mut().unwrap().extend(declaration.as_object().unwrap().clone());
+            let mut body =
+                json!({ "name": "Custom H3", "repo": "owner/custom", "family": "minimax-h3" });
+            body.as_object_mut()
+                .unwrap()
+                .extend(declaration.as_object().unwrap().clone());
             let (status, error) = request(app.clone(), "POST", "/api/v1/models/import", body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
             assert!(error["detail"].as_str().unwrap().contains(field), "{error}");
@@ -15890,7 +15915,8 @@ mod minimax_h3_import_declaration_tests {
 
     #[test]
     fn detected_h3_without_a_declaration_is_not_assigned_semantics() {
-        let mut payload: ModelImportRequest = serde_json::from_value(json!({ "repo": "owner/custom" })).unwrap();
+        let mut payload: ModelImportRequest =
+            serde_json::from_value(json!({ "repo": "owner/custom" })).unwrap();
         validate_minimax_h3_import_declaration(&payload).unwrap();
         // Family reconciliation may discover H3 even when the request left family unspecified.
         payload.family = Some("minimax-h3".to_owned());
@@ -15902,25 +15928,45 @@ mod minimax_h3_import_declaration_tests {
         validate_minimax_h3_import_declaration(&payload).unwrap();
         payload.base_model = Some("minimax_h3".to_owned());
         payload.minimax_h3_partition = Some("hybrid".to_owned());
-        assert!(validate_minimax_h3_import_declaration(&payload).unwrap_err().detail.contains("family"));
+        assert!(validate_minimax_h3_import_declaration(&payload)
+            .unwrap_err()
+            .detail
+            .contains("family"));
     }
 
     #[tokio::test]
     async fn multipart_preserves_the_same_explicit_declaration_names() {
         let temp = tempfile::tempdir().unwrap();
         let (_, state) = create_app_with_state(test_settings(&temp)).unwrap();
-        for (partition, base) in [("fl2va", "minimax_h3"), ("ref2va", "minimax_h3_ref"), ("hybrid", "minimax_h3")] {
+        for (partition, base) in [
+            ("fl2va", "minimax_h3"),
+            ("ref2va", "minimax_h3_ref"),
+            ("hybrid", "minimax_h3"),
+        ] {
             let boundary = "H3_DECLARATION_BOUNDARY";
             let mut body = String::new();
-            for (name, value) in [("family", "minimax-h3"), ("baseModel", base), ("minimaxH3Partition", partition)] {
+            for (name, value) in [
+                ("family", "minimax-h3"),
+                ("baseModel", base),
+                ("minimaxH3Partition", partition),
+            ] {
                 body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"));
             }
             body.push_str(&format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"h3.safetensors\"\r\nContent-Type: application/octet-stream\r\n\r\nheader\r\n--{boundary}--\r\n"));
-            let request = Request::builder().method("POST")
-                .header("content-type", format!("multipart/form-data; boundary={boundary}"))
-                .body(Body::from(body)).unwrap();
-            let multipart = axum::extract::Multipart::from_request(request, &state).await.unwrap();
-            let (payload, path) = model_import_request_from_multipart(&state, multipart).await.unwrap();
+            let request = Request::builder()
+                .method("POST")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap();
+            let multipart = axum::extract::Multipart::from_request(request, &state)
+                .await
+                .unwrap();
+            let (payload, path) = model_import_request_from_multipart(&state, multipart)
+                .await
+                .unwrap();
             assert_eq!(payload.base_model.as_deref(), Some(base));
             assert_eq!(payload.minimax_h3_partition.as_deref(), Some(partition));
             validate_minimax_h3_import_declaration(&payload).unwrap();
@@ -15929,42 +15975,79 @@ mod minimax_h3_import_declaration_tests {
     }
 
     #[tokio::test]
-    async fn linked_h3_imports_keep_explicit_partitions_and_reject_missing_or_incompatible_fields() {
+    async fn linked_h3_imports_keep_explicit_partitions_and_reject_missing_or_incompatible_fields()
+    {
         let temp = tempfile::tempdir().unwrap();
         let app = app(&temp);
         let library = temp.path().join("library");
         std::fs::create_dir_all(&library).unwrap();
-        let (status, root) = request_with_peer(app.clone(), "POST", "/api/v1/models/library-roots", json!({
-            "path": library.to_str().unwrap(),
-        }), "127.0.0.1:54321").await;
+        let (status, root) = request_with_peer(
+            app.clone(),
+            "POST",
+            "/api/v1/models/library-roots",
+            json!({
+                "path": library.to_str().unwrap(),
+            }),
+            "127.0.0.1:54321",
+        )
+        .await;
         assert_eq!(status, StatusCode::CREATED, "{root}");
         for (declaration, accepted, field) in [
-            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "fl2va" }), true, ""),
-            (json!({ "baseModel": "minimax_h3_ref", "minimaxH3Partition": "ref2va" }), true, ""),
-            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "hybrid" }), true, ""),
+            (
+                json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "fl2va" }),
+                true,
+                "",
+            ),
+            (
+                json!({ "baseModel": "minimax_h3_ref", "minimaxH3Partition": "ref2va" }),
+                true,
+                "",
+            ),
+            (
+                json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "hybrid" }),
+                true,
+                "",
+            ),
             (json!({}), false, "minimaxH3Partition"),
-            (json!({ "minimaxH3Partition": "ref2va" }), false, "baseModel"),
-            (json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "ref2va" }), false, "baseModel"),
+            (
+                json!({ "minimaxH3Partition": "ref2va" }),
+                false,
+                "baseModel",
+            ),
+            (
+                json!({ "baseModel": "minimax_h3", "minimaxH3Partition": "ref2va" }),
+                false,
+                "baseModel",
+            ),
         ] {
             let mut body = json!({
                 "linkedRootId": root["rootId"],
                 "linkedRelativePath": "custom/transformer",
                 "family": "minimax-h3",
             });
-            body.as_object_mut().unwrap().extend(declaration.as_object().unwrap().clone());
-            let (status, response) = request(app.clone(), "POST", "/api/v1/models/import", body).await;
+            body.as_object_mut()
+                .unwrap()
+                .extend(declaration.as_object().unwrap().clone());
+            let (status, response) =
+                request(app.clone(), "POST", "/api/v1/models/import", body).await;
             if accepted {
                 assert_eq!(status, StatusCode::CREATED, "{response}");
                 let entry = &response["payload"]["manifestEntry"];
                 assert_eq!(entry["baseModel"], declaration["baseModel"]);
-                assert_eq!(entry["minimaxH3Partition"], declaration["minimaxH3Partition"]);
+                assert_eq!(
+                    entry["minimaxH3Partition"],
+                    declaration["minimaxH3Partition"]
+                );
                 assert_eq!(entry["type"], "video");
                 assert_eq!(entry["source"]["rootId"], root["rootId"]);
                 assert!(entry.get("paths").is_none());
                 assert!(response["payload"].get("targetDir").is_none());
             } else {
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
-                assert!(response["detail"].as_str().unwrap().contains(field), "{response}");
+                assert!(
+                    response["detail"].as_str().unwrap().contains(field),
+                    "{response}"
+                );
             }
         }
     }

@@ -3078,6 +3078,31 @@ impl<'a> ModelEntries<'a> {
     /// The partition a shot binding `reference_roles` roles resolves to, with its catalog entry.
     /// The entry is `None` exactly when the resolved partition is not one this view holds.
     fn resolve(&self, reference_roles: usize) -> (ShotPartition, Option<&'a Map<String, Value>>) {
+        // Imported task compatibility is an entry contract, not the resident family split. Never
+        // turn a declared imported checkpoint into a stock reference checkpoint, even if a caller
+        // supplies a reference entry alongside it. Unsupported operations have no resolved entry.
+        if self.base.get("family").and_then(Value::as_str)
+            == Some(crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY)
+            && crate::jobs_store::checkpoint_plan_checkpoint_id(self.base).is_some()
+        {
+            let semantics =
+                crate::minimax_h3_import::entry_partition_model(self.base, reference_roles != 0);
+            let valid =
+                semantics.is_ok() && !matches!(self.base_id, "minimax_h3" | "minimax_h3_ref");
+            return (
+                ShotPartition {
+                    model_id: self.base_id.to_owned(),
+                    reason: match semantics {
+                        Ok(task) => format!(
+                            "explicit imported compatibility for {task}; retains checkpoint {}",
+                            self.base_id
+                        ),
+                        Err(reason) => reason,
+                    },
+                },
+                valid.then_some(self.base),
+            );
+        }
         let partition = resolve_shot_partition(self.base_id, reference_roles);
         if partition.model_id == self.base_id {
             return (partition, Some(self.base));
@@ -5807,6 +5832,32 @@ mod tests {
             resolve_shot_partition("minimax_h3_ref", 2).model_id,
             "minimax_h3_ref"
         );
+    }
+
+    #[test]
+    fn imported_h3_film_operations_never_resolve_to_stock_weights() {
+        let reference = reference_model_entry();
+        for (partition, base_model, accepts_base, accepts_refs) in [
+            ("fl2va", "minimax_h3", true, false),
+            ("ref2va", "minimax_h3_ref", false, true),
+            ("hybrid", "minimax_h3", true, true),
+            ("undeclared", "minimax_h3", false, false),
+        ] {
+            let imported = json!({"family":"minimax-h3", "baseModel":base_model, "minimaxH3Partition":partition, "importPlan":{"checkpointId":"managed/import"}}).as_object().unwrap().clone();
+            let entries = ModelEntries::with_reference_partition(
+                "minimax_h3_custom",
+                &imported,
+                Some(("minimax_h3_ref", &reference)),
+            );
+            for (count, accepted) in [(0, accepts_base), (1, accepts_refs)] {
+                let (resolved, entry) = entries.resolve(count);
+                assert_eq!(resolved.model_id, "minimax_h3_custom");
+                assert_eq!(entry.is_some(), accepted, "{partition}, refs={count}");
+                if let Some(entry) = entry {
+                    assert!(std::ptr::eq(entry, &imported));
+                }
+            }
+        }
     }
 
     #[test]

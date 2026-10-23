@@ -2497,6 +2497,8 @@ fn h3_import_job(fixture: &ManagedImportFixture, source: &std::path::Path) -> Jo
         .expect("manifest entry");
     // What the API's synchronous gate resolved the family to from the same bytes.
     entry.insert("family".to_owned(), json!("minimax-h3"));
+    entry.insert("baseModel".to_owned(), json!("minimax_h3"));
+    entry.insert("minimaxH3Partition".to_owned(), json!("fl2va"));
     job
 }
 
@@ -2601,4 +2603,37 @@ async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_inst
         "an ambiguous H3 assembly must never become a catalog entry"
     );
     assert!(!fixture.install_dir.exists(), "nothing may stay installed");
+}
+
+#[tokio::test]
+async fn h3_import_registration_requires_exact_task_compatibility() {
+    let _env = isolate_hf_cache();
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    for (index, declaration, accepted) in [
+        (0, json!({}), false),
+        (1, json!({"baseModel":"wan_2_2","minimaxH3Partition":"fl2va"}), false),
+        (2, json!({"baseModel":"minimax_h3","minimaxH3Partition":"ref2va"}), false),
+        (3, json!({"baseModel":"minimax_h3_ref","minimaxH3Partition":"ref2va"}), true),
+        (4, json!({"baseModel":"minimax_h3","minimaxH3Partition":"hybrid"}), true),
+    ] {
+        let id = format!("declared_h3_{index}");
+        let fixture = managed_import_fixture_with_id(base_url.clone(), &id).await;
+        let source = fixture.settings.data_dir.join("models/incoming/declared");
+        crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+        let mut job = h3_import_job(&fixture, &source);
+        let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+        entry.remove("baseModel");
+        entry.remove("minimaxH3Partition");
+        entry.extend(declaration.as_object().unwrap().clone());
+        let _ = super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await;
+        let registered = fixture.manifest_entry();
+        assert_eq!(registered.is_some(), accepted, "{declaration}");
+        if let Some(entry) = registered {
+            assert_eq!(entry["minimaxH3Partition"], declaration["minimaxH3Partition"]);
+            assert_eq!(entry["importPlan"]["assembly"]["partition"], declaration["minimaxH3Partition"]);
+            assert!(entry["capabilities"].as_array().unwrap().contains(&json!("reference_to_video")));
+        } else {
+            assert!(!fixture.install_dir.exists(), "ambiguous/incompatible assembly must roll back");
+        }
+    }
 }
