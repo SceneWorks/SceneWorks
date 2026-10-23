@@ -278,8 +278,8 @@ impl H3SourceInventory {
         Self::from_resolved_with_config(resolved, None)
     }
 
-    /// Consume a plan with its explicitly bound full architecture document, when one is needed.
-    /// The caller owns validating and sealing that configuration's persisted provenance.
+    /// Consume a plan with an explicitly bound fallback architecture document, when needed.
+    /// Source-owned configuration wins; callers seal the fallback's persisted provenance.
     pub fn from_resolved_with_config(
         resolved: &ResolvedCheckpointV1,
         bound_config: Option<H3Config>,
@@ -298,8 +298,8 @@ impl H3SourceInventory {
         Self::from_files_with_config(files, None)
     }
 
-    /// A source's sidecar and embedded documents must agree with any explicitly bound config.
-    /// The complete JSON value is preserved, including provider-relevant non-shape fields.
+    /// Source-owned sidecar/embedded documents are authoritative; the bound configuration is
+    /// only a fallback. Complete JSON is preserved, including provider-relevant non-shape fields.
     pub fn from_files_with_config(
         files: &[(String, PathBuf)],
         bound_config: Option<H3Config>,
@@ -389,14 +389,6 @@ impl H3SourceInventory {
             return Err(
                 "sharded H3 source requires diffusion_pytorch_model.safetensors.index.json".into(),
             );
-        }
-        if let (Some(source), Some(bound)) = (&config, &bound_config) {
-            if source.0 != bound.0 {
-                return Err(
-                    "conflicting MiniMax-H3 source config and explicitly bound configuration"
-                        .into(),
-                );
-            }
         }
         let config = config.or(bound_config).ok_or("MiniMax-H3 source has no config.json or embedded h3_config; explicitly select a compatible base to bind its exact configuration before import")?;
         let expected = config.shapes()?;
