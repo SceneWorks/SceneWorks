@@ -21726,7 +21726,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "MossImageEdit",
             "moss.rs",
             include_str!("moss.rs"),
-            "moss_edit_cold_peak(variant,",
+            "runtime.cold_peak(",
         ),
         (
             "SdxlEdit",
@@ -21890,21 +21890,29 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // cache-miss loader. Check the Candle arm specifically, so the parallel MLX arm cannot carry
     // this assertion, then bind the production loader callback to the admitted factory boundary.
     let moss = include_str!("moss.rs");
-    let candle_peak = moss
-        .split_once("#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]\n    let peak = if edit {")
-        .expect("MOSS must retain its Candle cold-peak arm")
-        .1
-        .split_once("} else {")
-        .expect("MOSS must retain separate ordinary and edit estimates")
-        .0;
+    let native_runtime = moss
+        .split_once("impl MossStreamRuntime for NativeMossStreamRuntime")
+        .expect("native MOSS defaults must exist")
+        .1;
+    let peak_lines: Vec<_> = native_runtime.lines().collect();
+    let candle_start = peak_lines
+        .windows(2)
+        .position(|lines| {
+            lines[0].trim()
+                == "#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]"
+                && lines[1].trim() == "let peak = if edit {"
+        })
+        .expect("native defaults must retain the Candle cold-peak arm");
     assert!(
-        candle_peak.lines().any(|line| {
-            line.contains("moss_edit_cold_peak(variant,") && !line.trim_start().starts_with("//")
-        }),
+        peak_lines[candle_start + 2..]
+            .iter()
+            .take_while(|line| !line.contains("} else {"))
+            .any(|line| line.contains("moss_edit_cold_peak(variant,")
+                && !line.trim_start().starts_with("//")),
         "MOSS Candle edit must use the exact native edit peak before the cache handoff"
     );
     let loader = moss
-        .split_once("move |id, spec| {")
+        .split_once("load: move |id: &str, spec: &LoadSpec| {")
         .expect("MOSS must retain its actual cache-miss loader")
         .1
         .split_once("\n        },")
@@ -27794,8 +27802,8 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
     let base = include_str!("base.rs");
     let body = base
-        .split_once("async fn generate_candle_stream_using(")
-        .expect("missing production function marker generate_candle_stream_using")
+        .split_once("async fn generate_candle_registry_stream_using(")
+        .expect("missing production generic Candle function marker")
         .1
         .split_once("\n}\n")
         .expect("generate_candle_stream has no top-level end marker")

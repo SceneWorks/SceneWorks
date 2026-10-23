@@ -331,6 +331,175 @@ fn moss_edit_render(
     );
     Ok((images, facts))
 }
+struct MossPreparation<'a> {
+    variant: gen_core::moss_image::MossImageVariant,
+    mode: gen_core::moss_image::MossImageAcceleration,
+    edit: bool,
+    entry: &'a JsonObject,
+    settings: &'a Settings,
+}
+struct MossColdRequest<'a> {
+    variant: gen_core::moss_image::MossImageVariant,
+    spec: &'a LoadSpec,
+    native: &'a GenerationRequest,
+    references: &'a [Image],
+    edit_options: sceneworks_core::moss_image::EditOptions,
+    resolved: &'a gen_core::moss_image::MossImageResolved,
+    total_count: u32,
+    edit: bool,
+}
+/// Private dependency boundary: production retains exact frozen seals and native admission.
+/// Injected CPU providers supply their own explicitly synthetic, pinned source contract.
+trait MossStreamRuntime: Send + Sync {
+    fn prepare(
+        &self,
+        input: MossPreparation<'_>,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> WorkerResult<LoadSpec>;
+    fn cold_peak(&self, input: MossColdRequest<'_>) -> WorkerResult<u64>;
+    fn budget(&self, settings: &Settings) -> WorkerResult<gen_core::MemoryBudget>;
+    fn cache(&self) -> crate::generator_cache::GeneratorCacheHandle {
+        crate::generator_cache::GeneratorCacheHandle::global()
+    }
+}
+struct NativeMossStreamRuntime;
+impl MossStreamRuntime for NativeMossStreamRuntime {
+    fn prepare(
+        &self,
+        input: MossPreparation<'_>,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> WorkerResult<LoadSpec> {
+        let MossPreparation {
+            variant,
+            mode,
+            edit,
+            entry,
+            settings,
+        } = input;
+        let root = huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            variant.repository(),
+            variant.revision(),
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{} frozen snapshot missing; install or repair this model in Models",
+                variant.provider_id()
+            ))
+        })?;
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(format!(
+            "{}:{:?}:edit={edit}",
+            variant.provider_id(),
+            mode
+        ));
+        spec = attach_required_components(spec, variant.provider_id(), entry, settings)?;
+        for row in entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = row.get("componentId").and_then(Value::as_str).filter(|id| {
+                id.starts_with("moss-dmd-") || *id == gen_core::moss_image_edit::EDIT_COMPONENT
+            }) {
+                let source = crate::model_jobs::resolve_optional_component(
+                    &Value::Object(entry.clone()),
+                    id,
+                    settings,
+                )
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(format!(
+                    "MOSS component {id} missing; install the selected optional package in Models"
+                ))
+                })?;
+                spec = spec.with_component(id, source);
+            }
+        }
+        moss_pin_spec(&mut spec, entry, settings, mode, progress)?;
+        Ok(spec)
+    }
+    fn cold_peak(&self, input: MossColdRequest<'_>) -> WorkerResult<u64> {
+        let MossColdRequest {
+            variant,
+            spec,
+            native,
+            references,
+            edit_options,
+            resolved,
+            total_count,
+            edit,
+        } = input;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let _ = (resolved, total_count);
+        #[cfg(target_os = "macos")]
+        let peak = if edit {
+            moss_edit_cold_peak(variant, spec, native, references, edit_options)?
+        } else {
+            let facts = moss_memory::selected_asset_facts(variant, spec, resolved.acceleration)
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            let expanded = if native.prompt_batch.is_empty() {
+                1
+            } else {
+                total_count
+            };
+            let branches =
+                if resolved.acceleration == gen_core::moss_image::MossImageAcceleration::Off {
+                    1 + u32::from(resolved.guidance != 1.0)
+                        + u32::from(
+                            resolved
+                                .slg
+                                .as_ref()
+                                .is_some_and(|s| s.scale > 0.0 && !s.layers.is_empty()),
+                        )
+                } else {
+                    1
+                };
+            let workspace = moss_memory::request_workspace_bytes(
+                native.width,
+                native.height,
+                expanded as usize,
+                resolved.max_sequence_length,
+                branches,
+            )
+            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            facts
+                .base_bytes
+                .checked_add(facts.overlay_bytes)
+                .and_then(|v| v.checked_add(workspace))
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload("MOSS memory estimate overflow".into())
+                })?
+        };
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let peak = if edit {
+            moss_edit_cold_peak(variant, spec, native, references, edit_options)?
+        } else {
+            moss_memory::selected_preload_estimate(
+                variant,
+                spec,
+                native,
+                gen_core::moss_image::MossImageAdvancedInputs::default(),
+            )
+            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
+            .peak_bytes
+        };
+        Ok(peak)
+    }
+    fn budget(&self, settings: &Settings) -> WorkerResult<gen_core::MemoryBudget> {
+        moss_live_budget(settings)
+    }
+}
+fn moss_adapter_label(model: &str, backend: &str) -> &'static str {
+    match (model, backend) {
+        ("moss_image_base", "candle") => "candle_moss_image_base",
+        ("moss_image_sft", "candle") => "candle_moss_image_sft",
+        ("moss_image_base", _) => "mlx_moss_image_base",
+        ("moss_image_sft", _) => "mlx_moss_image_sft",
+        _ => unreachable!("validated MOSS model"),
+    }
+}
+
+#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn generate_moss_stream_using(
     api: &ApiClient,
@@ -342,6 +511,34 @@ async fn generate_moss_stream_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
+) -> WorkerResult<()> {
+    generate_moss_stream_with_runtime(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        asset_writes,
+        load_generator,
+        Arc::new(NativeMossStreamRuntime),
+        "mlx",
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_moss_stream_with_runtime(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    runtime: Arc<dyn MossStreamRuntime>,
+    backend: &'static str,
 ) -> WorkerResult<()> {
     use gen_core::moss_image::{MossImageResolved, MossImageVariant};
     let request = &plan.request;
@@ -374,44 +571,6 @@ async fn generate_moss_stream_using(
         ),
     )
     .map_err(WorkerError::InvalidPayload)?;
-    let root = huggingface_pinned_snapshot_dir(
-        &settings.data_dir,
-        variant.repository(),
-        variant.revision(),
-    )
-    .ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "{} frozen snapshot missing; install or repair this model in Models",
-            request.model
-        ))
-    })?;
-    let mut spec = LoadSpec::new(WeightsSource::Dir(root)).with_resolved_route(format!(
-        "{}:{:?}:edit={edit}",
-        request.model, resolved.acceleration
-    ));
-    spec = attach_required_components(spec, variant.provider_id(), &entry, settings)?;
-    for row in entry
-        .get("downloads")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(id) = row.get("componentId").and_then(Value::as_str).filter(|id| {
-            id.starts_with("moss-dmd-") || *id == gen_core::moss_image_edit::EDIT_COMPONENT
-        }) {
-            let source = crate::model_jobs::resolve_optional_component(
-                &Value::Object(entry.clone()),
-                id,
-                settings,
-            )
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "MOSS component {id} missing; install the selected optional package in Models"
-                ))
-            })?;
-            spec = spec.with_component(id, source);
-        }
-    }
     // Pinning blocks this runtime thread, so a spawned task posts the per-file progress.
     let (pin_progress, mut pin_events) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
     let poster = {
@@ -440,70 +599,35 @@ async fn generate_moss_stream_using(
             }
         })
     };
-    let pinned = moss_pin_spec(
-        &mut spec,
-        &entry,
-        settings,
-        resolved.acceleration,
+    let prepared = runtime.prepare(
+        MossPreparation {
+            variant,
+            mode: resolved.acceleration,
+            edit,
+            entry: &entry,
+            settings,
+        },
         &mut |done, total| {
             let _ = pin_progress.send((done, total));
         },
     );
     drop(pin_progress);
     let _ = poster.await;
-    pinned?;
-    #[cfg(target_os = "macos")]
-    let peak = if edit {
-        moss_edit_cold_peak(variant, &spec, &native, &references, edit_options)?
-    } else {
-        let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        let expanded = if native.prompt_batch.is_empty() {
-            1
-        } else {
-            request.image_count()
-        };
-        let branches = if resolved.acceleration == gen_core::moss_image::MossImageAcceleration::Off
-        {
-            1 + u32::from(resolved.guidance != 1.0)
-                + u32::from(
-                    resolved
-                        .slg
-                        .as_ref()
-                        .is_some_and(|s| s.scale > 0.0 && !s.layers.is_empty()),
-                )
-        } else {
-            1
-        };
-        let workspace = moss_memory::request_workspace_bytes(
-            native.width,
-            native.height,
-            expanded as usize,
-            resolved.max_sequence_length,
-            branches,
-        )
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        facts
-            .base_bytes
-            .checked_add(facts.overlay_bytes)
-            .and_then(|v| v.checked_add(workspace))
-            .ok_or_else(|| WorkerError::InvalidPayload("MOSS memory estimate overflow".into()))?
-    };
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let peak = if edit {
-        moss_edit_cold_peak(variant, &spec, &native, &references, edit_options)?
-    } else {
-        moss_memory::selected_preload_estimate(
-            variant,
-            &spec,
-            &native,
-            gen_core::moss_image::MossImageAdvancedInputs::default(),
-        )
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
-        .peak_bytes
-    };
+    let spec = prepared?;
+    let peak = runtime.cold_peak(MossColdRequest {
+        variant,
+        spec: &spec,
+        native: &native,
+        references: &references,
+        edit_options,
+        resolved: &resolved,
+        total_count: request.image_count(),
+        edit,
+    })?;
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
+    let cold_runtime = Arc::clone(&runtime);
+    let cache = runtime.cache();
     let job_request = request.clone();
     let engine_id = variant.provider_id();
     let count = request.image_count() as usize;
@@ -533,13 +657,17 @@ async fn generate_moss_stream_using(
         0,
         spec,
         "MOSS exact native load".into(),
-        move |id, spec| {
-            moss_load_admitted(
-                peak,
-                moss_live_budget(&cold_settings)
-                    .map_err(|e| gen_core::Error::Unsupported(e.to_string()))?,
-                || load_generator(id, spec),
-            )
+        CachedGeneratorFactory {
+            cache,
+            load: move |id: &str, spec: &LoadSpec| {
+                moss_load_admitted(
+                    peak,
+                    cold_runtime
+                        .budget(&cold_settings)
+                        .map_err(|e| gen_core::Error::Unsupported(e.to_string()))?,
+                    || load_generator(id, spec),
+                )
+            },
         },
         move |generator, _state, _loaded_policy, warm_policy, _external, owned, tx, cancel| {
             warm_policy
@@ -553,7 +681,7 @@ async fn generate_moss_stream_using(
             moss_admit(
                 peak,
                 moss_owned_weight_bytes(generator, owned),
-                moss_live_budget(&settings_owned)?,
+                runtime.budget(&settings_owned)?,
             )?;
             if native.prompt_batch.is_empty() {
                 native.count = 1;
@@ -626,17 +754,7 @@ async fn generate_moss_stream_using(
             }
         },
     );
-    #[cfg(target_os = "macos")]
-    let (backend, adapter) = (
-        "mlx",
-        if variant == MossImageVariant::Base {
-            "mlx_moss_image_base"
-        } else {
-            "mlx_moss_image_sft"
-        },
-    );
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let (backend, adapter) = ("candle", candle_adapter_label(&request.model));
+    let adapter = moss_adapter_label(&request.model, backend);
     consume_gen_events(
         api,
         settings,
@@ -811,7 +929,13 @@ mod moss_consumer_tests {
         }
     }
     fn completed_receipt(req: &GenerationRequest) -> MossImageExecutionReport {
-        let resolved = MossImageResolved::resolve(MossImageVariant::Sft, req).unwrap();
+        completed_receipt_for(req, MossImageVariant::Sft)
+    }
+    fn completed_receipt_for(
+        req: &GenerationRequest,
+        variant: MossImageVariant,
+    ) -> MossImageExecutionReport {
+        let resolved = MossImageResolved::resolve(variant, req).unwrap();
         let hash = "a".repeat(64);
         let mode = resolved.acceleration;
         let mut paths = SNAPSHOT_FILES
@@ -863,8 +987,22 @@ mod moss_consumer_tests {
                     && mode == MossImageAcceleration::Dmd(MossDmdPrecision::FullFp32));
                 MossImageAssetReceipt {
                     role,
-                    repository: if dmd { DMD_REPO } else { SFT_REPO }.into(),
-                    revision: if dmd { DMD_REVISION } else { SFT_REVISION }.into(),
+                    repository: if dmd {
+                        DMD_REPO
+                    } else if role == MossImageAssetRole::Transformer {
+                        variant.repository()
+                    } else {
+                        SFT_REPO
+                    }
+                    .into(),
+                    revision: if dmd {
+                        DMD_REVISION
+                    } else if role == MossImageAssetRole::Transformer {
+                        variant.revision()
+                    } else {
+                        SFT_REVISION
+                    }
+                    .into(),
                     relative_path: path,
                     sha256: hash.clone(),
                 }
@@ -1221,7 +1359,7 @@ mod moss_consumer_tests {
     }
 
     #[test]
-    fn edit_worker_factory_refuses_before_load_then_uses_typed_warm_peak_and_reenters() {
+    fn edit_admission_and_typed_render_helpers_refuse_unsupported_providers() {
         let loads = Cell::new(0);
         let budget = gen_core::MemoryBudget {
             total_bytes: 100,
@@ -1233,7 +1371,7 @@ mod moss_consumer_tests {
             loads.set(loads.get() + 1);
             Ok(Probe::new())
         };
-        // The native edit estimate is 73 bytes in the probe; the ordinary placeholder would fit.
+        // The injected helper peak is 73 bytes; a smaller ordinary placeholder would fit.
         assert!(moss_load_admitted(73, budget, load).is_err());
         assert_eq!(
             loads.get(),
@@ -1309,7 +1447,7 @@ mod moss_consumer_tests {
         assert_eq!(
             loads.get(),
             1,
-            "warm reentry retains only this matching provider instance"
+            "direct helper calls reused the constructed probe"
         );
     }
 
@@ -1845,4 +1983,5 @@ mod moss_consumer_tests {
             .unwrap();
         std::fs::write(output.join("case-summary.json"),serde_json::to_vec_pretty(&json!({"protocol":"sc-26325-product-worker-v1","backend":if cfg!(target_os="macos"){"mlx"}else{"candle"},"cases":rows})).unwrap()).unwrap();
     }
+    include!("moss_dispatch_tests.rs");
 }
