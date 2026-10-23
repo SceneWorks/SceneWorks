@@ -8,11 +8,11 @@ import { userInfo } from 'node:os';
 import path from 'node:path';
 import { CONTROL_FILE, QUEUE_ROOT, SOURCE_ROOT, digest, verifyQueueReservation, QueuePhaseFailure, QUEUE_PHASES } from './flux3-terminal-queue.mjs';
 import { observeProcessTable, guardHardware, validateAdmission, fileHash } from './flux3-image-klein-terminal-session.mjs';
-import { validateApprovedPlan, planHash, initializeLedger, auditLedger } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, planHash, initializeLedger, auditLedger, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
 import { verifyTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
 import { loadProductTargets, targetRegistry, requestedDiskBudget } from './flux3-image-klein-terminal-plan.mjs';
 import { artifactStagingPlan } from './flux3-image-klein-terminal-artifacts.mjs';
-import { runTerminal } from './flux3-image-klein-terminal-driver.mjs';
+import { runTerminal, RETAINED_REPLAY_CASE, RETAINED_REPLAY_FIRST } from './flux3-image-klein-terminal-driver.mjs';
 import { productionResourceRequest } from './flux3-native-boundary-self-test.mjs';
 import { launchFlux3Resource } from './flux3-resource-launcher.mjs';
 const exec = promisify(execCb), ROOT = 'D:/tmp/sc26243-run';
@@ -82,6 +82,8 @@ async function runCampaignInner(env, trace) {
   phase('metadata');
   const approval = await controlArtifact(control.approval), inputSpec = await controlArtifact(control.inputSpec);
   const approved = validateApprovedPlan(approval); assert.equal(approval.sourceSha, identity.sourceSha); assert.equal(approval.inferenceMainSha, identity.inferenceMainSha);
+  if (approval.candleSourceTransitionSha256 !== undefined) assert.equal(control.continuation?.sha256, approval.candleSourceTransitionSha256, 'current approval must pin the exact explicit Candle continuation authorization');
+  else assert.equal(control.continuation, undefined, 'a continuation cannot be supplied outside its current approval');
   assert.equal(planHash(inputSpec), approval.inputSpecSha256.candle);
   const api = await controlArtifact(control.apiBuild), resource = await controlArtifact(control.resourceBuild);
   const plan = approval.plan, sources = await loadProductTargets(), registry = targetRegistry(sources), groups = executionGroups(plan);
@@ -127,8 +129,15 @@ async function runCampaignInner(env, trace) {
   phase('admission_write');
   await writeFile(path.join(path.dirname(outputRoot), 'admission.json'), JSON.stringify({ ...admission, operation: control.operation, diagnosticOnly: control.operation === 'admission-only', deviceAtAdmission: device, resourceHeadroom: { physicalCapacityBytes: capacityBytes, foreignDedicatedBytes: foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, alreadyFreeVramMustNotBeSubtractedAgain: true } }, null, 2), { flag: 'wx' });
   await milestone({ kind: 'admission', operation: control.operation, physicalGpuId: '1', gpuUuid: admitted.gpuUuid, foreignBytes, capacityAfterForeignBytes: capacityBytes - foreignBytes, diskFreeBytes: disk.freeBytes });
+  let continuationContext;
   const result = await executeAdmittedQueueOperation(control.operation, {
     initialize: async () => {
+      if (approval.candleSourceTransitionSha256 !== undefined) {
+        phase('ledger_transition');
+        continuationContext = await appendCandleSourceTransition({ approval, ledgerRoot: base.ledgerRoot, continuation: control.continuation });
+        await milestone({ kind: 'source-transition', historicalSourceSha: continuationContext.previousApproval.sourceSha, currentSourceSha: approval.sourceSha, authorizationSha256: approval.candleSourceTransitionSha256, headSha256: continuationContext.receipt.state.headSha256, generationCount: continuationContext.receipt.state.generationCount, noNewGeneration: true, historicalSupervisionStatus: 'FAILED' });
+        return; // Never initialize or replace the existing claim/manifest/journal prefix.
+      }
       phase('ledger_boundary');
       // Claim survives deletion of ledger dir. Neither an existing claim nor a journal is reset.
       for (const file of [base.ledgerRoot, path.join(path.dirname(base.ledgerRoot), `.flux3-${approval.ledgerId}-candle.initialized`)]) {
@@ -147,12 +156,17 @@ async function runCampaignInner(env, trace) {
         const start = Date.now(), invocation = group[0];
         if (invocation.kind === 'product_generation') {
           const ids = [...new Set(group.map(i => i.caseId))];
-          const { report } = await runTerminal({ admission, inputSpec, sources, caseIds: ids, approvedPlan: approval }, { print: () => {} });
+          const retained = continuationContext && invocation.caseId === RETAINED_REPLAY_CASE;
+          const cellAdmission = retained ? { ...admission, replayPrefixAuthorizationSha256: approval.candleSourceTransitionSha256 } : admission;
+          const { report } = await runTerminal({ admission: cellAdmission, inputSpec, sources, caseIds: ids, approvedPlan: approval }, { print: () => {} });
           const ledger = await auditLedger({ approval, backend: 'candle', ledgerRoot: base.ledgerRoot });
+          if (retained) await milestone({ kind: 'retained-render-baseline', invocationId: RETAINED_REPLAY_FIRST, result: 'HISTORICAL_SUPERVISION_FAILED_RENDER_RETAINED', spent: true, newGeneration: false, pngSha256: continuationContext.baseline.pngSha256, semanticAcceptance: 'PENDING', generationCount: ledger.state.generationCount });
           for (const i of group) {
-            const c = report.cases.find(c => c.caseId === i.caseId), index = group.filter(j => j.caseId === i.caseId).indexOf(i);
+            if (retained && i.invocationId === RETAINED_REPLAY_FIRST) continue;
+            const c = report.cases.find(c => c.caseId === i.caseId), index = retained ? 0 : group.filter(j => j.caseId === i.caseId).indexOf(i);
             const outputs = c?.kind === 'replay' ? (c.outputs ?? []).slice(index, index + 1) : c?.outputs ?? [];
-            await milestone({ invocationId: i.invocationId, result: c?.executionStatus ?? report.status, spent: ledger.state.consumedIds.includes(i.invocationId), outputs: outputs.map(o => ({ sha256: o.pngSha256, width: o.width, height: o.height })), wallSeconds: (Date.now() - start) / 1000 });
+            const spent = ledger.state.consumedIds.includes(i.invocationId);
+            await milestone({ invocationId: i.invocationId, result: spent ? (c?.executionStatus ?? report.status) : 'NOT_EXECUTED', caseExecutionStatus: c?.executionStatus ?? report.status, spent, generationCount: ledger.state.generationCount, outputs: outputs.map(o => ({ sha256: o.pngSha256, width: o.width, height: o.height })), wallSeconds: (Date.now() - start) / 1000 });
           }
           assertGroupPassed(report, ids);
         } else {

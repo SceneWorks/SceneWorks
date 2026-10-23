@@ -2,6 +2,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -11,7 +13,7 @@ import { existsSync } from 'node:fs';
 import { loadProductTargets, targetRegistry, terminalCatalog, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { snapshotPath, stageTerminalArtifacts, verifyTerminalMapping, artifactStagingPlan } from './flux3-image-klein-terminal-artifacts.mjs';
-import { launchTerminalSession, guardHardware, fileHash, verifyResourceProducerHardware, assessForeignGraphics, FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } from './flux3-image-klein-terminal-session.mjs';
+import { launchTerminalSession, guardHardware, fileHash, verifyResourceProducerHardware, assessForeignGraphics, gpuProcessMemoryScript, validateGpuProcessMemory, FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES, FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES } from './flux3-image-klein-terminal-session.mjs';
 import { produceTerminalBuild, verifyTerminalBuild, verifyPreparationBuild, buildRecipe } from './flux3-image-klein-terminal-build.mjs';
 import { nativeDatasetFingerprint, expectedNativeArtifacts, bindTrainingExpectation, verifyNativeContinuation, RNG_ALGORITHM } from './flux3-image-klein-terminal-training-proof.mjs';
 import { assertFinishedPng, assertCheckpoint, trainingSequence, pngCrc32, sha256 } from './flux3-image-klein-terminal-driver.mjs';
@@ -110,31 +112,227 @@ test('resource native-boundary observation binds actual adapter parent PID, exec
 });
 
 test('GPU1 guard: bounded measured desktop C+G passes, pure compute/over-limit/unmeasurable refuse, foreign runners refuse (DECLARED MOCK)',async()=>{
- const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'}],MiB=1024**2,LUID='0x00000000_0x0001f363';
+ const a={backend:'candle',gpuUuid:'GPU-abcd'},own=[21],table=[{pid:20,ppid:10,command:'node.exe'},{pid:10,ppid:0,command:'Runner.Worker.exe'}],MiB=1024**2,LUID='0xdeadbeef_0x00000001';
+ const startedAt='2000-01-01T00:00:00.0000000Z';
+ const processTable=()=>[...table,...procs.filter(([pid])=>!own.includes(pid)).map(([pid])=>({pid,ppid:1,command:'synthetic-desktop.exe',startedAt}))];
  let procs,memory,luid,memoryQueries;
  const exec=async(cmd,args)=>{const script=args.at(-1);
   if(cmd==='powershell.exe'&&script.includes('cuDeviceGetLuid'))return{stdout:`${a.gpuUuid}${luid?` luid=${luid}`:''}`};
-  if(cmd==='powershell.exe'&&script.includes('GPU Process Memory')){memoryQueries.push(script);return{stdout:[...memory].map(([pid,bytes])=>`${pid},${bytes}`).join('\r\n')};}
+  if(cmd==='powershell.exe'&&script.includes('GPU Process Memory')){memoryQueries.push(script);return{stdout:JSON.stringify({samples:[...memory].map(([pid,cookedBytes])=>({pid,luid:LUID,physicalNode:0,status:0,cookedBytes})),...Object.fromEntries(['expectedBefore','expectedAfter'].map(key=>[key,procs.filter(([pid,type])=>type==='C+G'&&!own.includes(pid)).map(([pid])=>({pid,luid:LUID,physicalNode:0}))])),identities:procs.filter(([pid,type])=>type==='C+G'&&!own.includes(pid)).map(([pid])=>({pid,startedAt})),errors:[]})};}
   if(args.includes('--query-gpu=index,uuid'))return{stdout:`1,${a.gpuUuid}`};
   if(args.includes('-x'))return{stdout:`<uuid>${a.gpuUuid}</uuid><processes>${procs.map(([pid,type])=>`<process_info><pid>${pid}</pid><type>${type}</type></process_info>`).join('')}</processes>`};
   return{stdout:procs.filter(([,type])=>type!=='G').map(([pid])=>`${pid},${a.gpuUuid}`).join('\n')};};
- const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>table};
+ const deps={exec,platform:'win32',controllerPid:20,processTable:async()=>processTable()};
  const reset=(p,m,l=LUID)=>{procs=p;memory=new Map(m);luid=l;memoryQueries=[];};
  // The real desktop shape: compositor + shell apps as C+G, measured on the CUDA-reported LUID.
  reset([[99,'C+G'],[98,'C+G'],[97,'G']],[[99,900*MiB],[98,100*MiB],[12345,5000*MiB]]);
  const proof=await guardHardware(a,own,deps);
- assert.deepEqual(proof.foreignGraphics,{luid:LUID,processes:2,totalBytes:1000*MiB,maxProcessBytes:900*MiB,processLimitBytes:1024*MiB,totalLimitBytes:3*1024*MiB},'measured foreign total is recorded, never hidden');
- assert(memoryQueries.length===1&&memoryQueries[0].includes(`luid_${LUID}_phys_`),'memory comes from the GPU1 LUID CUDA itself reported');
+ const {counterProof,...graphics}=proof.foreignGraphics;
+ assert.deepEqual(graphics,{luid:LUID,processes:2,totalBytes:1000*MiB,maxProcessBytes:900*MiB,processLimitBytes:1024*MiB,totalLimitBytes:3*1024*MiB},'measured foreign total is recorded, never hidden');
+ assert.deepEqual(counterProof.requiredProcesses,[{pid:99,startedAt},{pid:98,startedAt}]);
+ assert.deepEqual(JSON.parse(JSON.stringify(proof.foreignGraphics)),graphics,'Node-only counter completeness proof must not alter the external Rust hardware-observation JSON');
+ assert.deepEqual([...validateGpuProcessMemory(counterProof,LUID,counterProof.requiredProcesses)],[[99,900*MiB],[98,100*MiB]]);
+ assert.equal(memoryQueries.length,1);assert.equal(memoryQueries[0],gpuProcessMemoryScript(LUID,counterProof.requiredProcesses),'memory comes from the GPU1 LUID CUDA itself reported');
  reset([[97,'G']],[]);assert.equal((await guardHardware(a,own,deps)).foreignGraphics.totalBytes,0);assert.equal(memoryQueries.length,0,'graphics-only needs no measurement');
  reset([[99,'C+G']],[[99,1024*MiB+1]]);await assert.rejects(guardHardware(a,own,deps),/uses 1025 MiB of GPU1 \(limit 1024 MiB\)/);
  reset([[99,'C+G'],[98,'C+G'],[96,'C+G'],[95,'C+G']],[[99,900*MiB],[98,900*MiB],[96,900*MiB],[95,900*MiB]]);await assert.rejects(guardHardware(a,own,deps),/in total \(limit 3072 MiB\)/);
  reset([[99,'C']],[[99,1]]);await assert.rejects(guardHardware(a,own,deps),/foreign pure-compute/,'pure compute refuses at any size');
- reset([[99,'C+G']],[]);await assert.rejects(guardHardware(a,own,deps),/process 99 on GPU1 is unmeasurable/);
+ reset([[99,'C+G']],[]);await assert.rejects(guardHardware(a,own,deps),/required GPU counter physical-node coverage incomplete/);
  reset([[99,'C+G']],[[99,MiB]],null);await assert.rejects(guardHardware(a,own,deps),/no adapter LUID/);
  reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,processTable:async()=>[...table,{pid:11,ppid:0,command:'Runner.Worker.exe'}]}),/foreign Runner.Worker/);
  // An unidentified compute-app type on GPU1 is not presumed desktop.
  reset([[99,'C+G']],[[99,MiB]]);await assert.rejects(guardHardware(a,own,{...deps,exec:async(c,args)=>args.includes('-x')?{stdout:`<uuid>${a.gpuUuid}</uuid><processes></processes>`}:exec(c,args)}),/pure compute or unidentified type/);
 });
+const counterFixture=JSON.parse(await readFile(new URL('./fixtures/flux3-gpu-counter-normalized-synthetic.json',import.meta.url),'utf8'));
+const counterLuid=counterFixture.luid, counterRequired=counterFixture.requiredProcesses;
+const knownCounterError={category:'InvalidResult',code:'CounterApiError'};
+function counterObservation(){return structuredClone(counterFixture.collections[0]);}
+function unrequiredSample(observation){return observation.samples.find(s=>!counterRequired.some(p=>p.pid===s.pid));}
+
+test('normalized counter fixture retains two independent all-valid 29-row sets, not hardware evidence',()=>{
+ assert.equal(counterFixture.declaredSynthetic,true);assert.equal(counterFixture.hardwareEvidence,false);
+ assert.equal(counterFixture.collections.length,2);assert.equal(counterRequired.length,24);
+ assert.equal(counterFixture.collections.flatMap(c=>c.samples).length,58);
+ for(const observation of counterFixture.collections){
+  assert.equal(observation.samples.length,29);assert.equal(observation.identities.length,24);
+  assert(observation.samples.every(s=>s.status===0&&!('alive' in s)));
+  assert.deepEqual(observation.identities,counterRequired);
+  const memory=validateGpuProcessMemory(observation,counterLuid,counterRequired);
+  assert.equal(memory.size,24);
+  for(const required of counterRequired)assert.equal(memory.get(required.pid),observation.samples.find(s=>s.pid===required.pid).cookedBytes);
+ }
+});
+test('counter validator accepts status 0/1, sums distinct physical nodes, and excludes valid unrequired rows',()=>{
+ const observation=counterObservation(),first=observation.samples[0];first.status=1;
+ observation.samples.push({...first,physicalNode:1,cookedBytes:8192});
+ for(const key of ['expectedBefore','expectedAfter'])observation[key].push({pid:first.pid,luid:counterLuid,physicalNode:1});
+ const memory=validateGpuProcessMemory(observation,counterLuid.toUpperCase().replaceAll('0X','0x'),counterRequired);
+ assert.equal(memory.get(first.pid),first.cookedBytes+8192);assert.equal(memory.size,24);
+ assert(!memory.has(unrequiredSample(observation).pid));
+ first.cookedBytes=0;observation.samples.pop();for(const key of ['expectedBefore','expectedAfter'])observation[key].pop();assert.equal(validateGpuProcessMemory(observation,counterLuid,counterRequired).get(first.pid),0);
+});
+test('independent metadata requires every physical node even with explained unrequired counter errors',()=>{
+ for(const explainedError of [false,true]){
+  const observation=counterObservation(),required=counterRequired[0];
+  for(const key of ['expectedBefore','expectedAfter'])observation[key].push({pid:required.pid,luid:counterLuid,physicalNode:1});
+  if(explainedError){const row=unrequiredSample(observation);row.status=0xc0000bba;delete row.cookedBytes;observation.errors=[{...knownCounterError}];}
+  assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),undefined,'node 0 alone is incomplete, regardless of explained errors');
+  // Mutation witness: deriving expectations from partial samples would incorrectly allow it.
+  const partial=structuredClone(observation);
+  for(const key of ['expectedBefore','expectedAfter'])partial[key]=partial[key].filter(s=>s.physicalNode===0);
+  assert.equal(validateGpuProcessMemory(partial,counterLuid,counterRequired).size,24);
+  observation.samples.push({pid:required.pid,luid:counterLuid,physicalNode:1,status:1,cookedBytes:8192});
+  assert.equal(validateGpuProcessMemory(observation,counterLuid,counterRequired).get(required.pid),observation.samples[0].cookedBytes+8192);
+ }
+});
+test('counter metadata is mandatory, stable, unique, well-formed and complete for every required PID',()=>{
+ for(const key of ['expectedBefore','expectedAfter'])for(const [label,mutate] of [
+  ['absent',o=>delete o[key]],['empty',o=>o[key]=[]],['missing PID',o=>o[key].shift()],
+  ['changed physical node',o=>o[key][0].physicalNode=1],['reused PID',o=>o[key][0].pid=999999],
+  ['wrong LUID',o=>o[key][0].luid='0xdeadbeef_0x00000002'],['duplicate',o=>o[key].push({...o[key][0]})],
+  ['bad physical node',o=>o[key][0].physicalNode=-1]
+ ]){const observation=counterObservation();mutate(observation);assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),undefined,`${key}: ${label}`);}
+ const missingBoth=counterObservation();missingBoth.expectedBefore.shift();missingBoth.expectedAfter.shift();
+ assert.throws(()=>validateGpuProcessMemory(missingBoth,counterLuid,counterRequired),undefined,'matching but incomplete metadata cannot omit a required PID');
+});
+test('complete multi-node memory sums retain exact 1 GiB/process and 3 GiB/total thresholds',()=>{
+ const GiB=1024**3,required=counterRequired.slice(0,3);
+ const expected=required.flatMap(({pid})=>[0,1].map(physicalNode=>({pid,luid:counterLuid,physicalNode})));
+ const observation={expectedBefore:structuredClone(expected),expectedAfter:structuredClone(expected),identities:structuredClone(required),errors:[],samples:expected.map(e=>({...e,status:0,cookedBytes:GiB/2}))};
+ const memory=validateGpuProcessMemory(observation,counterLuid,required);
+ assert.deepEqual(assessForeignGraphics(required.map(p=>p.pid),memory),{processes:3,totalBytes:3*GiB,maxProcessBytes:GiB,processLimitBytes:GiB,totalLimitBytes:3*GiB});
+ observation.samples[1].cookedBytes++;assert.throws(()=>assessForeignGraphics(required.map(p=>p.pid),validateGpuProcessMemory(observation,counterLuid,required)),/limit 1024 MiB/);
+ observation.samples[1].cookedBytes--;
+ const fourth=counterRequired[3];observation.identities.push(fourth);
+ for(const key of ['expectedBefore','expectedAfter'])observation[key].push({pid:fourth.pid,luid:counterLuid,physicalNode:0});
+ observation.samples.push({pid:fourth.pid,luid:counterLuid,physicalNode:0,status:1,cookedBytes:1});
+ assert.throws(()=>assessForeignGraphics([...required,fourth].map(p=>p.pid),validateGpuProcessMemory(observation,counterLuid,[...required,fourth])),/in total \(limit 3072 MiB\)/);
+});
+test('counter partial results require recognized errors explained only by invalid unrequired instances',()=>{
+ for(const status of [0x800007d1,0xc0000bba]){
+  const observation=counterObservation(),unrequired=unrequiredSample(observation);
+  // Whether an unrequired instance is owned or has exited is deliberately NOT an identity assertion.
+  unrequired.status=status;delete unrequired.cookedBytes;observation.errors=[{...knownCounterError}];
+  assert.equal(validateGpuProcessMemory(observation,counterLuid,counterRequired).size,24);
+  observation.errors=[];assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),/unexplained/);
+  observation.errors=[{...knownCounterError}];observation.samples[0].status=status;
+  assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),/required foreign GPU process has invalid/);
+ }
+ const observation=counterObservation();observation.errors=[{...knownCounterError}];
+ assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),/unexplained/);
+});
+test('counter validator rejects missing, ambiguous, reused and unproved required identities',()=>{
+ for(const [label,mutate] of [
+  ['missing identity',o=>o.identities.shift()],['reused PID',o=>o.identities[0].startedAt='2000-01-02T00:00:00.0000000Z'],
+  ['duplicate identity',o=>o.identities.push({...o.identities[0]})],['unexpected identity',o=>o.identities.push({pid:999999,startedAt:counterRequired[0].startedAt})],
+  ['missing start',o=>delete o.identities[0].startedAt],['missing required sample',o=>o.samples.shift()]
+ ]){const observation=counterObservation();mutate(observation);assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),undefined,label);}
+ for(const required of [[...counterRequired,counterRequired[0]],counterRequired.map((p,i)=>i?p:{...p,startedAt:undefined}),counterRequired.map((p,i)=>i?p:{...p,startedAt:'not a date'})]){
+  assert.throws(()=>validateGpuProcessMemory(counterObservation(),counterLuid,required));
+ }
+});
+test('counter validator fails closed on malformed samples and provider/permission errors',()=>{
+ const mutations=[
+  ['wrong LUID',s=>s.luid='0xdeadbeef_0x00000002'],['missing LUID',s=>delete s.luid],
+  ['negative physical node',s=>s.physicalNode=-1],['fractional physical node',s=>s.physicalNode=0.5],['missing physical node',s=>delete s.physicalNode],
+  ['invalid PID',s=>s.pid=0],['nonintegral PID',s=>s.pid=1.5],
+  ['unknown status',s=>s.status=2],['negative status',s=>s.status=-1],['oversized status',s=>s.status=0x100000000],['missing status',s=>delete s.status],['string status',s=>s.status='0'],
+  ['NaN bytes',s=>s.cookedBytes=NaN],['infinite bytes',s=>s.cookedBytes=Infinity],['negative bytes',s=>s.cookedBytes=-1],['missing bytes',s=>delete s.cookedBytes],['string bytes',s=>s.cookedBytes='4096']
+ ];
+ for(const [label,mutate] of mutations)for(const required of [true,false]){
+  const observation=counterObservation();mutate(required?observation.samples[0]:unrequiredSample(observation));
+  observation.errors=required?[]:[{...knownCounterError}];
+  assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),undefined,`${label}; required=${required}`);
+ }
+ for(const value of [0.5,Number.MAX_SAFE_INTEGER+1]){const observation=counterObservation();observation.samples[0].cookedBytes=value;assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired));}
+ const duplicate=counterObservation();duplicate.samples.push({...duplicate.samples[0]});assert.throws(()=>validateGpuProcessMemory(duplicate,counterLuid,counterRequired),/duplicate/);
+ for(const error of [{category:'PermissionDenied',code:'CounterApiError'},{category:'InvalidResult',code:'UNKNOWN_COUNTER_PROVIDER_ERROR'},{category:'NotSpecified',code:'CounterApiError'},null]){
+  const observation=counterObservation();unrequiredSample(observation).status=0xc0000bba;observation.errors=[error];
+  assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),/provider\/permission/);
+ }
+ for(const field of ['samples','identities','errors']){const observation=counterObservation();delete observation[field];assert.throws(()=>validateGpuProcessMemory(observation,counterLuid,counterRequired),/structured/);}
+});
+
+// Execute the actual collector text in Windows PowerShell, but shadow BOTH hardware-facing
+// cmdlets before it is evaluated. These scripted functions are test-only; no real counters,
+// CIM, CUDA, GPU, API, provider or model is queried, nor is the production query rewritten.
+async function scriptedCounterCollector(observation,required=counterRequired){
+ const payload=Buffer.from(JSON.stringify(observation)).toString('base64');
+ const prefix=`$ProgressPreference='SilentlyContinue'; $script:listCalls=0; $fixture=([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${payload}')) | ConvertFrom-Json);
+function Get-Counter {
+ [CmdletBinding(DefaultParameterSetName='Values')] param([Parameter(ParameterSetName='Values')][string[]]$Counter,[Parameter(ParameterSetName='Values')][int]$MaxSamples,[Parameter(ParameterSetName='Metadata')][string]$ListSet)
+ if ($PSCmdlet.ParameterSetName -eq 'Metadata') {
+  if ($ListSet -cne 'GPU Process Memory' -or $script:listCalls -ge 2) { throw 'unexpected synthetic metadata query' };
+  $metadata=if ($script:listCalls++ -eq 0) {$fixture.expectedBefore} else {$fixture.expectedAfter};
+  $paths=@($metadata | ForEach-Object { '\\GPU Process Memory(pid_{0}_luid_{1}_phys_{2})\\Dedicated Usage' -f $_.pid,$_.luid,$_.physicalNode });
+  [pscustomobject]@{PathsWithInstances=$paths}; return;
+ };
+ $expectedPaths=@($fixture.expectedBefore | ForEach-Object { '\\GPU Process Memory(pid_{0}_luid_{1}_phys_{2})\\Dedicated Usage' -f $_.pid,$_.luid,$_.physicalNode });
+ if ($MaxSamples -ne 1 -or $Counter.Count -ne $expectedPaths.Count -or @($Counter | Where-Object { $_.Contains('*') -or $_ -cnotin $expectedPaths }).Count -ne 0) { throw 'synthetic value query must explicitly name EVERY independently expected node, without wildcard' };
+ foreach ($e in $fixture.errors) {
+  $category=[System.Management.Automation.ErrorCategory]$e.category;
+  $id=if ($e.code -eq 'CounterApiError') {'CounterApiError'} else {'SyntheticUnknown'};
+  Write-Error -Message 'SYNTHETIC_PRIVATE_RAW_ERROR_MUST_NOT_LEAK' -Category $category -ErrorId $id;
+ };
+ $rows=@($fixture.samples | ForEach-Object {
+  $value=if ($null -eq $_.cookedBytes) {[double]::NaN} else {[double]$_.cookedBytes};
+  [pscustomobject]@{InstanceName=('pid_{0}_luid_{1}_phys_{2}' -f $_.pid,$_.luid,$_.physicalNode);Status=$_.status;CookedValue=$value}
+ });
+ [pscustomobject]@{CounterSamples=$rows}
+}
+function Get-CimInstance {
+ [CmdletBinding()] param([string]$ClassName)
+ if ($ClassName -cne 'Win32_Process') { throw 'unexpected synthetic identity query' };
+ $fixture.identities | ForEach-Object { [pscustomobject]@{ProcessId=$_.pid;CreationDate=[datetime]::Parse($_.startedAt).ToUniversalTime()} }
+}
+`;
+ const script=prefix+gpuProcessMemoryScript(counterLuid,required)+"; if ($script:listCalls -ne 2) { throw 'independent before/after metadata queries required' }";
+ assert(!script.includes('cuDeviceGetLuid'));
+ // A temporary script avoids Windows' command-line length limit for the full real-shape fixture.
+ const root=await mkdtemp(path.join(os.tmpdir(),'sc26243-scripted-counter-'));
+ try{
+  const scriptPath=path.join(root,'synthetic-counter-test.ps1');await writeFile(scriptPath,script);
+  const result=await promisify(execFile)('powershell.exe',['-NoProfile','-NonInteractive','-File',scriptPath],{timeout:30000,maxBuffer:1024*1024,env:{...process.env,CUDA_VISIBLE_DEVICES:'-1'}});
+  assert(!result.stdout.includes('SYNTHETIC_PRIVATE_RAW_ERROR_MUST_NOT_LEAK'));
+  assert(!result.stderr.includes('SYNTHETIC_PRIVATE_RAW_ERROR_MUST_NOT_LEAK'));
+  assert.equal(result.stderr.trim(),'');return JSON.parse(result.stdout.replace(/^﻿/,''));
+ }finally{await rm(root,{recursive:true,force:true});}
+}
+test('Windows PowerShell collector executes only scripted counter/CIM fixtures and captures sanitized errors',{skip:process.platform!=='win32'},async()=>{
+ for(const source of counterFixture.collections){
+  const observed=await scriptedCounterCollector(source);assert.deepEqual(observed,source);
+  assert.equal(validateGpuProcessMemory(observed,counterLuid,counterRequired).size,24);
+ }
+ for(const explainedError of [false,true]){
+  const source=counterObservation(),first=source.samples[0];
+  for(const key of ['expectedBefore','expectedAfter'])source[key].push({pid:first.pid,luid:counterLuid,physicalNode:1});
+  if(explainedError){const row=unrequiredSample(source);row.status=0xc0000bba;delete row.cookedBytes;source.errors=[{...knownCounterError}];}
+  const partial=await scriptedCounterCollector(source);
+  assert.throws(()=>validateGpuProcessMemory(partial,counterLuid,counterRequired),undefined,'explicit two-node query still rejects missing node even when an unrequired error is explained');
+  source.samples.push({pid:first.pid,luid:counterLuid,physicalNode:1,status:1,cookedBytes:8192});
+  const complete=await scriptedCounterCollector(source);
+  assert.equal(validateGpuProcessMemory(complete,counterLuid,counterRequired).get(first.pid),first.cookedBytes+8192);
+ }
+ for(const status of [0x800007d1,0xc0000bba]){
+  const source=counterObservation();source.samples[0].status=1;
+  const row=unrequiredSample(source);row.status=status;delete row.cookedBytes;source.errors=[{...knownCounterError}];
+  const observed=await scriptedCounterCollector(source);assert.deepEqual(observed,source);
+  assert.deepEqual(Object.keys(observed.errors[0]).sort(),['category','code']);
+  assert.equal(validateGpuProcessMemory(observed,counterLuid,counterRequired).size,24);
+ }
+ for(const error of [{category:'PermissionDenied',code:'CounterApiError'},{category:'InvalidResult',code:'UNKNOWN_COUNTER_PROVIDER_ERROR'}]){
+  const source=counterObservation();unrequiredSample(source).status=0xc0000bba;delete unrequiredSample(source).cookedBytes;source.errors=[error];
+  const observed=await scriptedCounterCollector(source);assert.deepEqual(observed.errors,[error]);
+  assert.throws(()=>validateGpuProcessMemory(observed,counterLuid,counterRequired),/provider\/permission/);
+ }
+ const source=counterObservation();source.samples[0].cookedBytes=-1;
+ const observed=await scriptedCounterCollector(source);assert(!('cookedBytes' in observed.samples[0]));
+ assert.throws(()=>validateGpuProcessMemory(observed,counterLuid,counterRequired),/invalid counter data/);
+ // Singleton arrays must remain arrays under PS5 as well as the real-shape multirow fixture.
+ const singleton={samples:[counterObservation().samples[0]],identities:[counterRequired[0]],errors:[],expectedBefore:[counterObservation().expectedBefore[0]],expectedAfter:[counterObservation().expectedAfter[0]]};
+ assert.deepEqual(await scriptedCounterCollector(singleton,[counterRequired[0]]),singleton);
+});
+
 test('foreign desktop thresholds are exactly 1 GiB per process and 3 GiB in total (mutation checks)',()=>{
  const MiB=1024**2;assert.equal(FOREIGN_GRAPHICS_PROCESS_LIMIT_BYTES,1024*MiB);assert.equal(FOREIGN_GRAPHICS_TOTAL_LIMIT_BYTES,3*1024*MiB);
  assert.equal(assessForeignGraphics([1],new Map([[1,1024*MiB]])).totalBytes,1024*MiB,'the limit itself is allowed');

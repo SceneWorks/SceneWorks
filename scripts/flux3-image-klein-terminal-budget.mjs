@@ -2,7 +2,8 @@
 // Product/resource/resume sessions consume their backend's SAME stable local atomic ledger.
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { mkdir, open, readFile, readdir, rename, unlink, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { validateNativeBoundaryReceipt } from './lib/flux3-native-boundary.mjs';
 export const GLOBAL_GENERATION_CEILING = 48;
@@ -50,6 +51,7 @@ function validateHostLanes(plan) {
 export function validateApprovedPlan(approval) {
   assert(approval?.schemaVersion === 1 && approval.kind === 'flux3-terminal-plan-approval', 'explicit immutable terminal plan approval required');
   assert(approval.approvalId && approval.userPlanApprovalId && approval.approvedBy, 'parent-recorded user plan approval identity required');
+  if (Object.hasOwn(approval, 'candleSourceTransitionSha256')) assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'valid root Candle transition authorization digest required');
   assert(revision.test(approval.sourceSha ?? '') && revision.test(approval.inferenceMainSha ?? ''), 'approved final source/MAIN identities required');
   assert(/^[a-zA-Z0-9_-]{12,100}$/.test(approval.ledgerId ?? ''), 'stable non-resettable ledger identity required');
   // A backend whose inputs cannot exist yet (e.g. a second host still to be provisioned) may be
@@ -120,6 +122,197 @@ export function validateApprovedPlan(approval) {
   }
   return { approvedPlanSha256: planHash(approval), generationCount: invocations.length, backendQuotas: plan.budget.byBackend, trainingLifecycles: training.length };
 }
+// This is one fixed continuation, not a general source migration or quota-reset mechanism.
+const CANDLE_PREVIOUS_SOURCE = '7090f742a7d2973dc3cc1c144aa8a272cdc293c9';
+const CANDLE_REPLAY_CASE = 'candle.distilled.representative-repro.bf16';
+const CANDLE_CONSUMED = `${CANDLE_REPLAY_CASE}.generation-1`, CANDLE_NEXT = `${CANDLE_REPLAY_CASE}.generation-2`;
+const rawHash = bytes => createHash('sha256').update(bytes).digest('hex');
+const canonical = value => JSON.stringify(canonicalValue(value));
+function canonicalValue(value) {
+  if (Array.isArray(value)) return Array.from(value, canonicalValue);
+  if (value && typeof value === 'object') {
+    assert.equal(Object.getPrototypeOf(value), Object.prototype, 'approval must contain plain JSON objects only');
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalValue(value[key])]));
+  }
+  assert(value === null || typeof value === 'string' || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)), 'approval contains a non-JSON value');
+  return value;
+}
+function exactKeys(value, keys, label) {
+  assert(value && typeof value === 'object' && !Array.isArray(value), `${label} object required`);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} has unknown/missing fields`);
+}
+/** Hash ALL approval fields canonically, omitting ONLY the root authorization digest. */
+export function candleNextApprovalBaseSha256(approval) {
+  const { candleSourceTransitionSha256, ...base } = approval;
+  return rawHash(`flux3-candle-next-approval-base-v1\n${canonical(base)}`);
+}
+export function validateCandleSourceCompatibility(previousApproval, approval) {
+  validateApprovedPlan(previousApproval); validateApprovedPlan(approval);
+  assert.equal(previousApproval.sourceSha, CANDLE_PREVIOUS_SOURCE, 'only the fixed original Candle source may transition');
+  assert(!Object.hasOwn(previousApproval, 'candleSourceTransitionSha256'), 'a second Candle source transition is forbidden');
+  assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'parent authorization raw SHA required');
+  assert.notEqual(approval.sourceSha, previousApproval.sourceSha, 'new source must actually differ');
+  assert(!previousApproval.plan.hostLanes?.candle && !approval.plan.hostLanes?.candle, 'fixed Candle prefix cannot migrate host lanes');
+  for (const a of [previousApproval, approval]) {
+    assert(!(a.deferredInputSpecBackends ?? []).includes('candle'), 'fixed Candle source prefix must have approval-bound inputs');
+    validateNativeBoundaryReceipt(a.plan.nativeBoundaryReceipts?.candle, {backend:'candle',invocations:a.plan.generationInvocations.filter(i => i.backend === 'candle' && i.kind.startsWith('resource_')),
+      binarySha256:a.resourceBuildReceipts?.candle?.binarySha256,buildReceiptSha256:a.resourceBuildReceipts?.candle?.receiptSha256,sourceSha:a.sourceSha,inferenceMainSha:a.inferenceMainSha});
+  }
+  const scrub = (a, next) => {
+    const result = structuredClone(a); delete result.approvalId; delete result.sourceSha;
+    if (next) delete result.candleSourceTransitionSha256;
+    for (const key of ['buildReceipts', 'resourceBuildReceipts']) {
+      assert(result[key]?.candle, 'both sealed Candle builds required');
+      delete result[key].candle.receiptSha256; delete result[key].candle.transcriptSha256;
+    }
+    if (result.plan.nativeBoundaryReceipts?.candle) {
+      delete result.plan.nativeBoundaryReceipts.candle.sourceSha;
+      delete result.plan.nativeBoundaryReceipts.candle.buildReceiptSha256;
+    }
+    for (const row of result.plan.resourceCases ?? []) if (row.backend === 'candle') {
+      delete row.nativeBoundaryReceiptSha256; delete row.parentNativeBoundaryVerificationId;
+    }
+    return result;
+  };
+  assert.deepEqual(scrub(approval, true), scrub(previousApproval, false), 'source transition changed immutable plan/input/quota/build/root fields or introduced an unknown field');
+  return true;
+}
+const AUTH_KEYS = ['schemaVersion','kind','authorizationId','approvedBy','producersStopped','previousSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256','previousApproval','previousReceipt','previousBuilds','nextBuilds','nextSourceSha','nextApprovalBaseSha256','baseline'];
+const BASELINE_KEYS = ['caseId','consumedInvocationId','nextInvocationId','png','sidecar','report','readback','firstRequestSha256','secondRecordedRequestSha256','oldJobId','oldWorkerId','oldWorkerPid','allowedLineageRemap'];
+function artifactBinding(binding) {
+  exactKeys(binding, ['path','sha256'], 'artifact binding');
+  assert(typeof binding.path === 'string' && path.isAbsolute(binding.path) && sha.test(binding.sha256), 'absolute owned artifact and raw digest required');
+}
+function validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt) {
+  exactKeys(authorization, AUTH_KEYS, 'source transition authorization');
+  assert.equal(authorization.schemaVersion, 1); assert.equal(authorization.kind, 'flux3-candle-source-transition-authorization');
+  for (const field of ['authorizationId','approvedBy']) assert(typeof authorization[field] === 'string' && authorization[field].length);
+  assert.equal(authorization.producersStopped, true, 'stopped-producer parent authorization required');
+  assert.equal(authorization.previousSourceSha, CANDLE_PREVIOUS_SOURCE);
+  assert.equal(authorization.previousSourceSha, previousApproval.sourceSha);
+  assert.equal(authorization.nextSourceSha, approval.sourceSha);
+  assert.equal(authorization.previousApprovedPlanSha256, planHash(previousApproval));
+  assert.equal(authorization.nextApprovalBaseSha256, candleNextApprovalBaseSha256(approval), 'next approval base digest mismatch');
+  assert.equal(authorization.previousSequence, 1); assert.equal(authorization.previousGenerationCount, 1);
+  assert.deepEqual(authorization.previousConsumedIds, [CANDLE_CONSUMED]);
+  assert.deepEqual(previousReceipt.state, {sequence:1,generationCount:1,consumedIds:[CANDLE_CONSUMED],headSha256:authorization.previousHeadSha256}, 'authorization does not name exact fixed old prefix');
+  for (const field of ['previousHeadSha256','previousClaimSha256']) assert(sha.test(authorization[field] ?? ''));
+  for (const field of ['previousApproval','previousReceipt']) artifactBinding(authorization[field]);
+  for (const field of ['previousBuilds','nextBuilds']) { exactKeys(authorization[field], ['api','resource'], field); for (const binding of Object.values(authorization[field])) artifactBinding(binding); }
+  const baseline = authorization.baseline; exactKeys(baseline, BASELINE_KEYS, 'baseline');
+  assert.equal(baseline.caseId, CANDLE_REPLAY_CASE); assert.equal(baseline.consumedInvocationId, CANDLE_CONSUMED); assert.equal(baseline.nextInvocationId, CANDLE_NEXT);
+  assert.deepEqual(baseline.allowedLineageRemap, ['projectId']);
+  for (const field of ['png','sidecar','report','readback']) artifactBinding(baseline[field]);
+  for (const field of ['firstRequestSha256','secondRecordedRequestSha256']) assert(sha.test(baseline[field] ?? ''));
+  for (const field of ['oldJobId','oldWorkerId']) assert(typeof baseline[field] === 'string' && baseline[field].length);
+  assert(Number.isSafeInteger(baseline.oldWorkerPid) && baseline.oldWorkerPid > 0);
+  for (const id of [CANDLE_CONSUMED, CANDLE_NEXT]) assert(approval.plan.generationInvocations.some(i => i.invocationId === id && i.caseId === CANDLE_REPLAY_CASE && i.backend === 'candle' && i.kind === 'product_generation'), 'fixed replay pair missing');
+}
+const TRANSITION_KEYS = ['sequence','previousSha256','approvedPlanSha256','ledgerId','backend','kind','previousApprovalJson','previousReceiptJson','authorizationJson','authorizationSha256'];
+function transitionPrefix(approval, event) {
+  const { eventSha256, ...record } = event; exactKeys(record, TRANSITION_KEYS, 'Candle transition event');
+  assert.equal(eventSha256, planHash(record)); assert.equal(record.kind, 'candle_source_transition'); assert.equal(record.backend, 'candle'); assert.equal(record.sequence, 2);
+  assert.equal(record.ledgerId, approval.ledgerId); assert.equal(record.approvedPlanSha256, planHash(approval));
+  assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'unknown/unapproved Candle source transition');
+  for (const field of ['previousApprovalJson','previousReceiptJson','authorizationJson']) assert(typeof record[field] === 'string');
+  assert.equal(rawHash(record.authorizationJson), approval.candleSourceTransitionSha256, 'authorization raw bytes differ from approval');
+  assert.equal(record.authorizationSha256, approval.candleSourceTransitionSha256);
+  const authorization = JSON.parse(record.authorizationJson), previousApproval = JSON.parse(record.previousApprovalJson), previousReceipt = JSON.parse(record.previousReceiptJson);
+  validateCandleSourceCompatibility(previousApproval, approval);
+  assert.equal(rawHash(record.previousApprovalJson), authorization.previousApproval.sha256, 'old approval raw bytes mismatch');
+  assert.equal(rawHash(record.previousReceiptJson), authorization.previousReceipt.sha256, 'old final receipt raw bytes mismatch');
+  verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
+  validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt);
+  assert.equal(record.previousSha256, previousReceipt.state.headSha256);
+  return {authorization, previousApproval, previousReceipt, authorizationSha256:record.authorizationSha256, consumedInvocationId:CANDLE_CONSUMED, nextInvocationId:CANDLE_NEXT};
+}
+/** Pure authenticated carried-prefix lookup. No generic skip-consumed authority. */
+export function candleReplayPrefix(receipt, approval) {
+  verifyLedgerReceipt(approval, receipt, 'candle');
+  const event = receipt.events.find(e => e.kind === 'candle_source_transition');
+  assert(event, 'authenticated Candle source transition required for replay prefix');
+  return transitionPrefix(approval, event);
+}
+async function ownedArtifact(binding, ownedRoot, text = true) {
+  artifactBinding(binding);
+  // Reject foreign/UNC paths BEFORE any filesystem access to the supplied path.
+  const lexicalRelative = path.relative(path.resolve(ownedRoot), path.resolve(binding.path));
+  assert(lexicalRelative && lexicalRelative !== '..' && !lexicalRelative.startsWith(`..${path.sep}`) && !path.isAbsolute(lexicalRelative), 'artifact escaped lexical owned root');
+  const root = await realpath(ownedRoot), file = await realpath(binding.path), relative = path.relative(root, file);
+  assert(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'artifact escaped owned root');
+  assert((await stat(file)).isFile(), 'owned regular artifact required');
+  if (!text) {
+    const hash = createHash('sha256'); for await (const chunk of createReadStream(file)) hash.update(chunk);
+    assert.equal(hash.digest('hex'), binding.sha256, 'owned artifact raw bytes mismatch'); return;
+  }
+  const bytes = await readFile(file); assert.equal(rawHash(bytes), binding.sha256, 'owned artifact raw bytes mismatch'); return bytes.toString('utf8');
+}
+// previousBuilds/nextBuilds api/resource bindings name the RAW producer-receipt.json:
+// use produceTerminalBuild's receiptPath + receiptSha256, never an outer *-build-result.json.
+async function verifyTransitionBuilds(approval, bindings, ownedRoot) {
+  const { verifyTerminalBuild } = await import('./flux3-image-klein-terminal-build.mjs');
+  const results = {};
+  for (const [key, role] of [['api','api-worker'],['resource','resource-adapter']]) {
+    const json = await ownedArtifact(bindings[key], ownedRoot), receipt = JSON.parse(json);
+    // Check the binary is also owned before delegating the FULL real verifier (default checked code root).
+    await ownedArtifact({path:receipt.binary.path,sha256:receipt.binary.sha256}, ownedRoot, false);
+    const verified = await verifyTerminalBuild({approvedPlan:approval,backend:'candle',sourceSha:approval.sourceSha,inferenceMainSha:approval.inferenceMainSha,
+      binaryBuildReceipt:{...bindings[key],root:ownedRoot},binary:receipt.binary.path,binarySha256:receipt.binary.sha256}, {role});
+    const transcript = JSON.parse(await ownedArtifact({path:path.join(path.dirname(bindings[key].path), 'producer-transcript.json'),sha256:verified.transcriptSha256}, ownedRoot));
+    results[key] = {receipt:verified,transcript};
+  }
+  return results;
+}
+export async function appendCandleSourceTransition({approval, ledgerRoot, continuation}) {
+  const root = location(approval, 'candle', ledgerRoot), ownedRoot = path.resolve(root, '../..');
+  assert(sha.test(approval.candleSourceTransitionSha256 ?? ''), 'new approval must pin parent authorization');
+  assert.equal(continuation?.sha256, approval.candleSourceTransitionSha256, 'authorization differs from approved raw SHA');
+  const authorizationJson = await ownedArtifact(continuation, ownedRoot), authorization = JSON.parse(authorizationJson);
+  // Validate structure before following any artifact paths.
+  exactKeys(authorization, AUTH_KEYS, 'source transition authorization');
+  const previousApprovalJson = await ownedArtifact(authorization.previousApproval, ownedRoot), previousApproval = JSON.parse(previousApprovalJson);
+  const previousReceiptJson = await ownedArtifact(authorization.previousReceipt, ownedRoot), previousReceipt = JSON.parse(previousReceiptJson);
+  validateCandleSourceCompatibility(previousApproval, approval); verifyLedgerReceipt(previousApproval, previousReceipt, 'candle');
+  validateTransitionAuthorization(authorization, previousApproval, approval, previousReceipt);
+  const claimFile = path.join(path.dirname(root), `.flux3-${approval.ledgerId}-candle.initialized`);
+  const claimJson = await ownedArtifact({path:claimFile,sha256:authorization.previousClaimSha256}, ownedRoot);
+  assert.deepEqual(JSON.parse(claimJson), {ledgerId:previousApproval.ledgerId,backend:'candle',root,approvedPlanSha256:planHash(previousApproval)}, 'old initialization claim mismatch');
+  const beforeBuilds = await verifyTransitionBuilds(previousApproval, authorization.previousBuilds, ownedRoot), afterBuilds = await verifyTransitionBuilds(approval, authorization.nextBuilds, ownedRoot);
+  for (const key of ['api','resource']) {
+    const before = beforeBuilds[key], after = afterBuilds[key];
+    assert.deepEqual(before.receipt.recipe, after.receipt.recipe, 'build recipe changed');
+    assert.equal(before.receipt.binary.sha256, after.receipt.binary.sha256, 'sealed binary changed');
+    for (const field of ['recipe','cargoExecutableSha256','rustcExecutableSha256','rustcSha256','rustflags','msvcVersion','msvcObserved','cudaObserved']) assert.deepEqual(before.transcript[field], after.transcript[field], `build toolchain ${field} changed`);
+    for (const field of ['cargoLockSha256','manifestSha256']) assert.deepEqual(before.transcript.sourceBefore[field], after.transcript.sourceBefore[field], `build ${field} changed`);
+  }
+  for (const binding of Object.values(authorization.baseline).filter(v => v && typeof v === 'object' && !Array.isArray(v))) await ownedArtifact(binding, ownedRoot);
+  const { validateReplayPrefixBaseline } = await import('./flux3-image-klein-terminal-driver.mjs');
+  const baseline = await validateReplayPrefixBaseline({previousApproval,previousReceipt,authorization,ownedRoot});
+  return lock(root, async () => {
+    // The claim is immutable too: proof validation may take time, so re-read its exact bytes
+    // under the SAME consume lock before either append or idempotent acceptance.
+    const lockedClaimJson = await ownedArtifact({path:claimFile,sha256:authorization.previousClaimSha256}, ownedRoot);
+    assert.equal(lockedClaimJson, claimJson, 'old initialization claim changed during proof validation');
+    // Re-read and verify under consume.lock; never reconcile partial journal/state.
+    const files = (await readdir(path.join(root, 'events'))).sort();
+    if (files.length === 2) {
+      const receipt = await audited(approval, 'candle', root), prefix = candleReplayPrefix(receipt, approval);
+      assert.equal(receipt.state.sequence, 2); assert.equal(receipt.state.generationCount, 1);
+      assert.deepEqual(receipt.state.consumedIds, [CANDLE_CONSUMED]);
+      assert.equal(prefix.authorizationSha256, continuation.sha256);
+      return {receipt,authorization,previousApproval,previousReceipt,baseline,eventSha256:receipt.state.headSha256,alreadyApplied:true};
+    }
+    const current = await audited(previousApproval, 'candle', root);
+    assert.deepEqual(current, previousReceipt, 'old latest ledger differs from authorized FINAL receipt');
+    assert.equal(current.state.sequence, 1, 'transition only at fixed one-spend prefix');
+    const record = {sequence:2,previousSha256:current.state.headSha256,approvedPlanSha256:planHash(approval),ledgerId:approval.ledgerId,backend:'candle',kind:'candle_source_transition',previousApprovalJson,previousReceiptJson,authorizationJson,authorizationSha256:continuation.sha256};
+    const event = {...record,eventSha256:planHash(record)}, next = {...current.state,sequence:2,headSha256:event.eventSha256};
+    const receipt = verifyLedgerReceipt(approval, {...current,state:next,events:[...current.events,event]}, 'candle');
+    await durableNew(path.join(root, 'events', '000002.json'), event);
+    const temporary = path.join(root, `state-${randomBytes(16).toString('hex')}.tmp`); await durableNew(temporary, next); await rename(temporary, path.join(root, 'state.json'));
+    return {receipt,authorization,previousApproval,previousReceipt,baseline,eventSha256:event.eventSha256,alreadyApplied:false};
+  });
+}
 const ADDENDUM_KEYS = ['schemaVersion', 'kind', 'approvedPlanSha256', 'ledgerId', 'backend', 'inputSpecSha256', 'buildReceipt', 'resourceBuildReceipt', 'nativeBoundaryReceipt', 'parentNativeBoundaryVerificationId', 'addendumId', 'userApprovalId', 'approvedBy'].sort();
 /** Validate a parent-recorded input-spec addendum. It can ONLY bind a deferred backend's input
  *  specification for this exact approval: it never changes the plan, any bound spec, the ledger
@@ -188,6 +381,7 @@ async function durableNew(file, value) { const h = await open(file, 'wx'); try {
 // The durable sibling initialization claim survives deletion of the ledger directory.
 export async function initializeLedger({ approval, backend, ledgerRoot, host }) {
   const root = location(approval, backend, ledgerRoot, host), hash = planHash(approval), lane = ledgerLane(approval, backend, host);
+  assert(!(backend === 'candle' && Object.hasOwn(approval, 'candleSourceTransitionSha256')), 'Candle transition approval cannot initialize a fresh ledger');
   await durableNew(path.join(path.dirname(root), `.flux3-${approval.ledgerId}-${lane}.initialized`), { ledgerId: approval.ledgerId, backend, ...(lane !== backend ? { host } : {}), root, approvedPlanSha256: hash });
   await mkdir(root); await mkdir(path.join(root, 'events'));
   const manifest = expectedManifest(approval, backend, host);
@@ -230,9 +424,25 @@ export function verifyLedgerReceipt(approval, receipt, expectedBackend = receipt
       assert(inputSpecAddendum, 'BLOCKED: this ledger is bound to its recorded addendum; present that same addendum');
       assert.equal(planHash(inputSpecAddendum), inputSpecAddendumSha256, 'BLOCKED: a different addendum than the one recorded in this ledger');
     }
-  } else assert.equal(inputSpecAddendumSha256, undefined, 'a non-deferred backend ledger carries no addendum binding'); assert.deepEqual(manifest, expectedManifest(approval, expectedBackend, host), 'complete ledger manifest/plan/backend identity mismatch'); assert(Array.isArray(events));
-  let head = planHash(manifest), generations = 0; const ids = [];
+  } else assert.equal(inputSpecAddendumSha256, undefined, 'a non-deferred backend ledger carries no addendum binding');
+  assert(Array.isArray(events));
+  const transitions = events.filter(e => e.kind === 'candle_source_transition');
+  const requiresTransition = expectedBackend === 'candle' && Object.hasOwn(approval, 'candleSourceTransitionSha256');
+  let prefix;
+  if (requiresTransition) {
+    assert.equal(transitions.length, 1, 'authenticated Candle source transition required, exactly once');
+    assert.equal(events[1], transitions[0], 'source transition is only the fixed second journal event');
+    prefix = transitionPrefix(approval, transitions[0]);
+    assert.deepEqual(manifest, prefix.previousReceipt.manifest, 'immutable old manifest differs from carried prefix');
+    assert.deepEqual(events.slice(0, 1), prefix.previousReceipt.events, 'immutable old event differs from carried prefix');
+    assert.equal(inputSpecAddendumSha256, undefined, 'fixed Candle transition has no addendum');
+  } else {
+    assert.equal(transitions.length, 0, 'unknown/unapproved source transition');
+    assert.deepEqual(manifest, expectedManifest(approval, expectedBackend, host), 'complete ledger manifest/plan/backend identity mismatch');
+  }
+  let head = prefix ? transitions[0].eventSha256 : planHash(manifest), generations = prefix ? 1 : 0; const ids = prefix ? [CANDLE_CONSUMED] : [];
   for (const [index, event] of events.entries()) {
+    if (prefix && index < 2) continue;
     const { eventSha256, ...record } = event;
     assert.deepEqual(Object.keys(record).sort(), ['sequence','previousSha256','approvedPlanSha256','ledgerId','backend','caseId','invocationId','kind','requestSha256','reservedAt','controllerPid'].sort());
     assert.equal(eventSha256, planHash(record)); assert.equal(record.sequence, index + 1); assert.equal(record.previousSha256, head); assert.equal(record.ledgerId, approval.ledgerId); assert.equal(record.approvedPlanSha256, planHash(approval)); assert.equal(record.backend, expectedBackend); assert(sha.test(record.requestSha256)); assert(Number.isInteger(record.controllerPid) && record.controllerPid > 0 && Number.isFinite(Date.parse(record.reservedAt)));
@@ -248,6 +458,7 @@ async function boundAddendum(root) {
   try { return JSON.parse(await readFile(path.join(root, ADDENDUM_BINDING), 'utf8')); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
 }
 async function audited(approval, backend, root, inputSpecAddendum, host) {
+  assert(!(await readdir(root)).some(file => /^state-.*\.tmp$/.test(file)), 'ledger partial state publication; no automatic repair/reset');
   const manifest = JSON.parse(await readFile(path.join(root, 'manifest.json'), 'utf8')), state = JSON.parse(await readFile(path.join(root, 'state.json'), 'utf8')), files = (await readdir(path.join(root, 'events'))).sort(), events = [];
   for (const [index, file] of files.entries()) { assert.equal(file, `${String(index + 1).padStart(6, '0')}.json`, 'ledger journal missing/foreign event'); events.push(JSON.parse(await readFile(path.join(root, 'events', file), 'utf8'))); }
   const binding = await boundAddendum(root);
@@ -293,7 +504,7 @@ export function aggregateLedgerReceipts(approval, receipts, closure, inputSpecAd
     const lane = ledgerLane(approval, candidate.manifest.backend, candidate.manifest.host);
     const receipt = verifyLedgerReceipt(approval, candidate, candidate?.manifest?.backend, inputSpecAddenda[lane], candidate?.manifest?.host), key = `${receipt.manifest.ledgerId}:${lane}`; assert(!ledgers.has(key), 'duplicate ledger/backend receipt; use one complete latest receipt per backend'); ledgers.add(key);
     assert.deepEqual({ sequence: receipt.state.sequence, headSha256: receipt.state.headSha256 }, expectedHeads[lane], 'replayed/stale receipt differs from trusted latest coordinator-audited head');
-    for (const event of receipt.events) { assert(!ids.has(event.invocationId), 'duplicate receipt/permit across backend sessions'); ids.add(event.invocationId); }
+    for (const event of receipt.events) { if (event.kind === 'candle_source_transition') continue; assert(!ids.has(event.invocationId), 'duplicate receipt/permit across backend sessions'); ids.add(event.invocationId); }
     generationCount += receipt.state.generationCount;
   }
   assert.equal(ledgers.size, laneKeys.length, 'partial backend aggregation is not a global campaign count; every complete latest lane receipt required');
