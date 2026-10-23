@@ -4,6 +4,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
 import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
+import { ImportedCheckpointSurface } from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -1541,6 +1542,40 @@ export function ModelManagerScreen() {
         {/* Per-component installation details + supported limits (sc-24216). Collapsed by default;
             renders only for an entry that declares per-download licences or a prompt limit. */}
         {!cleanupOnly ? <ModelComponentDetails model={model} totalSizeText={model.downloadSizeLabel ? downloadSize : null} /> : null}
+        {/* The imported-checkpoint product surface (sc-26687): source variant, supported
+            operations/backends, component readiness and the repair steps that would complete the
+            assembly. Values come from the server's single derivation, so a repair offered here is
+            the repair the API describes. Collapsed by default, like the component table above. */}
+        {!cleanupOnly ? (
+          <ImportedCheckpointSurface
+            model={model}
+            onRepair={(repair) => {
+              if (repair.kind === "download") {
+                // Exactly the footer's own repair path, so the card offers ONE way to fix a torn
+                // install rather than two that could disagree about which bytes to fetch.
+                if (failedDownload) {
+                  onResumeDownloadJob(localDownloadJob, {
+                    payloadChanges: { downloadAction: "resume" },
+                  });
+                } else if (repairVariant) {
+                  onDownloadVariant(model, repairVariant.variant);
+                } else {
+                  onDownloadModel(model);
+                }
+                return;
+              }
+              // relink / rescan: the linked-repair affordance above, which is the seam that decides
+              // which of the two the library root index calls for.
+              if (linkedStatus && linkedFix) {
+                if (linkedFix.action === "relink") {
+                  relinkLinkedModel(linkedStatus);
+                } else {
+                  rescanLinkedModel(linkedStatus);
+                }
+              }
+            }}
+          />
+        ) : null}
         {incomplete ? (
           <p className="inline-warning">
             Cached files are incomplete

@@ -4062,18 +4062,38 @@ async fn create_generation_job_with_status(
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Never from a caller's payload: `modelManifestEntry` here is the entry
+    // `ensure_runtime_model_sources` just re-resolved from the SERVER catalog, and
+    // `resolved_model_provenance` re-derives the identity from the persisted plan rather than
+    // trusting anything a request wrote. A job with no bound plan behind it gets `None` — the
+    // honest answer for a builtin entry, and the same one a legacy job already carries.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+            &state.settings.data_dir,
+            entry,
+        )
+        .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?,
+        None => None,
+    };
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type,
-            project_id,
-            project_name,
-            payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status,
-        })
+        store.create_job_with_model_provenance(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
