@@ -19032,6 +19032,19 @@ button.audio-wave {
   gap: 12px;
 }
 
+.checkpoint-managed > .models-import-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.checkpoint-h3-declaration {
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+}
+
+.checkpoint-h3-compatibility-note {
+  grid-column: 1 / -1;
+}
+
 .checkpoint-linked-add {
   display: grid;
   grid-template-columns: minmax(220px, 2fr) auto minmax(140px, 1fr) auto;

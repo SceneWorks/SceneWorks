@@ -2121,13 +2121,8 @@ export function ModelManagerScreen() {
     );
   }
 
-  // Base-checkpoint import affordance (epic 14015, sc-14020). Surfaced on the Image Models
-  // tab (sc-14069) rather than the LoRAs tab where the sc-7080 scaffold first placed it — a
-  // base checkpoint IS an image model (a Krea 2 DiT today), so this is where a user looks for
-  // it. Gated on MODEL_IMPORT_ENABLED (mirrors the backend kill-switch S0d opened); the
-  // section also surfaces any in-flight model-import progress. Factored out of the tab body so
-  // it can mount under any relevant model-type tab once more base-checkpoint types become
-  // importable — image is the only relevant tab today (the Type selector is image-locked).
+  // The existing Add workflow serves both image checkpoints and explicitly declared H3 video
+  // fine-tunes. Both tabs share its source, compatibility, refusal, and progress surfaces.
   function renderModelImportPanel() {
     if (!MODEL_IMPORT_ENABLED && pendingModelImportJobs.length === 0) {
       return null;
@@ -2162,7 +2157,7 @@ export function ModelManagerScreen() {
     const { recommended, others, othersHeading } = modelGroupsByType[type];
     return (
       <div className="models-tab-panel">
-        {type === "image" ? renderModelImportPanel() : null}
+        {["image", "video"].includes(type) ? renderModelImportPanel() : null}
         {others.length ? (
           <div className="models-section">
             <div className="models-section-heading">

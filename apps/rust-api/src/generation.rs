@@ -3202,24 +3202,40 @@ mod imported_minimax_h3_video_tests {
         let plan = ImportPlanV1::new(
             "checkpoint-plan-h3",
             "minimax-h3",
-            vec![ImportLayerV1 {
-                layer_id: "artifact:diffusion_pytorch_model.safetensors".to_owned(),
-                role: "transformer".to_owned(),
-                target_path: "diffusion_pytorch_model.safetensors".to_owned(),
-                container: CheckpointContainerV1::Safetensors,
-                source: SourceLocatorV1::linked(
-                    "root-0123456789abcdef",
-                    "h3/diffusion_pytorch_model.safetensors",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                )
-                .expect("valid locator"),
-            }],
+            vec![
+                ImportLayerV1 {
+                    layer_id: "artifact:diffusion_pytorch_model.safetensors".to_owned(),
+                    role: "transformer".to_owned(),
+                    target_path: "diffusion_pytorch_model.safetensors".to_owned(),
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked(
+                        "root-0123456789abcdef",
+                        "h3/diffusion_pytorch_model.safetensors",
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("valid locator"),
+                },
+                ImportLayerV1 {
+                    layer_id: "artifact:config.json".to_owned(),
+                    role: "descriptor".to_owned(),
+                    target_path: "config.json".to_owned(),
+                    container: CheckpointContainerV1::JsonDescriptor,
+                    source: SourceLocatorV1::linked(
+                        "root-0123456789abcdef",
+                        "h3/config.json",
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("valid locator"),
+                },
+            ],
         )
         .expect("valid plan");
         let mut entry = json!({
             "id": IMPORTED_ID,
             "name": "Singularity FL2VA (dense)",
             "type": "image",
+            "baseModel": "minimax_h3",
+            "minimaxH3Partition": "fl2va",
             "importPlan": {
                 "checkpointId": format!("managed/{IMPORTED_ID}"),
                 "planId": plan.plan_id,
@@ -3228,7 +3244,8 @@ mod imported_minimax_h3_video_tests {
         .as_object()
         .cloned()
         .expect("object");
-        let assembly = MiniMaxH3ImportAssembly::from_plan(&plan).expect("complete assembly");
+        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry)
+            .expect("complete explicit assembly");
         stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         sceneworks_core::lora_family::apply_model_manifest_defaults(
             &mut entry,

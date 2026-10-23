@@ -89,4 +89,17 @@ describe("createModelImportJob type-field contract (sc-14020)", () => {
     expect(payload.sourceUrl).toBe("https://example.com/krea2.safetensors");
     expect(payload.name).toBe("krea2");
   });
+
+  it.each(["fl2va", "ref2va", "hybrid"])("forwards explicit %s metadata in multipart and JSON imports", async (minimaxH3Partition) => {
+    const baseModel = minimaxH3Partition === "ref2va" ? "minimax_h3_ref" : "minimax_h3";
+    const metadata = { type: "video", family: "minimax-h3", baseModel, minimaxH3Partition };
+    await act(async () => {
+      await hookApi.createModelImportJob({ ...metadata, file: new File(["h3"], "h3.safetensors") });
+      await hookApi.createModelImportJob({ ...metadata, sourceUrl: "https://example.com/h3.safetensors" });
+    });
+    const multipart = apiFetchMock.mock.calls[0][2].body;
+    expect(multipart.get("baseModel")).toBe(baseModel);
+    expect(multipart.get("minimaxH3Partition")).toBe(minimaxH3Partition);
+    expect(JSON.parse(apiFetchMock.mock.calls[1][2].body)).toMatchObject(metadata);
+  });
 });

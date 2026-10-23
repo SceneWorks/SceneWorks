@@ -47,7 +47,7 @@ Downstream consumers of this document:
 | sc-17158 | the `downloads[]` shape (§4), two manifest ids, the license gate (§8) |
 | sc-17149 | `transformer_ref` lands as its own catalog entry (§7) |
 
-## Dense community DiT imports (sc-26680)
+## Dense community DiT imports (sc-26680, sc-26682)
 
 The existing model Add/Import workflow also accepts an unsharded, dense F16/BF16/F32 H3
 Diffusers transformer component directory: `config.json` declaring
@@ -59,14 +59,36 @@ model id and plan identity remain attached to the job and resulting asset.
 Imported ids may share the `minimax_h3` prefix (for example, `minimax_h3_custom`); only the
 exact resident ids `minimax_h3` and `minimax_h3_ref` are reserved for shipped checkpoints.
 
-The import replaces only the base FL2VA DiT (text-to-video, image-to-video, first/last frame).
-Its text encoder, tokenizer/processor and both VAEs reuse the installed MiniMax-H3 components;
-MLX also requires the installed reference partition as a load-time companion. Install those
-components through Model Manager before generating. A missing or changed plan binding, an
-incomplete DiT directory, or unavailable resident components refuses before provider loading,
-never substitutes the built-in DiT or produces procedural video. Both native MLX and
-Candle/CUDA routes stage the imported transformer explicitly. Single-file, sharded, quantized,
-Ref2VA/hybrid imports and adapters on imported H3 entries are outside this story's surface.
+Architecture identity does **not** prove task compatibility: FL2VA and Ref2VA use identical
+tensor shapes but different weights. In the existing Add/Import workflow, explicitly select the
+compatible base and declare `minimaxH3Partition`:
+
+This declaration also constrains the detected source architecture, even if `family` is omitted.
+Non-H3 local, remote, or linked checkpoint bytes are refused before registration; managed staging
+is discarded and refused linked plan bindings are invalidated without changing library files.
+
+| Declaration | Exact `baseModel` | Supported operations |
+| --- | --- | --- |
+| `fl2va` | `minimax_h3` | Text, first frame, first/last frames |
+| `ref2va` | `minimax_h3_ref` | Ordered image/video/audio references (at least one visual reference) |
+| `hybrid` | `minimax_h3` | Explicit compatibility with both operation sets |
+
+No declaration is inferred from a name, directory, or tensor shape. Hybrid is an operation union,
+not simultaneous keyframes plus references: the pinned engine refuses that combination. Every
+accepted operation uses the imported DiT, including reference tasks; film plans retain the imported
+catalog id instead of choosing a stock reference checkpoint. Synchronized output audio and the
+provider's conditioning/sampling restrictions are preserved.
+
+The persisted assembly records the plan's DiT and the compatible installed text encoder,
+tokenizer/processor, video VAE, audio VAE and constructor documents. The provider implements H3's
+processor; there is no independent generic processor-config substitution. Native loads validate
+these shared config contracts with the pinned provider's parsers. MLX eagerly requires both task
+directories: a single-partition import records the opposite resident DiT as a **load-only**
+companion, while an explicitly compatible hybrid binds the imported DiT at both task paths.
+Candle stages the same task-selected imported bytes, with explicit base companionship for Ref2VA.
+Missing or incompatible shared components, a changed plan binding, and unsupported operations
+refuse before provider loading. There is no stock-weight substitution. Quantized imports, tensor
+layout normalization and adapters belong to the other epic slices.
 
 ---
 
