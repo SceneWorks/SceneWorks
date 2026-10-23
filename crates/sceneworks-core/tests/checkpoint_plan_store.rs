@@ -920,6 +920,46 @@ fn resolve_refuses_tampered_or_missing_plan_documents() {
 }
 
 #[test]
+fn missing_plan_context_cannot_be_discarded_by_source_only_recompilation() {
+    let fx = fixture("missing-bound-context");
+    write_krea_native_file(&fx.library_dir.join("checkpoint.safetensors"), 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let context = std::collections::BTreeMap::from([(
+        "configurationAuthority".into(),
+        json!({"revision":"1111111111111111111111111111111111111111","settings":{"precision":"preserve"}}),
+    )]);
+    let compiled = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context.clone())
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    fs::remove_file(&plan_path).unwrap();
+    assert!(matches!(
+        fx.store
+            .compile_linked(&root.root_id, "checkpoint.safetensors"),
+        Err(CheckpointPlanError::MissingPlan { .. })
+    ));
+    assert!(
+        !plan_path.exists(),
+        "a missing authority cannot publish a different context-free plan"
+    );
+    assert_eq!(
+        fx.store.record(&compiled.checkpoint_id).unwrap(),
+        compiled.record
+    );
+    let restored = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context)
+        .unwrap();
+    assert_eq!(restored, compiled);
+    assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
+}
+
+#[test]
 fn unknown_families_and_malformed_sources_refuse_at_compile_with_typed_diagnostics() {
     let fx = fixture("unknown");
     let root = fx.store.approve_root(&fx.library_dir).unwrap();

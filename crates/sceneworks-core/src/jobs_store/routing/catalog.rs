@@ -1676,13 +1676,13 @@ pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str>
 }
 
 /// The **source codec** an imported manifest entry's weights are stored in — the engine's stable
-/// codec id (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), derived from the header
-/// classification the import gate persisted as `importQuantFormat` (sc-21484, epic 11037).
+/// identity (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"convrot-int8-native"`, …). Registered decoders
+/// use the persisted header classification. Native H3 ConvRot instead requires the format stamp
+/// AND matching assembly encoding derived from the strictly validated source inventory.
 ///
-/// One place turns the persisted classification into the codec vocabulary, so admission and the
-/// worker's route cannot drift on what "this checkpoint is stored as NVFP4" means. `None` when the
-/// entry carries no classification, when the string is not one this build knows, or when the
-/// classification has no proved engine codec.
+/// One place turns those persisted source proofs into the codec vocabulary, so admission and the
+/// worker cannot disagree about the source format. `None` means the entry provides no known,
+/// proved codec identity; it never asserts dense storage, dense execution, or a default tier.
 ///
 /// **This is the SOURCE fact only.** It says nothing about how a load would execute the weights: a
 /// checkpoint stored `nvfp4-v1` reports `nvfp4-v1` here on a Mac, on CPU, on datacenter `sm_100`
@@ -1699,6 +1699,16 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
         .and_then(Value::as_str)?
         .trim()
         .to_ascii_lowercase();
+    if label == "convrot_int8"
+        && crate::minimax_h3_import::entry_is_imported_minimax_h3(entry)
+        && crate::minimax_h3_import::entry_assembly(entry).is_some_and(|assembly| {
+            assembly.get("sourceEncoding").and_then(Value::as_str) == Some("convrot_int8")
+        })
+    {
+        // The strict compiled source inventory supplies this assembly stamp. Coarse header
+        // classification or a family name alone never establishes a rotated operand format.
+        return Some(crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID);
+    }
     crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
 }
 

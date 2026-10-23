@@ -14327,6 +14327,7 @@ mod mlx_tier_probe_tests {
 #[cfg(all(test, unix))]
 mod variant_delete_tests {
     use super::*;
+    use crate::tests::support::isolate_hf_cache;
     use std::os::unix::fs::symlink;
 
     /// Write (once) a `blobs/<etag>` file of `bytes.len()` bytes and return its path.
@@ -14834,6 +14835,7 @@ mod variant_delete_tests {
     /// sibling entry's scopes retained.
     #[tokio::test]
     async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "SceneWorks/minimax-h3-mlx";
@@ -14898,6 +14900,7 @@ mod variant_delete_tests {
     /// catalog entries.
     #[tokio::test]
     async fn deleting_one_iris_task_keeps_the_other_tasks_files() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -14974,6 +14977,7 @@ mod variant_delete_tests {
     /// the generation task's Qwen3-VL text encoder when a depth or restoration task is deleted.
     #[tokio::test]
     async fn deleting_any_iris_task_keeps_every_other_tasks_files_and_shared_blobs() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -15055,6 +15059,7 @@ mod variant_delete_tests {
     /// both entries the same `files` or drop one entry's `files` ⇒ the sibling's blob is removed ⇒ red.
     #[tokio::test]
     async fn deleting_one_training_adapter_keeps_the_other_versions_file() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -15112,6 +15117,7 @@ mod variant_delete_tests {
     /// the universal path and quietly stop reclaiming the ~80 entries that own their repo outright.
     #[tokio::test]
     async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "Org/solo-model";
@@ -15154,6 +15160,7 @@ mod variant_delete_tests {
     /// than quietly reclaiming nothing.
     #[tokio::test]
     async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "SceneWorks/whole-repo-pair";

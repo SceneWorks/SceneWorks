@@ -1913,6 +1913,9 @@ impl CheckpointPlanStore {
     /// Inspect `<root>/<relative_path>` as a linked checkpoint and persist its plan, catalog record,
     /// and source bindings. Identity is `rootId + relativePath`; an unrunnable inspection refuses
     /// with the inspector's typed diagnostics and persists nothing.
+    /// A missing saved document can be reconstructed only when source reinspection reproduces its
+    /// semantic identity. Lost external authority must be supplied through
+    /// [`Self::compile_linked_with_context`], never silently replaced with an empty context.
     pub fn compile_linked(
         &self,
         root_id: &str,
@@ -2054,18 +2057,27 @@ impl CheckpointPlanStore {
         hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
-        // Rescans/recovery retain the immutable binding, never rediscover a mutable base config.
+        // Rescans retain an available immutable binding rather than rediscover a mutable config.
+        // A missing document may be reconstructed from source only if its bound identity matches.
         let mut request = request.clone();
+        let mut missing_plan = None;
         if request.context.is_empty() {
             if let Ok(record) = self.record(&checkpoint_id) {
-                let plan = self.plan(&checkpoint_id, &record.plan.plan_id)?;
-                record.validate_loaded_plan(&plan).map_err(|error| {
-                    CheckpointPlanError::PlanTampered {
-                        checkpoint_id: checkpoint_id.clone(),
-                        reason: error.to_string(),
+                match self.plan(&checkpoint_id, &record.plan.plan_id) {
+                    Ok(plan) => {
+                        record.validate_loaded_plan(&plan).map_err(|error| {
+                            CheckpointPlanError::PlanTampered {
+                                checkpoint_id: checkpoint_id.clone(),
+                                reason: error.to_string(),
+                            }
+                        })?;
+                        request.context = plan.context;
                     }
-                })?;
-                request.context = plan.context;
+                    Err(error @ CheckpointPlanError::MissingPlan { .. }) => {
+                        missing_plan = Some((record.plan.semantic_digest, error));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         let inspection = inspect_checkpoint(&request);
@@ -2108,6 +2120,13 @@ impl CheckpointPlanStore {
                 ),
             })?;
         record.validate_loaded_plan(&plan)?;
+        if let Some((expected_digest, error)) = missing_plan {
+            if record.plan.semantic_digest != expected_digest {
+                // Recompilation must not turn a lost external context into an empty one, nor
+                // silently switch source identity while the original authority is unavailable.
+                return Err(error);
+            }
+        }
 
         // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
         // the plan names. Sampling a stamp and trusting the inspector's earlier hash would let a
