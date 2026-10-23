@@ -116,8 +116,9 @@ jobs:
     # A stalled step otherwise rides GitHub's 6-hour default timeout, blocking the PR and
     # holding a runner for hours — this bit PR #1300 / sc-10354 for ~4 h. Cap well above the
     # healthy duration so healthy runs are unaffected but a wedge fails in minutes with a
-    # clear timeout (sc-10420).
-    timeout-minutes: 30
+    # clear timeout (sc-10420). ffmpeg apt took 10m54s in sc-26587: tests passed, but the
+    # final build hit 30m. Include provisioning plus all tests, final-binary and API/e2e snapshots.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
