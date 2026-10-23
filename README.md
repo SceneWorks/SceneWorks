@@ -159,6 +159,11 @@ The source's full configuration is authoritative. A weight-only file requires an
 explicitly bound compatible base configuration; its configuration is fetched without
 downloading stock DiT weights. Missing, contradictory or unsupported quantization
 operands refuse before the imported model becomes ready.
+Configuration reads are capped on one open handle, including growth after its size
+was inspected. A rescan can reconstruct a missing or edited plan only when fresh
+source inspection reproduces its catalog-committed semantic digest. If the plan's
+external configuration authority cannot be recovered, explicitly reimport with the
+original bound context; repair never silently drops it or adopts changed source bytes.
 
 ## Native inference engines
 

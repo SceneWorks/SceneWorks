@@ -571,6 +571,95 @@ fn oversized_descriptors_refuse_before_json_allocation_in_admission_and_codec() 
 }
 
 #[test]
+fn descriptor_reader_caps_growth_after_the_initial_metadata_observation() {
+    use std::cell::Cell;
+    struct Counted<'a, R> {
+        reader: R,
+        consumed: &'a Cell<usize>,
+    }
+    impl<R: Read> Read for Counted<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.reader.read(bytes)?;
+            self.consumed.set(self.consumed.get() + count);
+            Ok(count)
+        }
+    }
+    const LIMIT: u64 = 32;
+    let consumed = Cell::new(0);
+    let growing = std::io::Cursor::new(b"{}".as_slice()).chain(std::io::repeat(b' '));
+    let error = read_h3_descriptor_from_reader(
+        Counted {
+            reader: growing,
+            consumed: &consumed,
+        },
+        2,
+        LIMIT,
+        Path::new("growing-config.json"),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("exceeds 32 byte descriptor limit"),
+        "{error}"
+    );
+    assert_eq!(
+        consumed.get(),
+        LIMIT as usize + 1,
+        "a small stat followed by an unbounded growing reader must consume only cap+1"
+    );
+
+    consumed.set(0);
+    let error = read_h3_descriptor_from_reader(
+        Counted {
+            reader: std::io::repeat(b' '),
+            consumed: &consumed,
+        },
+        LIMIT + 1,
+        LIMIT,
+        Path::new("already-oversized.json"),
+    )
+    .unwrap_err();
+    assert!(error.contains("descriptor limit"));
+    assert_eq!(
+        consumed.get(),
+        0,
+        "oversized metadata must refuse before reading"
+    );
+}
+
+#[test]
+fn descriptor_file_growth_uses_the_open_handle_and_checks_the_exact_cap_boundary() {
+    const LIMIT: u64 = 32;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let file = File::open(&path).unwrap();
+    let observed_len = file.metadata().unwrap().len();
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    append.write_all(&[b' '; LIMIT as usize - 2]).unwrap();
+    assert_eq!(
+        read_h3_descriptor_from_reader(file, observed_len, LIMIT, &path).unwrap(),
+        json!({})
+    );
+
+    let file = File::open(&path).unwrap();
+    let observed_len = file.metadata().unwrap().len();
+    append.write_all(b" ").unwrap();
+    let error = read_h3_descriptor_from_reader(file, observed_len, LIMIT, &path).unwrap_err();
+    assert!(
+        error.contains("exceeds 32 byte descriptor limit"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [b"{}".as_slice(), &[b' '; 31]].concat(),
+        "the bounded reader must not modify the cached configuration"
+    );
+}
+
+#[test]
 fn uppercase_shards_normalize_to_provider_enumerable_names_with_exact_values() {
     let data = tempfile::tempdir().unwrap();
     let library = tempfile::tempdir().unwrap();

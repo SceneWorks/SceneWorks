@@ -6017,13 +6017,7 @@ async fn import_plan_context(
             "Selected base configuration is unavailable at the exact revision".into(),
         )
     })?;
-    let metadata = tokio::fs::metadata(&file).await?;
-    if metadata.len() > 16 * 1024 * 1024 {
-        return Err(WorkerError::InvalidPayload(
-            "Configuration exceeds descriptor limit".into(),
-        ));
-    }
-    let config: Value = serde_json::from_slice(&tokio::fs::read(&file).await?)
+    let config = sceneworks_core::minimax_h3_codec::read_h3_descriptor(&file)
         .map_err(|e| WorkerError::InvalidPayload(format!("Invalid selected-base config: {e}")))?;
     context.insert(
         "transformerConfig".into(),

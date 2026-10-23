@@ -2057,24 +2057,29 @@ impl CheckpointPlanStore {
         hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
-        // Rescans retain an available immutable binding rather than rediscover a mutable config.
-        // A missing document may be reconstructed from source only if its bound identity matches.
+        // Retain context only from a validated plan. Missing or tampered documents may be
+        // rebuilt from source only when inspection reproduces the catalog's old commitment.
         let mut request = request.clone();
-        let mut missing_plan = None;
+        let mut unavailable_plan = None;
         if request.context.is_empty() {
             if let Ok(record) = self.record(&checkpoint_id) {
                 match self.plan(&checkpoint_id, &record.plan.plan_id) {
-                    Ok(plan) => {
-                        record.validate_loaded_plan(&plan).map_err(|error| {
-                            CheckpointPlanError::PlanTampered {
-                                checkpoint_id: checkpoint_id.clone(),
-                                reason: error.to_string(),
-                            }
-                        })?;
-                        request.context = plan.context;
-                    }
+                    Ok(plan) => match record.validate_loaded_plan(&plan) {
+                        Ok(()) => request.context = plan.context,
+                        Err(error) => {
+                            unavailable_plan = Some((
+                                record.plan.semantic_digest,
+                                CheckpointPlanError::PlanTampered {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    reason: format!(
+                                        "{error}; source-only repair must reproduce the committed semantic digest; otherwise explicitly reimport with the original bound context"
+                                    ),
+                                },
+                            ));
+                        }
+                    },
                     Err(error @ CheckpointPlanError::MissingPlan { .. }) => {
-                        missing_plan = Some((record.plan.semantic_digest, error));
+                        unavailable_plan = Some((record.plan.semantic_digest, error));
                     }
                     Err(error) => return Err(error),
                 }
@@ -2120,10 +2125,10 @@ impl CheckpointPlanStore {
                 ),
             })?;
         record.validate_loaded_plan(&plan)?;
-        if let Some((expected_digest, error)) = missing_plan {
+        if let Some((expected_digest, error)) = unavailable_plan {
             if record.plan.semantic_digest != expected_digest {
-                // Recompilation must not turn a lost external context into an empty one, nor
-                // silently switch source identity while the original authority is unavailable.
+                // Neither lost external authority nor changed source bytes may be silently
+                // adopted while reconstructing an unavailable or untrusted plan document.
                 return Err(error);
             }
         }

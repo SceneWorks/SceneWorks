@@ -32,13 +32,22 @@ pub const H3_CONFIG_FILE: &str = "config.json";
 pub const H3_INDEX_FILE: &str = "diffusion_pytorch_model.safetensors.index.json";
 
 /// Apply the inspector's descriptor policy before allocating or deserializing untrusted JSON.
-pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
+pub fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     let limit = crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES;
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let len = file
         .metadata()
         .map_err(|e| format!("{}: {e}", path.display()))?
         .len();
+    read_h3_descriptor_from_reader(file, len, limit, path)
+}
+
+fn read_h3_descriptor_from_reader(
+    reader: impl Read,
+    len: u64,
+    limit: u64,
+    path: &Path,
+) -> Result<Value, String> {
     let oversized = || {
         format!(
             "H3 descriptor {} exceeds {limit} byte descriptor limit",
@@ -50,7 +59,8 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     }
     let mut bytes = Vec::with_capacity(len as usize);
     // Also reject growth between metadata and read without consuming the whole file.
-    file.take(limit + 1)
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() as u64 > limit {
