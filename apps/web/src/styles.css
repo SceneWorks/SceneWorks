@@ -13019,9 +13019,13 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .preview-modal {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
-  width: min(1120px, 96vw);
-  max-height: 94vh;
+  width: min(1120px, calc(100vw - 48px));
+  max-width: 100%;
+  max-height: min(94vh, calc(100dvh - 48px));
+  /* Keep tall media and wrapped footer actions inside the dialog. */
+  overflow: auto;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -13144,7 +13148,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-modal-meta {
   display: grid;
   gap: 3px;
-  min-width: min(100%, 280px);
+  flex: 1 1 280px;
+  min-width: 0;
 }
 
 .preview-modal-meta strong,
@@ -13229,9 +13234,13 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-actions {
   gap: 8px;
   justify-content: flex-end;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .preview-actions button {
+  max-width: 100%;
   min-height: 32px;
   padding: 0 12px;
   font-size: 12.5px;
