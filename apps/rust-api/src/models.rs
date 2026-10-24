@@ -17717,7 +17717,7 @@ mod imported_checkpoint_product_surface_tests {
     #[test]
     fn a_missing_resident_component_blocks_readiness_and_names_the_download() {
         let CompiledImport {
-            entry: mut entry,
+            mut entry,
             data_dir,
             _temp,
         } = real_imported_h3_entry("fl2va");
