@@ -69,8 +69,8 @@ pub fn edit_reference_ids(payload: &JsonObject) -> Result<Vec<String>, String> {
             }
         }
     }
-    if ids.len() != 1 {
-        return Err("MOSS edit currently requires exactly one ordered reference".into());
+    if !(1..=4).contains(&ids.len()) {
+        return Err("MOSS edit requires one to four ordered reference slots".into());
     }
     Ok(ids)
 }
@@ -439,11 +439,108 @@ mod tests {
         }
     }
     #[test]
+    fn edit_reference_slots_match_native_bounds_without_deduplicating_or_reordering() {
+        use gen_core::{moss_image_edit::MossImageEditInputs, Image};
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for ids in [
+                vec!["a"],
+                vec!["a", "b"],
+                vec!["a", "b", "a"],
+                vec!["c", "a", "b", "a"],
+            ] {
+                for ordered in [ids.clone(), ids.iter().rev().copied().collect()] {
+                    let payload = json!({"model":model,"mode":"edit_image","prompt":"blue cup",
+                        "referenceAssetIds":ordered,"sourceAssetId":ordered[0],"referenceAssetId":ordered[0]})
+                        .as_object().unwrap().clone();
+                    assert_eq!(edit_reference_ids(&payload).unwrap(), ordered);
+                    assert!(native_request(&payload, &entry()).unwrap().is_some());
+                    let references = ordered
+                        .iter()
+                        .map(|id| {
+                            let (width, height, pixel) = match *id {
+                                "a" => (48, 16, 73),
+                                "b" => (16, 48, 127),
+                                _ => (32, 32, 211),
+                            };
+                            Image {
+                                width,
+                                height,
+                                pixels: vec![pixel; width as usize * height as usize * 3],
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let expected = references
+                        .iter()
+                        .map(|image| [image.width, image.height])
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        MossImageEditInputs {
+                            references: &references,
+                            ..Default::default()
+                        }
+                        .validate()
+                        .unwrap(),
+                        expected
+                    );
+                    for mode in ["text_to_image", "edit_image"] {
+                        let mut unsupported = payload.clone();
+                        unsupported.insert("mode".into(), json!(mode));
+                        if mode == "edit_image" {
+                            unsupported.insert(
+                                "advanced".into(),
+                                json!({"mossImage":{"acceleration":"unmerged_bf16"}}),
+                            );
+                        }
+                        assert!(
+                            native_request(&unsupported, &entry()).is_err(),
+                            "ordinary/DMD cannot absorb edit references"
+                        );
+                    }
+                }
+            }
+            for slots in [Vec::new(), vec!["a"; 5]] {
+                let payload = json!({"model":model,"mode":"edit_image","prompt":"blue cup","referenceAssetIds":slots})
+                    .as_object().unwrap().clone();
+                assert!(edit_reference_ids(&payload).is_err());
+                assert!(native_request(&payload, &entry()).is_err());
+                let references = slots
+                    .iter()
+                    .map(|_| Image {
+                        width: 16,
+                        height: 16,
+                        pixels: vec![0; 16 * 16 * 3],
+                    })
+                    .collect::<Vec<_>>();
+                assert!(MossImageEditInputs {
+                    references: &references,
+                    ..Default::default()
+                }
+                .validate()
+                .is_err());
+            }
+            for changes in [
+                json!({"referenceAssetIds":["a",null]}),
+                json!({"referenceAssetIds":["a",2]}),
+                json!({"referenceAssetIds":["a"," b"]}),
+                json!({"referenceAssetIds":["a",""]}),
+                json!({"referenceAssetIds":"a"}),
+                json!({"sourceAssetId":"b"}),
+                json!({"referenceAssetId":"b"}),
+            ] {
+                let mut payload = json!({"model":model,"mode":"edit_image","prompt":"blue cup","referenceAssetIds":["a","b"]})
+                    .as_object().unwrap().clone();
+                payload.extend(changes.as_object().unwrap().clone());
+                assert!(edit_reference_ids(&payload).is_err(), "{changes}");
+                assert!(native_request(&payload, &entry()).is_err(), "{changes}");
+            }
+        }
+    }
+    #[test]
     fn edit_rejects_ambiguous_references_and_unimplemented_combinations() {
         let p = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"blue cup","referenceAssetIds":["a"],"advanced":{}}).as_object().unwrap().clone();
         for (key, value) in [
             ("referenceAssetIds", json!([])),
-            ("referenceAssetIds", json!(["a", "b"])),
+            ("referenceAssetIds", json!(["a", "b", "a", "b", "a"])),
             ("referenceAssetIds", json!([1])),
             ("referenceAssetIds", json!([" a"])),
             ("sourceAssetId", json!("b")),
