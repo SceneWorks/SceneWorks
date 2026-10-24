@@ -21,6 +21,7 @@ import {
   metalSubmissionsIgnored, parseWatchdogPeak, parseWatchdogHardStop, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
 import { anchorCandidate } from "./extract-memory-anchors.mjs";
+import { declaredSyntheticOwnedAccounting } from "./lib/flux3-owned-accounting-fixture.mjs";
 
 /**
  * A one-anchor plan in the collapsed format (sc-22514). Every runner test drives exactly one
@@ -348,6 +349,58 @@ function runtimeComplete() {
   record.id = recordId(record);
   return record;
 }
+
+// Shared DECLARED_SYNTHETIC CPU fixture, never hardware/model evidence.
+function ownedAccountingFixture(runtime = false) {
+  const record = declaredSyntheticOwnedAccounting(runtime ? runtimeComplete() : complete());
+  record.target.modelId = record.target.provider;
+  record.artifact.variant = record.target.tier;
+  record.logicalCaseId = logicalCaseId(record); record.id = recordId(record);
+  return record;
+}
+
+test("owned-process accounting complete and runtime records retain typed operating envelopes without physical aliases", () => {
+  for(const runtime of [false,true]) {
+    const record = ownedAccountingFixture(runtime);
+    assert.equal(validateRecord(record),record);
+    validateBundle({schemaVersion:SCHEMA_VERSION,harnessVersion:HARNESS_VERSION,records:[record]});
+    assert.equal(record.observedMemory,undefined);
+    assert.equal(record.ownedProcessMemory.unavailableMetrics.activeBytes,null);
+    assert.equal(record.observedOperatingConditions.fitAuthorization,false);
+    // A process working-set counter is not compared as physical live-array residency.
+    record.hardware.memoryBytes = 1;record.id = recordId(record);
+    assert.equal(validateRecord(record),record);
+  }
+});
+test("owned-process accounting fails closed on metric aliases provenance and completion-evidence mutations", () => {
+  for(const runtime of [false,true]) {
+    const original=ownedAccountingFixture(runtime);
+    const mutations=[
+      r=>r.observedMemory={overall:{activeBytes:300}},
+      r=>r.measurementKind="unknown-accounting",
+      r=>delete r.measurementKind,
+      r=>delete r.ownedProcessMemory,
+      r=>r.ownedProcessMemory.overall.activeBytes=300,
+      r=>r.diagnostics={metrics:{overallDevicePeakDelta:300}},
+      r=>delete r.ownedProcessMemory.phases.decode,
+      r=>r.ownedProcessMemory.sampling.maxObservedReadSkewMs=251,
+      r=>r.ownedProcessMemory.phases.denoise.maxGapMs=1501,
+      r=>r.ownedProcessMemory.unavailableMetrics.activeBytes=300,
+      r=>r.observedOperatingConditions.fitAuthorization=true,
+      r=>r.observedOperatingConditions.physicalResidencyClaim=true,
+      r=>r.observedOperatingConditions.gpuUuid="GPU-deadbeef",
+      r=>r.observedExecutionRecipeSha256="0".repeat(64),
+      r=>r.strategy.parameters.decodeTileEdge=1024,
+      r=>r.quality.result="failed",
+      r=>r.quality.maximumError=1,
+      r=>r.sweep.rangeVerified=false,
+      r=>r.sweep.cases=[],
+      r=>r.scenarios.find(s=>s.name==="loadability").result="not_run",
+      r=>r.loadability.result="failed",
+    ];
+    for(const mutate of mutations) {const record=structuredClone(original);mutate(record);record.logicalCaseId=logicalCaseId(record);record.id=recordId(record);assert.throws(()=>validateRecord(record));}
+  }
+});
 
 function qwenPositiveComplete() {
   const record = complete({

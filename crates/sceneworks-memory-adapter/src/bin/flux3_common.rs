@@ -401,6 +401,69 @@ pub(super) fn actual_spec_observation(plan: &Plan, spec: &LoadSpec) -> Result<Va
     Ok(value)
 }
 
+fn attach_owned_operating_conditions(fragment: &mut Value) -> Result<(), String> {
+    let output = &fragment["nativeOutput"];
+    let hardware = &output["reservation"]["hardwareObservation"];
+    let proof = &hardware["proof"];
+    if proof["sharedPolicy"]["sharingMode"] != "bounded-shared" {
+        return Err("owned accounting requires explicit bounded-shared producer policy".to_owned());
+    }
+    let conditions = json!({"schemaVersion":1,"sharingMode":"bounded-shared",
+        "physicalGpuId":proof["physicalGpuId"],"gpuUuid":proof["gpuUuid"],"pciBusId":proof["pciBusId"],
+        "observedAt":hardware["observedAt"],"totalDeviceBytes":proof["gpuHeadroom"]["totalBytes"],
+        "freeDeviceBytes":proof["gpuHeadroom"]["freeBytes"],
+        "foreignDedicatedBytes":proof["foreignGraphics"]["totalBytes"],
+        "foreignProcessCount":proof["foreignGraphics"]["processes"],
+        "foreignMaxProcessBytes":proof["foreignGraphics"]["maxProcessBytes"],
+        "foreignProcessLimitBytes":proof["foreignGraphics"]["processLimitBytes"],
+        "foreignTotalLimitBytes":proof["foreignGraphics"]["totalLimitBytes"],
+        "observationScope":"producer-reservation-admission","fitAuthorization":false,
+        "exclusiveThroughputClaim":false,"physicalResidencyClaim":false});
+    for field in [
+        "totalDeviceBytes",
+        "freeDeviceBytes",
+        "foreignDedicatedBytes",
+        "foreignProcessCount",
+        "foreignMaxProcessBytes",
+        "foreignProcessLimitBytes",
+        "foreignTotalLimitBytes",
+    ] {
+        if conditions[field].as_u64().is_none() {
+            return Err(format!(
+                "owned accounting operating condition {field} missing"
+            ));
+        }
+    }
+    let strategy = fragment
+        .get("anchorFragment")
+        .map(|value| &value["strategy"])
+        .unwrap_or(&fragment["strategy"]);
+    if !strategy.is_object() {
+        return Err("owned accounting measured strategy missing".to_owned());
+    }
+    let recipe = json!({"schemaVersion":1,"backend":"candle",
+        "provider":fragment["actualLoadSpec"]["provider"],"tier":fragment["actualLoadSpec"]["tier"],
+        "actualLoadSpecSha256":fragment["actualLoadSpec"]["sha256"],
+        "actualGenerationRequestSha256":resource::json_digest(b"flux3_observed_generation_request_v1\0", &output["actualGenerationRequest"])?,
+        "measuredStrategySha256":resource::json_digest(b"flux3_observed_memory_strategy_v1\0", strategy)?,
+        "invocationRequestSha256":output["reservation"]["requestSha256"]});
+    let recipe_digest = resource::json_digest(b"flux3_observed_execution_recipe_v1\0", &recipe)?;
+    fragment["observedOperatingConditions"] = conditions.clone();
+    fragment["observedExecutionRecipe"] = recipe.clone();
+    fragment["observedExecutionRecipeSha256"] = json!(recipe_digest);
+    if fragment.get("anchorFragment").is_some() {
+        fragment["anchorFragment"]["observedOperatingConditions"] = conditions;
+        fragment["anchorFragment"]["observedExecutionRecipe"] = recipe;
+        fragment["anchorFragment"]["observedExecutionRecipeSha256"] =
+            fragment["observedExecutionRecipeSha256"].clone();
+        fragment["anchorFragmentSha256"] = json!(resource::json_digest(
+            b"flux3_canonical_anchor_fragment_v1\0",
+            &fragment["anchorFragment"]
+        )?);
+    }
+    Ok(())
+}
+
 pub(super) fn attach_loaded_spec(
     mut fragment: Value,
     actual: Value,
@@ -413,6 +476,9 @@ pub(super) fn attach_loaded_spec(
         fragment["actualLoadSpec"] = actual;
         fragment["loadedGenerator"] =
             json!({"provider":generator.descriptor().id,"backend":generator.descriptor().backend});
+        if fragment["measurementKind"] == "windows-owned-process-accounting-v1" {
+            attach_owned_operating_conditions(&mut fragment)?;
+        }
         let invocation = fragment
             .pointer("/nativeOutput/reservation/invocationId")
             .and_then(Value::as_str)
@@ -584,20 +650,52 @@ fn output_receipt(output: &GenerationOutput, width: u32, height: u32) -> Result<
     )
 }
 
+#[cfg(not(target_os = "windows"))]
 pub(super) fn render(
     plan: &Plan,
     generator: &dyn Generator,
     context: &MemoryRunContext,
     observed: &mut dyn FnMut(protocol::ReferencePhase),
 ) -> Result<Value, String> {
-    render_guarded(plan, generator, context, observed, &mut resource::reserve)
+    render_observed(plan, generator, context, &mut |phase| {
+        observed(phase);
+        Ok(())
+    })
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn render_observed(
+    plan: &Plan,
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    observed: &mut dyn FnMut(protocol::ReferencePhase) -> Result<(), String>,
+) -> Result<Value, String> {
+    render_monitored(plan, generator, context, observed, &mut || Ok(()))
+}
+
+pub(super) fn render_monitored(
+    plan: &Plan,
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    observed: &mut dyn FnMut(protocol::ReferencePhase) -> Result<(), String>,
+    health: &mut dyn FnMut() -> Result<(), String>,
+) -> Result<Value, String> {
+    render_guarded(
+        plan,
+        generator,
+        context,
+        observed,
+        health,
+        &mut resource::reserve,
+    )
 }
 
 fn render_guarded(
     plan: &Plan,
     generator: &dyn Generator,
     context: &MemoryRunContext,
-    observed: &mut dyn FnMut(protocol::ReferencePhase),
+    observed: &mut dyn FnMut(protocol::ReferencePhase) -> Result<(), String>,
+    health: &mut dyn FnMut() -> Result<(), String>,
     reserve: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
 ) -> Result<Value, String> {
     let mut request = generation_request(plan);
@@ -617,11 +715,20 @@ fn render_guarded(
         let mut phase = protocol::ReferencePhase::Conditioning;
         let mut phase_error = None;
         let cancel = request.cancel.clone();
+        health()?;
         let reservation = reserve(plan, &request)?;
+        // Reservation can block while the independent collector refuses coverage.
+        // The permit remains consumed, but no generation may start after that fault.
+        health()?;
         let mut pup_pending = request.enhance_prompt;
         let mut pup_complete = false;
         let output = generator.generate(&request, &mut |progress| {
             if phase_error.is_some() {
+                return;
+            }
+            if let Err(error) = health() {
+                phase_error = Some(error);
+                cancel.cancel();
                 return;
             }
             if matches!(progress, Progress::PromptUpsamplingComplete) {
@@ -629,7 +736,10 @@ fn render_guarded(
                     pup_pending = false;
                     pup_complete = true;
                     // Observation only: keep the native scope's complete conditioning envelope.
-                    observed(protocol::ReferencePhase::Conditioning);
+                    if let Err(error) = observed(protocol::ReferencePhase::Conditioning) {
+                        phase_error = Some(error);
+                        cancel.cancel();
+                    }
                 } else if !pup_complete {
                     phase_error = Some("unexpected_phase_boundary: PUP bypass emitted completion".to_owned());
                     cancel.cancel();
@@ -651,7 +761,11 @@ fn render_guarded(
                 }
             };
             if let Some(next) = next {
-                observed(next);
+                if let Err(error) = observed(next) {
+                    phase_error = Some(error);
+                    cancel.cancel();
+                    return;
+                }
                 let (before, after) = match next {
                     protocol::ReferencePhase::Denoise => {
                         (MemoryPhase::Conditioning, MemoryPhase::Denoise)
@@ -771,6 +885,16 @@ pub(super) fn admit(
     Ok(context)
 }
 
+fn typed_process_accounting(target: &mut Value, observed: &Value) {
+    if observed["kind"] == "flux3_owned_process_memory_accounting_v1" {
+        if let Some(object) = target.as_object_mut() {
+            object.remove("observedMemory");
+        }
+        target["measurementKind"] = json!("windows-owned-process-accounting-v1");
+        target["ownedProcessMemory"] = observed.clone();
+    }
+}
+
 pub(super) fn fragment(
     request: &Value,
     lane: &str,
@@ -781,7 +905,7 @@ pub(super) fn fragment(
     output: Value,
 ) -> Result<Value, String> {
     if let Some(case) = &plan.resource_case {
-        return Ok(json!({
+        let mut observation = json!({
             "schemaVersion":1,"evidenceKind":"flux3_supplemental_resource_observation_v1",
             "anchorEligible":false,"caseId":case.value["caseId"],"status":"OBSERVED",
             "resourceCase":case.value,"requestSha256":case.digest,"inputInventory":case.inputs,
@@ -807,7 +931,9 @@ pub(super) fn fragment(
             "captureRequest":request,"inferencePin":protocol::INFERENCE_PIN,
             "capturedAt":protocol::captured_at(),
             "notAttested":["saved product assets","quality acceptance","canonical calibration anchor","warm repeat/cancellation/error scenarios"],
-        }));
+        });
+        typed_process_accounting(&mut observation, &observed);
+        return Ok(observation);
     }
     let mut observed = observed;
     if let Some(metrics) = observed.as_object_mut() {
@@ -834,6 +960,7 @@ pub(super) fn fragment(
         "loadability": { "result": "passed", "resolvedPathFingerprint": format!("{}@{}:{}:{}:external-original-te-ae", plan.checkpoint.repository, plan.checkpoint.revision, plan.tier, conversion(lane, &plan.tier).unwrap_or("publisher")) },
         "diagnostics": diagnostics, "capturedAt": protocol::captured_at(),
     });
+    typed_process_accounting(&mut fragment, &observed);
     protocol::settle_plain_overlay_scenario(
         request,
         &mut fragment,
@@ -841,14 +968,14 @@ pub(super) fn fragment(
     )?;
     if request["resourceEnvelope"] == true {
         // Accounting/spec/output evidence is NEVER inserted into a canonical anchor fragment.
-        return Ok(
-            json!({"schemaVersion":1,"evidenceKind":"flux3_native_resource_capture_envelope_v1",
+        let mut envelope = json!({"schemaVersion":1,"evidenceKind":"flux3_native_resource_capture_envelope_v1",
             "anchorEligible":false,"caseId":output["reservation"]["caseId"],
             "requestSha256":output["reservation"]["requestSha256"],
             "anchorFragmentSha256":resource::json_digest(b"flux3_canonical_anchor_fragment_v1\0", &fragment)?,
             "anchorFragment":fragment,"nativeOutput":output,
-            "componentInventory":resource::model_inventory()?}),
-        );
+            "componentInventory":resource::model_inventory()?});
+        typed_process_accounting(&mut envelope, &observed);
+        return Ok(envelope);
     }
     Ok(fragment)
 }
@@ -865,9 +992,17 @@ mod tests {
         context: &MemoryRunContext,
         observed: &mut dyn FnMut(protocol::ReferencePhase),
     ) -> Result<Value, String> {
-        render_guarded(plan, generator, context, observed, &mut |_, _| {
-            Ok(json!({"fixtureOnly":true}))
-        })
+        render_guarded(
+            plan,
+            generator,
+            context,
+            &mut |phase| {
+                observed(phase);
+                Ok(())
+            },
+            &mut || Ok(()),
+            &mut |_, _| Ok(json!({"fixtureOnly":true})),
+        )
     }
 
     fn request(lane: &str, tier: &str) -> Value {
@@ -1123,6 +1258,63 @@ mod tests {
     }
 
     #[test]
+    fn flux3_owned_sampler_faults_refuse_before_permit_or_cancel_without_a_capture() {
+        for fault in ["before_permit", "during_reservation", "health", "boundary"] {
+            let plan = plan(&request("candle", "bf16"), "candle").unwrap();
+            let generator = ScriptedGenerator::new(
+                vec![Progress::ConditioningComplete, Progress::Decoding],
+                false,
+            );
+            let calls = std::cell::Cell::new(0);
+            let spent = std::cell::Cell::new(false);
+            let queued_collector_fault = std::cell::Cell::new(false);
+            let error = render_guarded(
+                &plan,
+                &generator,
+                &context(&plan, 1, 1 << 34),
+                &mut |_| {
+                    if fault == "boundary" {
+                        Err("declared owned boundary fault".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut || {
+                    calls.set(calls.get() + 1);
+                    if fault == "before_permit"
+                        || queued_collector_fault.get()
+                        || (fault == "health" && calls.get() > 2)
+                    {
+                        Err("declared owned counter fault".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                },
+                &mut |_, _| {
+                    spent.set(true);
+                    // Simulate a collector refusal queued while reservation blocks.
+                    queued_collector_fault.set(fault == "during_reservation");
+                    Ok(json!({"fixtureOnly":true}))
+                },
+            )
+            .unwrap_err();
+            assert!(error.contains("declared owned"));
+            assert_eq!(spent.get(), fault != "before_permit");
+            assert_eq!(
+                generator.generate_calls.get(),
+                usize::from(!["before_permit", "during_reservation"].contains(&fault))
+            );
+            if !["before_permit", "during_reservation"].contains(&fault) {
+                assert!(generator.cancel_seen.get());
+            }
+            assert!(matches!(
+                generator.outcomes.borrow().as_slice(),
+                [MemoryRunOutcome::Error { .. }]
+            ));
+        }
+    }
+
+    #[test]
     fn flux3_actual_generation_projection_includes_all_native_sampler_axes_and_restores() {
         let p = plan(&request("candle", "bf16"), "candle").unwrap();
         let req = generation_request(&p);
@@ -1235,7 +1427,8 @@ mod tests {
                     &plan,
                     &generator,
                     &context(&plan, 1, 1 << 34),
-                    &mut |_| {},
+                    &mut |_| Ok(()),
+                    &mut || Ok(()),
                     &mut guard,
                 );
             }
@@ -1250,7 +1443,8 @@ mod tests {
                 &plan,
                 &denied,
                 &context(&plan, 1, 1 << 34),
-                &mut |_| {},
+                &mut |_| Ok(()),
+                &mut || Ok(()),
                 &mut |_, _| Err("missing immutable approval".to_owned())
             )
             .is_err());
@@ -1744,7 +1938,7 @@ mod tests {
                     vec![anchor_case(lane, "bf16"), anchor_case(lane, "q4")],
                 ),
                 lane,
-                render_guarded,
+                boundary::render_boundary_guarded,
                 &binary,
             )
             .unwrap();
@@ -1771,25 +1965,41 @@ mod tests {
     fn native_boundary_self_test_refuses_a_binary_hash_or_planner_digest_mismatch() {
         let binary = "b".repeat(64);
         let request = self_test_request("candle", &binary, vec![anchor_case("candle", "bf16")]);
-        let error = boundary::run_self_test(&request, "candle", render_guarded, &"e".repeat(64))
-            .unwrap_err();
+        let error = boundary::run_self_test(
+            &request,
+            "candle",
+            boundary::render_boundary_guarded,
+            &"e".repeat(64),
+        )
+        .unwrap_err();
         assert!(error.contains("sealed binary hash mismatch"), "{error}");
         let mut wrong_receipt = request.clone();
         wrong_receipt["buildReceiptBinarySha256"] = json!("d".repeat(64));
-        assert!(
-            boundary::run_self_test(&wrong_receipt, "candle", render_guarded, &binary).is_err()
-        );
+        assert!(boundary::run_self_test(
+            &wrong_receipt,
+            "candle",
+            boundary::render_boundary_guarded,
+            &binary
+        )
+        .is_err());
         let mut wrong_digest = request.clone();
         wrong_digest["cases"][0]["requestSha256"] = json!("0".repeat(64));
         assert!(
-            boundary::run_self_test(&wrong_digest, "candle", render_guarded, &binary).is_err(),
+            boundary::run_self_test(&wrong_digest, "candle", boundary::render_boundary_guarded, &binary).is_err(),
             "a planner digest differing from the binary's own native request digest yields no receipt"
         );
         let mut wrong_pin = request.clone();
         wrong_pin["inferenceMainSha"] = json!("f".repeat(40));
-        assert!(boundary::run_self_test(&wrong_pin, "candle", render_guarded, &binary).is_err());
+        assert!(boundary::run_self_test(
+            &wrong_pin,
+            "candle",
+            boundary::render_boundary_guarded,
+            &binary
+        )
+        .is_err());
         assert!(
-            boundary::run_self_test(&request, "mlx", render_guarded, &binary).is_err(),
+            boundary::run_self_test(&request, "mlx", boundary::render_boundary_guarded, &binary)
+                .is_err(),
             "lane mismatch"
         );
     }

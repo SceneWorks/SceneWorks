@@ -383,8 +383,15 @@ export async function validateReplayPrefixBaseline({ previousApproval, previousR
   assert.equal(readback.pngSha256, b.png.sha256); assert.equal(readback.retainedSidecarHashVerified, true); assert.equal(readback.seedAndReplayReconstructionVerified, true);
   assert.equal(output.semanticAcceptance, 'PENDING'); assert.equal(readback.semanticAcceptance, 'PENDING'); assert.equal(recorded.visualInspection, 'NOT_INSPECTED');
   assert.equal(output.device.physicalGpuId, '1'); assert.equal(output.device.logicalCudaOrdinal, 0); assert(output.device.ownComputePids.includes(b.oldWorkerPid));
+  // Historical proof remains GPU1 even when the separately authorized destination is GPU0.
+  if (authorization.deviceTransition) {
+    const prior = authorization.deviceTransition.previousDevice;
+    assert.equal(output.device.physicalGpuId, prior.physicalGpuId);
+    assert.equal(output.device.gpuUuid?.toLowerCase(), prior.gpuUuid.toLowerCase(), 'retained baseline UUID differs from authorized historical device');
+    if (output.device.pciBusId !== undefined) assert.equal(output.device.pciBusId.toLowerCase(), prior.pciBusId.toLowerCase());
+  }
   assert.deepEqual(replayRequest(saved.recipe, first.body.projectId), first.body);
-  return { caseId: RETAINED_REPLAY_CASE, consumedInvocationId: RETAINED_REPLAY_FIRST, nextInvocationId: RETAINED_REPLAY_NEXT, pngSha256: b.png.sha256, sidecarSha256: b.sidecar.sha256, pngPath: png.file, sidecarPath: sidecar.file, oldJobId: job.id, oldWorkerId: job.workerId, oldWorkerPid: b.oldWorkerPid, oldSourceSha: previousApproval.sourceSha, firstRequestSha256: first.sha256, secondRecordedRequestSha256: second.sha256, firstRequest: first.body, recordedReplayRequest: second.body, recipe: saved.recipe, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING' };
+  return { caseId: RETAINED_REPLAY_CASE, consumedInvocationId: RETAINED_REPLAY_FIRST, nextInvocationId: RETAINED_REPLAY_NEXT, pngSha256: b.png.sha256, sidecarSha256: b.sidecar.sha256, pngPath: png.file, sidecarPath: sidecar.file, oldJobId: job.id, oldWorkerId: job.workerId, oldWorkerPid: b.oldWorkerPid, oldSourceSha: previousApproval.sourceSha, oldDevice: structuredClone(output.device), ...(authorization.deviceTransition ? { deviceTransition: structuredClone(authorization.deviceTransition) } : {}), firstRequestSha256: first.sha256, secondRecordedRequestSha256: second.sha256, firstRequest: first.body, recordedReplayRequest: second.body, recipe: saved.recipe, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING' };
 }
 export function retainedReplayBody(prefix, projectId, authoredBody) {
   assert(prefix?.caseId === RETAINED_REPLAY_CASE && prefix.consumedInvocationId === RETAINED_REPLAY_FIRST && prefix.nextInvocationId === RETAINED_REPLAY_NEXT);
@@ -401,11 +408,27 @@ export async function executeRetainedReplayPrefix(session, cell, body, project, 
   assert(session.identity.workerId !== prefix.oldWorkerId, 'retained replay requires a fresh owned worker identity');
   assert.equal(report.outputs.length, 0); assert.equal(report.jobs.length, 0);
   const request = retainedReplayBody(prefix, project.id, body);
+  if (prefix.deviceTransition) {
+    const expected = prefix.deviceTransition.nextDevice, actual = session.deviceAtLaunch;
+    assert(actual, 'cross-device replay requires actual launch-device proof');
+    assert.equal(actual.physicalGpuId, expected.physicalGpuId);
+    assert.equal(actual.gpuUuid?.toLowerCase(), expected.gpuUuid.toLowerCase());
+    assert.equal(actual.pciBusId?.toLowerCase(), expected.pciBusId.toLowerCase());
+    assert.equal(actual.logicalCudaOrdinal, 0);
+  }
+  report.replayComparison = { kind: prefix.deviceTransition ? 'CROSS_SOURCE_CROSS_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON' : 'FRESH_PROCESS_EXACT_OUTPUT_COMPARISON', samePhysicalDeviceClaim: false, sameBinaryClaim: false, sameSourceClaim: false, historicalSourceSha: prefix.oldSourceSha, destinationSourceSha: prefix.deviceTransition?.nextSourceSha, historicalDevice: prefix.oldDevice, ...(prefix.deviceTransition ? { approvedDeviceTransition: prefix.deviceTransition, destinationDevice: session.deviceAtLaunch } : {}), exclusiveThroughputClaim: false, historicalMemoryTransferred: false };
   report.carriedBaseline = { caseId: prefix.caseId, invocationId: prefix.consumedInvocationId, sourceSha: prefix.oldSourceSha, authorizationSha256: prefix.authorizationSha256, jobId: prefix.oldJobId, pngSha256: prefix.pngSha256, sidecarSha256: prefix.sidecarSha256, firstRequestSha256: prefix.firstRequestSha256, secondRecordedRequestSha256: prefix.secondRecordedRequestSha256, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING', evidenceRole: 'RETAINED_RENDER_BASELINE_NOT_NEW_GENERATION' };
   await generate(request); // Production supplies ONLY runImage; CLI cannot inject a callback.
   assert.equal(report.outputs.length, 1, 'continuation creates only the actual second output');
   assert.equal(report.jobs.length, 1); assert.notEqual(report.jobs[0].id, prefix.oldJobId);
   assert.equal(report.jobs[0].workerId, session.identity.workerId);
+  if (prefix.deviceTransition) {
+    const expected = prefix.deviceTransition.nextDevice, actual = report.outputs[0].device;
+    assert.equal(actual?.physicalGpuId, expected.physicalGpuId, 'cross-device output physical proof mismatch');
+    assert.equal(actual?.gpuUuid?.toLowerCase(), expected.gpuUuid.toLowerCase());
+    assert.equal(actual?.pciBusId?.toLowerCase(), expected.pciBusId.toLowerCase());
+    assert.equal(actual?.logicalCudaOrdinal, 0);
+  }
   assert.equal(report.outputs[0].pngSha256, prefix.pngSha256, 'fresh-process replay differs from the parent-approved retained render baseline');
   report.replayCompletedFromRetainedBaseline = true;
 }

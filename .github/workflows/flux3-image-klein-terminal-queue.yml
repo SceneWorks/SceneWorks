@@ -52,7 +52,7 @@ jobs:
     steps:
       # No checkout/build/tool install/model access: use the existing clean preserved tree.
       # Source hash, full roster and job/Worker ancestry are checked by the CPU supervisor.
-      - name: Reserve one slot; run GPU1 only on the elected executor after the full barrier
+      - name: Reserve one slot; run the admitted physical GPU only after the full executor barrier
         run: |
           foreach ($tool in @('git.exe', 'gh.exe', 'powershell.exe', 'nvidia-smi.exe')) { Get-Command $tool -ErrorAction Stop | Out-Null }
           if ((Get-FileHash -LiteralPath 'D:/tmp/sc26242-node20-extract-20261020/node-v20.20.2-win-x64/node.exe' -Algorithm SHA256).Hash -ne '56c1520ee33b801e8bdb92fb321cf2e98529735b6d12bd4a2a6dec0ac0bab937') { throw 'Approved Node interpreter digest mismatch' }

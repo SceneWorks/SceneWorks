@@ -7,6 +7,7 @@ import path from 'node:path';
 import { initializeLedger, reserveInvocation, auditLedger, planHash } from './flux3-image-klein-terminal-budget.mjs';
 import { launchFlux3Resource } from './flux3-resource-launcher.mjs';
 import { declaredSyntheticReadyBackend } from './lib/flux3-native-boundary-fixtures.mjs';
+import { declaredSyntheticOwnedAccounting } from './lib/flux3-owned-accounting-fixture.mjs';
 import { flux3AnchorRequestDigest, flux3CaptureDigest, verifyNativeResourceCapture } from './lib/flux3-resource-contract.mjs';
 const digest='d'.repeat(64), adapterPid=12345;
 async function fixture(t) {
@@ -98,8 +99,67 @@ test('capture verification rejects tampered fragment/output/request/permit/hardw
   // The GPU1 foreign desktop memory observation is required capture evidence, even when re-hashed.
   for(const mutate of [v=>{delete v.nativeOutput.reservation.hardwareObservation.proof.foreignGraphics;},v=>{v.nativeOutput.reservation.hardwareObservation.proof.foreignGraphics.totalBytes='unknown';}]) {
     const changed=structuredClone(original);mutate(changed);delete changed.captureBindingSha256;changed.captureBindingSha256=flux3CaptureDigest('flux3_native_capture_binding_v1\0',changed);
-    assert.throws(()=>verifyNativeResourceCapture(changed,context),/foreign desktop memory observation missing/);
+    assert.throws(()=>verifyNativeResourceCapture(changed,context),/foreign memory observation missing/);
   }
   assert.deepEqual(verifyNativeResourceCapture(original,context).anchorFragment,f.anchorFragment);
   const {validateRecord}=await import('./memory-calibration-harness.mjs');assert.throws(()=>validateRecord({...original,id:original.caseId,logicalCaseId:original.caseId}),/invalid status/i);
+});
+
+test('CPU GPU0 resource proof is approval-bound and preserves bounded-shared allocation/headroom evidence',async t=>{
+  const f=await fixture(t);await launchFlux3Resource({admission:f.admission,request:f.request,invocationId:f.invocation.invocationId},f.dependencies);
+  const old=await auditLedger({approval:f.admission.approvedPlan,backend:'candle',ledgerRoot:f.admission.ledgerRoot});
+  const approval=structuredClone(f.admission.approvedPlan);
+  approval.candleSourceTransitionSha256=digest;
+  approval.candleDeviceTransition={schemaVersion:1,previousSourceSha:'7090f742a7d2973dc3cc1c144aa8a272cdc293c9',nextSourceSha:approval.sourceSha,
+    previousApprovedPlanSha256:digest,previousHeadSha256:digest,previousSequence:1,previousGenerationCount:1,
+    previousConsumedIds:['candle.distilled.representative-repro.bf16.generation-1'],previousClaimSha256:digest,
+    previousDevice:{physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'},
+    nextDevice:{physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'}};
+  // Isolated proof-validator fixture ONLY: this does not apply a real or synthetic journal transition.
+  const a={...f.admission,approvedPlan:approval,approvedPlanSha256:planHash(approval),physicalGpuId:'0',cudaVisibleDevices:'0',logicalCudaOrdinal:0,...approval.candleDeviceTransition.nextDevice};
+  const event={...old.events[0],approvedPlanSha256:a.approvedPlanSha256};
+  const original=structuredClone(f.latest()),observation=original.nativeOutput.reservation.hardwareObservation;
+  observation.approvedPlanSha256=a.approvedPlanSha256;
+  observation.proof={...observation.proof,...approval.candleDeviceTransition.nextDevice,
+    gpuHeadroom:{totalBytes:97887*1024**2,freeBytes:96835*1024**2},
+    sharedPolicy:{sharingMode:'bounded-shared',foreignProcessTypes:['C','C+G'],exclusiveThroughputClaim:false,deviceTotalAttributionClaim:false,computeActivityAssessment:'unsupported-dedicated-memory-only'}};
+  original.nativeOutput.reservation={...event,hardwareObservation:observation};
+  const rehash=v=>{delete v.captureBindingSha256;v.captureBindingSha256=flux3CaptureDigest('flux3_native_capture_binding_v1\0',v);return v;};
+  const context={admission:a,invocation:f.invocation,adapterPid,ledgerEvent:event};
+  assert.deepEqual(verifyNativeResourceCapture(rehash(original),context).anchorFragment,f.anchorFragment);
+  for(const mutate of [p=>p.physicalGpuId='1',p=>p.gpuUuid='GPU-wrong',p=>p.pciBusId='00000000:C1:00.0',p=>p.logicalCudaOrdinal=1,
+    p=>p.foreignGraphics.luid='not-a-luid',p=>p.foreignGraphics.maxProcessBytes=1024**3+1,p=>p.foreignGraphics.totalBytes=3*1024**3+1,
+    p=>p.foreignGraphics.totalBytes=-1,p=>p.gpuHeadroom.freeBytes=0,p=>p.gpuHeadroom.freeBytes=p.gpuHeadroom.totalBytes+1,
+    p=>p.sharedPolicy.exclusiveThroughputClaim=true,p=>p.sharedPolicy.deviceTotalAttributionClaim=true]){
+    const changed=structuredClone(original);mutate(changed.nativeOutput.reservation.hardwareObservation.proof);
+    assert.throws(()=>verifyNativeResourceCapture(rehash(changed),context),/BLOCKED/);
+  }
+  // Typed phase accounting must bind the ACTUAL producer, request, LoadSpec and strategy,
+  // even when an attacker rehashes both the inner fragment and outer transport envelope.
+  const typed=structuredClone(original),hardware=typed.nativeOutput.reservation.hardwareObservation;
+  hardware.adapterProcess.startedAt='2026-10-23T00:00:00.0000000Z';hardware.observedAt='2026-10-23T00:00:01.000Z';
+  const typedRecord=declaredSyntheticOwnedAccounting({...typed.anchorFragment,strategy:{name:'DECLARED_SYNTHETIC',parameters:{}}});
+  Object.assign(typedRecord.ownedProcessMemory.identity,{pid:adapterPid,executable:a.binary,luid:hardware.proof.foreignGraphics.luid});
+  typedRecord.observedExecutionRecipe.actualLoadSpecSha256=typed.actualLoadSpec.sha256;
+  typedRecord.observedExecutionRecipe.actualGenerationRequestSha256=flux3CaptureDigest('flux3_observed_generation_request_v1\0',typed.nativeOutput.actualGenerationRequest);
+  typedRecord.observedExecutionRecipe.invocationRequestSha256=f.invocation.requestSha256;
+  typedRecord.observedExecutionRecipeSha256=flux3CaptureDigest('flux3_observed_execution_recipe_v1\0',typedRecord.observedExecutionRecipe);
+  const foreign=hardware.proof.foreignGraphics;
+  Object.assign(typedRecord.observedOperatingConditions,{observedAt:hardware.observedAt,totalDeviceBytes:hardware.proof.gpuHeadroom.totalBytes,freeDeviceBytes:hardware.proof.gpuHeadroom.freeBytes,
+    foreignDedicatedBytes:foreign.totalBytes,foreignProcessCount:foreign.processes,foreignMaxProcessBytes:foreign.maxProcessBytes});
+  delete typedRecord.backend;delete typedRecord.target;
+  typed.anchorFragment=typedRecord;
+  const rehashTyped=v=>{for(const key of ['measurementKind','ownedProcessMemory','observedExecutionRecipe','observedExecutionRecipeSha256','observedOperatingConditions'])v[key]=structuredClone(v.anchorFragment[key]);
+    v.anchorFragment.observedExecutionRecipeSha256=flux3CaptureDigest('flux3_observed_execution_recipe_v1\0',v.anchorFragment.observedExecutionRecipe);
+    v.observedExecutionRecipeSha256=v.anchorFragment.observedExecutionRecipeSha256;
+    v.anchorFragmentSha256=flux3CaptureDigest('flux3_canonical_anchor_fragment_v1\0',v.anchorFragment);return rehash(v);};
+  assert.equal(verifyNativeResourceCapture(rehashTyped(typed),context).anchorFragment.measurementKind,'windows-owned-process-accounting-v1');
+  for(const mutate of [v=>v.anchorFragment.ownedProcessMemory.identity.pid++,v=>v.anchorFragment.ownedProcessMemory.identity.startedAt='2026-10-23T00:00:00.001Z',
+    v=>v.anchorFragment.ownedProcessMemory.identity.executable='DECLARED_OTHER_EXECUTABLE',v=>v.anchorFragment.ownedProcessMemory.identity.luid='0x00000000_0x00000001',
+    v=>v.anchorFragment.observedExecutionRecipe.actualLoadSpecSha256=digest,v=>v.anchorFragment.observedExecutionRecipe.actualGenerationRequestSha256=digest,
+    v=>v.anchorFragment.observedExecutionRecipe.invocationRequestSha256=digest,v=>v.anchorFragment.observedOperatingConditions.freeDeviceBytes--]){
+    const changed=structuredClone(typed);mutate(changed);assert.throws(()=>verifyNativeResourceCapture(rehashTyped(changed),context));
+  }
+  const noBinding={...a,approvedPlan:{...approval}};delete noBinding.approvedPlan.candleDeviceTransition;noBinding.approvedPlanSha256=planHash(noBinding.approvedPlan);
+  assert.throws(()=>verifyNativeResourceCapture(original,{...context,admission:noBinding}));
 });

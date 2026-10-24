@@ -5,8 +5,9 @@ import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan, terminalCatalog } from './flux3-image-klein-terminal-plan.mjs';
-import { validateApprovedPlan, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, planHash, verifyLedgerReceipt, candleNextApprovalBaseSha256, validateCandleSourceCompatibility, candleReplayPrefix, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
+import { validateApprovedPlan, initializeLedger, reserveInvocation, auditLedger, aggregateLedgerReceipts, planHash, verifyLedgerReceipt, candleNextApprovalBaseSha256, validateCandleSourceCompatibility, validateCandleDeviceTransitionBinding, validateCandleMeasurementTransitionBinding, validateCandleDependencySecurityUpdate, validateCandleDependencySecurityLocks, verifyCandleDependencySecurityArchive, candleReplayPrefix, appendCandleSourceTransition } from './flux3-image-klein-terminal-budget.mjs';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { produceTerminalBuild } from './flux3-image-klein-terminal-build.mjs';
 import { prepareReplayRequestFixture, makeReplayBaselineFixture } from './lib/flux3-replay-prefix-fixtures.mjs';
@@ -140,7 +141,7 @@ test('both lifecycles are captioned; edit-LoRA training is an explicit uncovered
 
 // Mocked producer executes ZERO compilers; full real verifier still checks owned files and
 // checked-source producer/Cargo.lock hashes. No sourceRoot override or validation escape hatch.
-async function appendTransitionFixture(t) {
+async function appendTransitionFixture(t, {crossDevice = false} = {}) {
   const {root,approval:previousApproval}=await fixture(t), sourceRoot=fileURLToPath(new URL('..',import.meta.url));
   const manifest=await readFile(path.join(sourceRoot,'Cargo.toml'),'utf8'), inference=manifest.match(/rev = "([a-f0-9]{40})"/)[1];
   previousApproval.sourceSha=originalSource;previousApproval.inferenceMainSha=inference;
@@ -171,7 +172,7 @@ async function appendTransitionFixture(t) {
   const prepared=prepareReplayRequestFixture(previousApproval),first=previousApproval.plan.generationInvocations.find(i=>i.invocationId===consumedId);
   await reserveInvocation({...reservation(previousApproval,'candle',first),requestSha256:prepared.firstRequestSha256});
   const previousReceipt=await auditLedger({approval:previousApproval,backend:'candle',ledgerRoot:previousApproval.ledgerRoots.candle});
-  const fixtureBaseline=await makeReplayBaselineFixture({root,approval:previousApproval,previousReceipt});
+  const fixtureBaseline=await makeReplayBaselineFixture({root,approval:previousApproval,previousReceipt,...(crossDevice ? {historicalDevice:{gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'}} : {})});
   const approval=structuredClone(previousApproval);approval.sourceSha='c'.repeat(40);approval.approvalId='SYNTHETIC_NEW_FIXED_SOURCE';
   const newApi=await build(approval.sourceSha,'api-worker'),newResource=await build(approval.sourceSha,'resource-adapter');
   approval.buildReceipts.candle=newApi.binding;declaredSyntheticReadyBackend(approval,'candle',{binarySha256:newResource.binding.binarySha256,buildReceiptSha256:newResource.binding.receiptSha256});approval.resourceBuildReceipts.candle=newResource.binding;
@@ -226,20 +227,27 @@ const rawSha = bytes => createHash('sha256').update(bytes).digest('hex');
 const originalSource = '7090f742a7d2973dc3cc1c144aa8a272cdc293c9';
 const replayCase = 'candle.distilled.representative-repro.bf16';
 const consumedId = `${replayCase}.generation-1`, nextId = `${replayCase}.generation-2`;
-async function pureTransitionFixture(t) {
+const oldApiBinary = 'd264bf21ba5e5a19012388041da92bc54764d2b3144c3d10065505b1a383e52d';
+const oldResourceBinary = '4795a3e8fd5d0ee2d60c6586a72153759133209403d6b15120af7d50fcc48df5';
+const previousSecurityLock = '96feb71e685fa37faa01509108824463d09e88ed057ac7079ba0f11ea2b60e92';
+const nextSecurityLock = 'c33fba4fef58de889073666728c920a67c04687f7b24f4d4aaf5657cccd9a0c7';
+async function pureTransitionFixture(t, {measurement = false, security = false} = {}) {
   const {root,approval:previousApproval} = await fixture(t);
   previousApproval.sourceSha = originalSource;
   previousApproval.ledgerRoots = {mlx:path.join(root,'ledgers','mlx'),candle:path.join(root,'ledgers','candle')};
   await mkdir(path.join(root,'ledgers'));
-  previousApproval.buildReceipts = {candle:{receiptSha256:digest,transcriptSha256:digest,binarySha256:digest,cargoLockSha256:digest}};
-  declaredSyntheticReadyBackend(previousApproval,'candle');
+  previousApproval.buildReceipts = {candle:{receiptSha256:digest,transcriptSha256:digest,binarySha256:measurement ? oldApiBinary : digest,cargoLockSha256:digest}};
+  declaredSyntheticReadyBackend(previousApproval,'candle',measurement ? {binarySha256:oldResourceBinary} : {});
+  if (security) for(const key of ['buildReceipts','resourceBuildReceipts']) previousApproval[key].candle.cargoLockSha256=previousSecurityLock;
   await initializeLedger({approval:previousApproval,backend:'candle',ledgerRoot:previousApproval.ledgerRoots.candle});
   const first = previousApproval.plan.generationInvocations.find(i=>i.invocationId===consumedId);
   await reserveInvocation(reservation(previousApproval,'candle',first));
   const previousReceipt = await auditLedger({approval:previousApproval,backend:'candle',ledgerRoot:previousApproval.ledgerRoots.candle});
   const approval = structuredClone(previousApproval); approval.sourceSha='c'.repeat(40); approval.approvalId='SYNTHETIC_ONE_FIXED_CONTINUATION';
   approval.buildReceipts.candle.receiptSha256='e'.repeat(64); approval.buildReceipts.candle.transcriptSha256='f'.repeat(64);
-  declaredSyntheticReadyBackend(approval,'candle',{buildReceiptSha256:'e'.repeat(64)});
+  if (measurement) approval.buildReceipts.candle.binarySha256 = '1'.repeat(64);
+  declaredSyntheticReadyBackend(approval,'candle',{buildReceiptSha256:'e'.repeat(64),...(measurement ? {binarySha256:'2'.repeat(64)} : {})});
+  if (security) for(const key of ['buildReceipts','resourceBuildReceipts']) approval[key].candle.cargoLockSha256=nextSecurityLock;
   const binding = name => ({path:path.join(root,name),sha256:digest});
   const previousApprovalJson=JSON.stringify(previousApproval,null,2)+'\n', previousReceiptJson=JSON.stringify(previousReceipt,null,2)+'\n';
   const authorization={schemaVersion:1,kind:'flux3-candle-source-transition-authorization',authorizationId:'SYNTHETIC_ONLY',approvedBy:'synthetic CPU test',producersStopped:true,previousSourceSha:originalSource,previousApprovedPlanSha256:planHash(previousApproval),previousHeadSha256:previousReceipt.state.headSha256,previousSequence:1,previousGenerationCount:1,previousConsumedIds:[consumedId],previousClaimSha256:digest,previousApproval:{...binding('old-approval.json'),sha256:rawSha(previousApprovalJson)},previousReceipt:{...binding('old-receipt.json'),sha256:rawSha(previousReceiptJson)},previousBuilds:{api:binding('old-api.json'),resource:binding('old-resource.json')},nextBuilds:{api:binding('new-api.json'),resource:binding('new-resource.json')},nextSourceSha:approval.sourceSha,nextApprovalBaseSha256:candleNextApprovalBaseSha256(approval),baseline:{caseId:replayCase,consumedInvocationId:consumedId,nextInvocationId:nextId,png:binding('old.png'),sidecar:binding('sidecar.json'),report:binding('report.json'),readback:binding('readback.json'),firstRequestSha256:digest,secondRecordedRequestSha256:digest,oldJobId:'synthetic-job',oldWorkerId:'synthetic-worker',oldWorkerPid:123,allowedLineageRemap:['projectId']}};
@@ -296,4 +304,187 @@ test('carried raw authorization, old approval, receipt, state, and native proof 
     const bad=structuredClone(receipt);mutate(bad);rehash(bad);assert.throws(()=>verifyLedgerReceipt(approval,bad));
   }
   for(const mutate of [a=>a.plan.nativeBoundaryReceipts.candle.sourceSha='0'.repeat(40),a=>a.plan.nativeBoundaryReceipts.candle.cases[0].requestSha256=digest,a=>a.plan.resourceCases.find(r=>r.backend==='candle').nativeBoundaryReceiptSha256=digest]) {const bad=structuredClone(approval);mutate(bad);assert.throws(()=>verifyLedgerReceipt(bad,receipt));}
+});
+
+function bindDeviceTransition(f) {
+  const a = f.authorization;
+  f.approval.candleDeviceTransition = {schemaVersion:1,
+    ...Object.fromEntries(['previousSourceSha','nextSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256'].map(k => [k, structuredClone(a[k])])),
+    previousDevice:{physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'},
+    nextDevice:{physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'}};
+  a.deviceTransition = structuredClone(f.approval.candleDeviceTransition);
+  a.nextApprovalBaseSha256 = candleNextApprovalBaseSha256(f.approval);
+}
+function bindMeasurementTransition(f) {
+  bindDeviceTransition(f);
+  const builds = approval => Object.fromEntries([['api','buildReceipts'],['resource','resourceBuildReceipts']].map(([role,key]) => [role, {binarySha256:approval[key].candle.binarySha256,receiptSha256:approval[key].candle.receiptSha256}]));
+  f.approval.candleMeasurementTransition = {schemaVersion:1,previousSourceSha:originalSource,nextSourceSha:f.approval.sourceSha,
+    measurementKind:'windows-owned-process-accounting-v1',reason:'measurement-only owned-process producer/consumer accounting; renderer and inference unchanged',
+    previousBuilds:builds(f.previousApproval),nextBuilds:builds(f.approval)};
+  f.authorization.measurementTransition = structuredClone(f.approval.candleMeasurementTransition);
+  for (const side of ['previousBuilds','nextBuilds']) for (const role of ['api','resource']) f.authorization[side][role].sha256 = f.approval.candleMeasurementTransition[side][role].receiptSha256;
+}
+function bindSecurityTransition(f) {
+  bindMeasurementTransition(f);
+  f.approval.candleMeasurementTransition.dependencySecurityUpdate={schemaVersion:1,advisory:'RUSTSEC-2026-0386',package:'tokio',previousVersion:'1.53.1',nextVersion:'1.53.3',previousSourceSha:originalSource,nextSourceSha:f.approval.sourceSha,previousCargoLockSha256:previousSecurityLock,nextCargoLockSha256:nextSecurityLock};
+  f.approval.candleMeasurementTransition.reason='measurement owned-process producer/consumer accounting and RUSTSEC-2026-0386 Tokio security update; renderer source and inference pin unchanged';
+  f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);
+  f.authorization.previousCargoLock={path:path.join(f.root,'historical-source-7090','Cargo.lock'),sha256:previousSecurityLock};
+}
+function resealCarriedTransition(f) {
+  f.authorization.nextApprovalBaseSha256 = candleNextApprovalBaseSha256(f.approval);
+  const authorizationJson = JSON.stringify(f.authorization, null, 2) + '\n';
+  f.approval.candleSourceTransitionSha256 = rawSha(authorizationJson);
+  const {eventSha256, ...record} = f.receipt.events[1];
+  Object.assign(record, {authorizationJson, authorizationSha256:rawSha(authorizationJson), approvedPlanSha256:planHash(f.approval)});
+  f.receipt.events[1] = {...record,eventSha256:planHash(record)};
+  f.receipt.state.headSha256 = f.receipt.events[1].eventSha256;
+}
+test('strict device transition binds destination and fixed old prefix while legacy format stays unchanged', async t => {
+  const f = await pureTransitionFixture(t);
+  assert.equal(validateCandleDeviceTransitionBinding(f.approval), undefined);
+  bindDeviceTransition(f); resealCarriedTransition(f);
+  assert.deepEqual(validateCandleDeviceTransitionBinding(f.approval), f.authorization.deviceTransition);
+  assert.equal(validateCandleSourceCompatibility(f.previousApproval,f.approval,f.authorization,f.previousReceipt),true);
+  assert.throws(() => validateCandleSourceCompatibility(f.previousApproval,f.approval));
+  assert.equal(verifyLedgerReceipt(f.approval,f.receipt).state.generationCount,1);
+  assert.equal(candleReplayPrefix(f.receipt,f.approval).authorization.deviceTransition.nextDevice.physicalGpuId,'0');
+  await assert.rejects(initializeLedger({approval:f.approval,backend:'candle',ledgerRoot:f.approval.ledgerRoots.candle}),/cannot initialize/);
+  const second = structuredClone(f.approval); second.sourceSha = 'f'.repeat(40);
+  assert.throws(() => validateCandleSourceCompatibility(f.approval,second,f.authorization,f.receipt));
+  // Destination source is the actual approval, not a hardcoded future merge SHA.
+  const another = await pureTransitionFixture(t); another.approval.sourceSha = 'e'.repeat(40);
+  declaredSyntheticReadyBackend(another.approval,'candle',{buildReceiptSha256:'e'.repeat(64)});
+  another.authorization.nextSourceSha = another.approval.sourceSha;
+  bindDeviceTransition(another); resealCarriedTransition(another);
+  assert.equal(verifyLedgerReceipt(another.approval,another.receipt).state.generationCount,1);
+});
+test('device transition rejects physical index UUID PCI swaps unknown fields and mismatched authorization even when rehashed', async t => {
+  const original = await pureTransitionFixture(t); bindDeviceTransition(original); resealCarriedTransition(original);
+  const mutations = [];
+  for (const field of ['previousDevice','nextDevice']) for (const key of ['physicalGpuId','gpuUuid','pciBusId']) {
+    mutations.push(f => {f.approval.candleDeviceTransition[field][key] = 'WRONG'; f.authorization.deviceTransition = structuredClone(f.approval.candleDeviceTransition);});
+  }
+  mutations.push(
+    f => {const b=f.approval.candleDeviceTransition; [b.previousDevice,b.nextDevice]=[b.nextDevice,b.previousDevice]; f.authorization.deviceTransition=structuredClone(b);},
+    f => f.authorization.deviceTransition.nextDevice.physicalGpuId='1',
+    f => delete f.authorization.deviceTransition,
+    f => delete f.approval.candleDeviceTransition,
+    f => f.approval.candleDeviceTransition.extra=true,
+    f => f.approval.candleDeviceTransition.nextDevice.extra=true,
+    f => f.authorization.deviceTransition.extra=true,
+    f => f.authorization.extra=true,
+    f => f.approval.unrecognizedDeviceTransition={physicalGpuId:'0'},
+    f => f.approval.candleDeviceTransition.nextSourceSha='f'.repeat(40),
+    f => {f.authorization.nextSourceSha='f'.repeat(40); f.authorization.deviceTransition.nextSourceSha='f'.repeat(40);},
+    f => {f.approval.candleDeviceTransition.previousSourceSha='f'.repeat(40); f.authorization.deviceTransition=structuredClone(f.approval.candleDeviceTransition);},
+  );
+  for (const mutate of mutations) {
+    const f=structuredClone(original); mutate(f); resealCarriedTransition(f);
+    assert.throws(() => verifyLedgerReceipt(f.approval,f.receipt));
+  }
+  for (const mutate of [a=>a.plan.cases[0].options.extra=true,a=>a.inputSpecSha256.candle='0'.repeat(64),a=>a.ledgerRoots.candle+='-reset',a=>a.buildReceipts.candle.binarySha256='0'.repeat(64)]) {
+    const f=structuredClone(original);mutate(f.approval);resealCarriedTransition(f);
+    assert.throws(() => verifyLedgerReceipt(f.approval,f.receipt));
+  }
+});
+test('device binding cannot substitute old prefix plan head count source or claim provenance', async t => {
+  const original=await pureTransitionFixture(t);bindDeviceTransition(original);resealCarriedTransition(original);
+  for (const [key,value] of [['previousApprovedPlanSha256','0'.repeat(64)],['previousHeadSha256','0'.repeat(64)],['previousSequence',0],['previousGenerationCount',0],['previousConsumedIds',[nextId]],['previousSourceSha','f'.repeat(40)]]) {
+    const f=structuredClone(original);f.approval.candleDeviceTransition[key]=value;f.authorization[key]=value;f.authorization.deviceTransition[key]=value;resealCarriedTransition(f);
+    assert.throws(() => verifyLedgerReceipt(f.approval,f.receipt));
+  }
+  const claim=structuredClone(original);claim.approval.candleDeviceTransition.previousClaimSha256='0'.repeat(64);claim.authorization.deviceTransition.previousClaimSha256='0'.repeat(64);resealCarriedTransition(claim);
+  assert.throws(() => verifyLedgerReceipt(claim.approval,claim.receipt),/previousClaimSha256/);
+  const swapped=await pureTransitionFixture(t);bindDeviceTransition(swapped);resealCarriedTransition(swapped);
+  const f=structuredClone(original);f.authorization.deviceTransition=swapped.authorization.deviceTransition;resealCarriedTransition(f);
+  assert.throws(() => verifyLedgerReceipt(f.approval,f.receipt),/differs from approval/);
+});
+test('fixed measurement-only binary exception authenticates both exact role receipts under one device/source transition', async t => {
+  const f=await pureTransitionFixture(t,{measurement:true});
+  // Without the explicit exception even an otherwise approved binary change is refused.
+  bindDeviceTransition(f);resealCarriedTransition(f);
+  assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt),/immutable/);
+  bindMeasurementTransition(f);resealCarriedTransition(f);
+  assert.deepEqual(validateCandleMeasurementTransitionBinding(f.approval),f.authorization.measurementTransition);
+  assert.equal(verifyLedgerReceipt(f.approval,f.receipt).state.generationCount,1);
+  assert.equal(candleReplayPrefix(f.receipt,f.approval).authorization.measurementTransition.measurementKind,'windows-owned-process-accounting-v1');
+  const second=structuredClone(f.approval);second.sourceSha='f'.repeat(40);
+  assert.throws(()=>validateCandleSourceCompatibility(f.approval,second,f.authorization,f.receipt));
+  await assert.rejects(initializeLedger({approval:f.approval,backend:'candle',ledgerRoot:f.approval.ledgerRoots.candle}),/cannot initialize/);
+});
+test('measurement transition rejects unknown fields generic remaps wrong role receipts source kind and renderer changes', async t => {
+  const original=await pureTransitionFixture(t,{measurement:true});bindMeasurementTransition(original);resealCarriedTransition(original);
+  const mutations=[
+    f=>delete f.authorization.measurementTransition,
+    f=>delete f.approval.candleMeasurementTransition,
+    f=>delete f.approval.candleDeviceTransition,
+    f=>f.approval.candleMeasurementTransition.extra=true,
+    f=>f.approval.candleMeasurementTransition.nextBuilds.api.extra=true,
+    f=>f.authorization.measurementTransition.extra=true,
+    f=>f.approval.candleMeasurementTransition.measurementKind='device-delta-stable-background-with-owned-process-accounting-v1',
+    f=>f.approval.candleMeasurementTransition.reason='arbitrary binary replacement',
+    f=>f.approval.candleMeasurementTransition.previousSourceSha='f'.repeat(40),
+    f=>f.approval.candleMeasurementTransition.nextSourceSha='f'.repeat(40),
+    f=>f.authorization.previousBuilds.api.sha256='0'.repeat(64),
+    f=>f.authorization.nextBuilds.resource.sha256='0'.repeat(64),
+    f=>{const b=f.approval.candleMeasurementTransition.nextBuilds;[b.api,b.resource]=[b.resource,b.api];},
+    f=>f.approval.plan.cases[0].options.extra=true,
+    f=>f.approval.buildReceipts.candle.cargoLockSha256='0'.repeat(64),
+    f=>f.approval.inferenceMainSha='f'.repeat(40),
+  ];
+  for(const side of ['previousBuilds','nextBuilds'])for(const role of ['api','resource'])for(const key of ['binarySha256','receiptSha256'])mutations.push(f=>{f.approval.candleMeasurementTransition[side][role][key]='0'.repeat(64);f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);});
+  for(const mutate of mutations){const f=structuredClone(original);mutate(f);resealCarriedTransition(f);assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt));}
+  const f=structuredClone(original);f.approval.candleMeasurementTransition.previousBuilds.api.receiptSha256='0'.repeat(64);f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);f.authorization.previousBuilds.api.sha256='0'.repeat(64);resealCarriedTransition(f);
+  assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt),/old approval/);
+});
+test('fixed Tokio security update binds exact old/new sources locks receipts and immutable Git archive', async t => {
+  const f=await pureTransitionFixture(t,{measurement:true,security:true});bindSecurityTransition(f);resealCarriedTransition(f);
+  assert.equal(validateCandleDependencySecurityUpdate(f.approval).advisory,'RUSTSEC-2026-0386');
+  assert.equal(verifyLedgerReceipt(f.approval,f.receipt).state.generationCount,1);
+  const sourceRoot=fileURLToPath(new URL('..',import.meta.url));
+  const oldBytes=execFileSync('git',['-C',sourceRoot,'show',`${originalSource}:Cargo.lock`],{maxBuffer:16*1024*1024});
+  const nextBytes=await readFile(path.join(sourceRoot,'Cargo.lock'));
+  assert.equal(validateCandleDependencySecurityLocks(oldBytes,nextBytes),true);
+  await mkdir(path.dirname(f.authorization.previousCargoLock.path));await writeFile(f.authorization.previousCargoLock.path,oldBytes);
+  assert.equal(await verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root),path.dirname(f.authorization.previousCargoLock.path));
+  for(const bytes of [nextBytes,Buffer.from(oldBytes.toString().replace('1.53.1','1.53.2')),Buffer.concat([oldBytes,Buffer.from('\n')])]) {
+    await writeFile(f.authorization.previousCargoLock.path,bytes);
+    await assert.rejects(verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root));
+  }
+  await writeFile(f.authorization.previousCargoLock.path,oldBytes);
+  for(const bytes of [oldBytes,Buffer.from(nextBytes.toString().replace('1.53.3','1.53.4')),Buffer.from(nextBytes.toString().replace('name = "tokio-macros"','name = "unexpected-macro"')),Buffer.concat([nextBytes,Buffer.from('\n')])])assert.throws(()=>validateCandleDependencySecurityLocks(oldBytes,bytes));
+});
+test('security transition rejects stripped exception unknown keys reason advisory versions source and arbitrary lock remaps', async t => {
+  const original=await pureTransitionFixture(t,{measurement:true,security:true});bindSecurityTransition(original);resealCarriedTransition(original);
+  const mutations=[
+    f=>delete f.authorization.previousCargoLock,
+    f=>f.authorization.previousCargoLock.extra=true,
+    f=>f.authorization.previousCargoLock.sha256=nextSecurityLock,
+    f=>f.authorization.previousCargoLock.path=path.join(f.root,'not-Cargo.lock'),
+    f=>f.authorization.measurementTransition.dependencySecurityUpdate.extra=true,
+    f=>{delete f.approval.candleMeasurementTransition.dependencySecurityUpdate;delete f.authorization.measurementTransition.dependencySecurityUpdate;f.approval.candleMeasurementTransition.reason=f.authorization.measurementTransition.reason='measurement-only owned-process producer/consumer accounting; renderer and inference unchanged';delete f.authorization.previousCargoLock;},
+    f=>f.approval.candleMeasurementTransition.reason='measurement-only owned-process producer/consumer accounting; renderer and inference unchanged',
+    f=>f.approval.buildReceipts.candle.cargoLockSha256=previousSecurityLock,
+    f=>f.approval.resourceBuildReceipts.candle.cargoLockSha256='0'.repeat(64),
+    f=>f.approval.resourceBuildReceipts.candle.manifestSha256='0'.repeat(64),
+  ];
+  for(const key of ['advisory','package','previousVersion','nextVersion','previousSourceSha','nextSourceSha','previousCargoLockSha256','nextCargoLockSha256'])mutations.push(f=>{f.approval.candleMeasurementTransition.dependencySecurityUpdate[key]='unknown';f.authorization.measurementTransition=structuredClone(f.approval.candleMeasurementTransition);});
+  for(const mutate of mutations){const f=structuredClone(original);mutate(f);resealCarriedTransition(f);assert.throws(()=>verifyLedgerReceipt(f.approval,f.receipt));}
+  await assert.rejects(initializeLedger({approval:original.approval,backend:'candle',ledgerRoot:original.approval.ledgerRoots.candle}),/cannot initialize/);
+});
+test('cross-device append preserves old claim and refuses forged claim and reset without ledger changes', async t => {
+  const f=await appendTransitionFixture(t,{crossDevice:true});bindDeviceTransition(f);
+  const originalClaim=f.authorization.previousClaimSha256;
+  f.authorization.previousClaimSha256='0'.repeat(64);f.authorization.deviceTransition.previousClaimSha256='0'.repeat(64);f.approval.candleDeviceTransition.previousClaimSha256='0'.repeat(64);
+  f.authorization.nextApprovalBaseSha256=candleNextApprovalBaseSha256(f.approval);
+  await assert.rejects(appendCandleSourceTransition(await f.reseal()),/raw bytes mismatch/);
+  await assert.rejects(readFile(path.join(f.args.ledgerRoot,'events','000002.json')),e=>e.code==='ENOENT');
+  f.authorization.previousClaimSha256=originalClaim;f.authorization.deviceTransition.previousClaimSha256=originalClaim;f.approval.candleDeviceTransition.previousClaimSha256=originalClaim;
+  f.authorization.nextApprovalBaseSha256=candleNextApprovalBaseSha256(f.approval);
+  const args=await f.reseal(), claimBytes=await readFile(f.claim), result=await appendCandleSourceTransition(args);
+  assert.equal(result.receipt.state.sequence,2);assert.equal(result.receipt.state.generationCount,1);
+  assert.deepEqual(await readFile(f.claim),claimBytes);
+  assert.equal((await appendCandleSourceTransition(args)).alreadyApplied,true);
+  await assert.rejects(initializeLedger({approval:f.approval,backend:'candle',ledgerRoot:path.join(f.root,'reset')}),/alternate ledger/);
 });

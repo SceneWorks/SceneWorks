@@ -87,13 +87,148 @@ pub const PACKAGED_MEMORY_CALIBRATION_EVIDENCE: &str =
     include_str!("../../../docs/generated/memory-calibration-evidence.json");
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(try_from = "RawEvidenceBundle")]
 pub struct EvidenceBundle {
     pub schema_version: u32,
     pub harness_version: String,
-    #[serde(default)]
     pub source_sessions: Vec<SourceSession>,
+    /// Legacy residency/allocator evidence only. Accounting observations can never reach fit readers.
     pub records: Vec<EvidenceRecord>,
+    pub observed_accounting_records: Vec<OwnedAccountingRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawEvidenceBundle {
+    schema_version: u32,
+    harness_version: String,
+    #[serde(default)]
+    source_sessions: Vec<SourceSession>,
+    records: Vec<Value>,
+}
+
+/// Typed observation retained by the bundle but deliberately excluded from legacy fit records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnedAccountingRecord {
+    pub accounting: crate::memory_anchor::OwnedProcessAccountingEvidence,
+    pub recipe: crate::memory_anchor::ObservedExecutionRecipe,
+    pub recipe_sha256: String,
+    pub operating_conditions: crate::memory_anchor::ObservedOperatingConditions,
+    // Private non-memory metadata projection shares completion/quality/lifecycle validation.
+    // Its explicit null is NOT measured telemetry and never enters EvidenceBundle.records.
+    metadata: EvidenceRecord,
+}
+
+impl OwnedAccountingRecord {
+    pub fn id(&self) -> &str {
+        &self.metadata.id
+    }
+    pub fn target(&self) -> &Target {
+        &self.metadata.target
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        crate::memory_anchor::validate_accounting_context(
+            &self.metadata.target.model_id,
+            &self.recipe,
+            &self.accounting,
+            &self.operating_conditions,
+        )?;
+        if self.metadata.backend != Backend::Candle
+            || !matches!(
+                self.metadata.target.provider.as_str(),
+                "flux3_klein" | "flux3_klein_base"
+            )
+            || self.recipe.provider != self.metadata.target.provider
+            || self.recipe.tier != self.metadata.target.tier
+            || !matches!(self.metadata.observed_memory, RequiredNullable::Null)
+            || self.recipe_sha256
+                != crate::memory_anchor::accounting_digest(
+                    "flux3_observed_execution_recipe_v1\0",
+                    &serde_json::to_value(&self.recipe).map_err(|error| error.to_string())?,
+                )
+            || self.recipe.measured_strategy_sha256
+                != crate::memory_anchor::accounting_digest(
+                    "flux3_observed_memory_strategy_v1\0",
+                    &serde_json::to_value(&self.metadata.strategy)
+                        .map_err(|error| error.to_string())?,
+                )
+            || self
+                .metadata
+                .diagnostics
+                .as_ref()
+                .is_some_and(|diagnostics| {
+                    diagnostics
+                        .measurements
+                        .iter()
+                        .any(|measurement| measurement.name.ends_with("DevicePeakDelta"))
+                })
+        {
+            return Err(
+                "accounting record identity/recipe/strategy binding or legacy alias is invalid"
+                    .into(),
+            );
+        }
+        // Strict typed evidence must validate BEFORE skipping only the unavailable legacy counters.
+        validate_record_metadata(&self.metadata, true)
+    }
+}
+
+impl TryFrom<RawEvidenceBundle> for EvidenceBundle {
+    type Error = String;
+    fn try_from(raw: RawEvidenceBundle) -> Result<Self, Self::Error> {
+        let mut records = Vec::new();
+        let mut observed_accounting_records = Vec::new();
+        for mut value in raw.records {
+            if value.get("measurementKind").is_none() {
+                records.push(serde_json::from_value(value).map_err(|error| error.to_string())?);
+                continue;
+            }
+            let object = value
+                .as_object_mut()
+                .ok_or("accounting record must be an object")?;
+            if object
+                .remove("measurementKind")
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .as_deref()
+                != Some("windows-owned-process-accounting-v1")
+                || object.contains_key("observedMemory")
+            {
+                return Err("unknown accounting kind or legacy observedMemory alias".into());
+            }
+            let mut take = |key: &str| {
+                object
+                    .remove(key)
+                    .ok_or_else(|| format!("accounting record lacks {key}"))
+            };
+            let accounting = serde_json::from_value(take("ownedProcessMemory")?)
+                .map_err(|error| error.to_string())?;
+            let recipe = serde_json::from_value(take("observedExecutionRecipe")?)
+                .map_err(|error| error.to_string())?;
+            let recipe_sha256 = serde_json::from_value(take("observedExecutionRecipeSha256")?)
+                .map_err(|error| error.to_string())?;
+            let operating_conditions = serde_json::from_value(take("observedOperatingConditions")?)
+                .map_err(|error| error.to_string())?;
+            // Only an internal metadata projection: absent legacy counters never become zero or
+            // accounting aliases. The strict legacy shape still rejects every unknown field.
+            object.insert("observedMemory".into(), Value::Null);
+            let metadata = serde_json::from_value(value).map_err(|error| error.to_string())?;
+            observed_accounting_records.push(OwnedAccountingRecord {
+                accounting,
+                recipe,
+                recipe_sha256,
+                operating_conditions,
+                metadata,
+            });
+        }
+        Ok(Self {
+            schema_version: raw.schema_version,
+            harness_version: raw.harness_version,
+            source_sessions: raw.source_sessions,
+            records,
+            observed_accounting_records,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -422,7 +557,7 @@ pub struct Geometry {
     pub frames: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Strategy {
     pub rung: StrategyRung,
@@ -1119,6 +1254,10 @@ fn validate_bundle(bundle: &EvidenceBundle) -> Result<(), String> {
     for record in &bundle.records {
         validate_record(record)?;
         validate_derivation(record, &sessions, &inventory_inputs)?;
+    }
+    for observation in &bundle.observed_accounting_records {
+        observation.validate()?;
+        validate_derivation(&observation.metadata, &sessions, &inventory_inputs)?;
     }
     Ok(())
 }
@@ -1850,6 +1989,13 @@ fn validate_source_inputs_against_record(
 }
 
 fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
+    validate_record_metadata(record, false)
+}
+
+fn validate_record_metadata(
+    record: &EvidenceRecord,
+    accounting_observation: bool,
+) -> Result<(), String> {
     require_nonempty(&record.id, "record.id")?;
     require_nonempty(&record.logical_case_id, "record.logicalCaseId")?;
     if !has_prefixed_hex(&record.id, "imc-", 20) {
@@ -1996,14 +2142,17 @@ fn validate_record(record: &EvidenceRecord) -> Result<(), String> {
     }
 
     match record.status {
-        RecordStatus::Complete => validate_complete(record),
-        RecordStatus::RuntimeComplete => validate_runtime_complete(record),
+        RecordStatus::Complete => validate_complete(record, accounting_observation),
+        RecordStatus::RuntimeComplete => validate_runtime_complete(record, accounting_observation),
         RecordStatus::NegativeComplete => validate_negative_complete(record),
         RecordStatus::Gated => Ok(()),
     }
 }
 
-fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
+fn validate_runtime_complete(
+    record: &EvidenceRecord,
+    accounting_observation: bool,
+) -> Result<(), String> {
     if record.target.overlay != "none" {
         return Err(format!(
             "{} runtime-complete evidence must target the base-only none overlay",
@@ -2046,25 +2195,27 @@ fn validate_runtime_complete(record: &EvidenceRecord) -> Result<(), String> {
             ));
         }
     }
-    let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
-    if let Some(observed) = observed.full() {
-        validate_phase_metrics(observed, &record.id)?;
-    }
-    if observed.overall_non_reclaimable_bytes() > record.hardware.memory_bytes() {
-        return Err(format!(
-            "{} observed resident memory exceeds hardware",
-            record.id
-        ));
-    }
-    // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
-    // runtime-complete `mlx:flux2_dev` records shipped asserting up to 26.0 GB more wired residency
-    // than the probed limit. Both statuses now carry the check, against the non-reclaimable figure.
-    if let (Hardware::Mlx(hardware), Some(observed)) = (&record.hardware, observed.full()) {
-        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+    if !accounting_observation {
+        let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
+        if let Some(observed) = observed.full() {
+            validate_phase_metrics(observed, &record.id)?;
+        }
+        if observed.overall_non_reclaimable_bytes() > record.hardware.memory_bytes() {
             return Err(format!(
-                "{} observed wired memory exceeds hardware",
+                "{} observed resident memory exceeds hardware",
                 record.id
             ));
+        }
+        // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
+        // runtime-complete `mlx:flux2_dev` records shipped asserting up to 26.0 GB more wired residency
+        // than the probed limit. Both statuses now carry the check, against the non-reclaimable figure.
+        if let (Hardware::Mlx(hardware), Some(observed)) = (&record.hardware, observed.full()) {
+            if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+                return Err(format!(
+                    "{} observed wired memory exceeds hardware",
+                    record.id
+                ));
+            }
         }
     }
     let scenarios: BTreeMap<_, _> = record
@@ -2291,7 +2442,7 @@ fn validate_sweep(sweep: &Sweep, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
+fn validate_complete(record: &EvidenceRecord, accounting_observation: bool) -> Result<(), String> {
     if record.repositories.scene_works.dirty || record.repositories.inference.dirty {
         return Err(format!(
             "{} complete evidence has a dirty repository",
@@ -2360,29 +2511,30 @@ fn validate_complete(record: &EvidenceRecord) -> Result<(), String> {
             record.id
         ));
     }
-    let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
-    let observed = observed.full().ok_or_else(|| {
-        format!(
-            "{} complete evidence requires full observed phase telemetry",
-            record.id
-        )
-    })?;
-    validate_phase_metrics(observed, &record.id)?;
-    if observed.overall.non_reclaimable_bytes() > record.hardware.memory_bytes() {
-        return Err(format!(
-            "{} observed resident memory exceeds hardware",
-            record.id
-        ));
-    }
-    if let Hardware::Mlx(hardware) = &record.hardware {
-        if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+    if !accounting_observation {
+        let observed = required_value(&record.observed_memory, &record.id, "observedMemory")?;
+        let observed = observed.full().ok_or_else(|| {
+            format!(
+                "{} complete evidence requires full observed phase telemetry",
+                record.id
+            )
+        })?;
+        validate_phase_metrics(observed, &record.id)?;
+        if observed.overall.non_reclaimable_bytes() > record.hardware.memory_bytes() {
             return Err(format!(
-                "{} observed wired memory exceeds hardware",
+                "{} observed resident memory exceeds hardware",
                 record.id
             ));
         }
+        if let Hardware::Mlx(hardware) = &record.hardware {
+            if observed.overall.non_reclaimable_bytes() > hardware.wired_limit_bytes {
+                return Err(format!(
+                    "{} observed wired memory exceeds hardware",
+                    record.id
+                ));
+            }
+        }
     }
-
     let scenarios: BTreeMap<_, _> = record
         .scenarios
         .iter()
@@ -2887,6 +3039,127 @@ mod tests {
 
     fn loaded_bundle() -> EvidenceBundle {
         load_bundle(&bundle(complete_record())).expect("valid fixture")
+    }
+
+    // Declared synthetic CPU protocol transformation, never measured calibration evidence.
+    fn accounting_record(mut record: Value) -> Value {
+        record["id"] = json!("imc-cccccccccccccccccccc");
+        record["target"]["modelId"] = json!("flux3_klein_base");
+        record["target"]["provider"] = json!("flux3_klein_base");
+        record["backend"] = json!("candle");
+        record.as_object_mut().unwrap().remove("observedMemory");
+        record["measurementKind"] = json!("windows-owned-process-accounting-v1");
+        record["diagnostics"]["measurements"] = json!([]);
+        let phase = |first, last| {
+            json!({ "dedicatedPeakBytes": 80, "sharedPeakBytes": 30,
+            "totalCommittedPeakBytes": 100_000, "samples": 2, "firstSampleMs": first,
+            "lastSampleMs": last, "maxGapMs": last-first })
+        };
+        record["ownedProcessMemory"] = json!({
+            "schemaVersion": 1, "kind": "flux3_owned_process_memory_accounting_v1",
+            "source": "Windows GPU Process Memory performance counters",
+            "semantics": "sampled per-process dedicated/shared/total-committed accounting; not physical residency or CUDA active/reserved allocator bytes",
+            "attribution": "own PID/start-time/executable and CUDA adapter LUID; includes any cross-process-shared allocations charged to this process",
+            "physicalResidencyClaim": false, "allocatorActivityClaim": false,
+            "deviceTotalDeltaAttributionClaim": false, "exclusiveThroughputClaim": false,
+            "sampling": { "intervalMs": 200, "maxAllowedGapMs": 1500, "maxAllowedReadSkewMs": 250, "maxObservedReadSkewMs": 5, "losslessPeakClaim": false },
+            "identity": { "pid": 42, "startedAt": "2026-10-23T00:00:00.0000000Z", "executable": "SYNTHETIC_CPU_ONLY",
+                "luid": "0x00000000_0x00020806", "physicalGpuId": "0", "gpuUuid": "GPU-00000000-0000-0000-0000-000000000001", "pciBusId": "00000000:21:00.0", "logicalCudaOrdinal": 0 },
+            "physicalNodes": [0,1], "phases": { "load": phase(0,200), "conditioning": phase(200,400), "denoise": phase(400,600), "decode": phase(600,800) },
+            "overall": { "dedicatedPeakBytes": 80, "sharedPeakBytes": 30, "totalCommittedPeakBytes": 100_000,
+                "samples": 5, "firstSampleMs": 0, "lastSampleMs": 800, "maxGapMs": 200 },
+            "unavailableMetrics": { "physicalResidentBytes": null, "activeBytes": null, "allocatorBytes": null }
+        });
+        record["observedExecutionRecipe"] = json!({ "schemaVersion": 1, "backend": "candle", "provider": "flux3_klein_base",
+            "tier": record["target"]["tier"], "actualLoadSpecSha256": "a".repeat(64),
+            "actualGenerationRequestSha256": "b".repeat(64), "invocationRequestSha256": "c".repeat(64),
+            "measuredStrategySha256": crate::memory_anchor::accounting_digest("flux3_observed_memory_strategy_v1\0", &record["strategy"]) });
+        record["observedExecutionRecipeSha256"] = json!(crate::memory_anchor::accounting_digest(
+            "flux3_observed_execution_recipe_v1\0",
+            &record["observedExecutionRecipe"]
+        ));
+        record["observedOperatingConditions"] = json!({ "schemaVersion": 1, "sharingMode": "bounded-shared", "physicalGpuId": "0",
+            "gpuUuid": "GPU-00000000-0000-0000-0000-000000000001", "pciBusId": "00000000:21:00.0", "observedAt": "2026-10-23T00:00:00.000Z",
+            "totalDeviceBytes": 50000, "freeDeviceBytes": 40000, "foreignDedicatedBytes": 10, "foreignProcessCount": 1, "foreignMaxProcessBytes": 10,
+            "foreignProcessLimitBytes": 1073741824_u64, "foreignTotalLimitBytes": 3221225472_u64,
+            "observationScope": "producer-reservation-admission", "fitAuthorization": false, "exclusiveThroughputClaim": false, "physicalResidencyClaim": false });
+        record
+    }
+
+    #[test]
+    fn mixed_bundle_preserves_legacy_fit_and_keeps_accounting_non_fit() {
+        let typed = accounting_record(complete_record());
+        let mixed = json!({ "schemaVersion": MEMORY_CALIBRATION_SCHEMA_VERSION,
+            "harnessVersion": "sceneworks-memory-v5", "records": [complete_record(), typed] });
+        let loaded = load_bundle(&mixed.to_string()).expect("mixed strict typed bundle");
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.observed_accounting_records.len(), 1);
+        assert!(matches!(
+            loaded.evidence_for(&exact_query()),
+            EvidenceVerdict::Verified(_)
+        ));
+        let mut typed_query = exact_query();
+        typed_query.model_id = "flux3_klein_base".into();
+        typed_query.provider = "flux3_klein_base".into();
+        assert_eq!(loaded.evidence_for(&typed_query), EvidenceVerdict::Unknown);
+        let observation = &loaded.observed_accounting_records[0];
+        assert_eq!(observation.target().model_id, "flux3_klein_base");
+        assert_eq!(observation.id(), "imc-cccccccccccccccccccc");
+        assert_eq!(
+            observation.accounting.overall.total_committed_peak_bytes,
+            100_000
+        );
+    }
+
+    #[test]
+    fn accounting_bundle_keeps_strict_metadata_completion_and_typed_obligations() {
+        let valid = accounting_record(complete_record());
+        for mutate in [
+            |value: &mut Value| value["observedMemory"] = json!(null),
+            |value: &mut Value| value["surpriseField"] = json!(true),
+            |value: &mut Value| {
+                value.as_object_mut().unwrap().remove("quality");
+            },
+            |value: &mut Value| value["quality"]["result"] = json!("failed"),
+            |value: &mut Value| value["sweep"]["rangeVerified"] = json!(false),
+            |value: &mut Value| value["scenarios"][4]["cleanupVerified"] = json!(false),
+            |value: &mut Value| value["repositories"]["sceneWorks"]["dirty"] = json!(true),
+            |value: &mut Value| value["measurementKind"] = json!("other"),
+            |value: &mut Value| value["ownedProcessMemory"]["identity"]["pid"] = json!(0),
+            |value: &mut Value| {
+                value["ownedProcessMemory"]["sampling"]["maxObservedReadSkewMs"] = json!(251)
+            },
+            |value: &mut Value| {
+                value["observedExecutionRecipe"]["actualLoadSpecSha256"] = json!("f".repeat(64))
+            },
+            |value: &mut Value| {
+                value["observedOperatingConditions"]["fitAuthorization"] = json!(true)
+            },
+            |value: &mut Value| {
+                value["diagnostics"]["measurements"] =
+                    json!([{ "name": "denoiseDevicePeakDelta", "unit": "bytes", "value": 80 }])
+            },
+        ] {
+            let mut mutant = valid.clone();
+            mutate(&mut mutant);
+            assert!(
+                load_bundle(&bundle(mutant.clone())).is_err(),
+                "accepted mutant {mutant}"
+            );
+        }
+        // A runtime observation still satisfies runtime completion's exact-case obligations.
+        let mut raw: Value = serde_json::from_str(PACKAGED_MEMORY_CALIBRATION_EVIDENCE).unwrap();
+        let runtime = raw["records"]
+            .as_array_mut()
+            .unwrap()
+            .iter()
+            .find(|record| record["status"] == "runtime_complete" && record["backend"] == "candle")
+            .unwrap()
+            .clone();
+        let runtime = accounting_record(runtime);
+        let loaded = load_bundle(&bundle(runtime)).expect("typed runtime accounting completion");
+        assert!(loaded.records.is_empty());
+        assert_eq!(loaded.observed_accounting_records.len(), 1);
     }
 
     #[test]

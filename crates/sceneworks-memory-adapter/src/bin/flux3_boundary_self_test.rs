@@ -71,9 +71,36 @@ pub(super) fn current_exe_sha256() -> Result<String, String> {
     Ok(sha256_hex(&bytes))
 }
 
+pub(super) fn render_boundary_guarded(
+    plan: &Plan,
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    observed: &mut dyn FnMut(protocol::ReferencePhase),
+    reserve: &mut dyn FnMut(&Plan, &GenerationRequest) -> Result<Value, String>,
+) -> Result<Value, String> {
+    // The guarded CPU self-test never starts a hardware collector. Keep its
+    // tensor-neutral seam while exercising the production permit/render loop.
+    render_guarded(
+        plan,
+        generator,
+        context,
+        &mut |phase| {
+            observed(phase);
+            Ok(())
+        },
+        &mut || Ok(()),
+        reserve,
+    )
+}
+
 pub(crate) fn native_boundary_self_test(request: &Value, lane: &str) -> Result<Value, String> {
     guard(&|key| std::env::var(key).ok())?;
-    run_self_test(request, lane, render_guarded, &current_exe_sha256()?)
+    run_self_test(
+        request,
+        lane,
+        render_boundary_guarded,
+        &current_exe_sha256()?,
+    )
 }
 
 /// Counting, tensor-neutral generator: records every `generate` and its order relative to permit
