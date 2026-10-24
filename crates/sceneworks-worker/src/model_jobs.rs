@@ -6074,13 +6074,25 @@ async fn run_linked_checkpoint_import_job(
                 .ok(),
         )
         .map(|(root, parts)| root.join(parts));
-    let context = import_plan_context(
+    let context = match import_plan_context(
         api,
         settings,
         job,
         linked_file.as_deref().unwrap_or(Path::new("")),
     )
-    .await?;
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+    };
     let root_id = root_id.to_owned();
     let relative_path = relative_path.to_owned();
     // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
@@ -6395,7 +6407,7 @@ async fn recover_committed_h3_import(
         .semantic_digest()
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let duplicates = store
-        .duplicates_of(&semantic, &checkpoint_id)
+        .duplicates_of_plan(&resolved.plan, &checkpoint_id)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     entry.insert("importPlan".into(), json!({"checkpointId":checkpoint_id,"planId":resolved.plan.plan_id,"semanticDigest":semantic}));
     let classification = base_weight_manifest_classification(&primary);
@@ -6871,13 +6883,25 @@ pub(crate) async fn run_model_import_job(
     // behind it, so a caller that reaches `finalize` by any other route is still checked.
     let declared_sha256 =
         optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
-    let context = import_plan_context(
+    let context = match import_plan_context(
         api,
         settings,
         job,
         imported_model_file.as_deref().unwrap_or(&staging_dir),
     )
-    .await?;
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+    };
     let install = match ingest.finalize_with_context(
         &primary_relative,
         declared_sha256.as_deref(),

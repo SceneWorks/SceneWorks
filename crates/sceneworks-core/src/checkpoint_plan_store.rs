@@ -2168,8 +2168,7 @@ impl CheckpointPlanStore {
         };
         // Reported against the inventory as it stands BEFORE this record is published, so a
         // recompile of the same checkpoint never reports itself as its own duplicate.
-        let duplicate_checkpoint_ids =
-            self.duplicates_of(&record.summary.semantic_digest, &checkpoint_id)?;
+        let duplicate_checkpoint_ids = self.duplicates_of_plan(&plan, &checkpoint_id)?;
 
         self.persist_plan(&plan)?;
         self.persist_bindings(&bindings)?;
@@ -2180,6 +2179,34 @@ impl CheckpointPlanStore {
             plan,
             duplicate_checkpoint_ids,
         })
+    }
+
+    /// Same bytes and execution semantics, regardless of provenance-only declarations. Read
+    /// immutable plans rather than changing inventory digests or rewriting historical identities.
+    pub fn duplicates_of_plan(
+        &self,
+        plan: &ImportPlanV1,
+        exclude_checkpoint_id: &str,
+    ) -> Result<Vec<String>, CheckpointPlanError> {
+        let digest = plan.duplicate_equivalence_digest()?;
+        let mut duplicates = Vec::new();
+        for record in self.inventory()?.records {
+            if record.checkpoint_id == exclude_checkpoint_id {
+                continue;
+            }
+            // Duplicate reporting is advisory, not load admission. An unavailable or tampered
+            // unrelated plan is not evidence of equivalence and must not block a new import.
+            let Ok(candidate) = self.plan(&record.checkpoint_id, &record.plan.plan_id) else {
+                continue;
+            };
+            if record.validate_loaded_plan(&candidate).is_err() {
+                continue;
+            }
+            if candidate.duplicate_equivalence_digest()? == digest {
+                duplicates.push(record.checkpoint_id);
+            }
+        }
+        Ok(duplicates)
     }
 
     /// Every persisted checkpoint other than `exclude_checkpoint_id` whose plan carries

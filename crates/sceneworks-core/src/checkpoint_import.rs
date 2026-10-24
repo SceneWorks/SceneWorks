@@ -1060,6 +1060,26 @@ impl ImportPlanV1 {
         Ok(identity(PLAN_SEMANTIC_DOMAIN, &self.semantic_form()?))
     }
 
+    /// Duplicate equivalence only; never a persisted plan commitment. Legacy-family declarations
+    /// add explanatory provenance, but H3 declarations also bind task partition and component
+    /// semantics that tensor shapes cannot establish. Preserve those, and every other context key.
+    /// An unknown historical H3 declaration stays distinct rather than inferring its partition.
+    pub fn duplicate_equivalence_digest(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        let mut context = self.context.clone();
+        let key = crate::model_artifacts::provenance::MODEL_DECLARATION_KEY;
+        if let Some(mut declaration) = context.remove(key) {
+            if self.family == crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY {
+                declaration["baseLineage"] = serde_json::json!({});
+                declaration["inheritedLicenseAcknowledgments"] = serde_json::json!([]);
+                context.insert(key.into(), declaration);
+            }
+        }
+        let mut semantic = self.semantic_form()?;
+        semantic.context = &context;
+        Ok(identity(PLAN_SEMANTIC_DOMAIN, &semantic))
+    }
+
     /// Identity that also binds each layer's exact physical owner, path, and provenance.
     pub fn source_binding_identity(&self) -> Result<String, CheckpointImportContractError> {
         self.validate()?;
