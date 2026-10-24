@@ -130,7 +130,7 @@ jobs:
           # 3) runner processes: ProcessId/Name/ExecutablePath ONLY (no CommandLine)
           $runnerProcs = @()
           try {
-            $runnerProcs = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe' OR Name='Runner.Worker.exe'" |
+            $runnerProcs = @(Get-CimInstance Win32_Process -Filter "Name='Runner.Listener.exe' OR Name='Runner.Worker.exe'" -Property ProcessId,Name,ExecutablePath |
               ForEach-Object {
                 [ordered]@{
                   process_id = [string]$_.ProcessId
@@ -194,20 +194,35 @@ jobs:
 
           # 6) hook config: ONLY ACTIONS_RUNNER_HOOK_JOB_STARTED/COMPLETED keys,
           #    from matched .env lines and Machine/User environment scopes only
+          #    (whole .env files are never dumped).
+          #    sc-26679 PARSER FIX: groups are NAMED and the value is read from
+          #    $Matches['value']. The first probe run printed $Matches[2] — the
+          #    (STARTED|COMPLETED) alternation token, NOT the configured value —
+          #    so every configured hook VALUE looked like the literal "COMPLETED"
+          #    and that run's hook/fence conclusions are INVALID. RAW configured
+          #    values are kept for path resolution only and are NEVER printed
+          #    (they may carry arguments); the JSON carries a redacted value.
           $hookCfg = @()
+          $rawHook = @{}
           $envKeys = @('ACTIONS_RUNNER_HOOK_JOB_STARTED', 'ACTIONS_RUNNER_HOOK_JOB_COMPLETED')
+          $hookLinePattern = '^\s*(?<key>ACTIONS_RUNNER_HOOK_JOB_(?:STARTED|COMPLETED))\s*=\s*(?<value>.*)$'
           foreach ($info in $rootInfo) {
             $root = [string]$info['root']
             $envFile = Join-Path $root '.env'
             if (Test-Path -LiteralPath $envFile) {
               try {
                 foreach ($line in @(Get-Content -LiteralPath $envFile)) {
-                  if ($line -match '^\s*(ACTIONS_RUNNER_HOOK_JOB_(STARTED|COMPLETED))\s*=\s*(.*)$') {
-                    $hookCfg += [ordered]@{
-                      source = 'runner-.env'
-                      root = $root
-                      key = $Matches[1]
-                      value = (ConvertTo-SafeString $Matches[2])
+                  if ($line -match $hookLinePattern) {
+                    $k = $Matches['key']
+                    $v = $Matches['value'].Trim()
+                    if ($v) {
+                      $rawHook["$root|$k"] = $v
+                      $hookCfg += [ordered]@{
+                        source = 'runner-.env'
+                        root = $root
+                        key = $k
+                        value = (ConvertTo-SafeString $v)
+                      }
                     }
                   }
                 }
@@ -219,6 +234,7 @@ jobs:
               try {
                 $v = [Environment]::GetEnvironmentVariable($k, $scope)
                 if ($v) {
+                  $rawHook["$scope|$k"] = $v
                   $hookCfg += [ordered]@{
                     source = "windows-env-$scope"
                     key = $k
@@ -229,27 +245,32 @@ jobs:
             }
           }
 
-          # 7) fence evidence: path + SHA256 + selected non-secret mechanism
-          #    names only; never the full script or any credential material
+          # 7) fence evidence from the RAW configured values: resolve an actual
+          #    hook script path (whole value, then each whitespace token with
+          #    quotes stripped — covers `powershell -File C:\hook.ps1 -Mode x`),
+          #    then report path + SHA256 + selected non-secret mechanism names
+          #    only. The full script, any credential material, and unresolved
+          #    configured values (may carry args) are never printed.
           $fence = @()
-          $seenHooks = @{}
-          foreach ($h in $hookCfg) {
-            $hp = ([string]$h['value']).Trim()
-            if (-not $hp) { continue }
-            if ($seenHooks.ContainsKey($hp)) { continue }
-            $seenHooks[$hp] = $true
+          $seenHookFiles = @{}
+          $configuredCount = @($rawHook.Keys).Count
+          foreach ($rk in @($rawHook.Keys)) {
+            $rv = [string]$rawHook[$rk]
             $hookFile = $null
-            foreach ($c in @($hp, (($hp -split '\s+')[0]).Trim('"'))) {
-              if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) { $hookFile = $c; break }
+            $cands = @($rv) + @($rv -split '\s+' | ForEach-Object { $_.Trim('"') }) + @([regex]::Matches($rv, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+            foreach ($c in ($cands | Select-Object -Unique)) {
+              if ($c -and ($c -match '\.(ps1|psm1|cmd|bat|exe|py|js)$') -and (Test-Path -LiteralPath $c -PathType Leaf)) { $hookFile = $c; break }
             }
             if (-not $hookFile) {
               $fence += [ordered]@{
-                hook_path = $hp
+                config_ref = $rk
                 status = 'ABSENT'
-                note = 'configured hook not present as a file (Test-Path only); no read attempted'
+                note = 'configured hook value does not resolve to an existing script file (Test-Path only); value not echoed'
               }
               continue
             }
+            if ($seenHookFiles.ContainsKey($hookFile)) { continue }
+            $seenHookFiles[$hookFile] = $true
             try {
               $sha = (Get-FileHash -LiteralPath $hookFile -Algorithm SHA256).Hash
               $ext = [System.IO.Path]::GetExtension($hookFile).ToLower()
@@ -305,9 +326,9 @@ jobs:
           if ($proven.Count -gt 0) {
             $overall = 'PROVEN'
             $overallScope = 'Global mutex name(s) + guard mechanisms observed by read-only scan of: ' + (($proven | ForEach-Object { $_['hook_path'] }) -join '; ')
-          } elseif ($fence.Count -gt 0) {
+          } elseif ($configuredCount -gt 0) {
             $overall = 'UNKNOWN'
-            $overallScope = 'hook file(s) exist but no Global mutex name matched the selected patterns; fence NOT proven and NOT inferred absent/safe. Patterns scanned: mutex ctor/WaitOne/ReleaseMutex, EventWaitHandle, lease folder path, lock file, gpu lease, nvidia-smi, gpu uuid, CUDA_VISIBLE_DEVICES'
+            $overallScope = "$configuredCount hook value(s) configured in the checked scopes but no Global mutex name matched the selected patterns; fence NOT proven and NOT inferred absent/safe. Configured raw values are not echoed; values that do not resolve to an existing script file are reported ABSENT. Patterns scanned: mutex ctor/WaitOne/ReleaseMutex, EventWaitHandle, lease folder path, lock file, gpu lease, nvidia-smi, gpu uuid, CUDA_VISIBLE_DEVICES"
           }
 
           $meta = [ordered]@{
@@ -354,4 +375,302 @@ jobs:
           Write-Output '===SC26679_PROBE_JSON_BEGIN==='
           $result | ConvertTo-Json -Depth 8
           Write-Output '===SC26679_PROBE_JSON_END==='
+          exit 0
+      - name: Collect read-only follow-up tenant/network/MIG/sshd metadata
+        shell: powershell
+        run: |
+          # sc-26679 FOLLOW-UP probe (CPU-ONLY, READ-ONLY). No GPU alloc, no
+          # network attempts (passive socket/route enumeration only), no
+          # secrets/private keys/complete .env, no host writes outside this
+          # job's own RUNNER_TEMP probe dirs, no process kill/suspend/contact.
+          # Win32_Process/Win32_Service are queried with explicit -Property
+          # lists so command-line material is never retrieved, let alone printed.
+          $ErrorActionPreference = 'Continue'
+          $ProgressPreference = 'SilentlyContinue'
+          $fuErrors = @()
+
+          function ConvertTo-Trim([object]$o, [int]$max = 200) {
+            $s = [string]$o
+            if ($s.Length -gt $max) { $s = $s.Substring(0, $max) }
+            return $s
+          }
+
+          # unique disposable HF dirs + offline flags (same hard fence as step 1)
+          $stamp = [guid]::NewGuid().ToString('N')
+          $rt = $env:RUNNER_TEMP
+          if ([string]::IsNullOrWhiteSpace($rt)) { $rt = Join-Path $env:TEMP 'sc26679-probe' }
+          $hfHome = Join-Path $rt "sc26679-followup-$stamp-hf-home"
+          $hfHub = Join-Path $rt "sc26679-followup-$stamp-hf-hub"
+          $hfData = Join-Path $rt "sc26679-followup-$stamp-hf-datasets"
+          try {
+            New-Item -ItemType Directory -Force -Path $hfHome, $hfHub, $hfData | Out-Null
+            $env:HF_HOME = $hfHome
+            $env:HF_HUB_CACHE = $hfHub
+            $env:HF_DATASETS_CACHE = $hfData
+            $env:HF_HUB_OFFLINE = '1'
+            $env:HF_DATASETS_OFFLINE = '1'
+            $env:TRANSFORMERS_OFFLINE = '1'
+          } catch {
+            $fuErrors += "hf-isolation: $($_.Exception.Message)"
+          }
+
+          # The two API tenants observed on the GPUs by run 40059712885:
+          # pid 19708 -> GPU index 0 (...bfc0), pid 42960 -> GPU index 1 (...fffe).
+          # Process and listen-socket collection is scoped to EXACTLY these PIDs.
+          $targetPids = @(19708, 42960)
+
+          # current GPU compute tenants (read-only nvidia-smi listing, as in step 1)
+          $currentApps = @()
+          $smiPath = (Get-Command nvidia-smi -ErrorAction SilentlyContinue).Source
+          if (-not $smiPath) {
+            $fuErrors += 'nvidia-smi not found in PATH'
+          } else {
+            $appsOut = $null; $appsExit = -1
+            try {
+              $appsOut = & $smiPath '--query-compute-apps=pid,gpu_uuid,process_name' '--format=csv,noheader' 2>&1
+              $appsExit = $LASTEXITCODE
+            } catch { $appsExit = -2; $fuErrors += "nvidia-smi: $($_.Exception.Message)" }
+            if ($appsExit -eq 0) {
+              foreach ($line in @($appsOut | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })) {
+                $p = $line.Split(',')
+                if ($p.Count -ge 3) {
+                  $currentApps += [ordered]@{ pid = $p[0].Trim(); gpu_uuid = $p[1].Trim(); process_name = $p[2].Trim() }
+                }
+              }
+            } else {
+              $fuErrors += "nvidia-smi compute-apps exit=$appsExit; $(ConvertTo-Trim (@($appsOut | ForEach-Object { [string]$_ }) -join ' | ') 300)"
+            }
+          }
+
+          # SAFE process identity for the target PIDs ONLY: start time, exe path,
+          # parent pid + parent name/path chain (<= 3 ancestors). The CIM query
+          # lists only these properties, so nothing else of the process is read.
+          $procInfo = @()
+          foreach ($tp in $targetPids) {
+            $entry = [ordered]@{}
+            $entry['requested_pid'] = [string]$tp
+            $entry['status'] = 'UNKNOWN'
+            try {
+              $p = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$tp" -Property ProcessId,Name,ExecutablePath,CreationDate,ParentProcessId -ErrorAction Stop
+              if ($null -eq $p) {
+                $entry['status'] = 'not_found'
+              } else {
+                $entry['status'] = 'present'
+                $entry['process_name'] = $p.Name
+                $entry['executable_path'] = $p.ExecutablePath
+                if ($p.CreationDate) {
+                  try { $entry['start_time_utc'] = ([datetime]$p.CreationDate).ToUniversalTime().ToString('o') }
+                  catch { $entry['start_time_utc'] = [string]$p.CreationDate }
+                } else { $entry['start_time_utc'] = $null }
+                if ($p.ParentProcessId) { $entry['parent_pid'] = [string]$p.ParentProcessId } else { $entry['parent_pid'] = $null }
+                $chain = @()
+                $cur = $p
+                for ($i = 0; $i -lt 3; $i++) {
+                  $ppid = $cur.ParentProcessId
+                  if (-not $ppid) { break }
+                  $par = $null
+                  try { $par = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ppid" -Property ProcessId,Name,ExecutablePath -ErrorAction Stop } catch { $par = $null }
+                  if ($null -eq $par) {
+                    $chain += [ordered]@{ pid = [string]$ppid; status = 'not_found_or_denied' }
+                    break
+                  }
+                  $chain += [ordered]@{ pid = [string]$ppid; name = $par.Name; executable_path = $par.ExecutablePath }
+                  $cur = $par
+                }
+                $entry['parent_chain'] = $chain
+              }
+            } catch {
+              $entry['status'] = 'access_denied'
+              $entry['error'] = ConvertTo-Trim $_.Exception.Message 160
+            }
+            $m = @($currentApps | Where-Object { $_['pid'] -eq [string]$tp })
+            if ($m.Count -gt 0) { $entry['current_gpu_context'] = @($m | ForEach-Object { $_['gpu_uuid'] }) }
+            else { $entry['current_gpu_context'] = 'none-listed' }
+            $procInfo += $entry
+          }
+
+          # passive LISTEN endpoints for the target PIDs ONLY (local socket table
+          # enumeration; no connections, probes or remote endpoints involved)
+          $listen = @()
+          foreach ($tp in $targetPids) {
+            $e = [ordered]@{ pid = [string]$tp }
+            $tcp = @(); $udp = @()
+            try {
+              $tcp = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                Where-Object { $_.OwningProcess -eq $tp } |
+                ForEach-Object { [ordered]@{ local_address = $_.LocalAddress; local_port = $_.LocalPort } })
+            } catch { $fuErrors += "tcp-listen $($tp): $(ConvertTo-Trim $_.Exception.Message 160)" }
+            try {
+              $udp = @(Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
+                Where-Object { $_.OwningProcess -eq $tp } |
+                ForEach-Object { [ordered]@{ local_address = $_.LocalAddress; local_port = $_.LocalPort } })
+            } catch { $fuErrors += "udp-endpoint $($tp): $(ConvertTo-Trim $_.Exception.Message 160)" }
+            $e['tcp_listen'] = $tcp
+            $e['udp_listen'] = $udp
+            $listen += $e
+          }
+
+          # non-loopback IPv4 addresses + default routes (host routing metadata)
+          $ip4 = @()
+          try {
+            $ip4 = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+              Where-Object { $_.IPAddress -notlike '127.*' } |
+              ForEach-Object { [ordered]@{ interface_alias = $_.InterfaceAlias; ip_address = $_.IPAddress; prefix_length = $_.PrefixLength } })
+          } catch { $fuErrors += "netipaddress: $(ConvertTo-Trim $_.Exception.Message 160)" }
+          $defaultRoutes = @()
+          try {
+            $defaultRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+              ForEach-Object { [ordered]@{ if_index = $_.ifIndex; interface_alias = $_.InterfaceAlias; next_hop = $_.NextHop; route_metric = $_.RouteMetric } })
+          } catch { $fuErrors += "netroute: $(ConvertTo-Trim $_.Exception.Message 160)" }
+
+          # NVIDIA MIG inventory: READ-ONLY supported queries only. Unsupported
+          # or denied queries are reported as n/a with their exit code, never
+          # as probe errors, and no MIG placement/enable operation is attempted.
+          $mig = [ordered]@{ note = 'read-only nvidia-smi queries only; unsupported or denied queries reported as n/a, not errors' }
+          if (-not $smiPath) {
+            $mig['mode_query'] = 'n/a'
+            $mig['mode_query_error'] = 'nvidia-smi not found in PATH'
+            $mig['devices'] = 'n/a'
+            $mig['profiles'] = 'n/a'
+          } else {
+            $modeOut = $null; $modeExit = -1
+            try {
+              $modeOut = & $smiPath '--query-gpu=index,uuid,mig.mode.current,mig.mode.pending' '--format=csv,noheader' 2>&1
+              $modeExit = $LASTEXITCODE
+            } catch { $modeExit = -2 }
+            if ($modeExit -eq 0) {
+              $mig['mode_query'] = @($modeOut | ForEach-Object { ConvertTo-Trim ([string]$_) 200 } | Where-Object { $_ })
+            } else {
+              $mig['mode_query'] = 'n/a'
+              $mig['mode_query_exit'] = $modeExit
+              $mig['mode_query_output'] = ConvertTo-Trim (@($modeOut | ForEach-Object { [string]$_ }) -join ' | ') 300
+            }
+            $devOut = $null; $devExit = -1
+            try { $devOut = & $smiPath 'mig' '-L' 2>&1; $devExit = $LASTEXITCODE } catch { $devExit = -2 }
+            if ($devExit -eq 0) {
+              $mig['devices'] = @($devOut | ForEach-Object { ConvertTo-Trim ([string]$_) 200 } | Where-Object { $_ })
+            } else {
+              $mig['devices'] = 'n/a'
+              $mig['devices_exit'] = $devExit
+            }
+            $lgipOut = $null; $lgipExit = -1
+            try { $lgipOut = & $smiPath 'mig' '-lgip' 2>&1; $lgipExit = $LASTEXITCODE } catch { $lgipExit = -2 }
+            if ($lgipExit -eq 0) {
+              $mig['profiles'] = @($lgipOut | ForEach-Object { ConvertTo-Trim ([string]$_) 200 } | Where-Object { $_ })
+            } else {
+              $mig['profiles'] = 'n/a'
+              $mig['profiles_exit'] = $lgipExit
+            }
+          }
+
+          # sshd availability (query only; no logins, no config or key changes):
+          # service state + port config candidates + actual passive listen
+          # sockets + host PUBLIC key fingerprints. Only *.pub files are read;
+          # private key files are never opened, and no key material is dumped.
+          $sshd = [ordered]@{}
+          $svcList = @()
+          try {
+            $svcList = @(Get-CimInstance -ClassName Win32_Service -Filter "Name='sshd' OR Name='ssh-agent'" -Property Name,DisplayName,State,Status,StartMode,StartName,ProcessId,PathName -ErrorAction SilentlyContinue)
+          } catch { $fuErrors += "sshd-service: $(ConvertTo-Trim $_.Exception.Message 160)" }
+          $sshd['scope'] = 'Win32_Service Name=sshd/ssh-agent; registry PortNumber candidates; sshd_config Port/ListenAddress lines; host *.pub SHA256 fingerprints (public files only)'
+          $sshdSvc = @($svcList | Where-Object { $_.Name -eq 'sshd' })
+          if ($sshdSvc.Count -eq 0) {
+            $sshd['present'] = 'ABSENT'
+          } else {
+            $sshd['present'] = 'PRESENT'
+            $s = $sshdSvc[0]
+            $exe = $null
+            if ($s.PathName) {
+              $pn = ([string]$s.PathName).Trim()
+              if ($pn.StartsWith('"')) {
+                if ($pn -match '^"([^"]+)"') { $exe = $Matches[1] }
+              } else { $exe = ($pn -split '\s+')[0].Trim('"') }
+            }
+            $sshd['service'] = [ordered]@{
+              name = $s.Name
+              display_name = $s.DisplayName
+              state = $s.State
+              status = $s.Status
+              start_mode = $s.StartMode
+              start_name = $s.StartName
+              process_id = if ($s.ProcessId) { [string]$s.ProcessId } else { $null }
+              executable_path = $exe
+            }
+            $portCfg = @()
+            foreach ($k in @('HKLM:\SYSTEM\CurrentControlSet\Services\sshd', 'HKLM:\SOFTWARE\OpenSSH')) {
+              try {
+                if (Test-Path -LiteralPath $k) {
+                  $v = (Get-ItemProperty -LiteralPath $k -Name PortNumber -ErrorAction SilentlyContinue).PortNumber
+                  $portCfg += [ordered]@{ key = $k; port_number = $(if ($null -ne $v) { [string]$v } else { $null }) }
+                } else { $portCfg += [ordered]@{ key = $k; present = $false } }
+              } catch { $portCfg += [ordered]@{ key = $k; error = ConvertTo-Trim $_.Exception.Message 120 } }
+            }
+            $cfgLines = @()
+            $cfgPath = 'C:\ProgramData\ssh\sshd_config'
+            try {
+              if (Test-Path -LiteralPath $cfgPath) {
+                $cfgLines = @(Select-String -LiteralPath $cfgPath -Pattern '^\s*(Port|ListenAddress)\s+(\S+)' | ForEach-Object {
+                  [ordered]@{ line_no = $_.LineNumber; directive = $_.Matches[0].Groups[1].Value; value = $_.Matches[0].Groups[2].Value }
+                })
+              } else { $cfgLines = 'file_absent' }
+            } catch { $cfgLines = "read_denied: $(ConvertTo-Trim $_.Exception.Message 120)" }
+            $sshd['port_config'] = [ordered]@{ registry = $portCfg; sshd_config_port_listen_lines = $cfgLines }
+            $sshdListen = @()
+            if ($s.ProcessId) {
+              try {
+                $sshdListen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                  Where-Object { $_.OwningProcess -eq $s.ProcessId } |
+                  ForEach-Object { [ordered]@{ local_address = $_.LocalAddress; local_port = $_.LocalPort } })
+              } catch { $fuErrors += "sshd-listen: $(ConvertTo-Trim $_.Exception.Message 160)" }
+            }
+            $sshd['listen_sockets'] = $sshdListen
+            $pubs = @()
+            try {
+              $sshDir = 'C:\ProgramData\ssh'
+              if (Test-Path -LiteralPath $sshDir) {
+                $pubs = @(Get-ChildItem -LiteralPath $sshDir -Filter 'ssh_host_*_key.pub' -File -ErrorAction SilentlyContinue | ForEach-Object {
+                  $fe = [ordered]@{ file = $_.Name; key_type = $null; sha256_fingerprint = $null }
+                  try {
+                    $first = [string](Get-Content -LiteralPath $_.FullName -TotalCount 1)
+                    $parts = $first.Trim() -split '\s+'
+                    if ($parts.Count -ge 2) {
+                      $fe['key_type'] = $parts[0]
+                      $bytes = [Convert]::FromBase64String($parts[1])
+                      $sha = [System.Security.Cryptography.SHA256]::Create()
+                      try { $hash = $sha.ComputeHash($bytes) } finally { $sha.Dispose() }
+                      $fe['sha256_fingerprint'] = 'SHA256:' + [Convert]::ToBase64String($hash).TrimEnd('=')
+                    }
+                  } catch { $fe['error'] = ConvertTo-Trim $_.Exception.Message 120 }
+                  $fe
+                })
+              } else { $pubs = 'dir_absent' }
+            } catch { $fuErrors += "hostkeys: $(ConvertTo-Trim $_.Exception.Message 160)" }
+            $sshd['host_public_key_fingerprints'] = $pubs
+          }
+
+          $fu = [ordered]@{
+            probe = 'sc-26679-cuda-guard-probe-followup'
+            purpose = 'READ-ONLY CPU-ONLY follow-up: tenant process identity (command lines, secrets, env and owning-user data never read), passive listen ports for the two known API PIDs only, non-loopback IPv4 + default routes, NVIDIA MIG read-only inventory, sshd availability incl. host PUBLIC key fingerprints; no GPU alloc, no network attempts, no private keys, no host writes outside RUNNER_TEMP'
+            utc_time = (Get-Date).ToUniversalTime().ToString('o')
+            runner_name = $env:RUNNER_NAME
+            hostname = [System.Net.Dns]::GetHostName()
+            cuda_visible_devices_env = $env:CUDA_VISIBLE_DEVICES
+            github_run_id = $env:GITHUB_RUN_ID
+            github_run_attempt = $env:GITHUB_RUN_ATTEMPT
+            github_ref = $env:GITHUB_REF
+            github_sha = $env:GITHUB_SHA
+            target_pids = @($targetPids | ForEach-Object { [string]$_ })
+            tenant_processes = $procInfo
+            tenant_listen_ports = $listen
+            current_gpu_compute_apps = $currentApps
+            non_loopback_ipv4 = $ip4
+            default_routes = $defaultRoutes
+            nvidia_mig = $mig
+            sshd = $sshd
+            probe_errors = @($fuErrors | Select-Object -Unique)
+          }
+
+          Write-Output '===SC26679_FOLLOWUP_JSON_BEGIN==='
+          $fu | ConvertTo-Json -Depth 8
+          Write-Output '===SC26679_FOLLOWUP_JSON_END==='
           exit 0
