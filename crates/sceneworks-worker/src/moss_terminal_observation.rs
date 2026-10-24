@@ -109,7 +109,7 @@ pub(crate) fn initialize(settings: &Settings) -> WorkerResult<()> {
 pub(crate) fn ready() -> WorkerResult<()> {
     if let Some(lock) = JOURNAL.get() {
         record(
-            &mut lock.lock().map_err(error)?,
+            &mut *lock.lock().map_err(error)?,
             "ready_after_bounded_startup_probe",
             None,
         )?;
@@ -118,7 +118,7 @@ pub(crate) fn ready() -> WorkerResult<()> {
 }
 pub(crate) fn heartbeat() -> WorkerResult<()> {
     if let Some(lock) = JOURNAL.get() {
-        record(&mut lock.lock().map_err(error)?, "heartbeat", None)?;
+        record(&mut *lock.lock().map_err(error)?, "heartbeat", None)?;
     }
     Ok(())
 }
