@@ -426,6 +426,12 @@ jobs:
       # this skip cannot quietly become a hole.
       - name: Workspace tests (excluding the NAX guard, which needs M5)
         run: cargo test -- --skip nax_16bit_sdpa_is_correct
+      # NO `-p sceneworks-worker` HERE (sc-26684 CI repair). Package selection decides the
+      # workspace feature union, exactly as the `image` comment in Cargo.toml warns: the step
+      # above builds the six default members, so `-p sceneworks-worker` resolves a narrower
+      # feature set and cargo recompiles every inference dependency before the test binary can
+      # run. Same default-member selection as the step above, `--lib` narrows only the targets
+      # that run, not the resolved features, so this reuses the warm build.
       - name: Run the synthetic MiniMax-H3 pruned Metal import forward
         timeout-minutes: 3
         run: |
@@ -437,7 +443,7 @@ jobs:
           export TRANSFORMERS_OFFLINE=1
           mkdir -p "$HF_HUB_CACHE"
           log="$HF_HOME/native-metal.txt"
-          cargo test --locked -p sceneworks-worker --lib minimax_h3_import_fixture::pruned_import_native_mlx_projection_smoke -- --exact --ignored --nocapture --test-threads=1 | tee "$log"
+          cargo test --locked --lib minimax_h3_import_fixture::pruned_import_native_mlx_projection_smoke -- --exact --ignored --nocapture --test-threads=1 | tee "$log"
           node -e "const text=require('node:fs').readFileSync(process.argv[1],'utf8'); if(!/test result: ok\\. 1 passed; 0 failed; 0 ignored;/.test(text)||!text.includes('minimax_h3_import_fixture::pruned_import_native_mlx_projection_smoke')) throw new Error('exact native pruned Metal fixture did not execute once');" "$log"
 
       # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
