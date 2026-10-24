@@ -122,7 +122,12 @@ on:
         type: choice
         required: false
         default: legacy
-        options: [legacy, facts-and-projections, consumer-assertions]
+        options: [legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact]
+      run_moss_native_validation:
+        description: "Run the four #[ignore]d MOSS native API tests (tests::moss_training_native) once, manually, with receipts. Exclusive with every other dispatch selector: mixed inputs fail before compiler setup"
+        required: false
+        type: boolean
+        default: false
       source_sha:
         description: "Exact SceneWorks commit for explicit verification profiles"
         type: string
@@ -256,7 +261,7 @@ jobs:
   # push / pull_request runs reach this job already path-filtered by the triggers, so it re-answers
   # `true` for them; that is a couple of cheap seconds to keep one code path rather than two.
   changes:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation) }}
     uses: ./.github/workflows/changed-paths.yml
     with:
       lane: .github/workflows/macos-mlx.yml
@@ -353,7 +358,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy') && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
@@ -495,6 +500,324 @@ jobs:
           path: ${{ runner.temp }}/engine-capability-facts-verify
           if-no-files-found: error
 
+  # Explicit, non-gating producer for the ignored real-router browser fixture. It is
+  # hosted (never NAX), dispatch-only, and refuses every legacy calibration selector so
+  # selecting an artifact cannot accidentally spend self-hosted capacity or run a campaign.
+  browser-fixture-artifact:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.verification_profile == 'browser-fixture-artifact' && !inputs.run_memory_calibration && !inputs.run_five_rung_reference && !inputs.provision_qwen_snapshot && !inputs.provision_z_image_snapshot && !inputs.run_moss_native_validation }}
+    runs-on: macos-26
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: "false"
+      CARGO_PROFILE_TEST_STRIP: "false"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Initialize private browser fixture paths
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/browser-fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root/output"
+          {
+            echo "CARGO_TARGET_DIR=$root/target"
+            echo "BROWSER_FIXTURE_OUTPUT=$root/output"
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Validate browser fixture producer selection contracts
+        run: |
+          set -euo pipefail
+          node --version > "$BROWSER_FIXTURE_OUTPUT/producer-contract-node-version.txt"
+          node --test --test-reporter=spec scripts/platform-review-contracts.test.mjs scripts/remote-macos-verification.test.mjs | tee "$BROWSER_FIXTURE_OUTPUT/producer-contract-tests.txt"
+      - name: Fetch current prebuilt MLX metallib
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning::Exact prebuilt unavailable; compiling the pinned MLX source for this hosted artifact."
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build and identify the current API libtest fixture
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          mkdir -p "$BROWSER_FIXTURE_OUTPUT"
+          messages="$BROWSER_FIXTURE_OUTPUT/cargo-artifacts.jsonl"
+          cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json | tee "$messages"
+          python3 - "$messages" "$BROWSER_FIXTURE_OUTPUT/executable-path.txt" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          messages = pathlib.Path(sys.argv[1])
+          candidates = []
+          for line in messages.read_text().splitlines():
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              target = event.get("target", {})
+              executable = event.get("executable")
+              if (
+                  event.get("reason") == "compiler-artifact"
+                  and executable
+                  and target.get("name") == "sceneworks_rust_api"
+                  and "lib" in target.get("kind", [])
+              ):
+                  candidates.append(executable)
+          if len(candidates) != 1:
+              raise SystemExit(f"expected one sceneworks_rust_api libtest executable, got {candidates!r}")
+          executable = pathlib.Path(candidates[0])
+          if not executable.is_file() or not executable.stat().st_mode & 0o111:
+              raise SystemExit(f"resolved executable is not runnable: {executable}")
+          pathlib.Path(sys.argv[2]).write_text(str(executable) + "\n")
+          PY
+          executable="$(cat "$BROWSER_FIXTURE_OUTPUT/executable-path.txt")"
+          cp "$executable" "$BROWSER_FIXTURE_OUTPUT/sceneworks-rust-api-libtest"
+          companion="$BROWSER_FIXTURE_OUTPUT/build-companion.json"
+          if [ -n "${PMETAL_METALLIB_PATH:-}" ] && [ -f "$PMETAL_METALLIB_PATH" ]; then
+            metallib="$PMETAL_METALLIB_PATH"
+            companion_source="prebuilt"
+          else
+            candidates=()
+            for candidate in "$CARGO_TARGET_DIR"/debug/build/pmetal-mlx-sys-*/out/build/lib/mlx.metallib; do
+              [ -f "$candidate" ] && candidates+=("$candidate")
+            done
+            case "${#candidates[@]}" in
+              0) metallib="" ;;
+              1) metallib="${candidates[0]}"; companion_source="source-build-install" ;;
+              *) echo "::error::Ambiguous installed mlx.metallib build companions."; exit 1 ;;
+            esac
+          fi
+          if [ -n "$metallib" ]; then
+            cp "$metallib" "$BROWSER_FIXTURE_OUTPUT/mlx.metallib"
+            python3 - "$companion" "$metallib" "$companion_source" <<'PY'
+          import json
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "present": True,
+              "sourcePath": sys.argv[2],
+              "source": sys.argv[3],
+              "runtimeRequirementValidated": False,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          else
+            python3 - "$companion" <<'PY'
+          import json
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "present": False,
+              "runtimeRequirementValidated": False,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          fi
+          "$BROWSER_FIXTURE_OUTPUT/sceneworks-rust-api-libtest" --list > "$BROWSER_FIXTURE_OUTPUT/test-list.txt"
+          grep -Fx 'tests::browser_fixture::serve_owned_manual_browser_fixture: test' "$BROWSER_FIXTURE_OUTPUT/test-list.txt"
+      - name: Record fixture artifact identity
+        run: |
+          set -euo pipefail
+          python3 - "$BROWSER_FIXTURE_OUTPUT" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import platform
+          import re
+          import subprocess
+          import sys
+
+          output = pathlib.Path(sys.argv[1])
+          root = pathlib.Path.cwd()
+          def text(command):
+              return subprocess.check_output(command, text=True).strip()
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          lock = (root / "Cargo.lock").read_text()
+          pins = set(re.findall(r"https://github\.com/SceneWorks/inference\?rev=([0-9a-f]{40})#", lock))
+          if len(pins) != 1:
+              raise SystemExit(f"expected one inference pin, got {sorted(pins)!r}")
+          build_companion = json.loads((output / "build-companion.json").read_text())
+          files = ["sceneworks-rust-api-libtest", "cargo-artifacts.jsonl", "test-list.txt", "executable-path.txt", "producer-contract-node-version.txt", "producer-contract-tests.txt", "build-companion.json"]
+          if build_companion["present"]:
+              files.append("mlx.metallib")
+          source_head = text(["git", "rev-parse", "HEAD"])
+          source_clean = text(["git", "status", "--porcelain"]) == ""
+          if source_head != os.environ["GITHUB_SHA"] or not source_clean:
+              raise SystemExit("artifact source must be the exact clean workflow SHA")
+          manifest = {
+              "schemaVersion": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "sourceHead": source_head,
+              "sourceClean": source_clean,
+              "workflowDefinitionSha": os.environ["GITHUB_WORKFLOW_SHA"],
+              "workflowRunId": os.environ["GITHUB_RUN_ID"],
+              "workflowRunAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "workflowFileSha256": digest(root / ".github/workflows/macos-mlx.yml"),
+              "cargoLockSha256": digest(root / "Cargo.lock"),
+              "rustToolchainSha256": digest(root / "rust-toolchain.toml"),
+              "rustcVv": text(["rustc", "-vV"]),
+              "host": text(["rustc", "-vV"]).split("host: ", 1)[1].splitlines()[0],
+              "sdkPath": text(["xcrun", "--sdk", "macosx", "--show-sdk-path"]),
+              "deploymentTarget": os.environ["MACOSX_DEPLOYMENT_TARGET"],
+              "cargoTargetDir": os.environ["CARGO_TARGET_DIR"],
+              "cargoBuildJobs": os.environ["CARGO_BUILD_JOBS"],
+              "cargoIncremental": os.environ["CARGO_INCREMENTAL"],
+              "cargoProfileDevDebug": os.environ["CARGO_PROFILE_DEV_DEBUG"],
+              "cargoProfileTestDebug": os.environ["CARGO_PROFILE_TEST_DEBUG"],
+              "cargoProfileDevStrip": os.environ["CARGO_PROFILE_DEV_STRIP"],
+              "cargoProfileTestStrip": os.environ["CARGO_PROFILE_TEST_STRIP"],
+              "cargoProfileDevBuildOverrideDebug": os.environ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG"],
+              "cargoProfileTestBuildOverrideDebug": os.environ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG"],
+              "cargoProfileDevBuildOverrideStrip": os.environ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP"],
+              "cargoProfileTestBuildOverrideStrip": os.environ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP"],
+              "inferencePin": next(iter(pins)),
+              "package": "sceneworks-rust-api",
+              "target": "sceneworks_rust_api",
+              "manualFixture": "tests::browser_fixture::serve_owned_manual_browser_fixture",
+              "producerContractCommand": "node --test --test-reporter=spec scripts/platform-review-contracts.test.mjs scripts/remote-macos-verification.test.mjs",
+              "producerContractNodeVersion": (output / "producer-contract-node-version.txt").read_text().strip(),
+              "buildCompanion": build_companion,
+              "runtimeRequirementValidated": False,
+              "files": {name: {"sha256": digest(output / name), "bytes": (output / name).stat().st_size} for name in files},
+          }
+          (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          PY
+          test -f "$BROWSER_FIXTURE_OUTPUT/manifest.json"
+      - name: Upload complete browser fixture artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rust-api-browser-libtest-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BROWSER_FIXTURE_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # Explicit, non-gating manual validation of the four #[ignore]d MOSS native API
+  # tests (tests::moss_training_native::*_round_trip_cpu). Real native model
+  # execution is excluded from ordinary PR/main CI by those #[ignore] attributes;
+  # this is its only MLX route (memory: real-model-execution-is-not-normal-ci).
+  #
+  # Dispatch shape: `gh workflow run macos-mlx.yml --ref <ref> -f
+  # run_moss_native_validation=true` with every other input at its default
+  # (verification_profile stays `legacy`, all run_*/provision_* flags false).
+  # Exactly this one job runs for that shape — every other job's `if:` excludes
+  # run_moss_native_validation. Mixed inputs start this job but its early guard
+  # fails actionably before compiler setup; every unrelated job remains off.
+  # Hosted macos-26 only, never NAX, CPU-synthetic
+  # fixtures; no GPU pass is claimed. Receipts, raw logs and discovery lists are
+  # uploaded even when the run fails.
+  #
+  # Bounds are the EXISTING bounded CPU validation contract, fixed here with no
+  # dispatch knob: 180 seconds external per case (the case's internal 120s run +
+  # 30s join + 15s server teardown stay inside the test) and a 2 GiB AGGREGATE
+  # owned-RSS cap the driver enforces on BOTH macOS and Windows
+  # (MOSS_NATIVE_RSS_CAP_GB below). The 2 GiB is an ADMITTED CAP — the native
+  # fixture's HOST_CAP_BYTES memory-budget override in the inference checkout —
+  # not a measured peak and no claim that the API resident set fits. The driver
+  # refuses any other stated value, so the cap cannot be widened by an
+  # environment edit alone; widening follows a real recorded overrun on the
+  # remote runs and is a parent decision. Compile time is bounded separately by
+  # this job's timeout, not the per-case bound. The strip/debug-override build
+  # profile stays exclusive to browser-fixture-artifact: this lane builds with
+  # the same default profile the ordinary hosted macos-checks lane proves.
+  moss-native-api-mlx:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.run_moss_native_validation }}
+    runs-on: macos-26
+    permissions:
+      contents: read
+    timeout-minutes: 120
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse conflicting MOSS validation inputs before compiler setup
+        env:
+          VERIFICATION_PROFILE: ${{ inputs.verification_profile }}
+          RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
+          PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
+        run: |
+          set -euo pipefail
+          if [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then
+            echo '::error::MOSS native validation must be dispatched alone: use run_moss_native_validation=true with verification_profile=legacy and all calibration/provisioning flags false.'
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Initialize private MOSS validation paths
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/moss-native-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$root/output"
+          {
+            echo "CARGO_TARGET_DIR=$root/target"
+            echo "MOSS_NATIVE_OUTPUT=$root/output"
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - name: Fetch current prebuilt MLX metallib
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning::Exact prebuilt unavailable; compiling the pinned MLX source for this validation."
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+      - name: Run the MOSS native API validation (mlx)
+        env:
+          MOSS_NATIVE_RSS_CAP_GB: "2"
+          MOSS_NATIVE_WORKFLOW_FILE: .github/workflows/macos-mlx.yml
+        run: |
+          set -euo pipefail
+          node scripts/moss-native-api-validation.mjs --root . --output "$MOSS_NATIVE_OUTPUT" --backend mlx
+      - name: Upload MOSS native validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moss-native-api-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOSS_NATIVE_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 14
+
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     #
@@ -534,7 +857,7 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.verification_profile == 'legacy') && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
     # The default PR/main path needs only `nax`. A final same-repo PR to `main`
     # whose title starts with `[Mac2]`, and the resulting main push whose merge
     # subject starts with `[Mac2]`, use the `rw-mage` label to select nax-macos-2.
@@ -984,7 +1307,7 @@ jobs:
   # No legacy job runs for an explicit verification profile. The receipt is produced by the exact
   # canonical command, not by translating ordinary CI verdicts or skipping NAX on a hosted Mac.
   manual-verification:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.verification_profile != 'legacy' && github.repository == 'SceneWorks/SceneWorks' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.verification_profile == 'facts-and-projections' || inputs.verification_profile == 'consumer-assertions') && github.repository == 'SceneWorks/SceneWorks' && !inputs.run_moss_native_validation }}
     runs-on: [self-hosted, macOS, ARM64, rw-llm]
     permissions:
       contents: read

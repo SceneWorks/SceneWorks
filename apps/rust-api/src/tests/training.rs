@@ -3614,6 +3614,125 @@ async fn completed_training_job_registers_lora_with_provenance() {
             && item["provenance"]["trainingJobId"] == json!(job_id)));
 }
 
+/// A completed MOSS run enters the existing adapter library with the exact checkpoint, method and
+/// serialized product controls intact. Mutation: drop MOSS provenance, register a generic family, or
+/// lose fractional alpha/module selection ⇒ red.
+#[tokio::test]
+async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_training_base(&settings.data_dir, "moss_image_base");
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MOSS Library" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "moss.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "MOSS set",
+            "items": [{ "assetId": asset["id"], "caption": { "text": "mossStyle portrait" } }]
+        }),
+    )
+    .await;
+    let (_, targets) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = targets["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["id"] == "moss_image_base_lora")
+        .expect("MOSS Base target");
+    let mut config = target["defaults"].clone();
+    config["alpha"] = json!(0.5);
+    config["triggerWord"] = json!("mossStyle");
+    config["advanced"]["networkType"] = json!("lokr");
+    config["advanced"]["decomposeFactor"] = json!(4);
+    config["advanced"]["loraTargetModules"] = json!(["q", "layers.0.proj.ffn_up_gate"]);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": "moss_image_base_lora",
+            "datasetId": dataset["id"],
+            "config": config,
+            "outputName": "MOSS Base LoKr",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    let adapter_path = output_dir.join(
+        job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .expect("output file"),
+    );
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(&adapter_path);
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "MOSS LoKr saved.", "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["result"]["loraRegistered"], true);
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let entry = loras
+        .as_array()
+        .expect("library")
+        .iter()
+        .find(|entry| entry["name"] == "MOSS Base LoKr")
+        .expect("completed MOSS adapter appears in the library");
+    assert_eq!(entry["family"], "moss-image");
+    assert_eq!(entry["baseModel"], "moss_image_base");
+    assert_eq!(entry["networkType"], "lokr");
+    assert_eq!(
+        entry["provenance"]["baseModelRepo"],
+        "OpenMOSS-Team/MOSS-Image-Base"
+    );
+    assert_eq!(entry["source"]["provider"], "training");
+    assert_eq!(entry["provenance"]["trainingJobId"], job_id);
+    assert_eq!(entry["provenance"]["configSnapshot"]["alpha"], 0.5);
+    assert_eq!(
+        entry["provenance"]["configSnapshot"]["advanced"]["loraTargetModules"],
+        json!(["q", "layers.0.proj.ffn_up_gate"])
+    );
+}
+
 fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
     #[cfg(target_os = "macos")]
     {

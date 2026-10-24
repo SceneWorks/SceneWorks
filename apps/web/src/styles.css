@@ -5675,6 +5675,10 @@ input.dataset-name-input.boxed:focus {
   grid-template-columns: repeat(4, minmax(120px, 1fr));
 }
 
+.training-seed-control {
+  align-items: end;
+}
+
 /* .training-config-warnings (+ span) retired in sc-10654 — the training config chips are
    now the generic .validation-chip row (<ValidationSummary>), shared app-wide. */
 

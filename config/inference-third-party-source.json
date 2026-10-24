@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed for inference revision 1755167e, advancing the native MOSS-Image Base/SFT adapter capability from the preceding feature pin. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes. Both inventory files are byte-identical to the preceding scan: no candidate, marker, blob, or crate-prefix inventory changes were observed. The advance adds native Candle LoRA/LoKr training and adapter application plus the MLX LoKr generator declaration repair within existing provider crates. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
-  "inferenceRevision": "1755167e90fbc09edad644ba065da423d5a8fe41",
-  "auditDigest": "38736b56fc80ea7e761963ab993c015a1beff99760fd83b3cf266dcafd4a6a5c",
+  "_comment": "Audit inventory reviewed for inference revision 6b58dd02, the merged native MOSS-Image manual-only validation-routing policy change. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes, byte-identical to the preceding scan: this delta only adds `#[ignore]` annotations to native model proofs, a test-only Metal device-observation helper, and CI profile wiring, so no candidate, marker, classification or crate prefix changed. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
+  "inferenceRevision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
+  "auditDigest": "752bb509e3af06064597752f9dd2f66e42bc1663a734680d1a0f60364cdcce18",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "1755167e90fbc09edad644ba065da423d5a8fe41",
+    "revision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 772,
-    "populationSha256": "9cc69521b01c6c52c738c75d37573a8db4471a5438a7e588337bedcf4bf919f7"
+    "populationSha256": "752d5b5781dd4b07fb342fa1637f9a2f26aa4259603801d29f1612187161d329"
   },
   "portedSourceAreas": [
     {
@@ -980,7 +980,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "1755167e90fbc09edad644ba065da423d5a8fe41",
+    "revision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 113,
     "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"

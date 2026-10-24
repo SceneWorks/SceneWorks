@@ -628,6 +628,51 @@ pub fn latest_training_resume_step(output_dir: &Path, stem: &str) -> Option<u32>
         .max()
 }
 
+/// Discover a verified native MOSS state, distinguishing an absent checkpoint from
+/// a corrupt latest bundle. The caller must first confine the job output directory.
+/// Never infer resumability from progress events or from a folder name alone.
+pub fn latest_moss_training_resume_step(
+    output_dir: &Path,
+    file_name: &str,
+) -> WorkerResult<Option<u32>> {
+    gen_core::moss_image_training::recovery::resume_state_if_present(output_dir, file_name)
+        .map(|state| state.map(|state| state.step))
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "MOSS resume checkpoint verification failed: {error}"
+            ))
+        })
+}
+
+/// Prepare only the job-owned MOSS recovery bundles. Native verification and bounded
+/// removal own their layout; ordinary adapter checkpoints and other runs stay intact.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn prepare_moss_training_resume_dir(
+    resume: bool,
+    output_dir: &Path,
+    file_name: &str,
+) -> WorkerResult<Option<u32>> {
+    if resume {
+        return latest_moss_training_resume_step(output_dir, file_name)?.map(Some).ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "MOSS resume requested but no verified checkpoint exists; restart from step 0 instead."
+                    .to_owned(),
+            )
+        });
+    }
+    gen_core::moss_image_training::recovery::clear_resume_states(output_dir, file_name).map_err(
+        |error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not clear job-owned MOSS resume checkpoints: {error}"
+            ))
+        },
+    )?;
+    Ok(None)
+}
+
 /// Delete every resume bundle of `stem`'s run (`*.resume.safetensors` and its `.optim.safetensors`
 /// optimizer sibling) in `output_dir`, returning how many files were removed. The user-loadable
 /// `{stem}-stepNNNNNN.safetensors` adapter checkpoints are left alone. An absent directory is a no-op.
@@ -970,6 +1015,28 @@ mod training_resume_bundle_tests {
             .collect();
         left.sort();
         left
+    }
+
+    #[test]
+    fn moss_discovery_distinguishes_absence_from_a_corrupt_final_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            latest_moss_training_resume_step(dir.path(), "style.safetensors").unwrap(),
+            None
+        );
+        // Ordinary adapters, another run, and private staging are not resume candidates.
+        std::fs::write(dir.path().join("style-step000003.safetensors"), b"adapter").unwrap();
+        std::fs::create_dir(dir.path().join("other-step000006.moss-state")).unwrap();
+        std::fs::create_dir(dir.path().join(".style-step000009.moss-state.tmp")).unwrap();
+        assert_eq!(
+            latest_moss_training_resume_step(dir.path(), "style.safetensors").unwrap(),
+            None
+        );
+        // A final-named incomplete candidate MUST be surfaced, not ignored as no checkpoint.
+        std::fs::create_dir(dir.path().join("style-step000003.moss-state")).unwrap();
+        assert!(latest_moss_training_resume_step(dir.path(), "style.safetensors").is_err());
+        assert!(dir.path().join("style-step000003.safetensors").is_file());
+        assert!(dir.path().join("other-step000006.moss-state").is_dir());
     }
 
     #[test]

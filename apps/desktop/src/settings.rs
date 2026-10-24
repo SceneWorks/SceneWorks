@@ -256,10 +256,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub remote_password_set: bool,
     /// User-set GPU memory cap as a fraction (0.1–1.0) of total unified memory (epic 7819).
-    /// `None` = no limit (MLX keeps its own default budget). Stored as a fraction so it's portable
-    /// across machines; the MLX worker spawn derives `fraction × hw.memsize` bytes and applies it to
-    /// the MLX runtime process-globally, covering generations, upscales, AND LoRA training. macOS/MLX
-    /// only today — the candle/Windows path is tracked separately (sc-7826).
+    /// `None` means no explicit user target. macOS keeps the existing fraction × total
+    /// unified-memory byte request. CUDA MOSS training resolves the same fraction against
+    /// its actual selected device's total VRAM, independent of host RAM and other GPUs.
+    /// This is not an OS process quota or a promise that every CUDA job honors it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_limit_fraction: Option<f32>,
     /// App-owned resolved-model hot-cache policy. Nested serde defaults preserve upgrades from
@@ -888,24 +888,46 @@ pub fn get_app_settings() -> AppSettings {
 /// worker would just OOM on every job, so the slider clamps here (epic 7819).
 const MIN_GPU_MEMORY_FRACTION: f32 = 0.1;
 
-/// Persist the user's GPU memory cap as a fraction of total unified memory, or clear it. `None`
-/// (and a non-finite or ≥ 1.0 value — 100% is "use everything" = no constraint) clears the cap;
-/// otherwise the value is clamped to `[MIN_GPU_MEMORY_FRACTION, 0.99]`. Persists the fraction AND
-/// (macOS, sc-7824) writes the derived byte ceiling to the live-handoff file the running MLX worker
-/// re-reads between jobs, so the change applies within a couple of seconds with no worker restart.
-/// Returns the updated settings.
+static GPU_MEMORY_LIMIT_UPDATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Persist the existing global fraction and atomically update its live handoff.
+/// macOS keeps its unified-memory byte form; CUDA MOSS training resolves the
+/// fraction against its actual selected device. Changes apply to subsequent jobs.
+/// `None` and 100% clear the request; the existing slider floor remains unchanged.
 #[tauri::command]
 pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String> {
-    let mut settings = load_settings();
+    let _guard = GPU_MEMORY_LIMIT_UPDATE_LOCK
+        .lock()
+        .map_err(|_| "GPU memory settings update is unavailable".to_owned())?;
+    set_gpu_memory_limit_using(
+        fraction,
+        load_settings(),
+        save_settings,
+        write_gpu_memory_limit_for,
+    )
+}
+
+fn set_gpu_memory_limit_using(
+    fraction: Option<f32>,
+    mut settings: AppSettings,
+    mut save: impl FnMut(&AppSettings) -> Result<(), String>,
+    write_handoff: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<AppSettings, String> {
+    let previous = settings.gpu_memory_limit_fraction;
     settings.gpu_memory_limit_fraction = match fraction {
         Some(value) if value.is_finite() && value < 1.0 => {
             Some(value.clamp(MIN_GPU_MEMORY_FRACTION, 0.99))
         }
         _ => None,
     };
-    save_settings(&settings)?;
-    #[cfg(target_os = "macos")]
-    write_gpu_memory_limit_file();
+    save(&settings)?;
+    if let Err(error) = write_handoff(&settings) {
+        settings.gpu_memory_limit_fraction = previous;
+        if let Err(rollback) = save(&settings) {
+            return Err(format!("GPU memory handoff failed: {error}; restoring the persisted setting also failed: {rollback}"));
+        }
+        return Err(format!("GPU memory target was not applied: {error}"));
+    }
     Ok(settings)
 }
 
@@ -922,15 +944,77 @@ pub fn set_resolved_cache_policy(
     Ok(settings)
 }
 
-/// Write the resolved byte ceiling (or `0` for "no limit") to the live-handoff file the running MLX
-/// worker re-reads between jobs (epic 7819, sc-7824), so a slider change applies without a worker
-/// restart. Best-effort: a write failure just means the change waits for the next worker restart
-/// (which re-reads `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` from the persisted fraction anyway).
-#[cfg(target_os = "macos")]
-fn write_gpu_memory_limit_file() {
-    let bytes = gpu_memory_limit_bytes().unwrap_or(0);
+/// Initialize the handoff from durable settings when a native worker starts.
+/// Serialize with slider updates so startup cannot overwrite a newer user request.
+pub(crate) fn write_gpu_memory_limit_file() -> Result<(), String> {
+    let _guard = GPU_MEMORY_LIMIT_UPDATE_LOCK
+        .lock()
+        .map_err(|_| "GPU memory settings update is unavailable".to_owned())?;
+    let settings = load_settings();
     let path = sceneworks_core::app_paths::gpu_memory_limit_file(&crate::setup::config_dir());
-    let _ = std::fs::write(&path, bytes.to_string());
+    initialize_gpu_memory_limit_file_at(&path, &settings, write_gpu_memory_limit_for)
+}
+
+fn initialize_gpu_memory_limit_file_at(
+    path: &std::path::Path,
+    settings: &AppSettings,
+    write_handoff: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    if settings.gpu_memory_limit_fraction.is_some() {
+        return write_handoff(settings);
+    }
+    // No persisted desktop fraction is not itself an explicit Off interaction.
+    // Preserve an absent file (startup environment), or an existing explicit
+    // request, including zero. Never repair corrupt/unknown input to unlimited.
+    match std::fs::read_to_string(path) {
+        Ok(raw) => sceneworks_core::app_paths::parse_gpu_memory_limit_request(&raw).map(|_| ()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("GPU memory handoff is unavailable: {error}")),
+    }
+}
+
+fn write_gpu_memory_limit_for(settings: &AppSettings) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let body = unified_gpu_memory_limit_bytes(settings.gpu_memory_limit_fraction)?
+        .unwrap_or(0)
+        .to_string()
+        .into_bytes();
+    #[cfg(not(target_os = "macos"))]
+    let body = gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?;
+    let path = sceneworks_core::app_paths::gpu_memory_limit_file(&crate::setup::config_dir());
+    atomic_write(&path, &body)
+}
+
+fn gpu_memory_limit_handoff(
+    fraction: Option<f32>,
+    unified_total_bytes: Option<u64>,
+    unified: bool,
+) -> Result<Vec<u8>, String> {
+    let Some(fraction) = fraction else {
+        return Ok(b"0".to_vec());
+    };
+    if !fraction.is_finite() || !(MIN_GPU_MEMORY_FRACTION..1.0).contains(&fraction) {
+        return Err(
+            "Stored GPU memory target is invalid; choose a target from 10% to 100%.".to_owned(),
+        );
+    }
+    if !unified {
+        // No desktop maximum-VRAM conversion: each actual CUDA device resolves
+        // this same global fraction in its own native admission domain.
+        return serde_json::to_vec(&serde_json::json!({"fraction":fraction}))
+            .map_err(|error| error.to_string());
+    }
+    let total = unified_total_bytes
+        .filter(|total| *total > 0)
+        .ok_or_else(|| {
+            "Unified GPU memory is unavailable; the target was not applied.".to_owned()
+        })?;
+    // Preserve the existing macOS fraction-to-byte rounding policy.
+    let bytes = (total as f64 * fraction as f64).round() as u64;
+    if bytes == 0 {
+        return Err("GPU memory target resolves to zero bytes; choose a larger target.".to_owned());
+    }
+    Ok(bytes.to_string().into_bytes())
 }
 
 /// Read the MLX worker's latest GPU memory telemetry for the Settings readout (epic 7819, sc-7825).
@@ -943,20 +1027,26 @@ pub fn get_gpu_telemetry() -> Option<sceneworks_core::app_paths::GpuMemoryTeleme
     serde_json::from_str(&raw).ok()
 }
 
-/// The configured GPU memory ceiling in BYTES for the MLX worker, or `None` for no limit:
-/// `fraction × hw.memsize` (total unified memory). Read at worker spawn (`supervise_mlx_worker`)
-/// and passed as `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`, which `run_worker_loop` applies process-
-/// globally. macOS only — the fraction is meaningless without a unified-memory total; the
-/// candle/Windows path is tracked separately (sc-7826).
+/// The existing macOS explicit byte cap. Missing device metadata is an error,
+/// distinct from the user's explicit off request.
 #[cfg(target_os = "macos")]
-pub fn gpu_memory_limit_bytes() -> Option<u64> {
-    let fraction = load_settings().gpu_memory_limit_fraction?;
-    if !(fraction.is_finite() && (MIN_GPU_MEMORY_FRACTION..1.0).contains(&fraction)) {
-        return None;
+pub fn gpu_memory_limit_bytes() -> Result<Option<u64>, String> {
+    unified_gpu_memory_limit_bytes(load_settings().gpu_memory_limit_fraction)
+}
+
+#[cfg(target_os = "macos")]
+fn unified_gpu_memory_limit_bytes(fraction: Option<f32>) -> Result<Option<u64>, String> {
+    if fraction.is_none() {
+        return Ok(None);
     }
     let total =
-        run_capture("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse::<u64>().ok())?;
-    Some((total as f64 * fraction as f64).round() as u64)
+        run_capture("sysctl", &["-n", "hw.memsize"]).and_then(|value| value.parse::<u64>().ok());
+    let body = gpu_memory_limit_handoff(fraction, total, true)?;
+    let bytes = std::str::from_utf8(&body)
+        .map_err(|error| error.to_string())?
+        .parse::<u64>()
+        .map_err(|error| error.to_string())?;
+    Ok(Some(bytes))
 }
 
 /// First-run storage state for the splash Step 1 + the in-app wizard gate. The
@@ -1542,6 +1632,129 @@ pub fn get_gpu_info() -> GpuInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_handoff_preserves_mac_total_bytes_and_defers_cuda_device_fraction() {
+        use sceneworks_core::app_paths::{parse_gpu_memory_limit_request, GpuMemoryLimitRequest};
+        let mac = gpu_memory_limit_handoff(Some(0.5), Some(1000), true).unwrap();
+        assert_eq!(
+            parse_gpu_memory_limit_request(std::str::from_utf8(&mac).unwrap()).unwrap(),
+            GpuMemoryLimitRequest::Bytes(500)
+        );
+        let cuda = gpu_memory_limit_handoff(Some(0.5), None, false).unwrap();
+        assert_eq!(
+            parse_gpu_memory_limit_request(std::str::from_utf8(&cuda).unwrap()).unwrap(),
+            GpuMemoryLimitRequest::Fraction(0.5)
+        );
+        assert_eq!(
+            cuda,
+            gpu_memory_limit_handoff(Some(0.5), Some(u64::MAX), false).unwrap(),
+            "desktop max/host totals must not change a selected-device CUDA fraction"
+        );
+        assert_eq!(gpu_memory_limit_handoff(None, None, true).unwrap(), b"0");
+        assert_eq!(gpu_memory_limit_handoff(None, None, false).unwrap(), b"0");
+        assert!(gpu_memory_limit_handoff(Some(0.5), None, true).is_err());
+        assert!(gpu_memory_limit_handoff(Some(0.5), Some(0), true).is_err());
+        for fraction in [f32::NAN, f32::INFINITY, -0.5, 0.0, 0.01, 1.0] {
+            assert!(gpu_memory_limit_handoff(Some(fraction), Some(1000), true).is_err());
+            assert!(gpu_memory_limit_handoff(Some(fraction), None, false).is_err());
+        }
+        for fraction in [MIN_GPU_MEMORY_FRACTION, 0.99] {
+            assert!(gpu_memory_limit_handoff(Some(fraction), Some(1000), true).is_ok());
+            assert!(gpu_memory_limit_handoff(Some(fraction), None, false).is_ok());
+        }
+    }
+
+    #[test]
+    fn memory_startup_preserves_unset_environment_and_explicit_off_without_repairing_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gpu_memory_limit");
+        let settings = AppSettings::default();
+        let writes = std::cell::Cell::new(0);
+        initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            !path.exists(),
+            "unset desktop preference must preserve startup environment semantics"
+        );
+        for raw in ["0", "64", r#"{"fraction":0.5}"#] {
+            std::fs::write(&path, raw).unwrap();
+            initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+                writes.set(writes.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+        }
+        std::fs::write(&path, "corrupt").unwrap();
+        assert!(initialize_gpu_memory_limit_file_at(&path, &settings, |_| {
+            writes.set(writes.get() + 1);
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(writes.get(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "corrupt");
+        let configured = AppSettings {
+            gpu_memory_limit_fraction: Some(0.5),
+            ..AppSettings::default()
+        };
+        initialize_gpu_memory_limit_file_at(&path, &configured, |settings| {
+            let body = gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?;
+            atomic_write(&path, &body)
+        })
+        .unwrap();
+        assert_eq!(
+            sceneworks_core::app_paths::parse_gpu_memory_limit_request(
+                &std::fs::read_to_string(&path).unwrap()
+            )
+            .unwrap(),
+            sceneworks_core::app_paths::GpuMemoryLimitRequest::Fraction(0.5)
+        );
+    }
+
+    #[test]
+    fn memory_setting_rpc_path_persists_and_rolls_back_if_live_handoff_fails() {
+        let initial = AppSettings {
+            gpu_memory_limit_fraction: Some(0.25),
+            ..AppSettings::default()
+        };
+        let mut saves = Vec::new();
+        let error = set_gpu_memory_limit_using(
+            Some(0.5),
+            initial,
+            |settings| {
+                saves.push(settings.gpu_memory_limit_fraction);
+                Ok(())
+            },
+            |_| Err("fixture handoff write failed".to_owned()),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("not applied"));
+        assert_eq!(saves, [Some(0.5), Some(0.25)]);
+        let mut saves = Vec::new();
+        let updated = set_gpu_memory_limit_using(
+            None,
+            AppSettings::default(),
+            |settings| {
+                saves.push(settings.gpu_memory_limit_fraction);
+                Ok(())
+            },
+            |settings| {
+                assert_eq!(
+                    gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?,
+                    b"0"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.gpu_memory_limit_fraction, None);
+        assert_eq!(saves, [None]);
+    }
 
     #[test]
     fn linux_storage_inputs_require_absolute_paths() {

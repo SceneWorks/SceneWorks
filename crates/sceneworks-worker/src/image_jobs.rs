@@ -2005,6 +2005,23 @@ fn resolve_prepared_adapter_file(
     crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
 
+/// Opt-in test access to the exact prepared resolver used by MOSS. Keep both
+/// specs and source pins alive; this does not relax official model validation.
+#[cfg(all(
+    feature = "test-support",
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+pub(crate) fn prepared_adapter_selection_for_test(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<(Vec<gen_core::AdapterSpec>, Vec<gen_core::PinnedWeightsFile>)> {
+    let prepared = resolve_prepared_adapters(request, settings)?;
+    Ok((prepared.specs, prepared.pins))
+}
+
 /// The exact weight parser used by every adapter lane and by the gallery attribution renderer.
 #[cfg(any(
     target_os = "macos",

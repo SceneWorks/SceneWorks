@@ -51,12 +51,11 @@ pub struct Settings {
     /// (feature off) unless `SCENEWORKS_EXTERNAL_MODEL_ROOTS` is set, and always empty on
     /// macOS — see `sceneworks_core::external_roots`.
     pub external_model_roots: Vec<PathBuf>,
-    /// Soft ceiling, in bytes, on the shared/unified GPU memory the MLX runtime may use, from
-    /// `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES` (epic 7819, sc-7820). `0` (the default / unset) leaves
-    /// MLX at its own budget — byte-identical to prior behavior. When non-zero it is applied
-    /// **process-globally** at worker startup via `generator_cache::apply_gpu_memory_limit`, so a
-    /// single value covers generations, upscales, AND LoRA training in this process. macOS/MLX only;
-    /// inert on candle/CPU builds (the cross-platform path is tracked separately as sc-7826).
+    /// Configured GPU-memory ceiling in bytes, from `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`.
+    /// MOSS training transports a nonzero value through the native per-job config on both
+    /// backends, intersecting the device budget rather than substituting a host-RAM budget.
+    /// `0` means no additional per-job ceiling. Other job families retain their existing
+    /// backend budget policy; the shared setting alone is not proof of native admission.
     pub gpu_memory_limit_bytes: u64,
 }
 
@@ -96,6 +95,35 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
+    /// Latest explicit user cap, not MLX's derived default. A written zero clears
+    /// a startup cap; an absent handoff preserves the launch-time environment.
+    #[cfg(any(
+        test,
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    pub(crate) fn requested_gpu_memory_limit(
+        &self,
+    ) -> WorkerResult<sceneworks_core::app_paths::GpuMemoryLimitRequest> {
+        use sceneworks_core::app_paths::{parse_gpu_memory_limit_request, GpuMemoryLimitRequest};
+        if self.config_dir.as_os_str().is_empty() {
+            return Ok(GpuMemoryLimitRequest::Bytes(self.gpu_memory_limit_bytes));
+        }
+        let path = sceneworks_core::app_paths::gpu_memory_limit_file(&self.config_dir);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => parse_gpu_memory_limit_request(&raw).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "GPU memory limit handoff {} is invalid: {error}",
+                    path.display()
+                ))
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(GpuMemoryLimitRequest::Bytes(self.gpu_memory_limit_bytes))
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The effective resolved-model cache policy (sc-19707). The field itself is
     /// `cfg(not(test))` — the dozens of test fixtures that build `Settings` literally predate it —
     /// so under test the SAME environment `from_env` would have read is consulted directly. Both
@@ -247,5 +275,40 @@ pub(crate) fn env_bool(key: &str, default: bool) -> bool {
             _ => default,
         },
         Err(_) => default,
+    }
+}
+
+#[cfg(test)]
+mod memory_limit_tests {
+    use super::*;
+    use sceneworks_core::app_paths::GpuMemoryLimitRequest::{Bytes, Fraction};
+
+    #[test]
+    fn one_immutable_settings_value_observes_user_on_change_off_and_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(root.path().join("data"));
+        settings.config_dir = root.path().join("config");
+        settings.gpu_memory_limit_bytes = 999;
+        std::fs::create_dir_all(&settings.config_dir).unwrap();
+        let settings = settings;
+        let path = sceneworks_core::app_paths::gpu_memory_limit_file(&settings.config_dir);
+        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
+        for (raw, expected) in [
+            ("100", Bytes(100)),
+            ("200", Bytes(200)),
+            ("0", Bytes(0)),
+            (r#"{"fraction":0.5}"#, Fraction(0.5)),
+            (r#"{"fraction":0.75}"#, Fraction(0.75)),
+            ("0", Bytes(0)),
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(settings.requested_gpu_memory_limit().unwrap(), expected);
+        }
+        for invalid in ["", "-1", "1.5", "18446744073709551616", "unknown"] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(settings.requested_gpu_memory_limit().is_err(), "{invalid}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
     }
 }

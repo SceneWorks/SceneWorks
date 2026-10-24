@@ -1,15 +1,15 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "1755167e90fbc09edad644ba065da423d5a8fe41",
+  "inferenceRevision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
   "models": {
     "bernini:candle": {
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "7625a7a30404a3285c3922d54736d6911b8987c7367cdb1c24588eaa7c6367f7",
-      "closureFileCount": 277,
+      "digest": "ddfac82b664a1e00ab4b8f7b7b74248cf7727e7f4e953422aec745a584dab140",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -28,6 +28,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -48,6 +49,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -295,8 +297,8 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "8631231879b979d311fe9e6a5c793770fa948917ba73f28a70e140d16726d817",
-      "closureFileCount": 161,
+      "digest": "1b8ae80641600b53b00cd4547ab89fdae063005887b0f7d376d879db83041c8d",
+      "closureFileCount": 162,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -341,6 +343,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -467,8 +470,8 @@
         "crates/media/candle-gen/candle-gen-bernini/src/bernini.rs",
         "crates/media/candle-gen/candle-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "afb85da3e49ce274b4a239e93996aca7a04d3e41a3fcd3c11a3d6064363d2a4a",
-      "closureFileCount": 277,
+      "digest": "562715d36e8f64d7be3d789f3385866012addb09587397370d541ffa1b77b56d",
+      "closureFileCount": 279,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -487,6 +490,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -507,6 +511,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -755,8 +760,8 @@
         "crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
         "crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs"
       ],
-      "digest": "ca4ef6b9704314513ddc6f91f019e9c9564925f6c5118ad99ae55b5aef830b29",
-      "closureFileCount": 161,
+      "digest": "ce6b7fda6bd4b287303311dbed8a5287b076681713d2c84afa0b9ca93fa345f9",
+      "closureFileCount": 162,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -801,6 +806,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -927,8 +933,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "37d3244175aca9f9200476e5738d82f23b52ad394158b389c16a7d5d31938ff6",
-      "closureFileCount": 234,
+      "digest": "7d53bcc8aa73277938cdcb69efee997f6b170f35a84d860e4c0a6b7fda69d5e2",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -947,6 +953,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -967,6 +974,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -1173,8 +1181,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "e7d5339e5ab2a11cbd4340971ae5b0b8be570160125865e30919a9ac268c6734",
-      "closureFileCount": 238,
+      "digest": "3d4faa1315e7df872c43752506fc501db3a9fadc2652ff72a7c7151de0a028f3",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -1220,6 +1228,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -1422,8 +1431,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "333c7207fb6c08a9d4e9e29b8dd99a90f7316e5cba81a7ad2e705797de7ca230",
-      "closureFileCount": 234,
+      "digest": "8c4a6d2102d2825f5668a19492501b9f7f3fa1fd79907e428f68e0024d8721b4",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -1442,6 +1451,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -1462,6 +1472,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -1668,8 +1679,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "31b145ecc2ed80f9bfc405cbcf394492ab74fbfd6617139090fb9a54872596d7",
-      "closureFileCount": 238,
+      "digest": "f3766749cac4cb69af34abbea0fc73a6b93e59ddcaf37f2406170c1c0f0a0d09",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -1715,6 +1726,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -1917,8 +1929,8 @@
         "crates/media/candle-gen/candle-gen-chroma/src/lib.rs",
         "crates/media/candle-gen/candle-gen-chroma/src/memory_strategy.rs"
       ],
-      "digest": "8fd3bbbb9574a18609f863438250abf3e24217f64cf33e7e47ce050f0d3aeec4",
-      "closureFileCount": 234,
+      "digest": "7c6c3a54a9816fa760c4183f34b612d8921239477648a8c95d97fc764f17b2d7",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -1937,6 +1949,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -1957,6 +1970,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -2163,8 +2177,8 @@
         "crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-chroma/src/model.rs"
       ],
-      "digest": "abd1fd9c6c54a385070ffaf5008e4421a79cfb5c6caf238e41570f52f55c2f3c",
-      "closureFileCount": 238,
+      "digest": "97d1ed6abf023c6214278531e71ee6b74f005cc99f850bafbc1d24a1fab76baa",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -2210,6 +2224,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -2412,8 +2427,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "e2ad206b45a936956fde765a9b90a2777998e04979f0e4931173d51b798d2e40",
-      "closureFileCount": 344,
+      "digest": "a0c11167243415c55e47772a13d6a13626026e63030fa83b897d80acdf8827d4",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -2466,6 +2481,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -2486,6 +2502,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -2767,8 +2784,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "b290523fd9b252833b49bd3335e02b324ff25efbfd6e82aab5d9dbbbc2227a89",
-      "closureFileCount": 237,
+      "digest": "e7b2287d323e925f32bfe6ec9663951cea714f8466d2754465a29e64e5af4fd6",
+      "closureFileCount": 238,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -2844,6 +2861,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -3015,8 +3033,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "748826e12bd55ab9080c98c1b6334d3066bb6fe3e8610fd91a0776c39325549f",
-      "closureFileCount": 344,
+      "digest": "802c09e2fc64a1ebc3aae720dffc68e86749f34d7874ac5f5eb9e174f601410d",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -3069,6 +3087,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -3089,6 +3108,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -3371,8 +3391,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "8acb76681129f8bde8483a615a81ffbe7f69365e55bb952fb03fb68091822014",
-      "closureFileCount": 237,
+      "digest": "0bd6b82b7503a78413655e1267fba288ca730f44f6b5cabe992e0d7701ab2edb",
+      "closureFileCount": 238,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -3448,6 +3468,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -3620,8 +3641,8 @@
         "crates/media/candle-gen/candle-gen-flux2/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux2/src/memory_strategy.rs"
       ],
-      "digest": "4dbe7115f8ba8c47926f19de5a0b19e35eba893d37ab8cc3a3d5a45254086cda",
-      "closureFileCount": 344,
+      "digest": "209cb6cdf25f8ef86fad7b80d496bd05b6f5774c950145a230b02e63ae09e4ad",
+      "closureFileCount": 346,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -3674,6 +3695,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -3694,6 +3716,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -3977,8 +4000,8 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "db76afb08b9f9c972fcad2946e73e72c240a4b64ba473b4add46eead54f558a5",
-      "closureFileCount": 237,
+      "digest": "a65127f4e6460ad0d696828ba682f666c7b455561ec1815cc7d414d007cc201d",
+      "closureFileCount": 238,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -4054,6 +4077,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -4225,8 +4249,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "5c38d7576be52408fa991a2dd93bac4b81a480b730d4c583b779918227fe3e74",
-      "closureFileCount": 298,
+      "digest": "b56391f7ad01576ec5ac2257319beee1d4ecd4c54d21be41accbf6e05de77b02",
+      "closureFileCount": 299,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
         "crates/contracts/gen-core-testkit/src/memory_strategy.rs",
@@ -4269,6 +4293,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -4535,8 +4560,8 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "1ab8358f322037637793a46cf921d14ceb73013d166c67a10edd034e797a87a8",
-      "closureFileCount": 226,
+      "digest": "feac198b8cf6b96a3a4d19e60de3597132a64b2cd2f8e8f10b010ec82d7be524",
+      "closureFileCount": 227,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -4582,6 +4607,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -4772,8 +4798,8 @@
         "crates/media/candle-gen/candle-gen-flux/src/lib.rs",
         "crates/media/candle-gen/candle-gen-flux/src/memory_strategy.rs"
       ],
-      "digest": "e7511582051218cb10656cbcaf9b1d7e12524a3255873a4331be172689fb1674",
-      "closureFileCount": 298,
+      "digest": "f5fa68f88f95f570f5e7ae98cc5fe45921f3c5436c7450f8d2065edfe5ea673a",
+      "closureFileCount": 299,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
         "crates/contracts/gen-core-testkit/src/memory_strategy.rs",
@@ -4816,6 +4842,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -5082,8 +5109,8 @@
         "crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux/src/model.rs"
       ],
-      "digest": "b5853bc68e3fb687f9081edbb371f633558a9b5de1539a95123d75333f938a50",
-      "closureFileCount": 226,
+      "digest": "5c15ea9008dbcfdf1a3d6e96736ed19dfd180d42fc43d5efdc4d182911965c15",
+      "closureFileCount": 227,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -5129,6 +5156,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -5318,8 +5346,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "2304de3ec66575a0ad793d1afb1809f617888b4cfeeaf127f81f538668e4ee40",
-      "closureFileCount": 231,
+      "digest": "c681c82287467523de9d204438e924da10037e967666708bd04ec307fec1c1b2",
+      "closureFileCount": 233,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -5337,6 +5365,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -5350,6 +5379,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -5559,8 +5589,8 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "c7e9d8422cfc342823ea78bcf15260e60a199aedf5761ae55ecbe6c49fbf0b12",
-      "closureFileCount": 256,
+      "digest": "533f283b93ddbb257ed77d225ed0834e04089381f7c634c7ea924a8af43f3088",
+      "closureFileCount": 257,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -5636,6 +5666,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -5825,8 +5856,8 @@
         "crates/media/candle-gen/candle-gen-ideogram/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ideogram/src/memory_strategy.rs"
       ],
-      "digest": "d04bb85a6bbffb34c8cc9aa0cd1fdfd253df0254e956ff6ec36138ae441428b4",
-      "closureFileCount": 231,
+      "digest": "3339def69648e6c1809f07afca45c0af2f31abb0a9a071a9644fd8fbf01f5671",
+      "closureFileCount": 233,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -5844,6 +5875,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -5857,6 +5889,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -6066,8 +6099,8 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "d8efa0f79e9f4fc3946a194a7f34cd8abe0205b9d1f62a2d910c58056ef4585e",
-      "closureFileCount": 256,
+      "digest": "23e6876fd389d37b04c75dd07560331569aba97774671b8b3d033b7decf0ec19",
+      "closureFileCount": 257,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -6143,6 +6176,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -6333,8 +6367,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "08c88d5dae6e76f39a4592a6a99d02a752fd13a3d23f0a862860f376e9fc2264",
-      "closureFileCount": 274,
+      "digest": "f7ae5456c4ce1e616d92826d6fd58a5de3407683eb45e627cdb215402e8ea9f5",
+      "closureFileCount": 275,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -6373,6 +6407,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -6618,8 +6653,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "328ff3d352788924bd03bfb4fac8e5c5355b56119dce5e6a2835149c7aee31b4",
-      "closureFileCount": 164,
+      "digest": "2450166db7b2f4fdc307c4e4224254dd726f40d66dde9a52c8ea92408f427a22",
+      "closureFileCount": 165,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -6665,6 +6700,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -6793,8 +6829,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "4d324943d1e4b566bef1e7e211bf495a6b996151b4455b29234dc4d2031072a2",
-      "closureFileCount": 274,
+      "digest": "f3fc0dea575d75a21555b10e84df50effcda642349ddc34fee50034d9e67e818",
+      "closureFileCount": 275,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -6833,6 +6869,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -7078,8 +7115,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "771db0a41ac7aadac612392f90e22ec5cbffc5bab7b76492a441b54fb8b8858a",
-      "closureFileCount": 164,
+      "digest": "a0c2a33bbcc00fe9743780949a6077d5f812be6d9bf893804eef48d59cc7efc7",
+      "closureFileCount": 165,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -7125,6 +7162,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -7253,8 +7291,8 @@
         "crates/media/candle-gen/candle-gen-instantid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-instantid/src/model.rs"
       ],
-      "digest": "4bed5145553907baf23e3648bc95f4ba61bf967103f224bd158ccd78c6e8aabf",
-      "closureFileCount": 280,
+      "digest": "ba85ae5f1d133839e57f53d8d99b0b012081fe8ca6723e3c7d5981f2dabbd5cd",
+      "closureFileCount": 281,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -7293,6 +7331,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -7544,8 +7583,8 @@
         "crates/media/mlx-gen/mlx-gen-instantid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-instantid/src/model.rs"
       ],
-      "digest": "bd099793987dea88dbd5ea0c9702abf68d1586d95053b45fdc8cc84233c88ae0",
-      "closureFileCount": 171,
+      "digest": "e5a485a134af58e58094e18f77d319e445fe016fa5eb838ee2398037aa000bd7",
+      "closureFileCount": 172,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -7591,6 +7630,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -7726,8 +7766,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/model.rs"
       ],
-      "digest": "ba4b5c8d8531974472036a559c45d8d1020fe35d2021a29eb72b91fd9161a0aa",
-      "closureFileCount": 328,
+      "digest": "6900f04ee7dce68ad2531fe2cc071449bbd8bcabe984df4be84519afcc169d11",
+      "closureFileCount": 329,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -7813,6 +7853,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -8065,8 +8106,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "14ab6a85ec002d3da282eb590594a85feb091d79b0c36f369396cd1858b7047c",
-      "closureFileCount": 199,
+      "digest": "ea10bd698ab6bde4d3841f52c21ec4fcc494782bae501bdae5587d2cb97ec6e0",
+      "closureFileCount": 200,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -8155,6 +8196,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -8275,8 +8317,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/depth.rs",
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "91c3295bd724a3d5b7094703424a55a3ee634af7c33dd36439ebb53af94d081f",
-      "closureFileCount": 328,
+      "digest": "8023ca9816dacd8114d0eaeccb26d2dbfc048ded768b498f2eb80e3653159f97",
+      "closureFileCount": 329,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -8362,6 +8404,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -8614,8 +8657,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "c8aaab6c14bb8c8c0b2d3727c06226ac9199e7132f7454a8034d8eadf7f513f2",
-      "closureFileCount": 199,
+      "digest": "3ad6685f7882f5a0cad47f4101a6df52d5d64b90bc20d877f1e2097d1e5aa36a",
+      "closureFileCount": 200,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -8704,6 +8747,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -8824,8 +8868,8 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs"
       ],
-      "digest": "aa03fb8cf662bb60e67ff2656f71e394ae118665b3a8a078ed45d3d09f55ccf5",
-      "closureFileCount": 328,
+      "digest": "824ba2fe95f469bef20c18f133d16b6373cd417d5426511fa4a802326bf3aa31",
+      "closureFileCount": 329,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -8911,6 +8955,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -9163,8 +9208,8 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "5d0572accbf4cdfd0f554154f51831182f2acbef95fdfe8cde1030786359df70",
-      "closureFileCount": 199,
+      "digest": "e7a20a6fb06c4deaed748e0d1ad722d6ece3d8619515d74f983fd1b292d6e7b6",
+      "closureFileCount": 200,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -9253,6 +9298,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -9372,8 +9418,8 @@
         "crates/media/candle-gen/candle-gen-kolors/src/lib.rs",
         "crates/media/candle-gen/candle-gen-kolors/src/memory_strategy.rs"
       ],
-      "digest": "60da748708a21c93eae5d68a9ef6a6492fb359d8d2a9d95ced62693df4a053f4",
-      "closureFileCount": 288,
+      "digest": "0780304a1bc0d31e26ce20a5c90e9b3a03fdc93e8e623d4b4c95315bbd3072a1",
+      "closureFileCount": 289,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -9412,6 +9458,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -9670,8 +9717,8 @@
         "crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-kolors/src/registry.rs"
       ],
-      "digest": "24384229bedc5b55628c703d14b9a760bcc14abb6cda9f79949f4e1c64c2318f",
-      "closureFileCount": 174,
+      "digest": "3b3224bcd1912460d8385efc1eb53d1fc516ab584feb39402d535af401185a61",
+      "closureFileCount": 175,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -9717,6 +9764,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -9853,8 +9901,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "6e71ced4c307fb9087aa649427063de9eeb9264413e8538fe83c85b1164d1a17",
-      "closureFileCount": 294,
+      "digest": "d074506fb8076dd816cfa20cd60dda7d9783aec81c589c1d0c2c4e434e0db8e9",
+      "closureFileCount": 296,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -9874,6 +9922,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -9894,6 +9943,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -10157,8 +10207,8 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "761129f0dff85d5f0ebbd3211e30555a765987cd1f7e1acfff877c428c508d89",
-      "closureFileCount": 292,
+      "digest": "edf92a3eb4c2296ce517373f844b39401d800bee996479e8694f391c50ce9a52",
+      "closureFileCount": 293,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -10204,6 +10254,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -10458,8 +10509,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-krea/src/lib.rs"
       ],
-      "digest": "a5a20f23479389e6788742a3a42acc82c0aea1326c3ad64d569f06523fd61b4d",
-      "closureFileCount": 294,
+      "digest": "5e4bb34d754b9f787223b0169f7cfa8821c0594999817c13b676369356b67959",
+      "closureFileCount": 296,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -10479,6 +10530,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -10499,6 +10551,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -10762,8 +10815,8 @@
         "crates/media/mlx-gen/mlx-gen-krea/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea/src/model.rs"
       ],
-      "digest": "84b430b958b1b4bbd37dbdccdf13566f1d9caa54643f7601a13dc3c2b5762628",
-      "closureFileCount": 292,
+      "digest": "2dbb3d8643f72cd6ab0c8f421a0439381f24d179a86ad4896aeb8a1dd658fdc0",
+      "closureFileCount": 293,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -10809,6 +10862,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -11065,8 +11119,8 @@
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-krea-realtime/src/pipeline.rs"
       ],
-      "digest": "886ecf48a581b253cd6afed3facb3a6d0ee8a47084a836e477aa0da6f8384ed2",
-      "closureFileCount": 150,
+      "digest": "556bb92e7a4521b6eb453538a9fae7bfdb395bcc67f9de07d0520e4c936dbbc6",
+      "closureFileCount": 151,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -11111,6 +11165,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -11224,8 +11279,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "4c9e2cd263444a53fb0d2c2fcb05580f61eb9b64439c25e9b33931570fde5806",
-      "closureFileCount": 340,
+      "digest": "62a9f0e61bd05f1eba4797700349df03424351a75d98bf7e2de0daba7aa7c0f5",
+      "closureFileCount": 342,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11267,6 +11322,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -11287,6 +11343,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -11574,8 +11631,8 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "3a2bcd6fcb2352114f6d379e1cbffa57707e6e69b5ea7cb5453b090f6d5ba5e4",
-      "closureFileCount": 273,
+      "digest": "c4dfc0ef94d2af90161da46a87d1f99cbbbe7192570de4b7aded80634bc44373",
+      "closureFileCount": 274,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -11651,6 +11708,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -11856,8 +11914,8 @@
       "entryPoints": [
         "crates/media/candle-gen/candle-gen-lens/src/lib.rs"
       ],
-      "digest": "20d87d22dfe2ffadaae86965c4a594beb4a6f872242be54850b7cb262c0e902a",
-      "closureFileCount": 340,
+      "digest": "576d52e53c8d5ac9d746f208103a4f776aefa7f207685e4ff677871a1cc94c9c",
+      "closureFileCount": 342,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -11899,6 +11957,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -11919,6 +11978,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -12206,8 +12266,8 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "750e2cc103355d8a89b969ac105dbb3bfd893804efb31e3ae393a7a40f1a4d82",
-      "closureFileCount": 273,
+      "digest": "3b09d0b78befa33a9faf426813f68623d131c9a508dff1348ee7eeb951c0acea",
+      "closureFileCount": 274,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -12283,6 +12343,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -12490,8 +12551,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy.rs"
       ],
-      "digest": "7087e42853a92bc5c5adc4c776850ba22db7c1e0e070f16d59ad8cd654ea90e0",
-      "closureFileCount": 370,
+      "digest": "61c7b9f21b7773dd449477e4e53948acf9bcd9a158cd35ce2f22e5914f7539ca",
+      "closureFileCount": 372,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -12547,6 +12608,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/ltx_checkpoint.rs",
@@ -12568,6 +12630,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -12870,8 +12933,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "985265ddce3af37f0d9eaa0f464a4b10a3f5fec3e3a7acca4481ed4b3b57838d",
-      "closureFileCount": 250,
+      "digest": "708168d3c5d065703e8e07a014102d331c4ff2c51e7e99ab1ab2fd6051305497",
+      "closureFileCount": 251,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -12946,6 +13009,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -13131,8 +13195,8 @@
         "crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
         "crates/media/candle-gen/candle-gen-ltx/src/memory_strategy_2_5.rs"
       ],
-      "digest": "a072054871daa826d44f93be49ec525fc39f3eae2f3c6e84285ca8965ec70195",
-      "closureFileCount": 370,
+      "digest": "4deeb5ab08240960de34cc7d8b81cfdd59c7d35fc831d614389e5c9a501879e5",
+      "closureFileCount": 372,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -13188,6 +13252,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/ltx_checkpoint.rs",
@@ -13209,6 +13274,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -13511,8 +13577,8 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "18063071e20d72230eee2b09e6a0814739d2ea2e161e4866730c38df3788b3b3",
-      "closureFileCount": 250,
+      "digest": "1f91583595594c437a8d339f737b9966b221af7442f2a53dfc48ebf1ff6c71be",
+      "closureFileCount": 251,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -13587,6 +13653,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -13772,8 +13839,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "e9b01f68c9dff3719baa45d2c5db2a75357e8c8c23743b70bd17f0920a7e592f",
-      "closureFileCount": 234,
+      "digest": "d8313dc7f5bf0e72f7ec463713597aacd69699bf02bcf328d063b4691220788d",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -13792,6 +13859,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -13804,6 +13872,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -14018,8 +14087,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "414f8cff4d7055e6ff034ca5a95db1f6f0be10798542035da0519642378a77c0",
-      "closureFileCount": 233,
+      "digest": "6341baa4f61d44fc8421e6911f32ce90825c689307c0859b541a59ef52dc5d69",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -14065,6 +14134,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -14262,8 +14332,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "5979a34fc5c3940cf3259f9dce60ea7f2774475965a32d3b543988ff7095a59d",
-      "closureFileCount": 234,
+      "digest": "d0b73dae7924c4b7ab3802ecd5a63be182488fe2018b1c8064c6964d5f794be3",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -14282,6 +14352,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -14294,6 +14365,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -14508,8 +14580,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "0b0435ab68cd659725cbb771010359908f734a57261cf77b81fdfd95285e9787",
-      "closureFileCount": 233,
+      "digest": "c375d31ac9c46e445f143670fdff34439c422ffe6695ae635a9bf87cf9f53520",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -14555,6 +14627,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -14753,8 +14826,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "e13d55d09ef409e5c73ef15abfb7d09b015663f734abb6a84aa67a7e940f7954",
-      "closureFileCount": 234,
+      "digest": "e370f6684f4bb485c1e2131de93dad9139b347ab5400c72186ea19d700bc2d49",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -14773,6 +14846,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -14785,6 +14859,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -14999,8 +15074,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "f66ee1d91c1beb8d7c916adf43ec6e0c2fd687b41952501ea605022aedd93990",
-      "closureFileCount": 233,
+      "digest": "342c12120a5a80cf33fc448c32fcd778515e332a72af5783158a5c74d14b72ff",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -15046,6 +15121,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -15244,8 +15320,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "c203d59c44be6906edee145e285e08b22dc1fc58e15400e5cd3cbaf14c59d623",
-      "closureFileCount": 234,
+      "digest": "e1e85dbcc7f73bab6fc7a7fba790fa2997d0d62b8bf81348facb37a40df3067d",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -15264,6 +15340,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -15276,6 +15353,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -15490,8 +15568,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "19eb26eb27aa3b31eede9636f0746cee81ff298fa2c6163fdc3fbca3d3fd0e5c",
-      "closureFileCount": 233,
+      "digest": "7c81b669a81b9212bde8795a16a48e781754c88649d3a531852e6f8f3a80a764",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -15537,6 +15615,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -15735,8 +15814,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "c24a87284579416021ee58f7a7fbb013275d928bc0bb8f753d130b694d24731b",
-      "closureFileCount": 234,
+      "digest": "bdaf6649aa41ec927530a3fd3e450dc10e512397fbf85da9bfd8951478795611",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -15755,6 +15834,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -15767,6 +15847,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -15981,8 +16062,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "aa32892e7dfa35f3f43211d2166e6ee0b7ffd6107dfbad9f5436243a58f76140",
-      "closureFileCount": 233,
+      "digest": "5c39838c684719a54161d1eb2565c84cffbc6b5d61ed1dc12014202e34f7a6cd",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -16028,6 +16109,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -16225,8 +16307,8 @@
         "crates/media/candle-gen/candle-gen-mage/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-mage/src/pipeline.rs"
       ],
-      "digest": "5bf8f5952b6243f2032d52cd0e7c74a2a8d6d6b06cd4001e2994d1489f00d396",
-      "closureFileCount": 234,
+      "digest": "21e14c1b4e8d46aa59b5dce18f17d6e542a825563bad2d1fcaa5fc15c91085c1",
+      "closureFileCount": 236,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -16245,6 +16327,7 @@
         "crates/contracts/gen-core/src/generator.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -16257,6 +16340,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -16471,8 +16555,8 @@
         "crates/media/mlx-gen/mlx-gen-mage/src/model.rs",
         "crates/media/mlx-gen/mlx-gen-mage/src/pipeline.rs"
       ],
-      "digest": "a687162be6e8fc114af6bd3db2ba05fc9fad252cf8c068f564cc4ccdf7421974",
-      "closureFileCount": 233,
+      "digest": "20f0fcb4c5ed9106f955b218547454e9261310a111c494df0263982a0054788c",
+      "closureFileCount": 234,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -16518,6 +16602,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -16714,8 +16799,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "ba7213a1465ac31664bec462c16b17f0b44bcce58f6027e9f4ebade777c3e365",
-      "closureFileCount": 447,
+      "digest": "c72ba51ac56f6bf1533d296eae32dd1dfa7be1f188f141c81482a64a17abd662",
+      "closureFileCount": 448,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -16763,6 +16848,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -17171,8 +17257,8 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "00e0c7095a55de31c6cabec5511435cd137d25268e5fe8f2d43c91403df598f0",
-      "closureFileCount": 249,
+      "digest": "89031068d5f977160c2d51cbf23f9fe3704f7bfd39f9da526c3e20cf742d5fe0",
+      "closureFileCount": 250,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -17218,6 +17304,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -17431,8 +17518,8 @@
         "crates/media/candle-gen/candle-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "4e3290abc47ebdda75b640ec1ac96e59fdc656d0aabb0bbeb26cabd20d81e2cd",
-      "closureFileCount": 447,
+      "digest": "f1fd207979442bca7b91656d006c34bec6cd43433017636cee242764699cc6bd",
+      "closureFileCount": 448,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -17480,6 +17567,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -17889,8 +17977,8 @@
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/model.rs"
       ],
-      "digest": "727e22b110ad17ce2c61287a948f67ec7d7070a52eb88ffe40274e3a3ce25054",
-      "closureFileCount": 249,
+      "digest": "402a2ba38869d5f44218e6ec1ac2a4533be4590dd49b4266488e262252b984e5",
+      "closureFileCount": 250,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -17936,6 +18024,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -18149,8 +18238,8 @@
         "crates/media/candle-gen/candle-gen-pulid/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "d2105e16f9693fcfb4e43c76308403ac3b4cf82d80809e77ad6c9fa75587c448",
-      "closureFileCount": 260,
+      "digest": "197e174f785a7dbe172cec59c6a9a99441cd890c6a84b5124b5f4568940cc2b8",
+      "closureFileCount": 262,
       "closureFiles": [
         "crates/contracts/gen-core-testkit/src/lib.rs",
         "crates/contracts/gen-core-testkit/src/memory_strategy.rs",
@@ -18172,6 +18261,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -18192,6 +18282,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -18420,8 +18511,8 @@
         "crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-pulid/src/pulid_flux.rs"
       ],
-      "digest": "567e8f6470f1fbaa1c3b386a88e546a8a7231dc5c8389abf249862a13f685627",
-      "closureFileCount": 238,
+      "digest": "80fa2c19aac376b6fc966af1c99942d0413c35b84ba592a63be44acaedc8328e",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -18467,6 +18558,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -18668,8 +18760,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "827e7530912b6500401eaaaaf8ed3b48e951229f259ab14c771d2dbab7187e7a",
-      "closureFileCount": 243,
+      "digest": "6d7e63d3a99513d0fee6c7b48286f60c03f36b22d6f52efe4a1c02ef11aded4a",
+      "closureFileCount": 245,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -18689,6 +18781,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -18709,6 +18802,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -18921,8 +19015,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model.rs"
       ],
-      "digest": "58102930d9123296336296f52e2005c099e82a06dc5fea0845ffb861c997082c",
-      "closureFileCount": 204,
+      "digest": "cf73b9dea4eb4f27a5b0e5995687c5cd9e52604b015fe946faab080ee551615c",
+      "closureFileCount": 205,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -18968,6 +19062,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -19135,8 +19230,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "d4af1fdff41e094477a8cfd9e26e70cbdfdd01a1b3a1944f376f6c5811015926",
-      "closureFileCount": 341,
+      "digest": "7a85e7586a85c8c23310c642027c389ba5b63b7cae56f3d0119882a4908f5f2b",
+      "closureFileCount": 343,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -19188,6 +19283,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -19208,6 +19304,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -19486,8 +19583,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "38a07126b26096ab1bb06c18f526620cedbc39fca0ab64c21075bc579b5426c6",
-      "closureFileCount": 238,
+      "digest": "00013c1b5b4e74c216035191d13df7c096a9b90846da7750e8f38cef4440ff7e",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -19562,6 +19659,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -19734,8 +19832,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/lib.rs",
         "crates/media/candle-gen/candle-gen-qwen-image-2-1/src/memory_strategy.rs"
       ],
-      "digest": "e07ea566311f04c339f573debbbcfcabf2ae7ecb3a57ab3b0b9c16353b430fe0",
-      "closureFileCount": 341,
+      "digest": "8e715bbdfe2bd8fc9af509c548a6ee7ff7d7d03921ab94d6b9c8ee1635e7aada",
+      "closureFileCount": 343,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -19787,6 +19885,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -19807,6 +19906,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -20085,8 +20185,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "57776b29b626501df2cf68166744013662bbc3979ae5ee63bd3016aeffa944fa",
-      "closureFileCount": 238,
+      "digest": "9b016afb38797a0a5e06daf35425d8e79d16aca4ed58a614fb0c717c917304bc",
+      "closureFileCount": 239,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -20161,6 +20261,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -20334,8 +20435,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "afdaf9427957f8ef5c82a0362e8a589a37ee143f3a87c26b22f78665dd830b64",
-      "closureFileCount": 242,
+      "digest": "edb11b1644337901dbda10c79e880f027869637206f74f410d1732e9e570814c",
+      "closureFileCount": 244,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -20355,6 +20456,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -20375,6 +20477,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -20587,8 +20690,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "a4b9d6f92fdbb5d563f017f72f2356c38c74a2ac8841c27f0eadda2c1ffc3092",
-      "closureFileCount": 204,
+      "digest": "a9a95a20db02169add7eef430ab766a594bd1c9bc4e5a0ba02d6acd1fe9680e0",
+      "closureFileCount": 205,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -20634,6 +20737,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -20802,8 +20906,8 @@
         "crates/media/candle-gen/candle-gen-qwen-image/src/edit.rs",
         "crates/media/candle-gen/candle-gen-qwen-image/src/memory_strategy.rs"
       ],
-      "digest": "85d3a60e39ce5f613e9a50f533e218ed6fa430e0e3561d828f9a90e8efca31f7",
-      "closureFileCount": 242,
+      "digest": "7620491cbca11c0825b733583f4d56c6ae55f79b81f5b054cab06dafb1cbb5e0",
+      "closureFileCount": 244,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -20823,6 +20927,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -20843,6 +20948,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -21055,8 +21161,8 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image/src/model_edit.rs"
       ],
-      "digest": "552f9d7dc3db5f90da83b788e28e072bc43d2ac777c5db41be7592369e7bff97",
-      "closureFileCount": 204,
+      "digest": "6d33d8c8873248adec4ae1cc223a12dbb496dfe3b6365b82ddcb4c4a4731c74b",
+      "closureFileCount": 205,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -21102,6 +21208,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -21270,8 +21377,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "36ffd6c66a93382687a9232590d002d34a6c9fb188b38499878e289697e96e86",
-      "closureFileCount": 274,
+      "digest": "5c60f2be460d93fe45794516d7b9bcd2f21470c7117f322679d06eb254deb5cd",
+      "closureFileCount": 275,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -21310,6 +21417,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -21555,8 +21663,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "651e7b2b183d482b2c8d0b3437b778d92dffc79f4ce59bbfa45ac9150d77ee02",
-      "closureFileCount": 164,
+      "digest": "7d46431931067f0fcac3489035323bc24050d94dd9ea39b4e930d3c42b8a6a65",
+      "closureFileCount": 165,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -21602,6 +21710,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -21730,8 +21839,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "ddb0949b507bff8cc274d6349c44923e39b0e7276af77a60b75d1a870b6c6fd1",
-      "closureFileCount": 274,
+      "digest": "93f035db9559b5ed2fa220dabb9e4ec219be77523de14a8e0497c22aefc86e4c",
+      "closureFileCount": 275,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -21770,6 +21879,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22015,8 +22125,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "31262c2e47d3c74cf4225a8eee6c8dac172831970f0c71421ae8682a1ebd3f44",
-      "closureFileCount": 164,
+      "digest": "a76f1bfa4352aca3b5d7c5c0c1df58e72ed08af4116e3db966e85ebd33235b13",
+      "closureFileCount": 165,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -22062,6 +22172,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22189,8 +22300,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "52b41344565601a5149aa809959a0c3e4b8a9ecbf98f35de47aed8ae5e245cd2",
-      "closureFileCount": 214,
+      "digest": "51565f2cd80fba69e9f6295d02ec8e3024a46b10c4a8a76acee088212a7cc91b",
+      "closureFileCount": 216,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/audio_embed.rs",
@@ -22208,6 +22319,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -22227,6 +22339,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22414,8 +22527,8 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "980b955da65259520e358c304cd639ebb1fde34aded014ab17c6e685586a705a",
-      "closureFileCount": 104,
+      "digest": "f3ae6aeae7986b628e71b979d6fd751c6cd307b812cbf02ac813f02c8a5ddf62",
+      "closureFileCount": 105,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -22461,6 +22574,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22528,8 +22642,8 @@
         "crates/media/candle-gen/candle-gen-sana/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-sana/src/model.rs"
       ],
-      "digest": "526692d0c350e298ab71cb1d2796de3372777a268999f02ffbca2ed2074552e1",
-      "closureFileCount": 214,
+      "digest": "56833f1a35afc362609b72d536e0e4f996d570e00f0af75695b174a559ee09f2",
+      "closureFileCount": 216,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/audio_embed.rs",
@@ -22547,6 +22661,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -22566,6 +22681,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22753,8 +22869,8 @@
         "crates/media/mlx-gen/mlx-gen-sana/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sana/src/model.rs"
       ],
-      "digest": "6ea226bf7912832645396c405fa0703d3d6dd12dc3eea83c0cebdcb5180fc3bc",
-      "closureFileCount": 104,
+      "digest": "81f2f049f7218fc28912de9b16ef105679fcd37d1e370bafde484a7011c82dfa",
+      "closureFileCount": 105,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -22800,6 +22916,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -22867,8 +22984,8 @@
         "crates/media/candle-gen/candle-gen-scail2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "0a01be728045611cd865cea8d961eaa33ac60cb47b360d07829fe18026db9c33",
-      "closureFileCount": 267,
+      "digest": "d2b1329f7b521f076cf49f46f6c9c7f4e866c79d49a120a72cbbed2bbd2a32b0",
+      "closureFileCount": 269,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -22887,6 +23004,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -22907,6 +23025,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -23144,8 +23263,8 @@
         "crates/media/mlx-gen/mlx-gen-scail2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-scail2/src/pipeline.rs"
       ],
-      "digest": "5f940c132f5c374c8a06ebed41d9787ee147db2c242079f2b466fbed7b089e2f",
-      "closureFileCount": 151,
+      "digest": "fe02b9193489aa6c29af3079a1db61fff7f21524f0da0f013ceb84e7b59b4056",
+      "closureFileCount": 152,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -23190,6 +23309,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -23305,8 +23425,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "03fa54e6c6c495e6dd1930a13c5479be78c462c886e3054f926e0fd72987d958",
-      "closureFileCount": 239,
+      "digest": "b03f6d08dd02543ebb5943ff57790fbfb4de8e5581e91d5caa6bdcdf57448609",
+      "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -23325,6 +23445,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -23345,6 +23466,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -23556,8 +23678,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "9dddaef6226a21bbe82271dd785d8557e77ad3ab9450f1ebe35c021ce1ec536b",
-      "closureFileCount": 241,
+      "digest": "3916eaa9ba4ba1599343325d9e3a28345caf3e468871087dcde60abd3735f7ac",
+      "closureFileCount": 242,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -23603,6 +23725,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -23807,8 +23930,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "c25eac3805d62f936e22e825179f2b552249f8993c2e924a05bc172d3d21e239",
-      "closureFileCount": 239,
+      "digest": "b28ea11f0386fc8976258cc067d4faf20f9f51f3457cbf34e6d6263ca74dbaf3",
+      "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -23827,6 +23950,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -23847,6 +23971,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -24058,8 +24183,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "0be456ffd845774e03dc258d14aea0b1ed34dda356045ddf82278b3245cc0a23",
-      "closureFileCount": 241,
+      "digest": "167b90202978079eda7a319a450f884da5b40f2ea8a9319650fc05c6f1a02a93",
+      "closureFileCount": 242,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -24105,6 +24230,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -24309,8 +24435,8 @@
         "crates/media/candle-gen/candle-gen-sd3/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sd3/src/memory_strategy.rs"
       ],
-      "digest": "1f051280898869947d4d09fde149d09b8bc5b0f25dc7a155b985fa0022900631",
-      "closureFileCount": 239,
+      "digest": "07cb2533dcbf1ed4d06122e3e81433f0b17533e67bd620a363abcb8662e1d819",
+      "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -24329,6 +24455,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -24349,6 +24476,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -24560,8 +24688,8 @@
         "crates/media/mlx-gen/mlx-gen-sd3/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sd3/src/model.rs"
       ],
-      "digest": "a199af18872259e7ecd08970d20186c9fe6a2256e4cfc63cea9adaede4b688ba",
-      "closureFileCount": 241,
+      "digest": "4f460c45f4c97126eb2c94729f4fe38591e7ae44fd335186d60ea6eb7ee31f16",
+      "closureFileCount": 242,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -24607,6 +24735,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -24811,8 +24940,8 @@
         "crates/media/candle-gen/candle-gen-sdxl/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sdxl/src/memory_strategy.rs"
       ],
-      "digest": "3242fc5058fbc7daa8a79f9daf9ff211eddb75f3feae27e87539dcdabd0af106",
-      "closureFileCount": 274,
+      "digest": "d9e6257cb55ea4d5cbc65f9aac62f76d1c99332e188b642edf9512c77ecf3e90",
+      "closureFileCount": 275,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -24851,6 +24980,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -25095,8 +25225,8 @@
         "crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sdxl/src/model.rs"
       ],
-      "digest": "70ee5fb22f8eb19647d4ba8d841255ed7cf5c385877c2c04ff1364960697e8a7",
-      "closureFileCount": 164,
+      "digest": "ef15131902fa4e0528b546fbd0cedf22530cbb3aa1f80dd627b41f98bc2a3dfc",
+      "closureFileCount": 165,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -25142,6 +25272,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -25269,8 +25400,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "09c2a4facc58d643ba239c4a4e03b678390d6897d65c7d93a2938bf39d36ddc6",
-      "closureFileCount": 284,
+      "digest": "be09e8b687ef83cf764f46757ec9d80060377b66bb0de9fc7c9d1e2652484fea",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -25324,6 +25455,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -25563,8 +25695,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "39b9a2ba77dccd2412efe23420844ab5388c16c0b183504d069e1d18514f348a",
-      "closureFileCount": 181,
+      "digest": "909bd6170cdaed27b14181b4ab9f3512ff7e5fa3645591b52fccbf994fc8c1bf",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -25631,6 +25763,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -25754,8 +25887,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "009c6a93e340c5089cf33d2edd6ba0e491e573d98ee4413e337a28b9cdf9572f",
-      "closureFileCount": 284,
+      "digest": "88ee7e48a2f41b889668f8bebd213e78b58ffcb7c99e270947e41bd80401a56c",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -25809,6 +25942,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -26048,8 +26182,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "1a89a451c7b09febddb904bf205a35294a2d1f075412d9f3e89ab60e94150563",
-      "closureFileCount": 181,
+      "digest": "3eb71e60a47a54d3a995c45dc4d5a07e2036b9ad0d7e96f6a1edfb1f72c081a5",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -26116,6 +26250,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -26240,8 +26375,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "61c5e571092d863d7bc654727c8b6abd21502b1306c59c5b385dc07024c00cdb",
-      "closureFileCount": 284,
+      "digest": "1b7142707151dd11e33f6e43d558dfe07a191e9a625e317cbf3eb395d0a1c06e",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -26295,6 +26430,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -26535,8 +26671,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "bf3ea025c26ba606e009ba37c3886ab4d4fd06cdffb0e46904980af0257c8e58",
-      "closureFileCount": 181,
+      "digest": "5fba62987e3eb4a9c3b77e40db8ec6b9c04b78b7848dd9d830faf4f1bd9cf1aa",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -26603,6 +26739,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -26727,8 +26864,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "a6e063cea5c71e79050723dce926f3b27735cf833475b69da15ce4bb6cbced9a",
-      "closureFileCount": 284,
+      "digest": "ae9127de00202be81eb6ee8d716d50d1fccbad50d222e205495cceb129d7fc1a",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -26782,6 +26919,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -27022,8 +27160,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "acd89f333fe04e2fba96403b08d670c0628f79ce114b0941e7515d4d0f182848",
-      "closureFileCount": 181,
+      "digest": "773b8c2131347684515dc5f789787e907a72add29e0defb870d32116bef3fcbb",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -27090,6 +27228,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -27214,8 +27353,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "0d3c2ccf308d1e5cf1820f0a85bccc886308349095866f6a1e16314ce4368dd5",
-      "closureFileCount": 284,
+      "digest": "c44db06518e92d3b72bdd6a3c13d44002956427987cae759aed3bc816b3a2615",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -27269,6 +27408,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -27509,8 +27649,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "4e95b3eaf3a59ce2350621382d8e949692ecf02a530c1f4cb38d3217c814be0c",
-      "closureFileCount": 181,
+      "digest": "984f35ffec567d46e2d19905249cc1878e326862dc74d67040a42b898a59d9f2",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -27577,6 +27717,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -27701,8 +27842,8 @@
         "crates/media/candle-gen/candle-gen-sensenova/src/lib.rs",
         "crates/media/candle-gen/candle-gen-sensenova/src/memory_strategy.rs"
       ],
-      "digest": "e722cd0f3deb70eb54f5bbab67e06333c5be94a74d9d73b6cc040e3a033babc1",
-      "closureFileCount": 284,
+      "digest": "65f640ed52e86d068982d33308af46166806034dca6c8ca99a4cf174b8a5ca2c",
+      "closureFileCount": 285,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
         "crates/contracts/core-llm/src/capabilities.rs",
@@ -27756,6 +27897,7 @@
         "crates/contracts/gen-core/src/runtime.rs",
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -27996,8 +28138,8 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "15a65fca079ea03c4a8f0af2c7970e77c53a42bc81bcd1a8e189aac5f7e84058",
-      "closureFileCount": 181,
+      "digest": "9cea1e7cb1e177c6192d5e5e308427a8715c99205fad7c28c083495464d7600e",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
         "crates/contracts/core-llm/core-llm-testkit/src/draft_model.rs",
@@ -28064,6 +28206,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -28188,8 +28331,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/memory_strategy.rs"
       ],
-      "digest": "b9c1b4a8a703ddd709257f3ba5425804e268fe15f7dbfbf47cb6e633d56bad1a",
-      "closureFileCount": 255,
+      "digest": "9f6cc875b1195daf1707cc254ae4f7456f7e6713cc4264b2956ec36b7edf39b3",
+      "closureFileCount": 257,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -28208,6 +28351,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -28228,6 +28372,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -28454,8 +28599,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "962e7ecf95cccf19e640790abe61a47cfb6f8f886d57c78b9574439c0768dea2",
-      "closureFileCount": 139,
+      "digest": "cb708939e803d1078656afe92e21e44f002d3f4942b44e2a647bc4ebd7a29f59",
+      "closureFileCount": 140,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -28500,6 +28645,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -28604,8 +28750,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "ebca098c014b2b35e02ce8bb897ad4f64e098ff8a539241bede3ef19b3576475",
-      "closureFileCount": 255,
+      "digest": "9ebf4875ebb289598dea3c57e1aa6f41caacfbf5a692d22c8a8d980956880bcc",
+      "closureFileCount": 257,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -28624,6 +28770,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -28644,6 +28791,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -28870,8 +29018,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "812ed1250de20d9ec7ea6e5007c9a05cfdcaa58681b6cfba9428bbc27cfb06db",
-      "closureFileCount": 139,
+      "digest": "e0d8b14de2ea0c7e1de87e88915a919bb47ad6610a68652fa6bf51b6a8c166ba",
+      "closureFileCount": 140,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -28916,6 +29064,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -29020,8 +29169,8 @@
         "crates/media/candle-gen/candle-gen-wan/src/config.rs",
         "crates/media/candle-gen/candle-gen-wan/src/i2v_memory_strategy.rs"
       ],
-      "digest": "f2ab5f23550a36acfd37d294dd1b0b583aca94b6d21c22bd12a52c145d8c525d",
-      "closureFileCount": 255,
+      "digest": "60c866eca9125b4f22a6ee63f9c759af82263df8fe02f4c78450e1c6a3fb0aa2",
+      "closureFileCount": 257,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -29040,6 +29189,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -29060,6 +29210,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -29286,8 +29437,8 @@
         "crates/media/mlx-gen/mlx-gen-wan/src/i2v_memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-wan/src/model.rs"
       ],
-      "digest": "05755c6b74cc566ee6807446d2eadcbf5d68d382d94aa3f33f5061e29d68b415",
-      "closureFileCount": 139,
+      "digest": "2c6fd7dd5020e56f11ee26840bf31c24201fc11b601ab4648cc1932e2e481813",
+      "closureFileCount": 140,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -29332,6 +29483,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -29435,8 +29587,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/base.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "f818289e866ebd91411e663b03d52a99054f42187c3755268beb1ce71f4d47f0",
-      "closureFileCount": 260,
+      "digest": "1efa99742f949046e9578b7ee70ab0993d2f1bde58fcd1ba92614572c9f54c85",
+      "closureFileCount": 262,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -29456,6 +29608,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -29476,6 +29629,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -29705,8 +29859,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model_base.rs"
       ],
-      "digest": "8a39a8460df6248fe4ffe12118b09fb53a223e0ba5a6b2d40e94ba3a8386db1e",
-      "closureFileCount": 181,
+      "digest": "b2506094be55ad172ef326387ab0af96c5a55867a6e1b4fa3701e8fa1c8150a8",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -29752,6 +29906,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -29897,8 +30052,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "fafcce74a2033225b18dba7f9d7b9a57d186706b49fd1bacea546accd88ef374",
-      "closureFileCount": 262,
+      "digest": "f0661c28ad9dded25c49988576b645baada04ecaeafc1a745b810eb8da73cbf6",
+      "closureFileCount": 264,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -29918,6 +30073,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -29938,6 +30094,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -30170,8 +30327,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "f47c8e4f3efca94974f8f6d4bb3b81190fb76fd190424f3abddeae6983b94232",
-      "closureFileCount": 181,
+      "digest": "61eaa4f1fd0703b656f2891b2e73c6b29c91e48f67c951acb51b15daa985050a",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -30217,6 +30374,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -30361,8 +30519,8 @@
         "crates/media/candle-gen/candle-gen-z-image/src/lib.rs",
         "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
       ],
-      "digest": "adbda90d32fad4985f4b7ee482b91efb4f48c36c014a6eaa7c73fa2e1f0431f0",
-      "closureFileCount": 262,
+      "digest": "76aa5ee31d2167611b05440500a36a45c5e9fefa122538ae7e7c50ae6b9e1666",
+      "closureFileCount": 264,
       "closureFiles": [
         "crates/contracts/gen-core/src/approximation.rs",
         "crates/contracts/gen-core/src/attention_budget.rs",
@@ -30382,6 +30540,7 @@
         "crates/contracts/gen-core/src/guidance.rs",
         "crates/contracts/gen-core/src/hdr.rs",
         "crates/contracts/gen-core/src/image_embed.rs",
+        "crates/contracts/gen-core/src/imageops.rs",
         "crates/contracts/gen-core/src/latent.rs",
         "crates/contracts/gen-core/src/lib.rs",
         "crates/contracts/gen-core/src/media.rs",
@@ -30402,6 +30561,7 @@
         "crates/contracts/gen-core/src/text_embed.rs",
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
@@ -30633,8 +30793,8 @@
         "crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-z-image/src/model.rs"
       ],
-      "digest": "750f27e46e51a530aa5a3650563af3c879da69ef5acf8dea54a089a066a126c8",
-      "closureFileCount": 181,
+      "digest": "dba9dec885686d662aa82169a59037d83ed93e747bd80630ea61e048837f7387",
+      "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/src/constraint.rs",
         "crates/contracts/core-llm/src/error.rs",
@@ -30680,6 +30840,7 @@
         "crates/contracts/gen-core/src/tiling.rs",
         "crates/contracts/gen-core/src/tokenizer.rs",
         "crates/contracts/gen-core/src/train.rs",
+        "crates/contracts/gen-core/src/train/aspect_ratio.rs",
         "crates/contracts/gen-core/src/train/aux_schedule.rs",
         "crates/contracts/gen-core/src/train/body.rs",
         "crates/contracts/gen-core/src/train/face_loss.rs",
