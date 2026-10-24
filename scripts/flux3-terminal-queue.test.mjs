@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { SLOTS, EXECUTOR, STALE_MS, CAMPAIGN_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES, processIdentity, authenticatedTerminalCleanup, SAFE_REASON_CODES } from './flux3-terminal-queue.mjs';
-import { executionGroups, assertGroupPassed, validateQueueOperation, executeAdmittedQueueOperation } from './flux3-terminal-queue-campaign.mjs';
+import { executionGroups, executionScope, assertGroupPassed, validateQueueOperation, executeAdmittedQueueOperation } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
 const source = 'a'.repeat(40), inference = 'b'.repeat(40), digest = 'c'.repeat(64), NOW = 1000000;
@@ -687,4 +687,79 @@ test('published deadline is a bounded correlation only, never authentication and
     await t.restore();
     assert.equal(await authenticatedTerminalCleanup(dir, local, identity), true, 'restored proof still concludes');
   } finally { await rm(t.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+test('execution scope selects only the approved replay case while absence preserves the full campaign', async () => {
+  const plan = terminalPlan(await loadProductTargets());
+  const all = executionGroups(plan).flat();
+  const RETAINED = 'candle.distilled.representative-repro.bf16';
+  // Eligibility comes from the shipped plan, not a guessed literal.
+  const replay = plan.cases.find(c => c.backend === 'candle' && c.kind === 'replay');
+  assert.equal(replay.caseId, RETAINED);
+  const replayInvocations = all.filter(i => i.caseId === RETAINED).map(i => i.invocationId);
+  assert.deepEqual(replayInvocations, [`${RETAINED}.generation-1`, `${RETAINED}.generation-2`]);
+  // Legacy default: no caseIds means every approved Candle invocation, unchanged.
+  const full = executionScope({ operation: 'run' }, plan);
+  assert.equal(full.selected, null);
+  assert.deepEqual(full.groups.flat().map(i => i.invocationId), all.map(i => i.invocationId));
+  assert.equal(full.groups.flat().length, 21);
+  // Legacy compatibility: a recorded control that lists every Candle case scopes to the same full campaign.
+  const everyCandleCase = plan.cases.filter(c => c.backend === 'candle').map(c => c.caseId);
+  const legacy = executionScope({ operation: 'run', caseIds: everyCandleCase }, plan);
+  assert.deepEqual(legacy.groups.flat().map(i => i.invocationId), all.map(i => i.invocationId));
+  assert.equal(legacy.groups.flat().length, 21);
+  // Recorded control shape: an explicit case list scopes execution to exactly those plan invocations.
+  const scoped = executionScope({ operation: 'run', caseIds: [RETAINED] }, plan);
+  assert.deepEqual(scoped.selected, [RETAINED]);
+  assert.deepEqual(scoped.invocationIds, replayInvocations);
+  assert.equal(scoped.groups.length, 1);
+  assert.deepEqual(scoped.groups[0].map(i => i.invocationId), replayInvocations);
+  assert.deepEqual(scoped.cells.map(c => c.caseId), [RETAINED]);
+  // Every other case/invocation is out of scope, and none of them is a training/adaptation group.
+  assert(scoped.groups.flat().every(i => i.caseId === RETAINED));
+  assert(scoped.groups.flat().every(i => i.kind === 'product_generation'));
+  // Rejections: empty, duplicate, unknown, non-Candle, training, and a case with no product invocation.
+  const training = plan.cases.find(c => c.backend === 'candle' && c.kind === 'training');
+  const reject = plan.cases.find(c => c.backend === 'candle' && c.kind === 'reject');
+  const provision = plan.cases.find(c => c.backend === 'candle' && c.kind === 'provision');
+  const mlx = plan.cases.find(c => c.backend === 'mlx');
+  for (const [label, caseIds] of [
+    ['empty', []], ['duplicate', [RETAINED, RETAINED]], ['unknown', ['candle.not.a.case']],
+    ['non-string', [1]], ['mlx case', [mlx.caseId]], ['narrowed scope with training', [RETAINED, training?.caseId ?? 'candle.base.train-interrupt-resume-export-captioned.bf16']],
+  ]) assert.throws(() => executionScope({ operation: 'run', caseIds }, plan), undefined, label);
+  // A reject/provision case owns no product generation invocation, so it is not a runnable scope target.
+  for (const cell of [reject, provision]) if (cell) assert.throws(() => executionScope({ operation: 'run', caseIds: [cell.caseId] }, plan), /approved product invocation/);
+});
+
+test('scoped queued orchestration reserves ONLY the next replay generation and never another case', async () => {
+  // Fake GPU/provider boundary: the campaign scope is the real shipped derivation; the driver call
+  // and the single-use ledger are recorded stubs shaped like the production contracts.
+  const plan = terminalPlan(await loadProductTargets());
+  const control = { operation: 'run', caseIds: ['candle.distilled.representative-repro.bf16'] };
+  const scope = executionScope(control, plan);
+  const consumed = ['candle.distilled.representative-repro.bf16.generation-1'];
+  const reserved = [], runCalls = [], trainingCalls = [], resourceCalls = [];
+  for (const group of scope.groups) {
+    const invocation = group[0];
+    if (invocation.kind === 'product_generation') {
+      const ids = [...new Set(group.map(i => i.caseId))];
+      runCalls.push(ids);
+      // Production selects the replay continuation's NEXT invocation only: index 0 returns gen2.
+      const next = group.find(i => !consumed.includes(i.invocationId));
+      if (next) reserved.push(next.invocationId);
+      continue;
+    }
+    if (invocation.kind.startsWith('training')) trainingCalls.push(invocation.invocationId);
+    else resourceCalls.push(invocation.invocationId);
+  }
+  assert.deepEqual(runCalls, [['candle.distilled.representative-repro.bf16']], 'exactly one driver invocation, for the replay case');
+  assert.deepEqual(reserved, ['candle.distilled.representative-repro.bf16.generation-2'], 'exactly one new permit: generation-2');
+  assert.deepEqual(trainingCalls, [], 'no training/export/reload inside a scoped pilot');
+  assert.deepEqual(resourceCalls, [], 'no resource image inside a scoped pilot');
+  assert.equal(consumed.length, 1, 'historical generation-1 stays the only consumed id until the pilot actually spends');
+  // Invalid scope fails before any reservation/transition/child could happen: derivation is pure and
+  // throws before the campaign reaches admission, transition or the driver.
+  let reservedBeforeFailure = 0;
+  assert.throws(() => executionScope({ operation: 'run', caseIds: ['candle.unknown'] }, plan));
+  assert.equal(reservedBeforeFailure, 0);
 });
