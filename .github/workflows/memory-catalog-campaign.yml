@@ -74,12 +74,18 @@ on:
           - qwen-image-2-1-app-lifecycle
           - iris-mlx-real-weights
           - supra2-mlx-real-weights
+          - moss-edit-terminal
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
         required: false
         type: string
         default: ""
+      moss_terminal:
+        description: "MOSS only: closed JSON candidate/bundle identity and upload, execute or verify phase. See docs/moss-edit-terminal.md for exact fields."
+        required: false
+        type: string
+        default: "{}"
       qwen_app_runner_target:
         description: "App lifecycle only: primary selects rw-starvector/nax-macos; secondary selects rw-mage/nax-macos-2."
         required: false
@@ -238,6 +244,55 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
+  moss-dispatch:
+    if: ${{ inputs.profile == 'moss-edit-terminal' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      dispatch: ${{ steps.validate.outputs.dispatch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Validate exact MOSS source and closed dispatch JSON before native jobs
+        id: validate
+        env:
+          MOSS_DISPATCH: ${{ inputs.moss_terminal }}
+          MOSS_SOURCE_SHA: ${{ inputs.ref }}
+          MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from 'node:fs';
+          import { validateDispatchEnvelope } from './scripts/lib/moss-edit-terminal-actions.mjs';
+          const value=validateDispatchEnvelope(process.env.MOSS_DISPATCH,process.env.MOSS_SOURCE_SHA,process.env.MOSS_INFERENCE_SHA,process.env.GITHUB_SHA);
+          appendFileSync(process.env.GITHUB_OUTPUT,`dispatch=${JSON.stringify(value)}\n`);
+          NODE
+  moss-edit-terminal:
+    if: ${{ inputs.profile == 'moss-edit-terminal' }}
+    needs: moss-dispatch
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/moss-edit-terminal.yml
+    secrets: inherit
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      candidate_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).candidate_id }}
+      bundle_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).bundle_run_id }}
+      bundle_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).bundle_artifact_id }}
+      bundle_manifest_sha256: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).bundle_manifest_sha256 }}
+      phase: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).phase }}
+      upload_path: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).upload_path }}
+      upload_kind: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).upload_kind }}
+      execution_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).execution_run_id }}
+      execution_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).execution_run_attempt }}
+      review_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).review_artifact_id }}
+      review_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).review_run_id }}
   qwen-app-lifecycle:
     if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     permissions:

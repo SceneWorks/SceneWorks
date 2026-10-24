@@ -1,0 +1,450 @@
+# sc-26757 final campaign only. Dispatch after integrated review, inference main
+# merge, permanent pin and stationary clean paired sources. No PR/push trigger.
+name: MOSS Image Edit terminal campaign
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact stationary permanent-pin SceneWorks feature commit
+        required: true
+        type: string
+      inference_sha:
+        description: Exact final inference main commit pinned by source_sha
+        required: true
+        type: string
+      candidate_id:
+        description: Immutable campaign identity, shared by both native backends
+        required: true
+        type: string
+      bundle_run_id:
+        description: Actions run retaining the reviewed immutable campaign input bundle
+        required: false
+        type: string
+      bundle_artifact_id:
+        description: Exact campaign input artifact ID
+        required: false
+        type: string
+      bundle_manifest_sha256:
+        description: SHA256 of bundle-inventory.json covering every campaign input byte
+        required: true
+        type: string
+      phase:
+        description: Execute once, or verify actual retained evidence after review
+        required: true
+        type: choice
+        options: [upload, execute, verify]
+      upload_path:
+        description: Exact sealed local directory on nax-macos; upload only
+        required: false
+        type: string
+      upload_kind:
+        description: Upload bundle or retained review evidence
+        required: false
+        type: choice
+        options: [bundle, review]
+      execution_run_id:
+        description: Prior execute run ID, required only for verify
+        required: false
+        type: string
+      execution_run_attempt:
+        description: Exact prior execute attempt; never merge artifacts from different attempts
+        required: false
+        default: "1"
+        type: string
+      review_artifact_id:
+        description: Actual external and visual review artifact ID; verify only
+        required: false
+        type: string
+      review_run_id:
+        description: Run retaining the later review artifact; verify only
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      candidate_id:
+        required: true
+        type: string
+      bundle_run_id:
+        required: false
+        type: string
+      bundle_artifact_id:
+        required: false
+        type: string
+      bundle_manifest_sha256:
+        required: true
+        type: string
+      phase:
+        required: true
+        type: string
+      upload_path:
+        required: false
+        type: string
+      upload_kind:
+        required: false
+        type: string
+      execution_run_id:
+        required: false
+        type: string
+      execution_run_attempt:
+        required: false
+        default: "1"
+        type: string
+      review_artifact_id:
+        required: false
+        type: string
+      review_run_id:
+        required: false
+        type: string
+    secrets:
+      INFERENCE_READ_TOKEN:
+        required: false
+      SCENEWORKS_INFERENCE_READ_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+# Run-specific group never cancels another queued candidate or creates a hardware lock.
+concurrency:
+  group: moss-edit-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+env:
+  MOSS_SOURCE_SHA: ${{ inputs.source_sha }}
+  MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}
+  MOSS_CANDIDATE: ${{ inputs.candidate_id }}
+  MOSS_BUNDLE_SHA: ${{ inputs.bundle_manifest_sha256 }}
+  MOSS_SOURCE: ${{ github.workspace }}/source
+  MOSS_INFERENCE: ${{ github.workspace }}/inference
+  MOSS_BUNDLE: ${{ github.workspace }}/moss-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_RELEASE_STRIP: none
+jobs:
+  upload-inputs:
+    if: inputs.phase == 'upload'
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify exact owned local bytes on their actual preparation host
+        env:
+          MOSS_UPLOAD_PATH: ${{ inputs.upload_path }}
+          MOSS_UPLOAD_KIND: ${{ inputs.upload_kind }}
+        run: |
+          test "$RUNNER_NAME" = nax-macos
+          node source/scripts/moss-edit-terminal-actions.mjs validate-upload "$MOSS_UPLOAD_PATH" "$MOSS_UPLOAD_KIND" "$MOSS_BUNDLE_SHA" "$MOSS_SOURCE_SHA" "$MOSS_INFERENCE_SHA" "$MOSS_CANDIDATE"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-${{ inputs.upload_kind }}-${{ inputs.candidate_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.upload_path }}/
+          if-no-files-found: error
+          retention-days: 90
+  build-native:
+    if: inputs.phase == 'execute'
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [mlx, cuda]
+    runs-on: ${{ matrix.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 180
+    env:
+      MOSS_BACKEND: ${{ matrix.backend }}
+      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
+      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
+      CUDA_COMPUTE_CAP: '120'
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
+      SCENEWORKS_GPU_ID: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.bundle_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUNDLE }}
+      - name: Validate immutable bundle and configure owned paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
+      - if: matrix.backend == 'cuda'
+        uses: ./source/.github/actions/prepare-rust-runner
+        with:
+          workspace-directory: source
+      - if: matrix.backend == 'mlx'
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Fetch Release libmlx or retain its source build fallback
+        if: matrix.backend == 'mlx'
+        working-directory: source
+        shell: bash
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build exact embedded API, worker, web and native inventories (MLX)
+        if: matrix.backend == 'mlx'
+        shell: bash
+        run: node source/scripts/moss-edit-terminal-actions.mjs build "$MOSS_ROOT/runtime.json"
+      - name: Build exact embedded API, worker, web and native inventories (CUDA)
+        if: matrix.backend == 'cuda'
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node source\scripts\moss-edit-terminal-actions.mjs build "%MOSS_ROOT%/runtime.json" || exit /b 1
+      - name: Retain immutable native build and actual install evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-native-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOSS_BUILDS }}/${{ matrix.backend }}/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain native setup diagnostics without package/cache bytes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-build-diagnostics-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOSS_ROOT }}/*.json
+            ${{ env.MOSS_ROOT }}/*.jsonl
+            ${{ env.MOSS_ROOT }}/*.log
+          if-no-files-found: error
+          retention-days: 90
+  execute-mlx:
+    needs: build-native
+    if: inputs.phase == 'execute'
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    timeout-minutes: 720
+    env:
+      MOSS_BACKEND: mlx
+      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-mlx
+      MOSS_ROOT: ${{ github.workspace }}/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-mlx
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.bundle_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUNDLE }}
+      - name: Validate immutable bundle and configure owned paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: moss-native-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOSS_BUILDS }}
+          merge-multiple: false
+      - name: Place source-bound backend artifacts at their declared local paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}"
+      - name: Provision exact headless CPU browser into the owned job directory
+        run: node source/scripts/moss-edit-terminal-actions.mjs provision-browser "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Execute allocated native rows and all refusal probes
+        run: node source/scripts/moss-edit-terminal-actions.mjs execute "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Retain complete and partial evidence; never upload HF caches, targets or credentials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-execution-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOSS_ROOT }}/evidence/
+            ${{ env.MOSS_ROOT }}/handoff/
+            ${{ env.MOSS_ROOT }}/commands/
+            ${{ env.MOSS_ROOT }}/captures/
+            ${{ env.MOSS_ROOT }}/samples/
+            ${{ env.MOSS_ROOT }}/devices/
+            ${{ env.MOSS_ROOT }}/cleanup/
+            ${{ env.MOSS_ROOT }}/*.json
+            ${{ env.MOSS_ROOT }}/*.jsonl
+            ${{ env.MOSS_ROOT }}/*.log
+          if-no-files-found: error
+          retention-days: 90
+  execute-cuda:
+    needs: execute-mlx
+    if: inputs.phase == 'execute'
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 720
+    env:
+      MOSS_BACKEND: cuda
+      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-cuda
+      MOSS_ROOT: ${{ github.workspace }}/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-cuda
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.bundle_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUNDLE }}
+      - name: Validate immutable bundle and configure owned paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: moss-native-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOSS_BUILDS }}
+          merge-multiple: false
+      - name: Place source-bound backend artifacts at their declared local paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: moss-execution-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MOSS_ROOT }}/prior
+      - name: Provision exact headless CPU browser into the owned job directory
+        run: node source/scripts/moss-edit-terminal-actions.mjs provision-browser "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Execute allocated native rows and all refusal probes
+        run: node source/scripts/moss-edit-terminal-actions.mjs execute "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Retain complete and partial evidence; never upload HF caches, targets or credentials
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-execution-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOSS_ROOT }}/evidence/
+            ${{ env.MOSS_ROOT }}/handoff/
+            ${{ env.MOSS_ROOT }}/commands/
+            ${{ env.MOSS_ROOT }}/captures/
+            ${{ env.MOSS_ROOT }}/samples/
+            ${{ env.MOSS_ROOT }}/devices/
+            ${{ env.MOSS_ROOT }}/cleanup/
+            ${{ env.MOSS_ROOT }}/*.json
+            ${{ env.MOSS_ROOT }}/*.jsonl
+            ${{ env.MOSS_ROOT }}/*.log
+          if-no-files-found: error
+          retention-days: 90
+  verify-retained:
+    if: inputs.phase == 'verify'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      MOSS_BACKEND: cuda
+      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-review
+      MOSS_ROOT: ${{ github.workspace }}/moss-review-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.bundle_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUNDLE }}
+      - name: Validate immutable bundle and configure owned paths
+        run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: moss-native-*-${{ inputs.execution_run_id }}-${{ inputs.execution_run_attempt }}
+          run-id: ${{ inputs.execution_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUILDS }}
+      - name: Place original source-bound native artifacts
+        run: node source/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: moss-execution-cuda-${{ inputs.execution_run_id }}-${{ inputs.execution_run_attempt }}
+          run-id: ${{ inputs.execution_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_ROOT }}/prior
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ inputs.review_artifact_id }}
+          merge-multiple: true
+          run-id: ${{ inputs.review_run_id || inputs.bundle_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_ROOT }}/reviews
+      - name: Verify all 50 rows, 58 refusals, eight visual anchors and ten external obligations
+        run: node source/scripts/moss-edit-terminal-actions.mjs finalize "${{ env.MOSS_ROOT }}/runtime.json"
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: moss-reviewed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MOSS_ROOT }}/evidence/
+            ${{ env.MOSS_ROOT }}/commands/
+          if-no-files-found: error
+          retention-days: 90
