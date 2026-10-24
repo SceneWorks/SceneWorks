@@ -46,8 +46,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rusqlite = { version = "0.32", features = ["bundled"] }
 sceneworks-core = { path = "../sceneworks-core" }
 # Backend-neutral inference contracts; pinned with both platform bundles to one canonical commit.
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6" }
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a" }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
@@ -59,7 +59,7 @@ uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
 axum = "0.7"
-sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6" }
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a" }
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
@@ -103,22 +103,22 @@ ort = { workspace = true, features = ["coreml"] }
 # weights, Metal beat CPU in every paired run for both Speech and Voice Clone, at equal-or-lower
 # peak RSS; the exact ratios are not pinned down because the box was under heavy concurrent load
 # (sc-13501 carries the clean numbers).
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6", features = ["audio-metal"] }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a", features = ["audio-metal"] }
 # Direct weights-free LTX-2.5 training preflight. The runtime bundle owns execution, while this
 # public header/request validator lets dry-run fail before any base model is loaded.
-mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6" }
+mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a" }
 # Retained direct dependency: SceneWorks' native person detector uses MLX tensor primitives.
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "fe22998bf73e5e785d7659beb2f24d624b785bda" }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 # Canonical NVIDIA inference composition; enabled only by `backend-candle`.
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6", optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a", optional = true }
 # The shared Candle training validator is a weights-free contract dependency. Keeping this direct
 # lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
 # family trainers use instead of maintaining a second, inevitably drifting enum mirror.
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a", optional = true }
 # Candle parity for the same weights-free LTX-2.5 prepared-request validation.
-candle-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6", optional = true }
+candle-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "20347e873d4d4f35b6b20f5aac665027a771559a", optional = true }
 # DWPose whole-body pose detection off-Mac (sc-5496, epic 5482) — the Windows/Linux/CUDA sibling of the
 # macOS `ort`/CoreML path (sc-3487). Same RTMW detector (yolox_m + rtmw-dw-x-l) and the same pure
 # pre/post math in `pose_jobs.rs`; only the execution provider differs (CUDA here, CoreML on Mac), with
