@@ -143,6 +143,7 @@ fn moss_render(
     request: &GenerationRequest,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
+    crate::moss_terminal_observation::provider_run()?;
     let output = generator
         .generate(request, on_progress)
         .map_err(|error| crate::classify_engine_error("MOSS generation", error))?;
@@ -251,6 +252,7 @@ fn moss_edit_render(
     options: sceneworks_core::moss_image::EditOptions,
     progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
+    crate::moss_terminal_observation::provider_run()?;
     let output = generator
         .generate_moss_image_edit(
             request,
