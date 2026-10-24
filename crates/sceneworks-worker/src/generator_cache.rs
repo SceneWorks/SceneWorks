@@ -155,6 +155,28 @@ pub(crate) struct PreparedH3CacheContext {
     pub(crate) receipt: sceneworks_core::minimax_h3_load::PreparedH3Load,
 }
 
+/// Load sources for the original request-aware cache callback. Ordinary callers retain their
+/// LoadSpec API; imported H3 additionally carries its content-bound prepared closure.
+pub(crate) struct GeneratorRequestLoad {
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+}
+
+impl From<LoadSpec> for GeneratorRequestLoad {
+    fn from(spec: LoadSpec) -> Self {
+        Self {
+            spec,
+            prepared_h3: None,
+        }
+    }
+}
+
+impl From<(LoadSpec, Option<PreparedH3CacheContext>)> for GeneratorRequestLoad {
+    fn from((spec, prepared_h3): (LoadSpec, Option<PreparedH3CacheContext>)) -> Self {
+        Self { spec, prepared_h3 }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadIdentity {
     engine_id: String,
@@ -1281,7 +1303,7 @@ where
 
 pub(crate) async fn with_cached_generator_for_request_using<R>(
     engine_id: &'static str,
-    spec: LoadSpec,
+    load: impl Into<GeneratorRequestLoad> + Send,
     load_error_context: impl Into<String>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
@@ -1300,42 +1322,7 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_after_cold_admission_using_on(
-        generator_worker(),
-        crate::transform_cache::evict_resident_transform(),
-        engine_id,
-        spec,
-        load_error_context,
-        0,
-        |_| Ok(()),
-        load_generator,
-        run,
-    )
-    .await
-}
-
-pub(crate) async fn with_cached_generator_for_request_using_prepared_h3<R>(
-    engine_id: &'static str,
-    spec: LoadSpec,
-    prepared_h3: Option<PreparedH3CacheContext>,
-    load_error_context: impl Into<String>,
-    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
-        + Send
-        + 'static,
-    run: impl FnOnce(
-            &dyn Generator,
-            MemoryCacheState,
-            ExecutionPolicy,
-            crate::execution_planner::WarmPolicyProposal,
-            u64,
-            u64,
-        ) -> WorkerResult<R>
-        + Send
-        + 'static,
-) -> WorkerResult<R>
-where
-    R: Send + 'static,
-{
+    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
     with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
         generator_worker(),
         crate::transform_cache::evict_resident_transform(),
@@ -1356,7 +1343,7 @@ async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
     evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
     engine_id: &'static str,
-    spec: LoadSpec,
+    load: impl Into<GeneratorRequestLoad> + Send,
     load_error_context: impl Into<String>,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
@@ -1375,11 +1362,13 @@ async fn with_cached_generator_for_request_using_on<R>(
 where
     R: Send + 'static,
 {
-    with_cached_generator_for_request_after_cold_admission_using_on(
+    let GeneratorRequestLoad { spec, prepared_h3 } = load.into();
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
         worker,
         evict_transform,
         engine_id,
         spec,
+        prepared_h3,
         load_error_context,
         0,
         |_| Ok(()),
@@ -3970,6 +3959,67 @@ mod tests {
 
         drop(tx);
         worker.join().expect("cache worker exits");
+    }
+
+    #[tokio::test]
+    async fn prepared_h3_uses_original_request_callback_for_cold_warm_and_changed_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("transformer")).unwrap();
+        std::fs::write(
+            root.path().join("transformer/model.safetensors"),
+            b"sealed fixture",
+        )
+        .unwrap();
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root.path().to_owned()))
+            .with_offload_policy(OffloadPolicy::Sequential);
+        let receipt = sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+        let loads = Arc::new(AtomicUsize::new(0));
+        for (identity, expected) in [
+            ("source-bound-schedule-17", MemoryCacheState::Cold),
+            ("source-bound-schedule-17", MemoryCacheState::Warm),
+            ("source-bound-schedule-23", MemoryCacheState::Cold),
+        ] {
+            let expected_pins = spec.prepared_file_pins().clone();
+            let loads = loads.clone();
+            let context = PreparedH3CacheContext {
+                identity: identity.to_owned(),
+                receipt: receipt.clone(),
+            };
+            let state = with_cached_generator_for_request_using_on(
+                &tx,
+                no_transform_eviction(),
+                "sc3724_stub",
+                (spec.clone(), Some(context)),
+                "stub load",
+                move |_, received| {
+                    assert_eq!(received.prepared_file_pins(), &expected_pins);
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    stub_load(received)
+                },
+                |_, state, policy, warm_policy, external, provider| {
+                    assert_eq!(policy.offload_policy, OffloadPolicy::Sequential);
+                    // Unit-cache backend probes are deliberately zero and create no device.
+                    assert_eq!((external, provider), (0, 0));
+                    warm_policy.decline(
+                        crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                    );
+                    Ok(state)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                state, expected,
+                "the original callback must retain the sealed semantic identity"
+            );
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+        drop(tx);
+        worker.join().unwrap();
     }
 
     #[tokio::test]

@@ -3151,10 +3151,9 @@ pub(super) async fn generate_video_using(
                         .await
                     }
                     None => {
-                        crate::generator_cache::with_cached_generator_for_request_using_prepared_h3(
+                        crate::generator_cache::with_cached_generator_for_request_using(
                             engine_id,
-                            spec,
-                            prepared_h3_context,
+                            (spec, prepared_h3_context),
                             "video load failed",
                             load_generator,
                             run,
@@ -3166,10 +3165,9 @@ pub(super) async fn generate_video_using(
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {
                 let _ = comfyui_load;
-                crate::generator_cache::with_cached_generator_for_request_using_prepared_h3(
+                crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
-                    spec,
-                    prepared_h3_context,
+                    (spec, prepared_h3_context),
                     "video load failed",
                     load_generator,
                     run,
