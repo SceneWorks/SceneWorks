@@ -20,6 +20,7 @@ function I({ d, fill = false, size = 18, ...rest }) {
 }
 
 export const Icon = {
+  Sidebar: ({ collapsed, ...p }) => <I {...p} d={`M3 4h18v16H3zM9 4v16${collapsed ? "M13 9l3 3-3 3" : "M16 9l-3 3 3 3"}`} />,
   Library: (p) => <I {...p} d="M4 5h6v14H4zM14 5h6v14h-6zM10 9h4M10 13h4M10 17h4" />,
   Image: (p) => <I {...p} d="M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4" />,
   ImageEditor: (p) => <I {...p} d="M7 2v15a1 1 0 001 1h15M2 7h15a1 1 0 011 1v15" />,
