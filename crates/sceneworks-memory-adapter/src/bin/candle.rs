@@ -38,6 +38,15 @@ const IRIS_ID: &str = "iris_3b";
 const IRIS_DEPTH_ID: &str = "iris_3b_depth";
 const IRIS_RESTORE_ID: &str = "iris_3b_restore";
 
+#[path = "candle_supra2.rs"]
+mod candle_supra2;
+
+/// Supra2-IMG (sc-24217, epic 24212), served by `candle_supra2`: `candle-gen-supra2`'s registry id
+/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// for the reason the Iris ids above are: `adapterCapturableProviders` reads the pre-gate off this
+/// file.
+const SUPRA2_ID: &str = "supra2_img";
+
 /// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
 /// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
 const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
@@ -2243,6 +2252,7 @@ fn missing_contract_reason(generator: &dyn Generator, request: &Value) -> String
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: 0,
@@ -3162,6 +3172,7 @@ fn run_five_rung_reference_loaded(
             frames: 1,
             reference_count: u32::from(edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -4055,6 +4066,7 @@ fn pulid_flux_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -4555,6 +4567,7 @@ fn sensenova_candle_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -5279,6 +5292,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
             frames: target.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: adapter_stack_identity(&adapters),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6402,6 +6416,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
+        reference_resources: None,
         overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6918,6 +6933,7 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay.clone()),
         budget: MemoryBudget {
             total_bytes: budget_bytes,
@@ -7510,6 +7526,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         },
         // `validate_edit_route` requires this to be exactly `Some("lora")` when the load carries
         // adapters and `None` when it does not — so it is derived from the spec's own stack.
+        reference_resources: None,
         overlay: (loaded_adapters > 0).then(|| "lora".to_owned()),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -7694,6 +7711,13 @@ fn run(request: &Value) -> Result<Value, String> {
     // the plain overlay itself (`protocol::validate_iris_plan`) before any env var or weight is read.
     if matches!(provider, IRIS_ID | IRIS_DEPTH_ID | IRIS_RESTORE_ID) {
         return candle_iris::run(request);
+    }
+    // sc-24217: Supra2-IMG dispatches above the shared gates too. Its arm validates the native
+    // single still, the plain overlay and its resident override itself
+    // (`protocol::validate_supra2_plan`) before any env var or weight is read, and converts the
+    // bundle in a child process before the measured process loads anything.
+    if provider == SUPRA2_ID {
+        return candle_supra2::run(request);
     }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
@@ -7894,6 +7918,7 @@ fn run(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -8331,6 +8356,8 @@ fn main() {
         "probe" => probe(),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
+        // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
+        protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
@@ -12235,6 +12262,7 @@ mod sc22738_arm_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: MemoryBudget {
                 total_bytes: 1 << 34,

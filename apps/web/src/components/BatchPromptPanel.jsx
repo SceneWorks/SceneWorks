@@ -81,6 +81,7 @@ function VariableChips({ label, values, onChange }) {
 
 export default function BatchPromptPanel({
   promptsText,
+  resolutionOptions,
   onPromptsTextChange,
   variableValues,
   onVariableValuesChange,
@@ -114,8 +115,8 @@ export default function BatchPromptPanel({
   // whole expansion, which inline alternation can make enormous. Strip any leading [WxH]
   // directive for display and surface the size as a badge (sc-10063).
   const preview = useMemo(
-    () => parsePromptResolution(firstResolvedPrompt(prompts, variables)),
-    [prompts, variables],
+    () => parsePromptResolution(firstResolvedPrompt(prompts, variables), resolutionOptions),
+    [prompts, variables, resolutionOptions],
   );
   const previewPrompt = preview.prompt;
   const previewResolution = preview.resolution;
@@ -171,7 +172,7 @@ export default function BatchPromptPanel({
             aria-label="Batch prompts"
             className="batch-prompts"
             onChange={(event) => onPromptsTextChange(event.target.value)}
-            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n[832x1216] {{name}} full-body portrait\n\nStart a line with [WxH] for a per-prompt size · use --- for multi-line prompts"}
+            placeholder={"{{name}} with {{hair}} hair, front view\n{{name}} in a {{red|blue|green}} coat\n[832x1216] {{name}} full-body portrait\n\nStart with [WxH] for an exact size or [16:9] for the closest model aspect at its largest size · use --- for multi-line prompts"}
             value={promptsText}
           />
         </label>
@@ -199,6 +200,11 @@ export default function BatchPromptPanel({
             <code>{"{{p:he|she}}"}</code> to link correlated options (pronouns).
           </p>
         )}
+
+        <p className="batch-hint">
+          Use <code>[16:9]</code>, <code>[4:3]</code>, or <code>[10:8]</code> to choose the closest available model aspect at its largest size.
+          {" "}Use <code>[WxH]</code> for an exact size.
+        </p>
 
         {previewPrompt || previewResolution ? (
           <div className="batch-preview">

@@ -144,6 +144,9 @@ export const MODEL_STORIES = {
   // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
   // backend's cells are owned by the story that brought that lane through SceneWorks.
   iris_3b: { mlx: 25679, candle: 25680 },
+  // Supra2-IMG (epic 24212): ported to MLX by sc-24213 and to Candle by sc-24214 — each backend's
+  // cells are owned by the story that brought that lane through SceneWorks.
+  supra2_img: { mlx: 24213, candle: 24214 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -222,6 +225,10 @@ export const FAMILY_STORIES = {
   // exists for either lane (the epic-end campaign owns anchors), so the cells stay
   // Implemented/Missing by implementation, never Anchored.
   25678: { mlx: 25678, candle: 25684 },
+  // Supra2-IMG: the MLX family is owned by its epic (sc-24212); the model stories sc-24213/sc-24214
+  // own the supra2_img cells, and one id may own only one thing. The Candle family twin is sc-24217,
+  // the epic's terminal story that owns the one measurement campaign (memory included).
+  24212: { mlx: 24212, candle: 24217 },
 };
 
 /**
@@ -371,6 +378,7 @@ export function familyGroup(modelId) {
   if (modelId === "bernini_image") return 15528;
   if (modelId.startsWith("iris")) return 25678;
   if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
+  if (modelId === "supra2_img") return 24212;
   throw new Error(`no family story for ${modelId}`);
 }
 

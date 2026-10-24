@@ -17,8 +17,10 @@ import {
   stepsMenuFromModel,
   guidanceIsOff,
   patchGridHint,
+  nativeResolutionHint,
+  promptTokenLimitHint,
 } from "./samplerOptions.js";
-import { fallbackModels } from "./constants.js";
+import { fallbackModels } from "./modelCatalog.js";
 
 describe("samplerOptions", () => {
   it("falls back to default-only when limits are missing", () => {
@@ -269,5 +271,34 @@ describe("sc-25681 image sampling-control declarations", () => {
     expect(patchGridHint(iris, 1024, 1024)).toBeNull();
     expect(patchGridHint(iris, 1216, 832)).toBe("Below 1024px a side, Iris 3B shows a visible patch grid.");
     expect(patchGridHint(plain, 512, 512)).toBeNull();
+  });
+});
+
+describe("Supra2-IMG interface hints (sc-24215)", () => {
+  const supra2 = {
+    name: "Supra2-IMG",
+    image: { supportsNegativePrompt: false, maxPromptTokens: 128 },
+    limits: { resolutions: ["256x256"], minDimension: 256, maxDimension: 256 },
+  };
+
+  it("states a single native size and never a free-size range", () => {
+    expect(nativeResolutionHint(supra2)).toBe("Supra2-IMG renders at its native 256×256 only.");
+    expect(nativeResolutionHint({ name: "Q", limits: { minDimension: 32, maxDimension: 2752 } })).toBeNull();
+    expect(nativeResolutionHint({ name: "P", limits: {} })).toBeNull();
+    expect(nativeResolutionHint(undefined)).toBeNull();
+  });
+
+  it("reads a declared step ceiling and keeps the generic one otherwise", () => {
+    expect(maxStepsForModel({ ...supra2, limits: { ...supra2.limits, hardMaxSteps: 100000 } })).toBe(100000);
+    expect(maxStepsForModel(supra2)).toBe(80);
+    expect(maxStepsForModel({ defaults: { steps: 100 } })).toBe(100);
+  });
+
+  it("states the declared prompt-token budget and its truncation", () => {
+    expect(promptTokenLimitHint(supra2)).toBe(
+      "Supra2-IMG reads up to 128 prompt tokens; anything longer is truncated and the image is flagged.",
+    );
+    expect(promptTokenLimitHint({ name: "P", image: {} })).toBeNull();
+    expect(promptTokenLimitHint({ name: "P", image: { maxPromptTokens: 0 } })).toBeNull();
   });
 });

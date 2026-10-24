@@ -147,12 +147,29 @@ fn prompt_enhancement_event_sink_for(
 }
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
+    // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
+    if matches!(progress, Progress::ConditioningComplete) {
+        return;
+    }
+    // Prompt-upsampling events (inference 46c22c01e) fire only for a request that asked for
+    // enhancement on a provider that implements it; this lane has no upsampling consumer, so they
+    // stay internal exactly like the conditioning boundary.
+    if matches!(
+        progress,
+        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. }
+    ) {
+        return;
+    }
     let event = match progress {
         Progress::Step { current, total } => GenEvent::Step {
             index,
             current,
             total,
         },
+        Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
+        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. } => {
+            unreachable!("prompt-upsampling events filtered above")
+        }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
     };
@@ -397,6 +414,40 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(&tx, 2, Progress::ConditioningComplete);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    send_gen_progress(&tx, 2, Progress::Step { current: 1, total: 4 });
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Step { index: 2, current: 1, total: 4 })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+/// The prompt-upsampling events (inference 46c22c01e) have no consumer on this lane, so they never
+/// reach the job wire: no event, no synthesized step.
+#[cfg(test)]
+#[test]
+fn prompt_upsampling_events_stay_internal() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(&tx, 0, Progress::Upsampling { tokens: 3, max_tokens: 8 });
+    send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry

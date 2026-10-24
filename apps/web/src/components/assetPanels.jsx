@@ -926,6 +926,7 @@ function FullscreenPreviewComponent({
   onEditImage,
   onEditInStudio,
   onPreviewAsset,
+  onRegenerate,
   onUseRecipe,
   onUseImportedRecipe,
   previousAsset,
@@ -1419,6 +1420,20 @@ function FullscreenPreviewComponent({
                   Use this recipe
                 </button>
               </>
+            ) : null}
+            {/* Re-generate (image only): like "Use this recipe" but skips the studio and
+                enqueues the recipe straight to the queue with a FRESH random seed. The
+                always-new seed is the point — a one-click close variation. Image-only: the
+                queue behind this button is the image lane; video/vector re-runs have studios,
+                not a direct image queue. */}
+            {onRegenerate && asset.type === "image" && hasRecordedRecipe ? (
+              <button
+                onClick={() => onRegenerate(asset)}
+                title="Regenerate this image with a new random seed"
+                type="button"
+              >
+                Re-Generate
+              </button>
             ) : null}
             {/* An image someone else made, imported here, carrying the recipe that made it in its
                 own bytes (sc-15949 → sc-15952). It has no recorded recipe of its own — nothing on

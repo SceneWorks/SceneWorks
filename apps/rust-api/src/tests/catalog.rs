@@ -8304,6 +8304,10 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
 /// Stage a superseded Qwen-Image 2.1 re-host tier the way a v0.9.0 download left it: every carried
 /// file at its exact declared size (sparse) under `snapshots/<legacy>/`, plus the install receipt
 /// that download wrote. Returns the legacy snapshot.
+/// Only caller is the cfg(unix) supersession-health test below, so gate it the same way —
+/// ungated it is dead code on win32 clippy, which fails the pre-push 'neither' build for
+/// every Windows push even though Linux CI (which compiles the caller) stays green.
+#[cfg(unix)]
 fn stage_superseded_qwen_image_2_1_tier(
     data_dir: &std::path::Path,
     supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
@@ -8427,9 +8431,11 @@ async fn qwen_image_2_1_tier_at_the_superseded_rehost_revision_reads_as_the_work
 async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
+    // The H3 Veda predictor by repo, not "the first" managed pin (sc-24213 adds Supra2-IMG's).
     let pin = sceneworks_core::managed_file::builtin_identities()
         .unwrap()
-        .first()
+        .iter()
+        .find(|identity| identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview")
         .unwrap();
     let payload = json!({"repo":pin.repo,"revision":pin.revision,"files":[pin.file],"licenseAcknowledged":true});
     let (status, job) = request(

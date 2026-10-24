@@ -115,6 +115,7 @@ COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/calibration/sc-24114/ ./docs/calibration/sc-24114/
 COPY docs/calibration/sc-25690/ ./docs/calibration/sc-25690/
 COPY docs/calibration/sc-25909/ ./docs/calibration/sc-25909/
+COPY docs/calibration/sc-24217/ ./docs/calibration/sc-24217/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 
@@ -266,6 +267,7 @@ COPY docs/calibration/sc-22738/ ./docs/calibration/sc-22738/
 COPY docs/calibration/sc-24114/ ./docs/calibration/sc-24114/
 COPY docs/calibration/sc-25690/ ./docs/calibration/sc-25690/
 COPY docs/calibration/sc-25909/ ./docs/calibration/sc-25909/
+COPY docs/calibration/sc-24217/ ./docs/calibration/sc-24217/
 COPY docs/generated/krea-candle-five-rung-sc-11045.json ./docs/generated/
 COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 

@@ -1338,6 +1338,9 @@ test("the candle SCAIL-2 rows plan the resident composition through the strategy
     "minimax_h3:bf16:candle", "minimax_h3:q4:candle", "minimax_h3:q8:candle",
     "minimax_h3_ref:bf16:candle", "minimax_h3_ref:q4:candle", "minimax_h3_ref:q8:candle",
     "scail2_14b:bf16:candle", "scail2_14b:q4:candle", "scail2_14b:q8:candle",
+    // sc-24217: Candle Supra2-IMG's contract is gen-core's compatibility default — Resident alone
+    // (staged residency `Missing`, not structurally inapplicable, so no manifest exemption).
+    "supra2_img:bf16:candle",
   ]);
 });
 

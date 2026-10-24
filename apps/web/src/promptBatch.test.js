@@ -373,6 +373,38 @@ describe("firstResolvedPrompt", () => {
 });
 
 describe("parsePromptResolution", () => {
+  const options = ["1024x1024", "1280x1024", "1600x1280", "1536x1024", "1920x1080", "768x1024"];
+
+  it.each([
+    ["10:8", 1600, 1280],
+    ["4:3", 1600, 1280],
+    ["16:9", 1920, 1080],
+    ["3:4", 768, 1024],
+    ["1:1", 1024, 1024],
+  ])("resolves [%s] to the largest closest-aspect model bucket", (ratio, width, height) => {
+    expect(parsePromptResolution(`[ ${ratio} ] landscape`, options)).toEqual({
+      prompt: "landscape", resolution: { width, height },
+    });
+  });
+
+  it("prioritizes aspect over pixel count and adapts to the available model options", () => {
+    expect(parsePromptResolution("[16:9] wide", ["4096x4096", "1280x720"]).resolution)
+      .toEqual({ width: 1280, height: 720 });
+    expect(parsePromptResolution("[16:9] wide", ["1024x1024"]).resolution)
+      .toEqual({ width: 1024, height: 1024 });
+    expect(parsePromptResolution("[16:9] wide", ["default"])).toEqual({ prompt: "wide", resolution: null });
+  });
+
+  it("resolves a ratio produced by template expansion", () => {
+    const expanded = expandBatch(["[{{ratio}}] scene"], [{ key: "ratio", values: ["16:9", "3:4"] }]);
+    expect(expanded.map(({ prompt }) => parsePromptResolution(prompt, options).resolution))
+      .toEqual([{ width: 1920, height: 1080 }, { width: 768, height: 1024 }]);
+  });
+
+  it.each(["[0:8] invalid", "[4:0] invalid", "[-4:3] invalid", "scene [4:3]"])("leaves invalid or nonleading ratios literal: %s", (prompt) => {
+    expect(parsePromptResolution(prompt, options)).toEqual({ prompt, resolution: null });
+  });
+
   it("strips a leading [WxH] and returns the parsed size", () => {
     expect(parsePromptResolution("[832x1216] a portrait")).toEqual({
       prompt: "a portrait",

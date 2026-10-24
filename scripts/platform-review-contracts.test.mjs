@@ -2399,38 +2399,14 @@ test("the Rust gate verifies tier integrity without gating the epic-end memory m
   assert.equal(scripts["check:rust-derived-docs"], "npm run check:tier-integrity");
   assert.doesNotMatch(scripts["check:rust-derived-docs"], /check:memory-matrix/);
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
 
-test("the pre-push derived-docs trigger is scoped to tier integrity, not memory evidence", async () => {
-  const hook = await source("scripts/git-hooks/pre-push");
-  const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
-  assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
-  const trigger = new RegExp(pattern);
-  for (const relative of [
-    "config/manifests/builtin.models.jsonc",
-    "config/tier-integrity.jsonc",
-    "packages/schemas/tier-integrity.schema.json",
-    "scripts/check-tier-integrity.mjs",
-    "scripts/tier-integrity-measurement-receipts.mjs",
-    "scripts/lib/jsonc.mjs",
-    "docs/generated/tier-integrity.json",
-    "docs/generated/tier-integrity.md",
-  ]) {
-    assert.ok(trigger.test(relative), `${relative} must trigger the tier-integrity check`);
-  }
-  for (const epicEndArtifact of [
-    "config/inference-provider-closures.json",
-    "config/rung4-contract-prerequisites.json",
-    "docs/generated/memory-matrix.json",
-    "docs/generated/memory-calibration-evidence.json",
-  ]) {
-    assert.equal(
-      trigger.test(epicEndArtifact),
-      false,
-      `${epicEndArtifact} must not wire the memory-matrix freshness gate back into pre-push`,
-    );
-  }
+test("pushes have no preflight hook while Rust checks remain available manually", async () => {
+  await assert.rejects(source("scripts/git-hooks/pre-push"), { code: "ENOENT" });
+  const scripts = JSON.parse(await source("package.json")).scripts;
+  assert.equal(scripts["rust:check:neither"], "node scripts/check-neither-build.mjs");
+  assert.equal(scripts["rust:check:candle"], "node scripts/check-candle-build.mjs");
+  assert.match(await source("scripts/git-hooks/pre-commit"), /npm run rust:fmt/);
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
@@ -2772,7 +2748,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
 test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const worker = workflowJob(workflow, "candle-worker");
-  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"];
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke"];
   const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
   const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
   assert.match(refusal, /-contains 'true'/);
@@ -2784,7 +2760,7 @@ test("Windows facts-only capture rejects mixed profiles and cannot escape throug
   const mixed = { capability_facts_only: true, ...Object.fromEntries(flags.map(flag => [flag, true])) };
   // Even a conflicting YuE2 flag reaches the fatal validator, while its separate GPU job cannot run.
   assert.equal(evaluateWorkflow(workflowExpression(worker), "workflow_dispatch", mixed), true);
-  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "imported-nvfp4-worker-smoke"]) {
+  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke", "imported-nvfp4-worker-smoke"]) {
     assert.equal(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", mixed), false, name);
   }
   const terminal = worker.split(/\n {6}- /).filter(block => /if: .*always\(\).*inputs\.run_epic_20738_terminal_cuda/.test(block));

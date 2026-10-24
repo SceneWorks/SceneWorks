@@ -5678,6 +5678,21 @@
       ]
     },
     {
+      "key": "SupraLabs/Supra2-IMG@10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+      "repo": "SupraLabs/Supra2-IMG",
+      "revision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+      "resolvedSha": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+      "servedRepo": "SupraLabs/Supra2-IMG",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "inference.py",
+        "model_final_ema.pt"
+      ]
+    },
+    {
       "key": "TenStrip/LTX2.3-10Eros@84a05a13610d78dbe4340d1be23fd8185e10f697",
       "repo": "TenStrip/LTX2.3-10Eros",
       "revision": "84a05a13610d78dbe4340d1be23fd8185e10f697",
@@ -5928,6 +5943,28 @@
         "model.safetensors",
         "preprocessor_config.json",
         "pytorch_model.bin"
+      ]
+    },
+    {
+      "key": "google/flan-t5-base@7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+      "repo": "google/flan-t5-base",
+      "revision": "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+      "resolvedSha": "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+      "servedRepo": "google/flan-t5-base",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "flax_model.msgpack",
+        "generation_config.json",
+        "model.safetensors",
+        "pytorch_model.bin",
+        "special_tokens_map.json",
+        "spiece.model",
+        "tf_model.h5",
+        "tokenizer.json",
+        "tokenizer_config.json"
       ]
     },
     {
@@ -6688,6 +6725,21 @@
         "upscaler/config.yaml",
         "upscaler/empty_prompt.safetensors",
         "upscaler/model.safetensors"
+      ]
+    },
+    {
+      "key": "stabilityai/sd-vae-ft-mse@31f26fdeee1355a5c34592e401dd41e45d25a493",
+      "repo": "stabilityai/sd-vae-ft-mse",
+      "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+      "resolvedSha": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+      "servedRepo": "stabilityai/sd-vae-ft-mse",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.bin",
+        "diffusion_pytorch_model.safetensors"
       ]
     },
     {

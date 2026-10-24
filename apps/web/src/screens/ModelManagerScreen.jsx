@@ -3,6 +3,7 @@ import { installJobStatusLabel } from "../yue2Policy.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -1537,6 +1538,9 @@ export function ModelManagerScreen() {
             gateVisible={licenseGateApplies}
           />
         ) : null}
+        {/* Per-component installation details + supported limits (sc-24216). Collapsed by default;
+            renders only for an entry that declares per-download licences or a prompt limit. */}
+        {!cleanupOnly ? <ModelComponentDetails model={model} totalSizeText={model.downloadSizeLabel ? downloadSize : null} /> : null}
         {incomplete ? (
           <p className="inline-warning">
             Cached files are incomplete
@@ -1575,6 +1579,25 @@ export function ModelManagerScreen() {
               ) : null}
             </div>
             <p>{mlxStatusText(model)}</p>
+            {/* A conversion that left files the engine would refuse (sc-24216): the catalog reports
+                it as needing conversion and names the engine's reason. */}
+            {model.mlxConversionProblem ? (
+              <div className="inline-warning" role="alert">
+                <p>The converted files are damaged or incomplete, so this model cannot load. Convert again to rebuild them from the downloaded checkpoint; if that fails, delete the model and download it again.</p>
+                <details className="model-conversion-problem">
+                  <summary>Details</summary>
+                  <p>{model.mlxConversionProblem}</p>
+                </details>
+              </div>
+            ) : null}
+            {/* The last conversion's failure, so "Retry Conversion" is never offered without the
+                reason it failed (sc-24216). */}
+            {!convertJob && failedConvert && mlxState !== "converted" && (failedConvert.error || failedConvert.message) ? (
+              <p className="inline-warning" role="alert">
+                Conversion {failedConvert.status === "canceled" ? "was canceled" : "failed"}
+                {failedConvert.error ? `: ${failedConvert.error}` : failedConvert.message ? `: ${failedConvert.message}` : "."}
+              </p>
+            ) : null}
             {!mlxEnoughMemory && !hasTierMatrix ? (
               <p className="inline-warning">
                 Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
@@ -1617,7 +1640,9 @@ export function ModelManagerScreen() {
                     ? "Converted"
                     : failedConvert
                       ? "Retry Conversion"
-                      : "Convert"}
+                      : model.mlxConversionProblem
+                        ? "Convert again"
+                        : "Convert"}
               </button>
             ) : null}
           </div>

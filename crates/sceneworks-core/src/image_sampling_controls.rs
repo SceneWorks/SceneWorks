@@ -290,6 +290,14 @@ pub fn max_prompt_batch_images(model_manifest_entry: &JsonObject) -> Option<u32>
         .filter(|max| *max > 0)
 }
 
+/// `image.nativeCountBatch` (sc-24215): the engine renders a job's `count` images of its ONE prompt
+/// in a single call (`GenerationRequest::count`), image `k` on seed `seed + k` — Supra2-IMG's
+/// published multi-image generation. ABSENT MEANS FALSE: every other model keeps one engine call
+/// per image on its own resolved seed.
+pub fn native_count_batch(model_manifest_entry: &JsonObject) -> bool {
+    declares(model_manifest_entry, "nativeCountBatch")
+}
+
 /// The enqueue-time refusal of a native prompt batch, or `None` when `prompts` is empty (an
 /// ordinary request) or honourable. `prompt` is the request's single prompt AFTER every server-side
 /// fold (preset / style); it must equal `prompts[0]`, so a fold that rewrote it — and would not
@@ -579,5 +587,16 @@ mod tests {
         assert!(undeclared.contains("one job per prompt"), "{undeclared}");
         assert_eq!(max_prompt_batch_images(&plain()), None);
         assert_eq!(max_prompt_batch_images(&entry), Some(8));
+    }
+
+    #[test]
+    fn native_count_batch_is_declared_only() {
+        assert!(!native_count_batch(&plain()));
+        assert!(!native_count_batch(&object(
+            json!({ "image": { "nativeCountBatch": "yes" } })
+        )));
+        assert!(native_count_batch(&object(
+            json!({ "image": { "nativeCountBatch": true } })
+        )));
     }
 }

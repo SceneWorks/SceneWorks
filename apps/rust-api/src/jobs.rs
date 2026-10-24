@@ -14,7 +14,7 @@ pub(crate) async fn list_jobs(
         let jobs = store.list_jobs(
             query.project_id.as_deref(),
             query.status.as_deref(),
-            query.limit.unwrap_or(100),
+            query.limit.unwrap_or(MAX_LISTED_JOBS),
         );
         Ok((sweep, jobs))
     })
@@ -1184,6 +1184,9 @@ pub(crate) async fn canonicalize_image_model_payload(
     // Every image entry point reaches this post-expansion/post-merge seam.
     sceneworks_core::moss_image::scrub_reports(payload);
     if let Some(entry) = model_manifest_entry.as_object() {
+        // sc-24215: Supra2-IMG's published interface (text-to-image, 256x256, prompt / seed /
+        // guidance / steps / count) — anything else is a 400 here, before a job exists.
+        sceneworks_core::supra2::validate_request(payload, entry).map_err(ApiError::bad_request)?;
         if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
             .map_err(ApiError::bad_request)?
         {

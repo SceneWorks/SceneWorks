@@ -215,12 +215,13 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), the
   // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), the relicensed SANA / SANA-Sprint
   // mirror revisions (same 144 keys), and epic 25899's base NOTICE re-record and published Turbo
-  // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys). The Illustrious
+  // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
+  // Supra2-IMG components (150 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "0bce144d4d816b3fda122c2460177c3ea6192f531bd496f3949a81dfb54b320c");
+    "95cde218e352097d3e314d0f9bb5891a219f9c01b84965c6af4abc56ac591d82");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
