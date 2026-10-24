@@ -9827,11 +9827,22 @@ fn qwen_image_2_1_live_mlx_lane_sends_an_alpha_reference_as_reference_rgba() {
                 (edit_refs[1].width, edit_refs[1].height),
                 "RGB and alpha share the fitted geometry"
             );
-            let alphas: std::collections::BTreeSet<u8> =
-                image.pixels.chunks_exact(4).map(|p| p[3]).collect();
+            let alphas: std::collections::BTreeSet<u8> = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
             assert!(alphas.contains(&0) && alphas.contains(&255), "{alphas:?}");
             // Straight alpha: the transparent half keeps its authored colour, never zeroed.
-            let transparent = image.pixels.chunks_exact(4).find(|p| p[3] == 0).unwrap();
+            let transparent = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .find(|p| p[3] == 0)
+                .unwrap();
             assert_eq!(&transparent[..3], &[10, 200, 30]);
         }
         other => panic!("the cut-out must travel as ReferenceRgba, got {other:?}"),
@@ -9949,7 +9960,7 @@ fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, f
                  upstream never crops or letterboxes a condition image"
             );
             // The plane is the asset's own, unresampled: columns 0..6 transparent, 6..12 opaque.
-            for (index, pixel) in portrait.pixels.chunks_exact(4).enumerate() {
+            for (index, pixel) in portrait.pixels.as_chunks::<4>().0.iter().enumerate() {
                 let expected = if index % 12 < 6 { 0 } else { 255 };
                 assert_eq!(
                     pixel[3], expected,
@@ -18201,7 +18212,9 @@ fn candle_preprocess_depth_estimates_off_mac() {
     assert!(
         depth
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .all(|p| p[0] == p[1] && p[1] == p[2]),
         "depth control must be grayscale-broadcast"
     );
