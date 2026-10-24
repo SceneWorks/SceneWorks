@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision c1a8ebff (epic sc-26752 interim merged feature pin): 786 provenance candidates and 117 production-Rust crate prefixes. Native multi-reference PR1330 merged with a source tree identical to the CPU/GPU-tested 7bd2e29e candidate. The advance from 3b71bffe adds ordered one-to-four MOSS edit slots, aggregate reference admission, cache lifecycle, and source-faithful BF16 arithmetic. The advance changes no Cargo manifests, lockfiles, LICENSE or NOTICE files. Existing Base/SFT, DMD, Supra2-IMG and other source-area dispositions remain preserved. Edit-adapter weights have no declared license; linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms. Existing FLUX.3 and other advisory compliance items remain open. Historical captures retain their own revisions; official inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "c1a8ebffe8edf16eceb4a70d979c47383ce87cb5",
-  "auditDigest": "0ac1ee30192c0241f43e06dd9365ea4b7c240cf8e5e588be600ceb807d942992",
+  "_comment": "Audit inventory reviewed at inference main revision 878f26ab (epic sc-26752 permanent pin): 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. Native PR1339 merged a tree identical to reviewed and CI-tested 78b28edb. The advance from c1a8ebff changes only the CI workflow and its Python policy tests to remove obsolete GPU occupancy admission while preserving physical GPU1 restrictions. Native runtime/numerical source, dependency manifests and lockfiles, LICENSE and NOTICE files are unchanged; existing numerical captures retain their original revisions and device identities. Existing Base/SFT, DMD, Supra2-IMG and other source-area dispositions remain preserved. Edit-adapter weights have no declared license; linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms. Existing FLUX.3 and other advisory compliance items remain open. Official inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "878f26aba50bfb6c371437da9ca7ead81052c25a",
+  "auditDigest": "ef98d7ec04bd8f998b85b2225d2a4dc93b0e262d7ca0319347d412f8f8a519a0",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "c1a8ebffe8edf16eceb4a70d979c47383ce87cb5",
+    "revision": "878f26aba50bfb6c371437da9ca7ead81052c25a",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "c1a8ebffe8edf16eceb4a70d979c47383ce87cb5",
+    "revision": "878f26aba50bfb6c371437da9ca7ead81052c25a",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
