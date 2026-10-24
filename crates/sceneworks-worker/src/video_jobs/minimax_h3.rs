@@ -2280,11 +2280,7 @@ fn record_imported_minimax_h3_identity(
         // Advanced settings cannot claim a conversion. Only the lease retained through this
         // render names an actual shared-cache derivative; the API redeems its bound receipt.
         raw.remove("checkpointDerivative");
-        if let Some(derivative) = &dit._derivative {
-            let cache_key = derivative
-                .artifact()
-                .cache_key()
-                .expect("leased artifact identity is validated");
+        if let Some(cache_key) = dit.load_authority.derivative_cache_key() {
             raw.insert(
                 "checkpointDerivative".to_owned(),
                 json!({"cacheKey":cache_key}),

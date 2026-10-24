@@ -939,10 +939,9 @@ fn inspect_discovered_pass(
         &mut pass.diagnostics,
     );
     if h3_context {
-        if context
-            .get("sourceEncoding")
-            .is_some_and(|encoding| encoding.as_str() != Some("convrot_int8"))
-        {
+        if context.get("sourceEncoding").is_some_and(|encoding| {
+            !matches!(encoding.as_str(), Some("convrot_int8" | "asym_w4a8_int8"))
+        }) {
             pass.diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::ContractViolation,
                 None,
@@ -994,9 +993,9 @@ fn inspect_discovered_pass(
                 // Reinspection derives source precision anew; a previous declaration cannot turn
                 // floating-point tensors into a native packed checkpoint.
                 pass.context.remove("sourceEncoding");
-                if inventory.convrot_int8 {
+                if let Some(encoding) = inventory.source_encoding() {
                     pass.context
-                        .insert("sourceEncoding".into(), serde_json::json!("convrot_int8"));
+                        .insert("sourceEncoding".into(), serde_json::json!(encoding));
                 }
                 // The reduced AdaLN binding is derived from the CURRENT operand bytes, never
                 // inherited: a stale or forged declaration cannot survive reinspection.
