@@ -1556,9 +1556,10 @@ fn floor_phase_peaks(
     }
 }
 
-/// Native deferred H3 owns correlated root/window/cache residency, including the selected TE
-/// inventory. Correct the ordinary weights term BEFORE adding its existing activation allowance;
-/// otherwise a legacy full-component floor would erase the valid windowed native prediction.
+/// Native H3 owns the actual stage residency for every backend and selection, including
+/// correlated root/window/cache and selected TE inventories. Correct ordinary weights BEFORE
+/// adding the existing activation allowance: a legacy cross-stage sum cannot be removed by
+/// maxing a correct native floor afterward, and would falsely refuse independently fitting stages.
 fn video_floor_weights_bytes(
     selector: &LadderVideoSelector<'_>,
     geometry: VideoAdmissionGeometry,
@@ -1566,51 +1567,50 @@ fn video_floor_weights_bytes(
     engaged: &[MemoryStrategy],
 ) -> gen_core::Result<u64> {
     let contract = selector.contract;
-    if selector.backend() == MemoryBackend::Mlx
-        && contract.engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency)
+    if let Some(native) = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
     {
-        if let Some(native) = contract
-            .phase_facts
+        let request = selector.native_quant_request.ok_or_else(|| {
+            gen_core::Error::Unsupported(
+                "native H3 allocation estimate requires the resolved request carrier".into(),
+            )
+        })?;
+        let rows = request.rows_at(native, geometry)?;
+        let component = selection.parameters.window_component();
+        let bounded =
+            contract.engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency);
+        let dit_window = if bounded && component.includes_dit() {
+            selection.parameters.transformer_window_size
+        } else {
+            None
+        };
+        let dit = native.resident_peak_bytes_windowed(rows, dit_window)?;
+        let facts = contract.asset_facts;
+        let conditioning = native
+            .conditioning_stream
             .as_ref()
-            .and_then(|phase| phase.native_quant.as_ref())
-        {
-            let request = selector.native_quant_request.ok_or_else(|| {
-                gen_core::Error::Unsupported(
-                    "native H3 window estimate requires the resolved request carrier".into(),
-                )
-            })?;
-            let rows = request.rows_at(native, geometry)?;
-            let component = selection.parameters.window_component();
-            let dit_window = component
-                .includes_dit()
-                .then_some(selection.parameters.transformer_window_size)
-                .flatten();
-            let dit = native.resident_peak_bytes_windowed(rows, dit_window)?;
-            let facts = contract.asset_facts;
-            let conditioning = native
-                .conditioning_stream
-                .as_ref()
-                .filter(|_| component.includes_text_encoder())
-                .map_or(facts.conditioning_bytes, |stream| {
-                    stream.peak_bytes(selection.parameters.transformer_window_size)
-                });
-            let encode = if request.shape.conditioning.is_empty() {
-                0
-            } else {
-                native.conditioning_resident_bytes
-            };
-            let unclassified = facts
-                .base_bytes
-                .saturating_sub(facts.conditioning_bytes)
-                .saturating_sub(facts.transformer_bytes)
-                .saturating_sub(facts.decoder_bytes);
-            return Ok(conditioning
-                .max(encode)
-                .max(native.video_decode_resident_bytes)
-                .max(native.audio_decode_resident_bytes)
-                .max(dit.saturating_add(facts.overlay_bytes))
-                .saturating_add(unclassified));
-        }
+            .filter(|_| bounded && component.includes_text_encoder())
+            .map_or(facts.conditioning_bytes, |stream| {
+                stream.peak_bytes(selection.parameters.transformer_window_size)
+            });
+        let encode = if request.shape.conditioning.is_empty() {
+            0
+        } else {
+            native.conditioning_resident_bytes
+        };
+        let unclassified = facts
+            .base_bytes
+            .saturating_sub(facts.conditioning_bytes)
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_sub(facts.decoder_bytes);
+        return Ok(conditioning
+            .max(encode)
+            .max(native.video_decode_resident_bytes)
+            .max(native.audio_decode_resident_bytes)
+            .max(dit.saturating_add(facts.overlay_bytes))
+            .saturating_add(unclassified));
     }
     Ok(if selector.backend() == MemoryBackend::Mlx {
         crate::mlx_fit_gate::mlx_fallback_weights_bytes(contract, engaged, selection.parameters)

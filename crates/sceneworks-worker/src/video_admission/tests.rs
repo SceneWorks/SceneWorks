@@ -5697,8 +5697,10 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
     let projection = |base: &str, w4a8: bool, rows| NativeProjection {
         base: base.into(),
         descriptor_bytes: 0,
-        input: 1024,
-        output: 2048,
+        // Arithmetic-only projection facts: working storage must exceed the ordinary allowance
+        // so geometry/precision mutations are observable at the actual selector boundary.
+        input: 8192,
+        output: 65536,
         rotation_group: 256,
         activation_width: if w4a8 { 2 } else { activation_width },
         w4a8,
@@ -5811,7 +5813,7 @@ fn native_rows_at(
 }
 
 #[test]
-fn native_quant_stage_bound_is_task_max_with_staged_companions_once_on_both_backends() {
+fn native_quant_stage_bound_uses_selected_task_and_companions_once_on_both_backends() {
     for lane in [VideoLane::Mlx, VideoLane::Candle] {
         let contract = native_quant_contract(lane, 2);
         let native = contract
@@ -5921,10 +5923,28 @@ fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() 
             .as_ref()
             .unwrap();
         let rows = native_rows_at(request, geometry, native);
-        let expected = native
-            .precompute_peak_bytes(rows)
-            .max(native.denoise_peak_bytes(rows))
-            + GIB / 4;
+        let selection = selector.selections[0].selection;
+        let weights = video_floor_weights_bytes(
+            &selector,
+            geometry,
+            selection,
+            &narrow.engaged_composition(selection.strategy),
+        )
+        .unwrap();
+        let expected = weights
+            .saturating_add(GIB)
+            .max(
+                native
+                    .precompute_peak_bytes_windowed(rows, None)
+                    .unwrap()
+                    .saturating_add(GIB / 4),
+            )
+            .max(
+                native
+                    .denoise_peak_bytes_windowed(rows, None)
+                    .unwrap()
+                    .saturating_add(GIB / 4),
+            );
         assert_eq!(
             raw, expected,
             "admitted geometry must replace the borrowed placeholder shape"
@@ -5938,7 +5958,7 @@ fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() 
                         VideoLane::Candle => MemoryBackend::Candle,
                     },
                     raw,
-                    Some(raw.saturating_sub(narrow.total_resident_bytes())),
+                    Some(raw.saturating_sub(weights)),
                 )
             ),
             "the existing policy margin is applied exactly once"
@@ -5956,14 +5976,28 @@ fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() 
             larger.selections[0].predicted_peak_bytes > raw,
             "working buffers follow admitted geometry"
         );
-        let mut precise = native_quant_selector(&wide, request, lane);
-        assert!(matches!(
-            precise.select(geometry),
-            VideoRungSelection::Selected { .. }
-        ));
-        assert!(
-            precise.selections[0].predicted_peak_bytes > raw,
-            "native source precision is not coerced to request tier"
+        // Precision belongs to the selected source task, not an unselected partition. Candle
+        // can need less cast scratch at F32, so preserve its value rather than assuming monotonicity.
+        let references = vec![gen_core::Conditioning::Reference {
+            image: native_image(64, 32),
+            strength: None,
+        }];
+        let reference_request = native_quant_request(&references);
+        let price_precision = |contract: &MemoryProviderContract| {
+            let mut precise = native_quant_selector(contract, reference_request, lane);
+            precise.identity.mode = "reference_to_video";
+            precise.identity.reference_count = 1;
+            precise.identity.reference_shape = "image";
+            assert!(matches!(
+                precise.select(geometry),
+                VideoRungSelection::Selected { .. }
+            ));
+            precise.selections[0].predicted_peak_bytes
+        };
+        assert_ne!(
+            price_precision(&narrow),
+            price_precision(&wide),
+            "selected native source precision is not coerced to request tier"
         );
         let mut source_patch = narrow.clone();
         for task in &mut source_patch
@@ -6002,6 +6036,113 @@ fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() 
             more_steps.selections[0].predicted_peak_bytes > raw,
             "distinct-timestep tables remain resident"
         );
+    }
+}
+
+#[test]
+fn native_quant_separate_stages_fit_resident_and_staged_on_both_backends() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        for strategy in [MemoryStrategy::Resident, MemoryStrategy::StagedResidency] {
+            let mut contract = native_quant_contract(lane, 2);
+            let native = contract
+                .phase_facts
+                .as_mut()
+                .unwrap()
+                .native_quant
+                .as_mut()
+                .unwrap();
+            native.tasks.retain(|task| !task.reference_task);
+            let task = &mut native.tasks[0];
+            task.resident_bytes = 6 * GIB;
+            task.constructor_bytes = 9 * GIB;
+            task.evicted_bytes = 4 * GIB;
+            task.table_bytes_per_timestep = 0;
+            task.projections.clear();
+            native.video_decode_resident_bytes = 5 * GIB;
+            native.audio_decode_resident_bytes = 3 * GIB;
+            contract.asset_facts.conditioning_bytes = 7 * GIB;
+            contract.asset_facts.transformer_bytes = 6 * GIB;
+            contract.asset_facts.decoder_bytes = 8 * GIB;
+            contract.asset_facts.base_bytes = 21 * GIB;
+            contract.asset_facts.overlay_bytes = 0;
+            // Restrict the offered capability, not the prediction arithmetic: exercise each
+            // actual candidate through the production selector instead of a copied formula.
+            for cap in &mut contract.strategies {
+                cap.support = if cap.strategy == strategy {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                };
+            }
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "{:?}",
+                contract.conformance_errors()
+            );
+            let mut selector = native_quant_selector(&contract, native_quant_request(&[]), lane);
+            selector.budget = budget(10.0);
+            let verdict = selector.select(geometry(124, VideoGeometryRole::Requested));
+            assert!(matches!(verdict, VideoRungSelection::Selected { .. }), "separate native stages fit; their legacy sum does not: {lane:?} {strategy:?} {verdict:?}");
+            let selected = &selector.selections[0];
+            assert_eq!(selected.selection.strategy, strategy);
+            assert_eq!(selected.predicted_peak_bytes, 9 * GIB, "actual cold constructor exceeds the ordinary stage+activation maximum and must remain priced");
+            assert!(contract.asset_facts.base_bytes > 10 * GIB);
+        }
+    }
+}
+
+#[test]
+fn native_quant_unselected_task_changes_do_not_move_the_selected_request_budget() {
+    let references = vec![gen_core::Conditioning::Reference {
+        image: native_image(64, 32),
+        strength: None,
+    }];
+    let geometry = geometry(124, VideoGeometryRole::Requested);
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        for reference in [false, true] {
+            let contract = native_quant_contract(lane, 2);
+            let conditioning = if reference {
+                references.as_slice()
+            } else {
+                &[]
+            };
+            let request = native_quant_request(conditioning);
+            let estimate = |contract: &MemoryProviderContract| {
+                let mut selector = native_quant_selector(contract, request, lane);
+                if reference {
+                    selector.identity.mode = "reference_to_video";
+                    selector.identity.reference_count = 1;
+                    selector.identity.reference_shape = "image";
+                }
+                let verdict = selector.select(geometry);
+                let VideoRungSelection::Selected { needed_gb, .. } = verdict else {
+                    panic!("{verdict:?}")
+                };
+                (selector.selections[0].predicted_peak_bytes, needed_gb)
+            };
+            let baseline = estimate(&contract);
+            let mut changed = contract.clone();
+            let unselected = changed
+                .phase_facts
+                .as_mut()
+                .unwrap()
+                .native_quant
+                .as_mut()
+                .unwrap()
+                .tasks
+                .iter_mut()
+                .find(|task| task.reference_task != reference)
+                .unwrap();
+            unselected.resident_bytes = 64 * GIB;
+            unselected.constructor_bytes = 128 * GIB;
+            unselected.table_bytes_per_timestep = GIB;
+            unselected.patch_size = [2, 2, 2];
+            // Real provider asset facts summarize all loadable tasks; those summary maxima
+            // must not sneak an unselected partition back under the request-scoped native floor.
+            changed.asset_facts.transformer_bytes = 64 * GIB;
+            changed.asset_facts.base_bytes = 66 * GIB;
+            assert_eq!(estimate(&changed), baseline, "unselected task storage/constructor/cache/patch and aggregate maxima cannot price this request");
+        }
     }
 }
 
