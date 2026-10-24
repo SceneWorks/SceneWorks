@@ -29,7 +29,13 @@ mod temp_fixture_guard;
 mod update;
 #[cfg(any(target_os = "linux", test))]
 mod webkitgtk;
+// WebView2 renderer-death recovery (Windows): the COM wiring is cfg(windows); the
+// decision logic is pure and compiled in tests on every host.
+#[cfg(any(windows, test))]
+mod webview_resilience;
 
+#[cfg(windows)]
+use tauri::Manager;
 use tauri::RunEvent;
 
 fn main() {
@@ -117,6 +123,15 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building the SceneWorks desktop shell");
+
+    // Windows/WebView2: if Chromium kills the webview's render process (OOM under
+    // commit pressure, hang watchdog, crash), the window would otherwise paint
+    // white for the rest of the session while jobs keep running blind. Reload
+    // the webview instead (2026-10-22 incident; see webview_resilience.rs).
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        webview_resilience::install_process_failed_recovery(&window);
+    }
 
     app.run(|app_handle, event| {
         // Stop the Python worker then the API sidecar gracefully, holding the

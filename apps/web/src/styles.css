@@ -19983,3 +19983,24 @@ pre.yue2-abc,
   border-radius: 8px;
 }
 .ie-moss-results span { display: flex; gap: 12px; }
+
+/* Compact Advanced navigation stays beside the workspace on smaller screens. */
+.sidebar-toggle { flex-shrink: 0; align-self: flex-end; }
+.app.sidebar-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+.sidebar-collapsed .sidebar { padding: 18px 8px; border-right: 1px solid var(--border); border-bottom: 0; }
+.sidebar-collapsed .sidebar-toggle { align-self: center; }
+.sidebar-collapsed .brand { justify-content: center; padding: 4px 0; }
+.sidebar-collapsed .brand > div,
+.sidebar-collapsed .sidebar-section-title,
+.sidebar-collapsed .nav-label,
+.sidebar-collapsed .project-pill-meta,
+.sidebar-collapsed .project-pill .chev,
+.sidebar-collapsed .sidebar-footer-details,
+.su-sidebar-collapsed .project-pill-meta,
+.su-sidebar-collapsed .project-pill .chev { display: none; }
+.sidebar-collapsed .nav-item { justify-content: center; padding: 0; height: 40px; }
+.sidebar-collapsed .nav-item.active::before { left: -8px; }
+.sidebar-collapsed .nav-pulse { position: absolute; right: 3px; top: 4px; width: 5px; height: 5px; }
+.sidebar-collapsed .project-pill,
+.su-sidebar-collapsed .project-pill { justify-content: center; padding: 8px 0; }
+.sidebar-collapsed .sidebar-footer { display: flex; justify-content: center; padding: 8px 0 0; }
