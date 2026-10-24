@@ -57,6 +57,15 @@ fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
     }
 }
 
+/// These utility routes may be enqueued through the raw queue. Their execution model comes from
+/// the existing fixed-runtime/reference tables, never a caller's manifest carrier.
+pub(crate) fn canonical_utility_model_carrier(job_type: &JobType) -> bool {
+    matches!(
+        job_type,
+        JobType::ImageVqa | JobType::ImageInterleave | JobType::ImageDepth | JobType::ImageUpscale
+    )
+}
+
 /// DATA TABLE: job types that always load a fixed utility model, keyed on the job type and the
 /// request's own data (engine/flags) — never on a model name. Referenced ids are ordinary catalog
 /// manifest entries; adding a model or utility changes manifest data, not this seam.
@@ -272,10 +281,36 @@ pub(crate) async fn ensure_runtime_model_sources(
         return preflight_payload_model_sources(state, payload).await;
     }
 
-    let mut ids = fixed_runtime_model_ids(job_type, payload)
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+    let canonical_primary = canonical_utility_model_carrier(job_type);
+    if canonical_primary {
+        for key in [
+            "modelManifestEntry",
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            payload.remove(key);
+        }
+    }
+    let fixed_ids = fixed_runtime_model_ids(job_type, payload);
+    let primary_id = if canonical_primary {
+        fixed_ids.first().map(|id| (*id).to_owned()).or_else(|| {
+            payload_reference_spec(job_type)
+                .iter()
+                .find_map(|reference| match reference {
+                    PayloadModelRef::CatalogId(key) => payload
+                        .get(*key)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned),
+                    PayloadModelRef::Repository(_) => None,
+                })
+        })
+    } else {
+        None
+    };
+    let mut ids = fixed_ids.into_iter().map(str::to_owned).collect::<Vec<_>>();
     let mut repositories = Vec::new();
     let has_primary_carrier = payload.contains_key("modelManifestEntry");
     for reference in payload_reference_spec(job_type) {
@@ -323,6 +358,23 @@ pub(crate) async fn ensure_runtime_model_sources(
             continue;
         }
         push_model_entry(payload, entry)?;
+    }
+    if let Some(primary_id) = primary_id {
+        let entry = payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| {
+                        entry.get("id").and_then(Value::as_str) == Some(primary_id.as_str())
+                    })
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                ApiError::internal("Canonical utility model carrier was not resolved")
+            })?;
+        payload.insert("modelManifestEntry".to_owned(), entry);
     }
 
     preflight_payload_model_sources(state, payload).await
