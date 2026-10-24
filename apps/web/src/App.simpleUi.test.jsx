@@ -162,5 +162,7 @@ describe("App — Simple/Advanced shell switching", () => {
     ];
     expect(simple.disabled).toBe(true);
     expect(advanced.disabled).toBe(true);
+    expect(container.querySelector(".sidebar-toggle")).toBeNull();
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeNull();
   });
 });

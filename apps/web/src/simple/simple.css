@@ -2914,3 +2914,17 @@
 .su-option-row img {
   --checker-tile: 8px;
 }
+
+/* Desktop/tablet icon rail; phones retain the overlay navigation drawer. */
+.su-nav > .sidebar-toggle { margin-bottom: 14px; }
+.su-sidebar-collapsed .su-nav { width: 64px; padding-inline: 8px; }
+.su-sidebar-collapsed .sidebar-toggle { align-self: center; }
+.su-sidebar-collapsed .su-brand { justify-content: center; padding-inline: 0; }
+.su-sidebar-collapsed .su-brand > div,
+.su-sidebar-collapsed .su-nav-label,
+.su-sidebar-collapsed .su-nav-group-title { display: none; }
+.su-sidebar-collapsed .su-nav-group + .su-nav-group { margin-top: 16px; }
+.su-sidebar-collapsed .su-nav-item { justify-content: center; padding-inline: 0; }
+.su-sidebar-collapsed .su-nav-item.active::before { left: -8px; }
+.su-sidebar-collapsed .su-nav-badge { position: absolute; right: 0; top: 0; padding: 1px 3px; font-size: 9px; }
+.su-sidebar-collapsed .su-nav-footer { display: flex; justify-content: center; padding-inline: 0; }

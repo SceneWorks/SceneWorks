@@ -101,6 +101,77 @@ describe("App — durable UI preference writes carry the access token (sc-15136)
       (button.getAttribute("title") ?? "").startsWith("Switch to "),
     );
 
+  it("collapses and expands navigation, preserving accessible destinations and authenticated persistence", async () => {
+    await renderApp();
+    const collapse = container.querySelector('[aria-label="Collapse sidebar"]');
+    expect(collapse.getAttribute("aria-expanded")).toBe("true");
+    await click(collapse);
+    await settle();
+    expect(container.querySelector("main.app").classList.contains("sidebar-collapsed")).toBe(true);
+    expect(preferenceWrites().at(-1)).toEqual({ body: { sidebarCollapsed: true }, token: TOKEN });
+    const queue = container.querySelector('.nav-item[aria-label="Queue"]');
+    await click(queue);
+    expect(queue.getAttribute("aria-current")).toBe("page");
+    await click(container.querySelector('[aria-label="Expand sidebar"]'));
+    await settle();
+    expect(container.querySelector("main.app").classList.contains("sidebar-collapsed")).toBe(false);
+    expect(preferenceWrites().at(-1)).toEqual({ body: { sidebarCollapsed: false }, token: TOKEN });
+  });
+
+  it("restores the durable collapsed preference and expands to open the workspace picker", async () => {
+    const fetchApi = fakeApi();
+    global.fetch = vi.fn((url, init) => {
+      if (new URL(url).pathname.endsWith("/ui-preferences") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(response({ sidebarCollapsed: true }));
+      }
+      return fetchApi(url, init);
+    });
+    await renderApp();
+    expect(container.querySelector('[aria-label="Expand sidebar"]')).toBeTruthy();
+    await click(container.querySelector(".project-pill"));
+    expect(container.querySelector('[aria-label="Collapse sidebar"]')).toBeTruthy();
+    expect(container.querySelector('.project-menu[role="listbox"]')).toBeTruthy();
+  });
+
+  it("keeps the collapse preference when switching between Advanced and Simple UI", async () => {
+    await renderApp();
+    await click(container.querySelector('[aria-label="Collapse sidebar"]'));
+    await click(container.querySelector('[aria-label="Switch to Simple UI"]'));
+    await settle();
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeTruthy();
+    await click(container.querySelector('[aria-label="Expand sidebar"]'));
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeNull();
+    await click([...container.querySelectorAll('.su-switch button')].find(b => b.textContent === "Advanced"));
+    await settle();
+    expect(container.querySelector('[aria-label="Collapse sidebar"]')).toBeTruthy();
+  });
+
+  it("closes an open workspace menu when collapsing without an outside mouse click", async () => {
+    await renderApp();
+    await click(container.querySelector(".project-pill"));
+    expect(container.querySelector(".project-menu")).toBeTruthy();
+    await click(container.querySelector('[aria-label="Collapse sidebar"]'));
+    expect(container.querySelector(".project-menu")).toBeNull();
+    expect(container.querySelector(".project-pill").getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("does not let a late preference read undo a newer sidebar toggle", async () => {
+    let resolvePreferences;
+    const pendingPreferences = new Promise(resolve => { resolvePreferences = resolve; });
+    const fetchApi = fakeApi();
+    global.fetch = vi.fn((url, init) => {
+      if (new URL(url).pathname.endsWith("/ui-preferences") && (init?.method ?? "GET") === "GET") {
+        return pendingPreferences;
+      }
+      return fetchApi(url, init);
+    });
+    await renderApp();
+    await click(container.querySelector('[aria-label="Collapse sidebar"]'));
+    await act(async () => resolvePreferences(response({ sidebarCollapsed: false })));
+    await settle();
+    expect(container.querySelector('[aria-label="Expand sidebar"]')).toBeTruthy();
+  });
+
   it("sends the token on the theme PUT, so a remote theme change reaches ui-preferences.json", async () => {
     await renderApp();
     const toggle = themeToggle();

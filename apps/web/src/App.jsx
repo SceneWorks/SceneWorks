@@ -371,7 +371,7 @@ export const viewTitles = {
   },
 };
 
-function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled }) {
+function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled, onOpen, collapsed }) {
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -411,6 +411,14 @@ function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled
     }
   }, [creating]);
 
+  useEffect(() => {
+    if (collapsed) {
+      setOpen(false);
+      setCreating(false);
+      setName("");
+    }
+  }, [collapsed]);
+
   async function submitNew(event) {
     event.preventDefault();
     const trimmed = name.trim();
@@ -432,9 +440,13 @@ function ProjectSwitcher({ activeProject, projects, onSelect, onCreate, disabled
       <button
         aria-expanded={open}
         aria-haspopup="listbox"
+        aria-label={activeProject?.name ?? "Pick a workspace"}
         className="project-pill"
         disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          if (!open) onOpen?.();
+          setOpen((value) => !value);
+        }}
         title={activeProject?.name ?? "Pick a workspace"}
         type="button"
       >
@@ -844,6 +856,13 @@ export function App() {
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarChanged = useRef(false);
+  const changeSidebarCollapsed = (next) => {
+    sidebarChanged.current = true;
+    setSidebarCollapsed(next);
+    persistNavigationPreferences({ sidebarCollapsed: next });
+  };
   const [theme, setTheme] = useState(readStoredTheme);
   // Apply a theme and persist it through the API. localStorage gives an instant
   // initial paint, but on the desktop shell the UI runs at the API's per-launch
@@ -1639,9 +1658,12 @@ export function App() {
         if (isAccentId(prefs?.accent)) {
           setAccent(prefs.accent);
         }
-        // "Use Simple UI by default" (design handoff). Seeded from the durable copy for
-        // the same reason as theme/accent; the localStorage cache only gives the first
-        // paint. A session override (the sidebar switch) still wins over it.
+        // A late launch read must not undo a sidebar toggle made in this session.
+        if (typeof prefs?.sidebarCollapsed === "boolean" && !sidebarChanged.current) {
+          setSidebarCollapsed(prefs.sidebarCollapsed);
+        }
+        // "Use Simple UI by default" is seeded from the durable copy; a session
+        // override from the mode switch still wins over it.
         if (typeof prefs?.simpleUi === "boolean") {
           setSimpleUiDefault(prefs.simpleUi);
           writeStoredSimpleDefault(prefs.simpleUi);
@@ -3896,6 +3918,8 @@ export function App() {
                ui-preferences GET has landed, the Simple studios must neither restore from
                a possibly-empty cache nor write their catalog defaults over the stored copy. */
             preferencesHydrated={navigationHydrated}
+            sidebarCollapsed={sidebarCollapsed}
+            onSidebarCollapsedChange={changeSidebarCollapsed}
             simpleDefault={simpleUiDefault}
           />
           {workflowEmbedNoticeOpen ? (
@@ -3920,8 +3944,18 @@ export function App() {
   return (
     <AppStaticContext.Provider value={appStaticValue}>
     <AppLiveContext.Provider value={appLiveValue}>
-    <main className="app">
+    <main className={sidebarCollapsed ? "app sidebar-collapsed" : "app"}>
       <aside className="sidebar" aria-label="Primary">
+        <button
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!sidebarCollapsed}
+          className="icon-btn sidebar-toggle"
+          onClick={() => changeSidebarCollapsed(!sidebarCollapsed)}
+          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          type="button"
+        >
+          <Icon.Sidebar collapsed={sidebarCollapsed} />
+        </button>
         <div className="sidebar-scroll">
           <div className="brand">
             <span className="brand-mark" aria-hidden="true">
@@ -3935,8 +3969,10 @@ export function App() {
 
           <ProjectSwitcher
             activeProject={activeProject}
+            collapsed={sidebarCollapsed}
             disabled={!authenticated}
             onCreate={createProject}
+            onOpen={() => { if (sidebarCollapsed) changeSidebarCollapsed(false); }}
             onSelect={selectProject}
             projects={projects}
           />
@@ -3951,6 +3987,8 @@ export function App() {
                   const label = item.label ?? item.id;
                   return (
                     <button
+                      aria-label={label}
+                      aria-current={activeView === item.id ? "page" : undefined}
                       className={activeView === item.id ? "nav-item active" : "nav-item"}
                       key={item.id}
                       onClick={() => navTo(item.id)}
@@ -3973,12 +4011,24 @@ export function App() {
             the Simple UI; the same component renders in the Simple sidebar footer, so the
             control can never present differently between the two. */}
         <div className="sidebar-footer">
-          <AppVersion update={appUpdate} />
-          <SimpleModeSwitch
-            locked={uiModeLocked}
-            mode={ADVANCED_MODE}
-            onChange={setUiModeOverride}
-          />
+          <div className="sidebar-footer-details"><AppVersion update={appUpdate} /></div>
+          {sidebarCollapsed ? (
+            <button
+              aria-label="Switch to Simple UI"
+              className="icon-btn"
+              onClick={() => setUiModeOverride(SIMPLE_MODE)}
+              title="Switch to Simple UI"
+              type="button"
+            >
+              <Icon.Sparkle />
+            </button>
+          ) : (
+            <SimpleModeSwitch
+              locked={uiModeLocked}
+              mode={ADVANCED_MODE}
+              onChange={setUiModeOverride}
+            />
+          )}
         </div>
       </aside>
 
