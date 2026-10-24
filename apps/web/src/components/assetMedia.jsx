@@ -241,6 +241,7 @@ export function AssetThumbnail({ asset, className = "" }) {
   if (!asset) {
     return null;
   }
+  if (asset.type === "tensor") return <span className={className}>FP32 tensor · {asset.tensor?.shape?.join(" × ") ?? "NPY"}</span>;
   const src = thumbnailUrl(asset);
   if (!src) {
     return <span className={className} onContextMenu={suppressThumbnailContextMenu}>{asset.type ?? "asset"}</span>;
@@ -294,6 +295,7 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
   if (!asset) {
     return null;
   }
+  if (asset.type === "tensor") return <span className={className}>Tensor artifact · {asset.tensor?.dtype} [{asset.tensor?.shape?.join(", ")}] · {asset.tensor?.byteLength} bytes. SHA256 {asset.tensor?.sha256}. No image preview.</span>;
   const src = isPreviewBackedAsset(asset) ? storedPreviewUrl(asset) : assetUrl(asset);
   if (!src) {
     return <span className={className}>{asset.type ?? "asset"}</span>;

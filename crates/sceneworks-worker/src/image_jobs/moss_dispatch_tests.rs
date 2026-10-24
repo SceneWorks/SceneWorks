@@ -28,6 +28,7 @@ mod dispatch_transaction_tests {
         ordinary: AtomicUsize,
         api_cancel: AtomicBool,
         posts: Mutex<Vec<Value>>,
+        jobs: Mutex<std::collections::HashMap<String, Value>>,
         expected_references: Mutex<Vec<(u32, u32, Vec<u8>)>>,
         use_kv_cache: AtomicBool,
     }
@@ -50,6 +51,7 @@ mod dispatch_transaction_tests {
                 ordinary: 0.into(),
                 api_cancel: false.into(),
                 posts: Mutex::new(Vec::new()),
+                jobs: Mutex::new(Default::default()),
                 expected_references: Mutex::new(vec![(48, 16, vec![73; 48 * 16 * 3])]),
                 use_kv_cache: false.into(),
             }
@@ -108,6 +110,15 @@ mod dispatch_transaction_tests {
             assert_eq!(input.resolved.acceleration, MossImageAcceleration::Off);
             assert_eq!(input.total_count, 1);
             if input.edit {
+                assert_eq!(
+                    input.advanced.negative_prompts.unwrap(),
+                    &["fixture negative"]
+                );
+                assert_eq!(input.advanced.output, MossImageOutputKind::Images);
+                input
+                    .advanced
+                    .validate(input.native, input.resolved)
+                    .unwrap();
                 let request = gen_core::moss_image_edit::edit_request(input.native).unwrap();
                 assert_eq!(
                     request.moss_image.unwrap().acceleration,
@@ -132,7 +143,6 @@ mod dispatch_transaction_tests {
     struct TransactionProbe {
         inner: Probe,
         control: Arc<Control>,
-        variant: MossImageVariant,
     }
     impl Generator for TransactionProbe {
         fn descriptor(&self) -> &gen_core::ModelDescriptor {
@@ -149,6 +159,10 @@ mod dispatch_transaction_tests {
             request: &GenerationRequest,
             inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
         ) -> gen_core::Result<u64> {
+            assert_eq!(
+                inputs.advanced.negative_prompts.unwrap(),
+                &["fixture negative"]
+            );
             self.control.warm.fetch_add(1, Ordering::SeqCst);
             self.control
                 .assert_references(inputs.references, inputs.use_kv_cache);
@@ -173,6 +187,10 @@ mod dispatch_transaction_tests {
             inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
             progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<MossImageAdvancedOutput> {
+            assert_eq!(
+                inputs.advanced.negative_prompts.unwrap(),
+                &["fixture negative"]
+            );
             self.control.renders.fetch_add(1, Ordering::SeqCst);
             self.control
                 .assert_references(inputs.references, inputs.use_kv_cache);
@@ -182,8 +200,6 @@ mod dispatch_transaction_tests {
             let mut output = self
                 .inner
                 .generate_moss_image_edit(request, inputs, progress)?;
-            self.inner.edit_report.borrow_mut().as_mut().unwrap().base =
-                completed_receipt_for(request, self.variant);
             match attempt {
                 Attempt::MissingReport => *self.inner.edit_report.borrow_mut() = None,
                 Attempt::InvalidReport => {
@@ -245,10 +261,26 @@ mod dispatch_transaction_tests {
             Json(body): Json<Value>,
         ) -> Json<Value> {
             c.posts.lock().unwrap().push(json!({"job":id,"body":body}));
-            Json(crate::tests::job_snapshot_json(
-                &id,
-                c.api_cancel.load(Ordering::SeqCst),
-            ))
+            let mut saved =
+                crate::tests::job_snapshot_json(&id, c.api_cancel.load(Ordering::SeqCst));
+            let payload = c.jobs.lock().unwrap().get(&id).cloned().unwrap();
+            saved["payload"] = payload.clone();
+            saved["projectId"] = payload["projectId"].clone();
+            if body["status"] == "completed" {
+                saved["status"] = json!("completed");
+                saved["result"] = body["result"].clone();
+                let generation = body["result"]["generationSetId"].clone();
+                let facts = body["result"]["assetWrites"].as_array().unwrap();
+                saved["result"]["assetIds"] = json!(facts
+                    .iter()
+                    .map(|f| f["assetId"].clone())
+                    .collect::<Vec<_>>());
+                saved["result"]["assets"] = json!(facts.iter().map(|f| json!({
+                    "id":f["assetId"], "projectId":payload["projectId"], "generationSetId":generation,
+                    "file":{"path":f["mediaPath"]}, "lineage":{"jobId":id}
+                })).collect::<Vec<_>>());
+            }
+            Json(saved)
         }
         async fn heartbeat(RoutePath(id): RoutePath<String>) -> Json<Value> {
             Json(
@@ -304,10 +336,18 @@ mod dispatch_transaction_tests {
         "advanced":{"mossImage":{"acceleration":"off"}}});
         if edit {
             payload["referenceAssetIds"] = json!(references);
+            payload["advanced"]["mossImageAdvanced"] =
+                json!({"negativePrompts":["fixture negative"]});
             payload["advanced"]["mossImageEdit"] = json!({"reference_max_edge":32,"use_kv_cache":control.use_kv_cache.load(Ordering::SeqCst)});
         }
         let id = format!("moss-dispatch-{}", Uuid::new_v4());
+        control
+            .jobs
+            .lock()
+            .unwrap()
+            .insert(id.clone(), payload.clone());
         let mut job = crate::tests::job_snapshot_json(&id, false);
+        job["projectId"] = json!(project);
         job["payload"] = payload.clone();
         let job: JobSnapshot = serde_json::from_value(job).unwrap();
         let request = ImageRequest::from_payload(payload.as_object().unwrap());
@@ -315,7 +355,7 @@ mod dispatch_transaction_tests {
             &request,
             1,
             moss_adapter_label(model, backend),
-            None,
+            Some(Arc::new(job.payload.clone())),
         );
         let mut writes = vec![];
         let load = move |engine: &str, spec: &LoadSpec| -> gen_core::Result<Box<dyn Generator>> {
@@ -325,11 +365,7 @@ mod dispatch_transaction_tests {
             let mut inner = Probe::new();
             inner.descriptor.id = model;
             inner.descriptor.backend = backend;
-            Ok(Box::new(TransactionProbe {
-                inner,
-                control,
-                variant,
-            }))
+            Ok(Box::new(TransactionProbe { inner, control }))
         };
         let api = ApiClient::new(settings);
         let result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -364,6 +400,26 @@ mod dispatch_transaction_tests {
         })
         .await
         .expect("bounded actual dispatch/cache/event transaction");
+        // Mirror the actual outer worker boundary: staged edits publish only after the native
+        // task/event consumer succeeded; the shared publication helper owns the acknowledgment.
+        let batch = { plan.moss_staged.lock().unwrap().take() };
+        let result = match (result, batch) {
+            (Ok(()), Some(batch)) => {
+                publish_moss_batch(
+                    &ApiClient::new(settings),
+                    &job,
+                    &plan,
+                    backend,
+                    &writes,
+                    batch,
+                )
+                .await
+            }
+            (result, batch) => {
+                drop(batch);
+                result
+            }
+        };
         (result, writes, id)
     }
 
@@ -452,6 +508,14 @@ mod dispatch_transaction_tests {
             assert_eq!(report["reference_max_edge"], 32);
             assert_eq!(report["use_kv_cache"], false);
             assert_eq!(report["base"]["samples"][0]["seed"], 173);
+            assert_eq!(
+                writes[0]["rawAdapterSettings"]["mossImageAdvanced"]["negativePrompts"],
+                json!(["fixture negative"])
+            );
+            assert_eq!(report["base"]["conditioning"][0]["negative"]["sha256"], {
+                use sha2::{Digest, Sha256};
+                format!("{:x}", Sha256::digest(b"fixture negative"))
+            });
             assert!(Path::new(&project.path)
                 .join(writes[0]["mediaPath"].as_str().unwrap())
                 .is_file());

@@ -79,3 +79,8 @@ export const qualityChoices = [
   ["balanced", "Balanced"],
   ["best", "Final"],
 ];
+
+// A terminal render can still be waiting for its durable API asset publication.
+export function jobOutputsPending(job) {
+  return job?.result?.outputPublication?.state === "pending";
+}

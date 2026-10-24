@@ -22402,6 +22402,7 @@ mod preview_stream_tests {
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
+            GenEvent::MossAssets(..) => "MossAssets",
             GenEvent::Image { .. } => "Image",
         }
     }

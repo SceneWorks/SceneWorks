@@ -28,6 +28,16 @@ impl Default for EditOptions {
         }
     }
 }
+/// Shared discovery contract; runtime validation remains `edit_options`.
+pub fn edit_options_schema() -> Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "properties": {
+            "reference_max_edge": {"type": "integer", "minimum": 16, "maximum": 4096, "default": 512},
+            "use_kv_cache": {"type": "boolean", "default": true}
+        }
+    })
+}
 pub fn edit_options(advanced: &JsonObject) -> Result<EditOptions, String> {
     let options: EditOptions = advanced.get(EDIT_OPTIONS_KEY).map_or_else(
         || Ok(EditOptions::default()),
@@ -41,6 +51,15 @@ pub fn edit_options(advanced: &JsonObject) -> Result<EditOptions, String> {
 /// The ordered plural carrier is authoritative. Aliases may only repeat its first element.
 /// Never trim, deduplicate, or truncate semantic reference slots.
 pub fn edit_reference_ids(payload: &JsonObject) -> Result<Vec<String>, String> {
+    let ids = edit_reference_slots(payload)?;
+    if !(1..=4).contains(&ids.len()) {
+        return Err("MOSS edit requires one to four ordered reference slots".into());
+    }
+    Ok(ids)
+}
+/// Resolve carriers without applying an execution-cardinality policy. Sharing describes slots;
+/// enqueue still applies the runtime's current bound through `edit_reference_ids`.
+pub fn edit_reference_slots(payload: &JsonObject) -> Result<Vec<String>, String> {
     let mut ids = match payload.get("referenceAssetIds") {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::Array(values)) => values
@@ -69,9 +88,6 @@ pub fn edit_reference_ids(payload: &JsonObject) -> Result<Vec<String>, String> {
             }
         }
     }
-    if !(1..=4).contains(&ids.len()) {
-        return Err("MOSS edit requires one to four ordered reference slots".into());
-    }
     Ok(ids)
 }
 pub fn is_edit(payload: &JsonObject) -> bool {
@@ -91,6 +107,19 @@ pub fn is_moss(model: &str) -> bool {
 /// Product editing availability for the actual enqueue lane, independent of ordinary/DMD support.
 pub fn edit_backend_eligible(model: &str, backend: &str) -> bool {
     is_moss(model) && matches!(backend, "mlx" | "candle")
+}
+
+/// Effective sampling controls persisted by every edit enqueue path, so history can replay
+/// an omitted native default after the catalog or application defaults change.
+pub fn edit_effective_controls(
+    model: &str,
+    request: &GenerationRequest,
+) -> Result<JsonObject, String> {
+    let variant = MossImageVariant::from_provider_id(model).ok_or("unknown MOSS model")?;
+    let resolved =
+        MossImageResolved::resolve(variant, request).map_err(|error| error.to_string())?;
+    Ok(json!({"steps":resolved.steps,"guidanceScale":resolved.guidance,"schedulerShift":resolved.shift})
+        .as_object().expect("controls object").clone())
 }
 /// Discovery metadata only. Request validation always uses the native strict serde + resolver.
 pub fn options_schema() -> Value {
@@ -178,6 +207,7 @@ pub fn native_request(
     payload: &JsonObject,
     entry: &JsonObject,
 ) -> Result<Option<GenerationRequest>, String> {
+    let advanced_inputs = crate::moss_image_advanced::options(payload)?;
     let model = payload.get("model").and_then(Value::as_str).unwrap_or("");
     let advanced = payload
         .get("advanced")
@@ -316,9 +346,21 @@ pub fn native_request(
             request.prompt.clear();
         }
     }
+    if advanced_inputs
+        .as_ref()
+        .is_some_and(|a| a.negative_prompts.is_some())
+    {
+        request.negative_prompt = None;
+    }
     let expanded = request
         .count
-        .checked_mul(request.prompt_batch.len().max(1) as u32)
+        .checked_mul(
+            request
+                .prompt_batch
+                .len()
+                .max(crate::moss_image_advanced::batch_hint(payload))
+                .max(1) as u32,
+        )
         .ok_or("image count overflow")?;
     if expanded == 0 || expanded > 8 {
         return Err("MOSS-Image prompts × count must be in 1..=8".into());
@@ -337,7 +379,14 @@ pub fn native_request(
     if edit {
         request = gen_core::moss_image_edit::edit_request(&request).map_err(|e| e.to_string())?;
     }
-    MossImageResolved::resolve(variant, &request).map_err(|e| e.to_string())?;
+    let resolved = MossImageResolved::resolve(variant, &request).map_err(|e| e.to_string())?;
+    if edit {
+        request
+            .moss_image
+            .as_mut()
+            .expect("MOSS options")
+            .training_shift = Some(resolved.training_shift);
+    }
     Ok(Some(request))
 }
 /// Stage ONLY the selected optional package. Ordinary SFT remains usable without any DMD files.
@@ -391,11 +440,13 @@ pub fn selected_components_for_purpose(
 }
 /// Reports are exclusively worker-produced. Replay keeps requested options but cannot reuse outcomes.
 pub fn scrub_reports(payload: &mut JsonObject) {
+    payload.remove("mossImageSampleIndex");
     payload.remove(EDIT_REPORT_KEY);
     payload.remove("moss_image_edit_execution_report");
     payload.remove(REPORT_KEY);
     payload.remove("moss_image_execution_report");
     if let Some(advanced) = payload.get_mut("advanced").and_then(Value::as_object_mut) {
+        advanced.remove("mossImageSampleIndex");
         advanced.remove(EDIT_REPORT_KEY);
         advanced.remove("moss_image_edit_execution_report");
         advanced.remove(REPORT_KEY);
