@@ -189,10 +189,25 @@ export function verifyAccessProofs(binding, proofs) {
  * disappeared WITHOUT verified cleanup is still NOTPASS (and is refused by the ordinary path). */
 export async function authenticatedTerminalCleanup(dir, binding, identity) {
   try {
-    if (!binding?.container || !binding?.containerAttestation) return false;
-    const member = binding.members?.[EXECUTOR]; if (!member?.publicKey) return false;
-    const attested = authenticated(binding.containerAttestation, member.publicKey); sameIdentity(attested.identity, identity);
-    assert.deepEqual(attested.container, binding.container);
+    // A holder reaching the pre-barrier roster check has only the LOCAL binding it built from the
+    // member announcements; the executor publishes container + attestation later in binding.json.
+    // Consult that published document, but never trust it merely for existing: its identity, its
+    // deadline and every member this caller already holds must be byte-identical to the local view.
+    let proof = binding;
+    if (!binding?.container || !binding?.containerAttestation) {
+      proof = await json(path.join(dir, 'binding.json'));
+      assert.equal(proof?.kind, 'flux3-four-slot-reservation');
+      sameIdentity(proof.identity, identity);
+      assert.equal(binding?.kind, 'flux3-four-slot-reservation');
+      assert.equal(proof.deadline, binding.deadline);
+      const local = binding?.members ?? {}, executorMember = local[EXECUTOR];
+      assert(executorMember?.publicKey, 'holder must already hold the announced executor member');
+      assert.deepEqual(proof.members?.[EXECUTOR], executorMember, 'published executor member differs from the announced one');
+      for (const runner of Object.keys(local)) if (local[runner]) assert.deepEqual(proof.members?.[runner], local[runner], `published ${runner} member differs from the announced one`);
+    }
+    const member = proof.members?.[EXECUTOR]; if (!member?.publicKey) return false;
+    const attested = authenticated(proof.containerAttestation, member.publicKey); sameIdentity(attested.identity, identity);
+    assert.deepEqual(attested.container, proof.container); binding = proof;
     const pulse = authenticated(await json(path.join(dir, `${EXECUTOR}.pulse.json`)), member.publicKey);
     sameIdentity(pulse.identity, identity); assert.equal(pulse.runner, EXECUTOR);
     assert.equal(pulse.status, 'safe_to_release'); assert.equal(pulse.containerCreated, true);
