@@ -275,7 +275,7 @@ export function StudioRunStatus({ job }) {
 export function StudioResults({ job, assets, type, columns, meta, pendingCount = 1, wide = false }) {
   const { toast, openPreview } = useSimpleUi();
   const { updateAssetStatus } = useAppStatic();
-  const results = job ? resolveJobResultAssets(job, assets, { type }) : [];
+  const results = job ? resolveJobResultAssets(job, assets, { type: type === "image" && job.payload?.advanced?.mossImageAdvanced?.output === "latents" ? "tensor" : type }) : [];
   const running = jobIsRunning(job);
   // Failure/outcome reporting lives in StudioRunStatus (the run strip above this), so this
   // block is purely the output grid — a failed run simply has none.

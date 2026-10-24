@@ -97,6 +97,58 @@ fn golden_asset() -> Asset {
     .expect("golden asset parses")
 }
 
+#[test]
+fn moss_edit_export_counts_semantic_slots_and_never_deduplicates_the_vector() {
+    use sceneworks_core::workflow_resolution::{
+        build_resolution_report, CatalogEntry, StaticCatalogs,
+    };
+    for ids in [json!(["a"]), json!(["a", "b", "a", "c"])] {
+        for aliases in [
+            json!({}),
+            json!({"sourceAssetId":"a"}),
+            json!({"sourceAssetId":"a","referenceAssetId":"a"}),
+        ] {
+            let mut payload = json!({"model":"moss_image_sft","mode":"edit_image","referenceAssetIds":ids,"advanced":{"mossImageEdit":{"reference_max_edge":1024,"use_kv_cache":false}}});
+            payload
+                .as_object_mut()
+                .unwrap()
+                .extend(aliases.as_object().unwrap().clone());
+            let share = build_workflow_share(&golden_asset(), payload.as_object().unwrap());
+            assert_eq!(share.inputs.len(), 1);
+            assert_eq!(share.inputs[0].kind, "reference");
+            assert_eq!(
+                share.inputs[0].count as usize,
+                ids.as_array().unwrap().len()
+            );
+            let catalogs = StaticCatalogs {
+                models: vec![CatalogEntry::new("moss_image_sft").installed()],
+                conditional_components: vec![
+                    CatalogEntry::new("moss_image_sft:moss_image_edit").installed()
+                ],
+                ..Default::default()
+            };
+            let report = build_resolution_report(&share, &catalogs);
+            assert_eq!(report.input_images_required, share.inputs[0].count);
+            assert!(report.runnable);
+            assert!(!report.one_click_replayable());
+            let missing = build_resolution_report(
+                &share,
+                &StaticCatalogs {
+                    models: catalogs.models,
+                    ..Default::default()
+                },
+            );
+            assert!(!missing.runnable);
+            assert_eq!(missing.components.len(), 1);
+            let mut conflict = payload;
+            conflict["sourceAssetId"] = json!("other");
+            let refused = build_workflow_share(&golden_asset(), conflict.as_object().unwrap());
+            assert!(!build_resolution_report(&refused, &StaticCatalogs::default()).runnable);
+            assert!(refused.omitted.iter().any(|key| key == "inputs"));
+        }
+    }
+}
+
 /// The job row's `payload_json` for that asset — the exact `ImageJobRequest` the API stored,
 /// including the fields it stamps on (`modelManifestEntry`, `seeds`, the resolved geometry).
 fn golden_payload() -> JsonObject {

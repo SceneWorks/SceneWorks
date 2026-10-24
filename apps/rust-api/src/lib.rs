@@ -137,6 +137,7 @@ use catalogs::{
     update_catalog_analyzer_config, update_catalog_saved_view,
 };
 mod assets;
+mod moss_output_publication;
 use assets::{
     delete_asset, get_asset, get_asset_poster, import_asset, list_assets, move_asset_to_character,
     move_asset_to_library, purge_asset, sweep_stale_asset_uploads, update_asset_status,
@@ -2420,6 +2421,7 @@ async fn get_project_file(
     Query(query): Query<ProjectFileQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    moss_output_publication::require_path(&state, &project_id, &relative_path).await?;
     let project_file = project_call(state.clone(), {
         let project_id = project_id.clone();
         let relative_path = relative_path.clone();
@@ -3415,6 +3417,20 @@ where
 /// opaque option back into a host path and would let replay clients persist server-private
 /// metadata. Keep the stored row intact and remove only that private resolution from public clones.
 fn public_job_snapshot(mut job: JobSnapshot) -> JobSnapshot {
+    if jobs::moss_edit_output_batch(&job)
+        && job.result.contains_key("generationSetId")
+        && (job.result.contains_key("assetWrites") || job.status == JobStatus::Completed)
+        && moss_output_publication::canonical_batch(&job).is_none()
+    {
+        job.result.insert("outputPublication".into(), json!({"state":"pending","jobId":job.id,"note":"Output publication is pending. Poll this job for canonical assets; do not resubmit generation."}));
+        job.result.remove("assetWrites");
+        job.result.remove("assets");
+        job.result.remove("assetIds");
+        job.result.remove("generationSet");
+        job.result
+            .remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
+        job.result.remove(sceneworks_core::moss_image::REPORT_KEY);
+    }
     let private_resolution = job
         .payload
         .get_mut("modelManifestEntry")
@@ -5154,7 +5170,30 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("projectId is required"));
     }
     validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+    if (payload.moss_image_advanced.is_some()
+        || payload
+            .advanced
+            .contains_key(sceneworks_core::moss_image_advanced::KEY))
+        && (payload.mode != "edit_image" || !sceneworks_core::moss_image::is_moss(&payload.model))
+    {
+        return Err(ApiError::bad_request(
+            "mossImageAdvanced tensor/output controls require explicit MOSS edit_image mode",
+        ));
+    }
+    let positive_tensor = payload.mode == "edit_image"
+        && sceneworks_core::moss_image::is_moss(&payload.model)
+        && (payload
+            .moss_image_advanced
+            .as_ref()
+            .is_some_and(|a| a.positive.is_some())
+            || payload
+                .advanced
+                .get(sceneworks_core::moss_image_advanced::KEY)
+                .and_then(|v| v.get("positive"))
+                .is_some_and(|v| !v.is_null()));
+    if (!positive_tensor && payload.prompt.is_empty())
+        || payload.prompt.chars().count() > MAX_PROMPT_CHARS
+    {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));

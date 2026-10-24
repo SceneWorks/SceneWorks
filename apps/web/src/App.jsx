@@ -1070,7 +1070,7 @@ export function App() {
   // Latest jobs list, so the claim-release sweep can read it without re-subscribing.
   const jobsRef = useRef([]);
   const trackEditorScratchOp = useCallback(
-    (jobId, assets) => editorScratchRegistry.track(jobId, assets),
+    (jobId, assets, options) => editorScratchRegistry.track(jobId, assets, options),
     [editorScratchRegistry],
   );
   const releaseEditorScratchOp = useCallback(
@@ -3274,7 +3274,7 @@ export function App() {
     () =>
       assets.filter(
         (asset) =>
-          (asset.type === "image" || asset.type === "frame") &&
+          (asset.type === "image" || asset.type === "frame" || asset.type === "tensor") &&
           asset.projectId === activeProject?.id &&
           !asset.status?.trashed &&
           !asset.status?.rejected,
@@ -3291,6 +3291,7 @@ export function App() {
     () =>
       [
         ...models.map((model) => `m:${model.id}:${model.installState}`),
+        ...models.flatMap((model) => Object.entries(model.conditionalPurposes ?? {}).map(([purpose, state]) => `c:${model.id}:${purpose}:${state.installState}:${Boolean(state.blocked)}`)),
         ...loras.map((lora) => `l:${lora.id}:${lora.scope ?? ""}:${lora.installState}`),
       ].join("|"),
     [models, loras],
@@ -3326,6 +3327,7 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    assets,
     // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
     // model, which `imageModels` filters out — before the download starts (sc-17227).
     catalogModels: models,

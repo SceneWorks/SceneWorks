@@ -1,4 +1,6 @@
 enum GenEvent {
+    /// An actual MOSS edit image or NPY latent artifact; nullable effective seed is retained.
+    MossAssets(MossOutputBatch),
     Step {
         index: usize,
         current: u32,
@@ -425,10 +427,21 @@ fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    send_gen_progress(&tx, 2, Progress::Step { current: 1, total: 4 });
+    send_gen_progress(
+        &tx,
+        2,
+        Progress::Step {
+            current: 1,
+            total: 4,
+        },
+    );
     assert!(matches!(
         rx.try_recv(),
-        Ok(GenEvent::Step { index: 2, current: 1, total: 4 })
+        Ok(GenEvent::Step {
+            index: 2,
+            current: 1,
+            total: 4
+        })
     ));
     assert!(matches!(
         rx.try_recv(),
@@ -442,7 +455,14 @@ fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
 #[test]
 fn prompt_upsampling_events_stay_internal() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 0, Progress::Upsampling { tokens: 3, max_tokens: 8 });
+    send_gen_progress(
+        &tx,
+        0,
+        Progress::Upsampling {
+            tokens: 3,
+            max_tokens: 8,
+        },
+    );
     send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
     assert!(matches!(
         rx.try_recv(),

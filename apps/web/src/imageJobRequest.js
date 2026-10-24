@@ -2,6 +2,7 @@ import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./fitMode.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration } from "./upscaleEngines.js";
 import { irisRestoreControls } from "./irisRestore.js";
+import { isMossEdit, mossEditReferenceIds } from "./mossImage.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } from "./ideogramCaption.js";
 
@@ -43,6 +44,8 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText 
 }
 
 export function buildImageJobRequest(state) {
+  const mossEdit = isMossEdit(state.model, state.mode);
+  const mossReferences = mossEdit ? mossEditReferenceIds(state) : null;
   const {
     // Prompt / resolution overrides — the one legitimate single-vs-batch difference.
     promptToSend,
@@ -182,10 +185,11 @@ export function buildImageJobRequest(state) {
   return {
     mode,
     prompt: composedPrompt,
+    ...(mossEdit && state.mossPromptBatch?.length ? { prompts: [...state.mossPromptBatch] } : {}),
     negativePrompt,
     model,
     count: posePayload.length ? 1 : count,
-    seed: seed === "" ? null : Number(seed),
+    seed: mossEdit && state.mossImageAdvanced?.noise || seed === "" ? null : Number(seed),
     // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
     width: resolutionOverride?.width ?? width,
     height: resolutionOverride?.height ?? height,
@@ -209,7 +213,7 @@ export function buildImageJobRequest(state) {
     // uploaded control image here as the source the worker auto-derives the map FROM
     // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
     sourceAssetId:
-      mode === "edit_image" && !multiReference
+      mossEdit ? undefined : mode === "edit_image" && !multiReference
         ? // A two-reference edit sends the ordered [image1, image2] pair as referenceAssetIds instead
           // (epic 10871 P1.3), so the single sourceAssetId is dropped when a second image is chosen.
           editSecondPair
@@ -221,24 +225,24 @@ export function buildImageJobRequest(state) {
     // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
     // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [image1, image2] pair.
     referenceAssetIds:
-      mode === "edit_image" && multiReference && referenceAssetIds.length
+      mossEdit ? mossReferences : mode === "edit_image" && multiReference && referenceAssetIds.length
         ? referenceAssetIds
         : mode === "edit_image" && sourceWithMultiReference && referenceAssetIds.length
           ? referenceAssetIds
           : (editSecondPair ?? undefined),
     // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
     // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
-    fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
+    fitMode: mode === "edit_image" && !mossEdit ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
     // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
     // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
     // worker's krea arm routes it to img2img latent-init (advanced.strength below).
     referenceAssetId:
-      mode === "character_image"
+      mossEdit ? undefined : mode === "character_image"
         ? referenceAssetId || null
         : supportsImg2img
           ? img2imgReferenceAssetId || null
           : null,
-    loras,
+    loras: mossEdit ? [] : loras,
     ...(upscaleEnabled
       ? {
           upscale: upscaleEngineIsRestoration(upscaleEngine)
@@ -254,7 +258,7 @@ export function buildImageJobRequest(state) {
               },
         }
       : {}),
-    ...(hiresFixEnabled
+    ...(hiresFixEnabled && !mossEdit
       ? {
           hiresFix: {
             enabled: true,
@@ -274,6 +278,9 @@ export function buildImageJobRequest(state) {
     advanced: buildImageJobAdvanced({
       model,
       mossImage: state.mossImage,
+      mossImageEdit: state.mossImageEdit,
+      mossImageAdvanced: mossEdit ? state.mossImageAdvanced : undefined,
+      mossPromptBatch: mossEdit ? state.mossPromptBatch : undefined,
       mossDmdSteps: state.mossDmdSteps,
       mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride

@@ -672,6 +672,8 @@ export function AssetDetail({
               Download raw depth (.npy)
             </a>
           ) : null}
+          {asset.type === "tensor" ? <a className="button" download href={assetUrl(asset)}>Download exact tensor (.npy)</a> : null}
+          {asset.type === "tensor" && asset.extra?.workflowCompanion?.path ? <a className="button" download href={assetUrl({ projectId: asset.projectId, file: { path: asset.extra.workflowCompanion.path } })}>Download portable workflow (.json)</a> : null}
         </AssetStatusActions>
       </div>
       <dl>
@@ -966,7 +968,7 @@ function FullscreenPreviewComponent({
   // the "and nowhere else" half: no envelope, no button.
   const hasRecordedRecipe = Boolean(
     onUseRecipe &&
-      ["image", "video", "vector"].includes(asset.type) &&
+      ["image", "video", "vector", "tensor"].includes(asset.type) &&
       (asset.generationSet?.recipe || asset.recipe),
   );
   // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
@@ -985,6 +987,7 @@ function FullscreenPreviewComponent({
   // Zoom/pan is IMAGES ONLY — video keeps its native <video> controls and gets no
   // zoom overlay/UI (sc-8728). `isVideo` gates the whole zoom surface.
   const isVideo = assetCanRenderAsVideo(displayedAsset);
+  const isTensor = displayedAsset.type === "tensor";
 
   // Side-by-side compare (Original vs Edited) for Image-Studio edits that link back
   // to a source asset still present in the gallery (asset.lineage.sourceAssetId,
@@ -992,7 +995,7 @@ function FullscreenPreviewComponent({
   // OWN Library tile — this is a view-only toggle, never a fold. Excluded for video
   // and for the upscale-variant fold, which owns the footer Original/Upscaled toggle.
   const canCompare =
-    !isVideo && !hasUpscaleVariants && asset.recipe?.mode === "edit_image" && Boolean(sourceAsset);
+    !isVideo && !isTensor && !hasUpscaleVariants && asset.recipe?.mode === "edit_image" && Boolean(sourceAsset);
   const [compareMode, setCompareMode] = React.useState(false);
   const toggleCompare = React.useCallback(() => setCompareMode((on) => !on), []);
   // Drop compare when navigating to another asset (prev/next) so it never persists
@@ -1042,7 +1045,7 @@ function FullscreenPreviewComponent({
   // preventDefault the page scroll; React's onWheel is passive in some browsers.
   React.useEffect(() => {
     const node = viewportNode;
-    if (!node || isVideo) {
+    if (!node || isVideo || isTensor) {
       return undefined;
     }
     const onWheel = (event) => {
@@ -1054,7 +1057,7 @@ function FullscreenPreviewComponent({
     };
     node.addEventListener("wheel", onWheel, { passive: false });
     return () => node.removeEventListener("wheel", onWheel);
-  }, [isVideo, displayedAsset?.id, viewportNode]);
+  }, [isVideo, isTensor, displayedAsset?.id, viewportNode]);
 
   const onPointerDown = (event) => {
     if (view.scale <= PREVIEW_MIN_SCALE) {
@@ -1203,16 +1206,16 @@ function FullscreenPreviewComponent({
           onSelect: toggleCompare,
         });
       }
-      if (!isVideo) {
+      if (!isVideo && !isTensor) {
         items.push({ key: "zoom-in", label: "Zoom In", onSelect: zoomIn });
         items.push({ key: "zoom-out", label: "Zoom Out", onSelect: zoomOut });
         items.push({ key: "fit", label: "Fit to View", onSelect: fitToView });
       }
       const submenuItems = [];
-      if (onEditImage && !isVectorAsset(asset)) {
+      if (onEditImage && !isVectorAsset(asset) && !isTensor) {
         submenuItems.push({ key: "image-editor", label: "Image Editor", onSelect: () => onEditImage(asset) });
       }
-      if (onEditInStudio && !isVectorAsset(asset)) {
+      if (onEditInStudio && !isVectorAsset(asset) && !isTensor) {
         submenuItems.push({ key: "image-studio", label: "Image Studio", onSelect: () => onEditInStudio(asset) });
       }
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;
@@ -1222,6 +1225,7 @@ function FullscreenPreviewComponent({
       asset,
       displayedAsset,
       isVideo,
+      isTensor,
       isFullscreen,
       enterFullscreen,
       exitFullscreen,
@@ -1278,7 +1282,7 @@ function FullscreenPreviewComponent({
                 <figcaption>Edited</figcaption>
               </figure>
             </div>
-          ) : isVideo ? (
+          ) : isVideo || isTensor ? (
             <AssetMedia asset={displayedAsset} />
           ) : (
             <div
@@ -1310,7 +1314,7 @@ function FullscreenPreviewComponent({
           >
             <Icon.ArrowRight size={18} />
           </button>
-          {isVideo || compareActive ? null : (
+          {isVideo || isTensor || compareActive ? null : (
             <div className="preview-zoom-controls" role="group" aria-label="Zoom controls">
               <button
                 aria-label="Zoom out"
@@ -1391,6 +1395,7 @@ function FullscreenPreviewComponent({
             <button onClick={() => saveAssetAs(displayedAsset)} type="button">
               Save As…
             </button>
+            {isTensor && displayedAsset.extra?.workflowCompanion?.path ? <a download href={assetUrl({ projectId: displayedAsset.projectId, file: { path: displayedAsset.extra.workflowCompanion.path } })}>Download portable workflow (.json)</a> : null}
             {/* Its without-the-recipe sibling (sc-15953). The option existed only behind a
                 right-click, which makes "discoverable" untrue for the one action a user takes
                 specifically because they are about to send the file to someone else. PNGs only —

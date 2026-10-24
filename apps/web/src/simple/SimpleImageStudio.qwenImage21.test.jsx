@@ -16,7 +16,7 @@ import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { SimpleShell } from "./SimpleShell.jsx";
-import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
 // `setInput` drives the HTMLInputElement value setter, which jsdom refuses on a textarea.
 // Same trick, the matching prototype.
@@ -155,6 +155,28 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     // ... and the settings bar above it is untouched: Model, Resolution and Variations stay where
     // Simple's design puts them, so the fold ADDS a surface rather than moving one.
     expect(fold.contains(container.querySelector(".su-chips"))).toBe(false);
+  });
+  it.each(["moss_image_base", "moss_image_sft"])("Simple submits %s ordered repeated edit slots with visible controls and component readiness", async (id) => {
+    const model={...manifestModels.find((entry)=>entry.id===id),capabilities:["text_to_image","edit_image"],installState:"installed",conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+    const assets=[{id:"wide",type:"image",displayName:"Wide"},{id:"tall",type:"image",displayName:"Tall"}];
+    const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));
+    await click([...container.querySelectorAll('[role="tab"]')].find((tab)=>tab.textContent==="Edit"));await openAdvanced();
+    const label=(text)=>[...container.querySelectorAll("label")].find((node)=>node.textContent.startsWith(text))?.querySelector("input,select");
+    const add=()=>[...container.querySelectorAll("button")].find((button)=>button.textContent==="Add reference image");
+    for(const [index,asset] of ["wide","tall","wide","tall"].entries()){
+      await click(add());await act(async()=>setSelect(label(`Image ${index+1}`),asset));
+    }
+    await act(async()=>setInput(label("Reference maximum edge"),"768"));
+    await click(label("Cache reference K/V"));
+    await act(async()=>setTextarea(fieldById("su-image-prompt"),"make the second image blue"));
+    expect(container.querySelector(".su-generate").disabled).toBe(false);
+    await click(container.querySelector(".su-generate"));
+    const body=context.createImageJob.mock.calls.at(-1)[0];
+    expect(body.referenceAssetIds).toEqual(["wide","tall","wide","tall"]);expect(body.sourceAssetId).toBeUndefined();
+    expect(body.width).toBe(512);expect(body.height).toBe(512);expect(body.advanced).toMatchObject({steps:30,guidanceScale:4,schedulerShift:5,mossImageEdit:{reference_max_edge:768,use_kv_cache:false}});
+    await openImage({...context,imageModels:[{...model,conditionalPurposes:{moss_image_edit:{installState:"incomplete"}}}]});
+    expect(container.querySelector(".su-generate").disabled).toBe(true);
+    expect(container.textContent).toContain("incomplete, corrupt, or blocked");
   });
 
   it("offers steps at the MODEL's floor, plus seed, negative prompt and true-CFG guidance", async () => {
