@@ -10,7 +10,7 @@ publish = false
 test-support = []
 
 [dependencies]
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "26f850a61209bd05e6ae81f562e50a72df2057a6" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "15e4b5191f3cf07c10f55f023420aa4afe68b73e" }
 directories = "5"
 fs2 = "0.4"
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's
@@ -46,6 +46,10 @@ png = { workspace = true }
 # so no new locked version appears.
 sha2 = "0.10"
 subtle = "2.6"
+# sc-26684: the pruned AdaLN content hash widens stored F16 operands losslessly to F32 through
+# the same `half` the checkpoint readers already compile; the 2.7 line is already locked, so no
+# new version or extension of the graph appears.
+half = "2.7.1"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Purge sends asset media/sidecars to the OS trash (recoverable) instead of unlinking.

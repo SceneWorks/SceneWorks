@@ -1911,6 +1911,8 @@ pub(super) struct ImportedMiniMaxH3Dit {
     /// The validated binding, recorded verbatim on the asset.
     pub(super) assembly: Value,
     pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
+    /// Complete source table/basis binding; never inferred from filenames or mutable settings.
+    pub(super) pruning: Option<sceneworks_core::minimax_h3_codec::H3PruningBinding>,
     component_bindings: Value,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
@@ -2027,6 +2029,8 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         )
     })
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
+    sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
+        .map_err(|reason| refuse("pruning-incompatible", reason))?;
     let (directory, derivative) =
         if inventory.requires_normalization {
             use sceneworks_core::checkpoint_derivative::{
@@ -2091,6 +2095,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
                 None,
             )
         };
+    with_imported_h3_source_seals(&pins, || {
+        verify_imported_h3_pruning_directory(&directory, assembly.pruning.as_ref())
+    })
+    .map_err(|reason| refuse("pruning-incompatible", reason))?;
     // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
     // directory, so a verified shard set alone cannot authorize a foreign file beside it.
     let planned: std::collections::BTreeSet<_> = if inventory.requires_normalization {
@@ -2124,12 +2132,51 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         checkpoint_id,
         transformer_dir: directory,
         partition: assembly.partition,
+        pruning: assembly.pruning.clone(),
         assembly: assembly.to_json(),
         component_bindings: json!({"tier":entry.get("importComponentTier"),"downloads":entry.get("downloads")}),
         _pins: pins,
         _derivative: derivative,
         _source_lease: source_lease,
     })
+}
+
+/// Verify the leased canonical component against the source-bound table and complete reduced basis.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(super) fn verify_imported_h3_pruning_directory(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "H3 canonical component filename is not UTF-8")?;
+        if path.is_file()
+            && (path.extension().is_some_and(|ext| ext == "safetensors")
+                || matches!(
+                    name.as_str(),
+                    "config.json" | "diffusion_pytorch_model.safetensors.index.json"
+                ))
+        {
+            files.push((name, path));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical = sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)?;
+    if canonical.pruning.as_ref() != Some(expected) {
+        return Err(
+            "sealed H3 component has a different pruning table/basis identity or source precision"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// The request as its declared task partition sees it — for SEMANTICS only (shape validation, the
@@ -2573,6 +2620,12 @@ fn stage_imported_minimax_h3_assembly(
         reference.as_os_str().as_encoded_bytes(),
     ] {
         hasher.update(part);
+        hasher.update([0]);
+    }
+    if let Some(pruning) = &dit.pruning {
+        hasher.update(pruning.topology_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(pruning.identity.as_bytes());
         hasher.update([0]);
     }
     let key = format!("{:x}", hasher.finalize());

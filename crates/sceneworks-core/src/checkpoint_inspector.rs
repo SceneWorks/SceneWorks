@@ -998,6 +998,13 @@ fn inspect_discovered_pass(
                     pass.context
                         .insert("sourceEncoding".into(), serde_json::json!("convrot_int8"));
                 }
+                // The reduced AdaLN binding is derived from the CURRENT operand bytes, never
+                // inherited: a stale or forged declaration cannot survive reinspection.
+                pass.context.remove("adalnPruning");
+                if let Some(pruning) = &inventory.pruning {
+                    pass.context
+                        .insert("adalnPruning".into(), pruning.to_json());
+                }
                 let provenance = if source_owned {
                     serde_json::json!({"kind":"source"})
                 } else {
