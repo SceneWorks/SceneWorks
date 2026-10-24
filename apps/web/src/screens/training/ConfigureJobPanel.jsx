@@ -1243,7 +1243,7 @@ export function ConfigureJobPanel({
             <div className="training-advanced-toggles">
               {isMossTrainingTarget ? (
                 <>
-                  <label className="training-checkbox-field" title="Reuse frozen VAE latents, or turn off to encode training images on demand.">
+                  <label className="training-checkbox-field" title="Reuse frozen VAE latents, or turn off to encode each training image again every epoch. Caching keeps the encoded latents resident for the run (more memory); recomputing trades that residency for encode time.">
                     <input
                       checked={configDraft.cacheLatents !== false}
                       onChange={(event) => updateConfigDraft("cacheLatents", event.target.checked)}
@@ -1251,7 +1251,7 @@ export function ConfigureJobPanel({
                     />
                     Cache VAE latents
                   </label>
-                  <label className="training-checkbox-field" title="Reuse frozen text embeddings, or turn off to encode captions on demand.">
+                  <label className="training-checkbox-field" title="Reuse frozen text embeddings, or turn off to encode each caption again every epoch. Caching keeps the frozen text encoder's embeddings resident (more memory); recomputing trades that residency for encode time.">
                     <input
                       checked={configDraft.cacheTextEmbeddings !== false}
                       onChange={(event) => updateConfigDraft("cacheTextEmbeddings", event.target.checked)}

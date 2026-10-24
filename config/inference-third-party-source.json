@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed for inference revision e9612d81, the merged native MOSS-Image training and recovery feature. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes. Compared with the preceding scan, five existing candidate source blobs changed in the shared training contract, Candle/MLX FLUX VAE, and MLX LoRA/optimizer modules; candidate paths, normalized provenance markers, classifications, and the crate-prefix inventory are unchanged. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
-  "inferenceRevision": "e9612d817ee77907db7a5c6be42375dafa5f6805",
-  "auditDigest": "74c08661f9ac31da05d1ebd8e8d664c10f3de5891d62bd4f0566e49f6dd9e5c3",
+  "_comment": "Audit inventory reviewed for inference revision 6b58dd02, the merged native MOSS-Image manual-only validation-routing policy change. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes, byte-identical to the preceding scan: this delta only adds `#[ignore]` annotations to native model proofs, a test-only Metal device-observation helper, and CI profile wiring, so no candidate, marker, classification or crate prefix changed. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
+  "inferenceRevision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
+  "auditDigest": "752bb509e3af06064597752f9dd2f66e42bc1663a734680d1a0f60364cdcce18",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "e9612d817ee77907db7a5c6be42375dafa5f6805",
+    "revision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -980,7 +980,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "e9612d817ee77907db7a5c6be42375dafa5f6805",
+    "revision": "6b58dd02c57ff283bee767492dfa2e6bbcec44f3",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 113,
     "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"
