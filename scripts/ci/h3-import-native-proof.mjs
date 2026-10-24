@@ -1,8 +1,8 @@
 // Explicit synthetic model-level validation only. Ordinary CI may import the pure checks below,
 // but must never call runProof. No model download or production model/cache path is used.
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { lockedInferenceRevision } from "../select-windows-cargo-cache.mjs";
@@ -33,11 +33,115 @@ function checked(command, args, options = {}) {
   return result.stdout;
 }
 
-export function runProof(backend, evidence) {
+export function requireMetalHeadroom(observation) {
+  const { totalBytes, freePercent } = observation;
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0 || !Number.isFinite(freePercent)
+      || freePercent < 0 || freePercent > 100 || totalBytes * freePercent / 100 < 18 * 2 ** 30) {
+    throw new Error("Mac2 needs 8 GiB cap + 10 GiB free headroom immediately before each case");
+  }
+}
+
+function metalMemoryObservation() {
+  const totalBytes = Number(checked("sysctl", ["-n", "hw.memsize"]).trim());
+  const pressure = checked("/usr/bin/memory_pressure", ["-Q"]);
+  const freePercent = Number(pressure.match(/free percentage:\s*(\d+)%/)?.[1]);
+  return { observedAt: new Date().toISOString(), totalBytes, freePercent,
+    availableBytes: totalBytes * freePercent / 100, requiredBytes: 18 * 2 ** 30, pressure };
+}
+
+export function observeMetalCase(name, receipt, save, observe = metalMemoryObservation) {
+  const observation = { name, ...observe() };
+  (receipt.memoryObservations ??= []).push(observation);
+  save(); // retain the actual pre-case observation even when it refuses execution
+  requireMetalHeadroom(observation);
+  return observation;
+}
+
+export function cudaDeviceEvidence(env, csv) {
+  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || env.CUDA_VISIBLE_DEVICES !== "0") {
+    throw new Error("manual CUDA proof requires PCI_BUS_ID ordering and visible device 0");
+  }
+  const devices = csv.trim().split(/\r?\n/).filter(Boolean).map(line => {
+    const [index, uuid, pciBusId, name, driverVersion] = line.split(",").map(value => value.trim());
+    const bus = /^([0-9a-f]+):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])$/i.exec(pciBusId ?? "");
+    if (!/^\d+$/.test(index) || !uuid?.startsWith("GPU-") || !bus || !name || !driverVersion) {
+      throw new Error("invalid physical CUDA device identity in nvidia-smi evidence");
+    }
+    return { nvmlIndex: Number(index), uuid, pciBusId, name, driverVersion,
+      busOrder: bus.slice(1).map(part => Number.parseInt(part, 16)) };
+  });
+  devices.sort((a, b) => {
+    for (let i = 0; i < a.busOrder.length; i++) if (a.busOrder[i] !== b.busOrder[i]) return a.busOrder[i] - b.busOrder[i];
+    return 0;
+  });
+  if (!devices.length) throw new Error("missing physical CUDA device identity");
+  const { busOrder: _order, ...selectedPhysicalDevice } = devices[0];
+  return { cudaDeviceOrder: env.CUDA_DEVICE_ORDER, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES,
+    selectedPhysicalDevice, enumeration: "PCI_BUS_ID ascending; CUDA visible ordinal 0" };
+}
+
+/// Build-only process supervision: stdout/stderr go directly to durable files, not a Node
+/// buffer. The receipt is saved BEFORE launch. A bounded timeout/interruption records failure
+/// and terminates only this compiler process tree; no native model runs through this helper.
+export async function streamProofBuild(command, args, { env, evidence, receipt, save,
+  timeoutMs = 40 * 60 * 1000, graceMs = 10_000 }) {
+  const start = Date.now();
+  receipt.build = { command: [command, ...args], state: "running", startedAt: new Date(start).toISOString(),
+    timeoutMs, stdout: "build.jsonl", stderr: "build.log" };
+  save();
+  const stdout = openSync(path.join(evidence, "build.jsonl"), "w");
+  const stderr = openSync(path.join(evidence, "build.log"), "w");
+  let child;
+  try { child = spawn(command, args, { env, stdio: ["ignore", stdout, stderr], detached: process.platform !== "win32" }); }
+  finally { closeSync(stdout); closeSync(stderr); }
+  let reason;
+  let escalation;
+  const terminate = signal => {
+    if (!child.pid) return;
+    try {
+      if (process.platform === "win32") spawnSync("taskkill", ["/PID", String(child.pid), "/T", ...(signal === "SIGKILL" ? ["/F"] : [])], { stdio: "ignore", timeout: 5000 });
+      else process.kill(-child.pid, signal);
+    } catch (error) { if (error.code !== "ESRCH") receipt.build.terminationError = String(error); }
+  };
+  const stop = why => {
+    if (reason) return;
+    reason = why;
+    receipt.build.state = "terminating";
+    receipt.build.termination = why;
+    receipt.build.terminationRequestedAt = new Date().toISOString();
+    save();
+    terminate("SIGTERM");
+    escalation = setTimeout(() => terminate("SIGKILL"), graceMs);
+  };
+  const onTerm = () => stop("SIGTERM");
+  const onInt = () => stop("SIGINT");
+  process.on("SIGTERM", onTerm);
+  process.on("SIGINT", onInt);
+  const timer = setTimeout(() => stop("timeout"), timeoutMs);
+  try {
+    const result = await new Promise(resolve => {
+      child.once("error", error => resolve({ status: null, error }));
+      child.once("close", (status, signal) => resolve({ status, signal }));
+    });
+    receipt.build = { ...receipt.build, state: reason ? "interrupted" : result.status === 0 ? "passed" : "failed",
+      status: result.status, signal: result.signal ?? null, error: result.error ? String(result.error) : null,
+      durationMs: Date.now() - start, completedAt: new Date().toISOString() };
+    save();
+    if (reason || result.error || result.status !== 0) throw new Error(`proof build failed: ${reason ?? result.error ?? result.status}`);
+    return readFileSync(path.join(evidence, "build.jsonl"), "utf8");
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(escalation);
+    process.off("SIGTERM", onTerm);
+    process.off("SIGINT", onInt);
+  }
+}
+
+export async function runProof(backend, evidence) {
   requireManualSelection(process.env.GITHUB_EVENT_NAME, process.env.H3_IMPORT_BACKEND, backend);
   if (process.platform !== (backend === "mlx" ? "darwin" : "win32")) throw new Error("native backend/host mismatch");
   if (backend === "mlx" && process.env.RUNNER_NAME !== "nax-macos-2") throw new Error("MLX proof is Mac2-only");
-  if (backend === "cuda" && process.env.CUDA_VISIBLE_DEVICES !== "0") throw new Error("manual CUDA proof must retain device 0");
+  if (backend === "cuda" && (process.env.CUDA_VISIBLE_DEVICES !== "0" || process.env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID")) throw new Error("manual CUDA proof must retain PCI_BUS_ID ordering and device 0");
   if (!path.isAbsolute(evidence)) throw new Error("evidence directory must be absolute and new");
   mkdirSync(evidence); // refuse accidental reuse of an earlier receipt/log set
   const start = Date.now();
@@ -58,13 +162,15 @@ export function runProof(backend, evidence) {
   try {
     if (receipt.sourceSha !== process.env.GITHUB_SHA) throw new Error("checkout must equal the dispatched source SHA");
     if (backend === "mlx") {
-      const total = Number(checked("sysctl", ["-n", "hw.memsize"]).trim());
-      const pressure = checked("/usr/bin/memory_pressure", ["-Q"]);
-      writeFileSync(path.join(evidence, "host.txt"), `${checked("system_profiler", ["SPHardwareDataType", "SPDisplaysDataType"])}\n${pressure}`);
-      const free = Number(pressure.match(/free percentage:\s*(\d+)%/)?.[1]);
-      if (!Number.isFinite(free) || total * free / 100 < 18 * 2 ** 30) throw new Error("Mac2 needs 8 GiB cap + 10 GiB free headroom");
+      receipt.initialMemory = metalMemoryObservation();
+      writeFileSync(path.join(evidence, "host.txt"), `${checked("system_profiler", ["SPHardwareDataType", "SPDisplaysDataType"])}\n${receipt.initialMemory.pressure}`);
+      save();
+      requireMetalHeadroom(receipt.initialMemory);
     } else {
-      writeFileSync(path.join(evidence, "host.txt"), checked("nvidia-smi", ["--query-gpu=index,uuid,name,driver_version", "--format=csv"]));
+      const inventory = checked("nvidia-smi", ["--query-gpu=index,uuid,pci.bus_id,name,driver_version", "--format=csv,noheader,nounits"]);
+      writeFileSync(path.join(evidence, "host.txt"), inventory);
+      receipt.cuda = cudaDeviceEvidence(process.env, inventory);
+      save();
     }
     for (const dir of ["hf", "data", "tmp"]) mkdirSync(path.join(evidence, dir));
     const env = { ...process.env, CARGO_NET_OFFLINE: "true", HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1",
@@ -74,13 +180,8 @@ export function runProof(backend, evidence) {
       TMP: path.join(evidence, "tmp"), TEMP: path.join(evidence, "tmp") };
     const args = ["test", "--offline", "--locked", "-p", "sceneworks-worker", "--lib", "--no-run", "--message-format=json"];
     if (backend === "cuda") args.push("--features", "backend-candle");
-    const buildStart = Date.now();
-    const build = spawnSync("cargo", args, { env, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    writeFileSync(path.join(evidence, "build.jsonl"), build.stdout ?? "");
-    writeFileSync(path.join(evidence, "build.log"), build.stderr ?? "");
-    receipt.build = { command: ["cargo", ...args], status: build.status, durationMs: Date.now() - buildStart };
-    if (build.error || build.status !== 0) throw new Error(`proof build failed: ${build.error ?? build.status}`);
-    const binaries = (build.stdout ?? "").split("\n").filter(Boolean).map(line => JSON.parse(line))
+    const buildOutput = await streamProofBuild("cargo", args, { env, evidence, receipt, save });
+    const binaries = buildOutput.split("\n").filter(Boolean).map(line => JSON.parse(line))
       .filter(item => item.reason === "compiler-artifact" && item.target?.name === "sceneworks_worker" && item.profile?.test && item.executable)
       .map(item => item.executable);
     if (binaries.length !== 1) throw new Error(`expected one worker libtest executable, got ${binaries.length}`);
@@ -88,6 +189,7 @@ export function runProof(backend, evidence) {
       const log = path.join(evidence, `${name.split("::").at(-1)}.log`);
       const testArgs = [name, "--exact", "--ignored", "--nocapture", "--test-threads=1"];
       const testStart = Date.now();
+      if (backend === "mlx") observeMetalCase(name, receipt, save);
       const result = backend === "mlx"
         ? spawnSync("python3.12", ["scripts/ci/iris-mlx-real-weights/tree_guard.py", "8", "180", log, "--", binaries[0], ...testArgs], { env, encoding: "utf8" })
         : spawnSync(binaries[0], testArgs, { env, encoding: "utf8", timeout: 180_000, killSignal: "SIGTERM" });
@@ -113,5 +215,5 @@ export function runProof(backend, evidence) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runProof(process.argv[2], process.argv[3]);
+  await runProof(process.argv[2], process.argv[3]);
 }

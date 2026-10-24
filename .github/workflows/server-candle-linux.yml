@@ -77,7 +77,7 @@ concurrency:
   # Every terminal phase shares one non-canceling bridge queue. An unrelated
   # ordinary Linux compile must not cancel a source/provision/readiness/campaign
   # caller, and a later terminal phase must wait for its predecessor to finish.
-  group: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge' }}
+  group: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge') }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
@@ -145,6 +145,7 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CUDA_COMPUTE_CAP: "120"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
       CUDA_VISIBLE_DEVICES: "0"
       SCENEWORKS_GPU_ID: "0"
     steps:
@@ -157,6 +158,11 @@ jobs:
           "H3_PROOF_EVIDENCE=$env:RUNNER_TEMP\h3-import-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CARGO_TARGET_DIR=$env:RUNNER_TEMP\h3-import-cuda-target-${{ github.run_id }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable sccache for the heavy Candle proof build
+        shell: powershell
+        run: |
+          $env:RUSTC_WRAPPER = ''
+          'RUSTC_WRAPPER=' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
