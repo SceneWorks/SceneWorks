@@ -6,6 +6,50 @@
   "type": "object",
   "required": ["schemaVersion", "models"],
   "$defs": {
+    "inheritedLicenseAcknowledgment": {
+      "type": "object", "additionalProperties": false,
+      "required": ["modelId", "name", "license", "licenseUrl", "licenseNotice", "termsSha256", "attribution", "requiresLicenseAcknowledgment"],
+      "properties": {
+        "modelId": { "type": "string", "minLength": 1 }, "name": { "type": "string" },
+        "license": { "type": ["string", "null"] }, "licenseUrl": { "type": ["string", "null"] },
+        "licenseNotice": { "type": ["string", "null"] }, "attribution": { "type": ["string", "null"] },
+        "termsSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "requiresLicenseAcknowledgment": { "type": "boolean" }
+      }
+    },
+    "modelProvenance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "modelId", "family", "plan", "sources", "inheritedLicenseAcknowledgments", "derivativeHistory"],
+      "properties": {
+        "schemaVersion": { "const": 1 }, "modelId": { "type": "string" }, "family": { "type": "string", "minLength": 1 },
+        "plan": {
+          "type": "object", "additionalProperties": false,
+          "required": ["schemaVersion", "planId", "semanticDigest", "sourceBindingIdentity"],
+          "properties": {
+            "schemaVersion": { "const": 1 }, "planId": { "type": "string", "minLength": 1 },
+            "semanticDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "sourceBindingIdentity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          }
+        },
+        "sources": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["layerId", "role", "sha256", "source"],
+            "properties": {
+              "layerId": { "type": "string", "minLength": 1 }, "role": { "type": "string", "minLength": 1 },
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "source": { "type": "object" }
+            }
+          }
+        },
+        "baseLineage": { "type": "object" }, "declaredSemantics": { "type": "object" },
+        "configuration": {
+          "type": "object", "additionalProperties": false, "required": ["sha256", "provenance"],
+          "properties": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "provenance": { "type": "object" } }
+        },
+        "inheritedLicenseAcknowledgments": { "type": "array", "items": { "$ref": "#/$defs/inheritedLicenseAcknowledgment" } },
+        "derivativeHistory": { "type": "array", "items": { "type": "object" } }
+      }
+    },
     "depthLaneAdmission": {
       "type": "object",
       "additionalProperties": false,
@@ -1028,6 +1072,11 @@
             "type": "string",
             "description": "Restrictions the user is notified of at the acknowledgment gate (sc-17227). Plain prose restating the upstream license's own operative terms — territory, acceptable use, revenue ceiling — not a summary invented here. Rendered inside the acknowledgment box."
           },
+          "inheritedLicenseAcknowledgments": {
+            "type": "array", "items": { "$ref": "#/$defs/inheritedLicenseAcknowledgment" },
+            "description": "Server-derived component terms; author license metadata cannot replace or erase this set."
+          },
+          "modelProvenance": { "$ref": "#/$defs/modelProvenance" },
           "nonCommercial": { "type": "boolean" },
           "experimental": {
             "type": "boolean",

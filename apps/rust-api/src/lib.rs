@@ -4062,18 +4062,51 @@ async fn create_generation_job_with_status(
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => {
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
+        None => None,
+    };
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type,
-            project_id,
-            project_name,
-            payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status,
-        })
+        store.create_job_with_model_provenance(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
