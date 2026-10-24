@@ -1293,6 +1293,167 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     let _ = server.await;
 }
 
+// Exercise the completed-progress path (which bypasses persist_reported_assets), not just
+// the policy helper: every atomic output must retain lineage consumed by commercial exports.
+async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool) {
+    use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let project = state
+        .project_store
+        .create_project("MOSS policy lineage")
+        .unwrap();
+    let root = std::path::Path::new(&project.path);
+    let source = root.join("assets/images/source.png");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([73; 3]))
+        .save(&source)
+        .unwrap();
+    let parent = state.project_store.persist_generated_asset(&project.id, "source-job", "source-set", &json!({
+        "assetId":"policy-parent", "displayName":"Policy-bearing reference", "type":"image", "createdAt":"2026-10-24T00:00:00Z",
+        "mediaPath":"assets/images/source.png", "mimeType":"image/png",
+        "extra":{"usagePolicy":{"modelId":"restricted-fixture", "commercialUse":{"verdict":"refused", "reason":"noncommercial fixture"}}}
+    })).unwrap();
+    let job = state.jobs_store.create_job(CreateJob {
+        job_type: JobType::ImageEdit, project_id: Some(project.id.clone()), project_name: None,
+        payload: json!({"model":"moss_image_sft", "mode":"edit_image", "prompt":"edit", "referenceAssetIds":[parent["id"]], "count":2, "width":16, "height":16}).as_object().unwrap().clone(),
+        requested_gpu: "auto".into(), source_job_id: None, duplicate_of_job_id: None,
+        attempts: 1, initial_status: None,
+    }).unwrap();
+    claim_job_as_worker(
+        &app,
+        &job.id,
+        "policy-publisher",
+        &[
+            "image_edit",
+            "gpu",
+            if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            },
+        ],
+    )
+    .await;
+    // The worker already owns decoded pixels when an input can disappear from the library.
+    let decoded = image::open(&source).unwrap().to_rgb8();
+    if parent_removed_after_decode {
+        state
+            .project_store
+            .delete_asset(&project.id, "policy-parent")
+            .unwrap();
+        state
+            .project_store
+            .purge_asset(&project.id, "policy-parent", true)
+            .unwrap();
+        assert!(state
+            .project_store
+            .get_asset(&project.id, "policy-parent")
+            .is_err());
+    }
+    let set = "genset_policy";
+    let directory = root.join(format!("assets/images/moss-edit/{set}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut facts = Vec::new();
+    for index in 0..2 {
+        let relative = format!("assets/images/moss-edit/{set}/{index:04}.png");
+        decoded.save(root.join(&relative)).unwrap();
+        facts.push(json!({"assetId":format!("policy-output-{index}"), "displayName":"MOSS edit", "type":"image", "createdAt":"2026-10-24T00:00:00Z", "mimeType":"image/png", "mediaPath":relative, "parents":[parent["id"]], "model":"moss_image_sft", "mode":"edit_image", "seed":index, "width":16, "height":16}));
+    }
+    let completion = json!({"status":"completed", "stage":"completed", "progress":1, "message":"Done", "workerId":"policy-publisher", "result":{"generationSetId":set, "expectedCount":2, "generationSet":{"id":set, "model":"moss_image_sft", "mode":"edit_image", "count":2}, "assetWrites":facts}});
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/progress", job.id),
+        completion.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let saved = state.jobs_store.get_job(&job.id).unwrap();
+    assert!(state
+        .jobs_store
+        .pending_terminal_progress_side_effects(
+            &job.id,
+            saved.worker_id.as_deref(),
+            saved.status.clone()
+        )
+        .unwrap()
+        .is_none());
+    assert!(crate::moss_output_publication::canonical_batch(&saved).is_some());
+    assert!(!saved.result.contains_key("assetWrites"));
+    let expected = if parent_removed_after_decode {
+        json!({"assetId":"policy-parent", "policy":null, "unresolved":"not_found"})
+    } else {
+        json!({"assetId":"policy-parent", "policy":parent["extra"]["usagePolicy"]})
+    };
+    for index in 0..2 {
+        let id = format!("policy-output-{index}");
+        let asset = state.project_store.get_asset(&project.id, &id).unwrap();
+        assert_eq!(
+            asset["extra"]["usagePolicies"],
+            json!([expected]),
+            "{asset}"
+        );
+        assert_eq!(asset["extra"]["mossPublication"]["jobId"], job.id);
+        let (status, mut timeline) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/projects/{}/timelines", project.id),
+            json!({"name":"Policy export", "aspectRatio":"16:9", "fps":30}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{timeline}");
+        let timeline_id = timeline["id"].as_str().unwrap().to_owned();
+        let track_id = timeline["tracks"][0]["id"].clone();
+        timeline["tracks"][0]["items"] = json!([{"id":"image-item", "trackId":track_id, "assetId":id, "type":"image", "displayName":"MOSS", "sourceIn":0, "sourceOut":1, "timelineStart":0, "timelineEnd":1, "speed":1, "fit":"fit"}]);
+        let route = format!("/api/v1/projects/{}/timelines/{timeline_id}", project.id);
+        let (status, response) =
+            request(app.clone(), "PUT", &route, json!({"timeline":timeline})).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("{route}/exports"),
+            json!({"commercialUse":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+        assert_eq!(
+            response["code"],
+            if parent_removed_after_decode {
+                "commercial_use_lineage_unknown"
+            } else {
+                "commercial_use_refused"
+            }
+        );
+    }
+    // Repeated completion still acknowledges exactly the published batch and keeps its policies.
+    let (status, response) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{}/progress", job.id),
+        completion,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(
+        state.jobs_store.get_job(&job.id).unwrap().result,
+        saved.result
+    );
+}
+
+#[tokio::test]
+async fn moss_atomic_publication_inherits_parent_policies_and_refuses_commercial_export() {
+    assert_moss_publication_usage_policy(false).await;
+}
+
+#[tokio::test]
+async fn moss_atomic_publication_records_deleted_decoded_parent_and_refuses_commercial_export() {
+    assert_moss_publication_usage_policy(true).await;
+}
+
 #[tokio::test]
 async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_recovery() {
     use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};

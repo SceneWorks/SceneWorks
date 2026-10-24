@@ -2250,6 +2250,7 @@ async fn publish_moss_edit_progress(
             .and_then(Value::as_array)
             .ok_or_else(|| ApiError::bad_request("Missing MOSS output batch"))?
             .clone();
+        crate::yue2_jobs::inherit_usage_policies(&projects, project, &mut facts)?;
         stamp_moss_publication(&job, &mut facts);
         let set = job
             .result
