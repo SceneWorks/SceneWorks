@@ -699,11 +699,6 @@ export function ImageStudio() {
   const [hiresFixUpscaleBy, setHiresFixUpscaleBy] = useState(saved.hiresFixUpscaleBy ?? 2);
   const [hiresFixCfgScale, setHiresFixCfgScale] = useState(saved.hiresFixCfgScale ?? "");
   const [submitting, setSubmitting] = useState(false);
-  // The launch id whose recipe replay has finished hydrating studio state. Set at the END of the
-  // recipe-launch effect so the "Re-Generate" auto-submit can distinguish "recipe applied" from the
-  // pre-replay render that carries the same launch id but stale state (the effect's setState batch
-  // commits one render later).
-  const [recipeHydratedLaunchId, setRecipeHydratedLaunchId] = useState(null);
   // Auto-expand state (sc-6501): when a structured model is in plain-text mode, Generate first
   // expands the idea into a JSON caption via magic-prompt. `expanding` drives the button label;
   // `submitError` surfaces an expansion failure (e.g. the utility model isn't installed) without
@@ -2061,7 +2056,6 @@ export function ImageStudio() {
     setHiresFixDenoisingStrength(hiresFix?.denoisingStrength ?? 0.7);
     setHiresFixUpscaleBy(hiresFix?.upscaleBy ?? 2);
     setHiresFixCfgScale(hiresFix?.cfgScale ?? "");
-    setRecipeHydratedLaunchId(launchRequest.id);
   // The launch id owns this one-shot hydration. Including the local values this
   // effect sets would replay a launch while applying that launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2417,30 +2411,27 @@ export function ImageStudio() {
     [assets, localJobs],
   );
 
-  // The single Generate core, extracted from `submit` so the viewer's "Re-Generate"
-  // (autoGenerate launch) can queue a replayed recipe programmatically with no form event.
-  // Returns the created job, or null when a guard aborted before enqueue. The guards live
-  // here — not just on the Generate button — because an auto-generated replay skips the
-  // button and must hit the same authorization checks.
-  async function submitNow() {
+  async function submit(event) {
+    if (!mossComponents.ready) { event.preventDefault(); setSubmitError("Install the selected MOSS 8-step components before generating."); return; }
+    event.preventDefault();
     // Batch mode runs through its own "Run batch" action (sc-9956), never the single
     // Generate submit — guard so a stray Enter in a batch field can't queue one image.
     if (batchMode) {
-      return null;
+      return;
     }
     if (submitting) {
-      return null;
+      return;
     }
     // Defense in depth for Enter/programmatic submits and restored stale state.
     // The disabled button is only an affordance; capability eligibility is the
     // actual authorization to create a job.
     if (!selectedModelServesMode) {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
-      return null;
+      return;
     }
     if (decoderCapabilitiesPending) {
       setSubmitError("Waiting for engine capabilities before using the restored decoder.");
-      return null;
+      return;
     }
     if (dimensionsInvalid || hiresFixTargetInvalid) {
       setSubmitError(
@@ -2448,11 +2439,11 @@ export function ImageStudio() {
           dimensionError ||
           "Width and height must each be between 256 and 4096.",
       );
-      return null;
+      return;
     }
     if (cfgIntervalError) {
       setSubmitError(cfgIntervalError);
-      return null;
+      return;
     }
     setSubmitting(true);
     try {
@@ -2477,13 +2468,13 @@ export function ImageStudio() {
           // (silent auto-expand, surfaced in the Builder) before generating.
           const idea = prompt.trim();
           if (!idea) {
-            return null;
+            return;
           }
           if (typeof magicPrompt !== "function" || magicModelMissing) {
             setSubmitError(
               "Plain text can't be sent to this model. Download the prompt-refiner model to auto-expand your idea into a caption, or build one in the Builder.",
             );
-            return null;
+            return;
           }
           let expanded;
           setExpanding(true);
@@ -2491,7 +2482,7 @@ export function ImageStudio() {
             expanded = await onMagicExpand(idea);
           } catch (e) {
             setSubmitError(e?.message || "Couldn't expand the prompt into a caption. Try the Builder.");
-            return null;
+            return;
           } finally {
             setExpanding(false);
           }
@@ -2500,7 +2491,7 @@ export function ImageStudio() {
           setPromptMode("form");
           if (!validateCaption(expanded).ok) {
             setSubmitError("The auto-generated caption needs a tweak — review it in the Builder and generate again.");
-            return null;
+            return;
           }
           sendStructured = true;
           submitCaption = expanded;
@@ -2523,16 +2514,9 @@ export function ImageStudio() {
         }),
       );
       onLocalJobCreated?.(job);
-      return job;
     } finally {
       setSubmitting(false);
     }
-  }
-
-  async function submit(event) {
-    if (!mossComponents.ready) { event.preventDefault(); setSubmitError("Install the selected MOSS 8-step components before generating."); return; }
-    event.preventDefault();
-    await submitNow();
   }
 
   // sc-11219 (F-031): the single shared image-job-request builder used by BOTH single Generate
@@ -3126,36 +3110,6 @@ export function ImageStudio() {
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
-
-  // Viewer "Re-Generate" (an `autoGenerate` launch): once the replayed recipe has fully hydrated —
-  // `recipeHydratedLaunchId` is set at the END of the recipe-launch effect, and `generateDisabled`
-  // only flips false once the same readiness the Generate button enforces is met (model serves the
-  // mode, no pending decoder capabilities, valid dimensions, ready validity) — fire the submit
-  // programmatically and hand off to the Queue. This is the same recipe the "Use this recipe" button
-  // would open, minus the click, with a fresh random seed (replaySeed null). A recipe that can't queue
-  // cleanly (its model gone, a batch it reopens) keeps the user on the prefilled studio — the screen
-  // "Use this recipe" would have opened anyway — so no attempt is silently lost. One-shot per launch.
-  const autoGenerateFiredRef = useRef(null);
-  const submitNowRef = useRef(submitNow);
-  submitNowRef.current = submitNow;
-  useEffect(() => {
-    const launchId = launchRequest?.id ?? null;
-    if (!launchRequest?.autoGenerate) {
-      if (autoGenerateFiredRef.current !== launchId) autoGenerateFiredRef.current = null;
-      return;
-    }
-    // Fire at most once per launch, and only after the recipe is committed AND generateable.
-    if (autoGenerateFiredRef.current === launchId || recipeHydratedLaunchId !== launchId || generateDisabled) {
-      return;
-    }
-    autoGenerateFiredRef.current = launchId;
-    void (async () => {
-      const job = await submitNowRef.current();
-      // Land on the Queue when the replay enqueued, else on the prefilled studio so the reason is visible.
-      setActiveView(job ? "Queue" : "Image");
-    })();
-    // `submitNow` is read through a ref so its identity doesn't churn this effect every render.
-  }, [launchRequest?.id, launchRequest?.autoGenerate, recipeHydratedLaunchId, generateDisabled, setActiveView]);
 
   return (
     <ModelAvailabilityGate
