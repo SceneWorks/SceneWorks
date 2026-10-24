@@ -37,6 +37,38 @@ export function executionGroups(plan) {
   assert.deepEqual(groups.flat().map(i => i.invocationId), invocations.map(i => i.invocationId), 'queue order must equal the approved plan order');
   return groups;
 }
+/** Optional campaign case scope. `control.caseIds` already exists and, in every recorded control,
+ * names exactly the plan's Candle cases, so it is honoured here with the SAME meaning; absence keeps
+ * the legacy full-campaign behaviour. A present scope must be nonempty, unique, and every id must be
+ * an exact known Candle case of the approved plan that owns at least one product invocation and is
+ * not a training/adaptation case. The invocation set is DERIVED from the plan, never from caller ids,
+ * and the returned groups stay a sub-sequence of the full approved order. */
+export function executionScope(control, plan) {
+  const all = executionGroups(plan).flat();
+  if (control?.caseIds === undefined) return { selected: null, groups: executionGroups(plan), invocationIds: all.map(i => i.invocationId), cells: plan.cases.filter(c => c.backend === 'candle') };
+  const requested = control.caseIds;
+  assert(Array.isArray(requested) && requested.length, 'execution case scope must be a nonempty array');
+  assert.equal(new Set(requested).size, requested.length, 'execution case scope must not repeat a case');
+  assert(requested.every(id => typeof id === 'string'), 'execution case scope must name case IDs');
+  const cells = new Map(plan.cases.map(c => [c.caseId, c]));
+  // Legacy compatibility: a recorded control that lists EVERY Candle case is the full campaign.
+  const everyCandleCase = plan.cases.filter(c => c.backend === 'candle').map(c => c.caseId);
+  if (requested.length === everyCandleCase.length && everyCandleCase.every(id => requested.includes(id))) {
+    return { selected: null, groups: executionGroups(plan), invocationIds: all.map(i => i.invocationId), cells: plan.cases.filter(c => c.backend === 'candle') };
+  }
+  for (const id of requested) {
+    const cell = cells.get(id);
+    assert(cell, 'execution case scope names an unknown approved case');
+    assert.equal(cell.backend, 'candle', 'execution case scope is Candle-only');
+    assert.notEqual(cell.kind, 'training', 'execution case scope cannot include a training/adaptation case');
+    assert(all.some(i => i.caseId === id && i.kind === 'product_generation'), 'execution case scope must name a case with an approved product invocation');
+  }
+  const derived = all.filter(i => requested.includes(i.caseId)).map(i => i.invocationId);
+  const groups = executionGroups(plan).filter(group => group.every(i => requested.includes(i.caseId)));
+  assert.deepEqual(groups.flat().map(i => i.invocationId), derived, 'scoped groups must be exactly the plan invocations of the selected cases');
+  assert(groups.flat().length <= all.length && groups.flat().length > 0, 'execution case scope cannot exceed the approved invocations');
+  return { selected: [...requested], groups, invocationIds: derived, cells: plan.cases.filter(c => requested.includes(c.caseId)) };
+}
 export function assertGroupPassed(report, ids) {
   const selected = report.cases.filter(c => ids.includes(c.caseId));
   assert.equal(selected.length, ids.length);
@@ -86,10 +118,12 @@ async function runCampaignInner(env, trace) {
   else assert.equal(control.continuation, undefined, 'a continuation cannot be supplied outside its current approval');
   assert.equal(planHash(inputSpec), approval.inputSpecSha256.candle);
   const api = await controlArtifact(control.apiBuild), resource = await controlArtifact(control.resourceBuild);
-  const plan = approval.plan, sources = await loadProductTargets(), registry = targetRegistry(sources), groups = executionGroups(plan);
+  const plan = approval.plan, sources = await loadProductTargets(), registry = targetRegistry(sources), scope = executionScope(control, plan), groups = scope.groups;
   const outputRoot = path.join(QUEUE_ROOT, `${identity.runId}-${identity.attempt}`, 'outputs'); await mkdir(outputRoot);
   const milestoneFile = path.join(path.dirname(outputRoot), 'milestones.jsonl');
   const milestone = async v => { await appendFile(milestoneFile, JSON.stringify(v) + '\n'); console.log(JSON.stringify(v)); };
+  // A scoped campaign records exactly which approved cases and invocations it may touch.
+  if (scope.selected) await milestone({ kind: 'execution-scope', caseIds: scope.selected, invocationIds: scope.invocationIds });
   phase('license');
   const admitted = control.admission;
   assert(admitted && admitted.trainingLicenseAcknowledged === true && typeof admitted.trainingLicenseAcceptance === 'string' && admitted.trainingLicenseAcceptance.includes('And I accept the license'), 'actual user training-license acceptance must be recorded verbatim');
