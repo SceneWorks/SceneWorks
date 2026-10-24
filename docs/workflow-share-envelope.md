@@ -778,6 +778,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | --- | --- | --- |
 | `apps/web/src/imageJobAdvanced.js` | `buildImageJobAdvanced` | The Image Studio's ~30-knob builder. |
 | `apps/web/src/mossImage.js` | `buildMossEditJobAdvanced` | The shared MOSS edit controls, prompt batches and advanced tensor inputs used by Studio and Editor. |
+| `apps/web/src/regenerateImage.js` | `imageRecipeRequest` | Background image regeneration when the original job is unavailable. Replays persisted adapter inputs, removes output receipts, and feeds the image generation and inline-upscale embedding lanes without authoring new advanced controls. |
 | `apps/web/src/imageJobs.js` | `buildEditJobBody` | The Image Editor's prompt-edit body. |
 | `apps/web/src/imageJobs.js` | `buildDetailJobBody` | The standalone Detail pass. |
 | `apps/web/src/components/CharacterAdvancedOptions.jsx` | `buildAdvanced` | The character lane's shared tuning block. |
@@ -813,9 +814,14 @@ how to know it still can.
 | `lane` | Prose: the embedding lane this builder's payload ends up written by, so a reader can see why the keys matter. |
 | `anchors` | Keys the extractor **must** still find. The floor against an extractor that has quietly stopped understanding the file — a lint that reads zero keys and passes is the failure mode the whole registry exists to prevent. |
 | `minimum_keys` | The smallest key count the extractor may report before the lint calls itself broken. Set it well under the real count; it is a floor, not a census. |
-| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
+| `spread_of` | Identifiers spread into an `AssignedObject` or `SpreadAdvancedLiteral` initializer whose keys another registry entry already accounts for, or whose producers accounted for them before persistence in a recipe replay. A dotted member path (`base.advanced`) counts as one name; a call expression is refused, because its keys have no declarable name. Empty for most builders, and declared so a **new** spread of something nobody classified fails the lint instead of vanishing into it. |
 
 <!-- END PINNED: builder-fields -->
+
+The recipe replay builder is a persisted-input passthrough, so it declares `spread_of: ["raw"]`
+with no anchors and a zero new-key floor. Its original producers own the persisted keys'
+classifications. Tests assert that replay adds no keys, that a new explicit key still needs a
+classification, and that an undeclared spread or computed `advanced` access remains refused.
 
 A new variant on `AdvancedKeySource` is the step most easily missed, because nothing about writing
 `allow_from(…, AdvancedKeySource::MyBuilder, …)` reminds you that the variant also has to appear in

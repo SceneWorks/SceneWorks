@@ -24,6 +24,7 @@ import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { mossSeededRecipeReplay } from "./mossImage.js";
+import { regenerateImage } from "./regenerateImage.js";
 import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -2858,7 +2859,6 @@ export function App() {
     replaySeed = null,
     assetId = null,
     sourceAssetId = null,
-    autoGenerate = false,
   }) {
     if (!recipe) {
       return { ok: false, reason: "no-recipe" };
@@ -2892,7 +2892,6 @@ export function App() {
       sourceAssetId,
       recipe,
       replaySeed,
-      autoGenerate,
     });
     return { ok: true };
   }
@@ -2961,28 +2960,20 @@ export function App() {
     sendAssetRecipeToImage(asset, options);
   }
 
-  // The viewer's "Re-Generate" (image only): the same recipe as "Use this recipe" but enqueued
-  // straight to the image queue with a FRESH random seed, skipping the studio. `replaySeed` stays
-  // null so the studio's recipe replay leaves seed random (a close variation) — the whole point of
-  // the button. `autoGenerate` tells the studio to fire its own submit once the replayed recipe has
-  // fully hydrated, then hand the user off to the Queue. Non-image assets are never routed here (the
-  // button is image-only), and the studio falls back to its normal prefilled form if the recipe
-  // cannot be queued cleanly (e.g. its model is no longer installed).
-  function sendAssetRecipeToQueue(asset) {
-    if (asset?.type !== "image") {
-      return;
-    }
-    const recipe = recipeForAsset(asset);
-    if (!recipe) {
-      return;
-    }
-    setSelectedAssetId(asset.id);
-    closePreview();
-    void launchImageRecipe({
-      ...mossSeededRecipeReplay(asset, recipe, null),
-      assetId: asset.id,
-      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
-      autoGenerate: true,
+  // Re-Generate is a background enqueue: never close the viewer, change pages, or touch a draft.
+  async function sendAssetRecipeToQueue(asset) {
+    const projectId = activeProjectRef.current?.id;
+    return regenerateImage({
+      asset,
+      projectId,
+      projectName: activeProjectRef.current?.name,
+      token,
+      requestedGpu,
+      models,
+      assets,
+      beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
+      isCurrentProject: () => activeProjectRef.current?.id === projectId,
+      onCreated: (job) => setJobs((items) => upsertJobNewest(items, job)),
     });
   }
 

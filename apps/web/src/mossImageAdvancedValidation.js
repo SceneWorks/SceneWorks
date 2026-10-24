@@ -1,4 +1,4 @@
-// UI-only preflight stays with lazy studio controls, outside the app replay shell.
+// Shared UI preflight; background replay loads it only for an actual MOSS request.
 import { mossAdvancedWire, mossTensorReferences, mossTensorMatches } from "./mossImageAdvanced.js";
 
 export function mossAdvancedIssue(options, { assets, upscaleEnabled = false, prompt = "", prompts = [], negativePrompt = "", count = 1, width, height, context = 4096 } = {}) {

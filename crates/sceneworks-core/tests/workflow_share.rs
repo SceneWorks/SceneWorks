@@ -1364,6 +1364,50 @@ fn the_discovery_scan_still_sees_every_literal_shape() {
 }
 
 #[test]
+fn the_image_recipe_replay_only_passes_through_persisted_keys() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    assert!(emitted_keys(builder, &source).is_empty());
+}
+
+#[test]
+fn a_new_image_recipe_replay_key_still_needs_classification() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    for replacement in [
+        "const advanced = { ...raw, replayProbeKnob: true };",
+        "const advanced = { ...raw }; advanced.replayProbeKnob = true;",
+    ] {
+        let mutated = source.replacen("const advanced = { ...raw };", replacement, 1);
+        assert_ne!(
+            mutated, source,
+            "mutation must reach the real replay builder"
+        );
+        assert!(emitted_keys(builder, &mutated).contains("replayProbeKnob"));
+        assert!(!classified_keys().contains("replayProbeKnob"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "spread_of")]
+fn an_undeclared_image_recipe_replay_spread_is_refused() {
+    let builder = builder_for(AdvancedKeySource::ImageRecipeReplayBuilder);
+    let source = read_repo_file(builder.path);
+    let mutated = source.replacen("{ ...raw }", "{ ...raw, ...unaccounted }", 1);
+    assert_ne!(
+        mutated, source,
+        "mutation must reach the real replay builder"
+    );
+    emitted_keys(builder, &mutated);
+}
+
+#[test]
+#[should_panic(expected = "a computed key")]
+fn a_computed_advanced_deletion_remains_refused() {
+    refuse_invisible_advanced_writes(&scannable("delete advanced[key];"), "a probe");
+}
+
+#[test]
 #[should_panic(expected = "a computed key")]
 fn an_invisible_write_is_refused_through_any_object_path() {
     refuse_invisible_advanced_writes(

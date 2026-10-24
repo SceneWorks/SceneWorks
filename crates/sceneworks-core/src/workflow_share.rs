@@ -497,6 +497,8 @@ pub enum AdvancedKeySource {
     StudioBuilder,
     /// The shared MOSS edit controls, also used by the eager Library/editor request builder.
     MossEditBuilder,
+    /// `imageRecipeRequest` — replays persisted adapter settings without authoring new controls.
+    ImageRecipeReplayBuilder,
     /// `buildEditJobBody` — the Image Editor's prompt-edit body (sc-15948 follow-up: it emits
     /// `advanced.guidanceScale` and feeds an embedding lane, so it is registered even though
     /// every key it emits was already classified).
@@ -556,6 +558,7 @@ impl AdvancedKeySource {
     pub const ALL: &'static [Self] = &[
         Self::StudioBuilder,
         Self::MossEditBuilder,
+        Self::ImageRecipeReplayBuilder,
         Self::EditBuilder,
         Self::DetailBuilder,
         Self::CharacterBuilder,
@@ -634,8 +637,8 @@ pub struct AdvancedBuilder {
     /// Set well under the real count; it is a floor, not a census.
     pub minimum_keys: usize,
     /// Identifiers spread into an [`AdvancedBuilderShape::AssignedObject`] initializer, whose keys
-    /// are accounted for by another registry entry. Declared so a NEW spread of something nobody
-    /// classified fails the lint instead of vanishing into it.
+    /// are accounted for by another registry entry, or by those producers before persistence for
+    /// a recipe replay. Declared so a NEW spread fails the lint instead of vanishing into it.
     pub spread_of: &'static [&'static str],
 }
 
@@ -671,6 +674,19 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
         anchors: &["resolution", "sampler", "steps", "styleId", "poses"],
         minimum_keys: 25,
         spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::ImageRecipeReplayBuilder,
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/image/jobs — replay persisted image recipe inputs when the original \
+               job is unavailable, written by `write_image_asset`",
+        // The persisted map's producers own its key classifications. This builder only removes
+        // receipts; any new explicit key still has to pass the same classification check.
+        anchors: &[],
+        minimum_keys: 0,
+        spread_of: &["raw"],
     },
     AdvancedBuilder {
         source: AdvancedKeySource::EditBuilder,
@@ -1214,6 +1230,10 @@ const GENERATE_JOB_BUILDERS: &[WebBuilderRef] = &[
         function: "buildImageJobAdvanced",
     },
     WebBuilderRef {
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
+    },
+    WebBuilderRef {
         path: "apps/web/src/imageJobs.js",
         function: "buildEditJobBody",
     },
@@ -1243,6 +1263,10 @@ const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
         path: "apps/web/src/imageJobAdvanced.js",
         function: "buildImageJobAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
     },
     WebBuilderRef {
         path: "apps/web/src/imageJobs.js",
