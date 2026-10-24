@@ -95,6 +95,7 @@ export function SimpleShell({
   settingsSharingFocusRequest,
   lockedToSimple,
   preferencesHydrated = true,
+  workspaceSwitcher,
 }) {
   const {
     jobs = [],
@@ -111,7 +112,7 @@ export function SimpleShell({
   const breakpoint = breakpointFor(width);
   const phone = breakpoint === "phone";
 
-  const [screen, setScreen] = useState("image");
+  const [screen, setScreen] = useState(() => SCREEN_BY_ID.has(requestedScreen) ? requestedScreen : "image");
   const [drawer, setDrawer] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -316,6 +317,7 @@ export function SimpleShell({
                   <div className="su-brand-sub">Simple</div>
                 </div>
               </div>
+              {workspaceSwitcher}
               {SIMPLE_SCREENS.map((group) => (
                 <React.Fragment key={group.group}>
                   <div className="su-nav-group-title">{group.group}</div>

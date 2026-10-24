@@ -128,6 +128,8 @@
 
 .su-nav-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 
+.su-nav .project-switcher { margin-bottom: 16px; }
+
 /* Phone: the sidebar becomes an overlay drawer above the scrim. */
 .su-root[data-bp="phone"] .su-nav {
   position: absolute;

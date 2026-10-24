@@ -3876,11 +3876,23 @@ export function App() {
   // below. It mounts INSIDE the same two providers, so its screens read the identical
   // catalogs, job feed and actions — there is no second data layer, and switching back
   // to Advanced lands on the same live state.
+  const workspaceSwitcher = (
+    <ProjectSwitcher
+      activeProject={activeProject}
+      disabled={!authenticated}
+      onCreate={createProject}
+      onSelect={selectProject}
+      projects={projects}
+    />
+  );
+
   if (showSimpleShell) {
     return (
       <AppStaticContext.Provider value={appStaticValue}>
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
+            // Flush the old workspace's draft and reset transient selections/overlays.
+            key={activeProject?.id}
             appVersion={<AppVersion update={appUpdate} />}
             accent={accent}
             embedWorkflow={embedWorkflow}
@@ -3897,6 +3909,7 @@ export function App() {
                a possibly-empty cache nor write their catalog defaults over the stored copy. */
             preferencesHydrated={navigationHydrated}
             simpleDefault={simpleUiDefault}
+            workspaceSwitcher={workspaceSwitcher}
           />
           {workflowEmbedNoticeOpen ? (
             <WorkflowEmbedDecisionModal
@@ -3933,13 +3946,7 @@ export function App() {
             </div>
           </div>
 
-          <ProjectSwitcher
-            activeProject={activeProject}
-            disabled={!authenticated}
-            onCreate={createProject}
-            onSelect={selectProject}
-            projects={projects}
-          />
+          {workspaceSwitcher}
 
           {navSections.map((section) => (
             <div className="sidebar-section" key={section.label}>
