@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
+import { composeStyledPrompt } from "../styleComposer.js";
+import { styleTextForId } from "../data/styleCatalog.js";
 import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
 import { isMossEdit, mossEditDefaults, mossComponentState, mossEditWireOptions, mossEditReferenceIds, mossEditControlsError } from "../mossImage.js";
 import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
@@ -414,7 +416,7 @@ export function SimpleImageStudio() {
     try {
       mossEditWireOptions(mossImageEdit); mossEditReferenceIds({ referenceAssetIds: orderedReferenceIds });
       mossEditError = mossEditControlsError({ steps, guidanceScale: guidance, schedulerShift: mossShift, max_sequence_length: mossContext, training_shift: mossTrainingShift });
-      mossEditError ||= mossAdvancedIssue(mossImageAdvanced, { assets, prompt, prompts: mossPromptBatch, negativePrompt, count: variations, width: Number(widthOverride || resolution.split("x")[0]), height: Number(heightOverride || resolution.split("x")[1]), context: mossContext });
+      mossEditError ||= mossAdvancedIssue(mossImageAdvanced, { assets, prompt, effectivePrompt: composeStyledPrompt({ userPrompt: prompt, styleText: styleTextForId(styleId) }), prompts: mossPromptBatch, negativePrompt, count: variations, width: Number(widthOverride || resolution.split("x")[0]), height: Number(heightOverride || resolution.split("x")[1]), context: mossContext });
       if (orderedReferenceIds.some((id) => !assets.some((asset) => asset.id === id && asset.type === "image"))) mossEditError = "A MOSS reference is missing. Reacquire the exact ordered slot before editing.";
     } catch (error) { mossEditError = error.message; }
   }
@@ -445,7 +447,7 @@ export function SimpleImageStudio() {
     setSubmitting(true);
     try {
       const request = buildSimpleImageRequest({
-        prompt: prompt.trim(),
+        prompt: mossEdit ? prompt : prompt.trim(),
         mode,
         model,
         resolution,

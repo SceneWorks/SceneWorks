@@ -66,3 +66,13 @@ describe("native edit artifact transport and replay", () => {
   });
 
 });
+
+it("blocks positive embeddings against effective Style/preset text before enqueue", () => {
+  const positive = artifact("positive", [1, 2, 4096]);
+  const options = { positive: { values: mossTensorRef(positive) } };
+  for (const effectivePrompt of ["Style: watercolor", "preset prefix"]) {
+    expect(mossAdvancedIssue(options, { assets: [positive], prompt: "", effectivePrompt, context: 2 })).toContain("Clear the selected Style or prompt preset");
+  }
+  expect(mossAdvancedIssue(options, { assets: [positive], prompt: " ", context: 2 })).toContain("Clear the prompt and prompt batch");
+  expect(mossAdvancedIssue(options, { assets: [positive], prompt: "", effectivePrompt: "", context: 2 })).toBe("");
+});

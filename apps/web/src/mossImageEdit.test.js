@@ -51,3 +51,31 @@ describe("MOSS edit shared product boundary", () => {
     expect(mossComponentState({ conditionalPurposes: { moss_image_edit: { installState: "installed" } } }, null, "edit_image").ready).toBe(true);
   });
 });
+
+describe("effective MOSS text conditioning", () => {
+  const rows = ["  first row  ", "second row"];
+  it("styles every native row once and records the effective batch for replay", () => {
+    const request = buildImageJobRequest(state({ promptToSend: rows[0], mossPromptBatch: rows, styleText: "watercolor", styleId: "watercolor" }));
+    expect(request.prompts).toEqual(["Subject: first row\nStyle: watercolor", "Subject: second row\nStyle: watercolor"]);
+    expect(request.prompt).toBe(request.prompts[0]);
+    expect(request.advanced.promptBatch).toEqual(request.prompts);
+    expect(request.advanced.styleId).toBe("watercolor");
+    expect(request.advanced).not.toHaveProperty("stylePrompt");
+    expect(request.presetPromptResolvedClientSide).toBe(true);
+  });
+  it("preserves whitespace-bearing native rows in Full, Simple and Editor", () => {
+    const full = buildImageJobRequest(state({ promptToSend: rows[0], mossPromptBatch: rows }));
+    const simple = buildSimpleImageRequest({ model: "moss_image_base", mode: "edit_image", prompt: rows[0].trim(), mossPromptBatch: rows, referenceAssetIds: ["ref"], resolution: "512x512", count: 1, seed: "0" });
+    const editor = buildEditJobBody({ project: { id: "p" }, model: "moss_image_base", prompt: rows[0].trim(), referenceAssetIds: ["ref"], mossEditSettings: { promptBatch: rows } });
+    for (const request of [full, simple, editor]) {
+      expect(request.prompt).toBe(rows[0]);expect(request.prompts).toEqual(rows);expect(request.advanced.promptBatch).toEqual(rows);
+    }
+  });
+  it("rejects composed Style text for positive embeddings while keeping accepted text empty", () => {
+    const positive = { values: { assetId: "positive", sha256: "a".repeat(64), metadata: { dtype: "float32", shape: [1, 2, 4096], byteLength: 32768 } } };
+    const input = state({ promptToSend: "", negativePrompt: "", mossImageAdvanced: { positive } });
+    expect(() => buildImageJobRequest({ ...input, styleText: "watercolor", styleId: "watercolor" })).toThrow("Clear the selected Style or prompt preset");
+    expect(() => buildSimpleImageRequest({ model: "moss_image_base", mode: "edit_image", prompt: "", mossImageAdvanced: { positive }, referenceAssetIds: ["ref"], resolution: "512x512", count: 1, seed: "0", styleId: "ghibli-style" })).toThrow("Clear the selected Style or prompt preset");
+    const accepted = buildImageJobRequest(input);expect(accepted.prompt).toBe("");expect(accepted.presetPromptResolvedClientSide).toBe(true);
+  });
+});

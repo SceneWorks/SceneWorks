@@ -1,6 +1,6 @@
 import { apiFetch } from "../api.js";
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
-import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
+import { mossAdvancedIssue, mossPositivePromptIssue } from "../mossImageAdvancedValidation.js";
 import { isMossImage, isMossEdit, mossEditDefaults, mossDefaults, mossWireOptions, mossAccelerated, mossComponentState, mossPresetWithOrdinarySettings, mossEditWireOptions, mossEditReferenceIds, mossEditControlsError } from "../mossImage.js";
 import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
 import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
@@ -1798,6 +1798,10 @@ export function ImageStudio() {
       }),
     [selectedPreset, generalStack, prompt, negativePrompt, resolutionOptions],
   );
+  if (mossEdit && !mossEditError) mossEditError = mossPositivePromptIssue(mossImageAdvanced, {
+    prompt, prompts: mossPromptBatch,
+    effectivePrompt: composeImageJobPrompt({ promptToSend: composedStack.prompt, sendStructured: false, styleText: styleTextForId(effectiveStyleId) }).prompt,
+  });
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
 
@@ -1933,6 +1937,10 @@ export function ImageStudio() {
     // once the catalog resolves, even on a late-catalog mount where `skip*` was already consumed.
     referenceTuningDeclaredArmed.current = false;
     setSelectedPresetId(noPresetId);
+    // Native batch rows already contain the effective preset/style text captured by the worker.
+    if (replayMossEdit && rawSettings.mossImageAdvanced && rawSettings.promptBatch?.length) {
+      for (const id of generalStackIds) toggleGeneralPreset(id);
+    }
     setMode(nextMode);
     if (recipe.model) {
       if (recipe.model !== advancedDefaultsModel.current) {
@@ -2606,7 +2614,7 @@ export function ImageStudio() {
     (overrides = {}) => {
       const stackActive = generalStack.length > 0;
       const isStructured = overrides.sendStructured ?? false;
-      const foldPrompt = stackActive && !isStructured;
+      const foldPrompt = (stackActive || (mossEdit && mossPromptBatch.length > 0)) && !isStructured;
       const promptToSend =
         foldPrompt && overrides.promptToSend != null
           ? composePreset({
@@ -2623,7 +2631,7 @@ export function ImageStudio() {
       });
       return { composedPrompt, foldPrompt, isStructured, promptToSend };
     },
-    [activeStyleText, generalStack, resolutionOptions, selectedPreset],
+    [activeStyleText, generalStack, resolutionOptions, selectedPreset, mossEdit, mossPromptBatch.length],
   );
 
   const buildJobRequest = (overrides = {}) => {
@@ -2648,7 +2656,7 @@ export function ImageStudio() {
       mossImage,
       mossImageEdit,
       mossImageAdvanced,
-      mossPromptBatch,
+      mossPromptBatch: mossEdit ? mossPromptBatch.map((text) => composeJobPrompt({ ...overrides, promptToSend: text }).promptToSend) : mossPromptBatch,
       mossDmdSteps,
       mossOrdinarySettings: mossDmd ? { options: { ...mossImage, acceleration: "off" }, steps: stepsOverride, guidanceScale: guidanceOverride, negativePrompt, schedulerShift } : undefined,
       resolution,

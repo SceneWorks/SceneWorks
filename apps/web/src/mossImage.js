@@ -88,12 +88,13 @@ export function buildMossEditJobAdvanced(state) {
     resolution: state.resolution,
     mossImage: { acceleration: "off", max_sequence_length: state.mossImage?.max_sequence_length ?? 4096, training_shift: state.mossImage?.training_shift ?? 1, uncond_skip_layers: [] },
     mossImageEdit: mossEditWireOptions(state.mossImageEdit),
-    ...(state.mossImageAdvanced ? { mossImageAdvanced: mossAdvancedWire(state.mossImageAdvanced) } : {}),
+    ...(state.mossImageAdvanced || state.mossPromptBatch?.length ? { mossImageAdvanced: mossAdvancedWire(state.mossImageAdvanced ?? { output: "images" }) } : {}),
     ...(state.mossPromptBatch?.length ? { promptBatch: state.mossPromptBatch.slice() } : {}),
     steps: state.stepsOverride === "" || state.stepsOverride == null ? 30 : Number(state.stepsOverride),
     guidanceScale: state.guidanceOverride === "" || state.guidanceOverride == null ? 4 : Number(state.guidanceOverride),
     schedulerShift: state.schedulerShift == null || state.schedulerShift === "" ? 5 : Number(state.schedulerShift),
-    ...(state.styleId ? { styleId: state.styleId, stylePrompt: state.styleUserPrompt ?? "" } : {}),
+    // Effective native rows replay directly; a scalar raw Style prompt cannot describe the batch.
+    ...(state.styleId ? { styleId: state.styleId, ...(state.styleUserPrompt === null ? {} : { stylePrompt: state.styleUserPrompt ?? "" }) } : {}),
   };
 }
 // References are semantic slots. Repeating an asset intentionally occupies multiple slots.

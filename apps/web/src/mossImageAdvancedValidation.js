@@ -1,11 +1,19 @@
 // Shared UI preflight; background replay loads it only for an actual MOSS request.
 import { mossAdvancedWire, mossTensorReferences, mossTensorMatches } from "./mossImageAdvanced.js";
 
-export function mossAdvancedIssue(options, { assets, upscaleEnabled = false, prompt = "", prompts = [], negativePrompt = "", count = 1, width, height, context = 4096 } = {}) {
+export function mossPositivePromptIssue(options, { prompt = "", prompts = [], effectivePrompt = prompt } = {}) {
+  if (!options?.positive) return "";
+  if (prompt !== "" || prompts.length) return "Supplied positive embeddings replace both prompt fields. Clear the prompt and prompt batch to use them.";
+  if (effectivePrompt != null && effectivePrompt !== "") return "Supplied positive embeddings replace composed text. Clear the selected Style or prompt preset before generating.";
+  return "";
+}
+
+export function mossAdvancedIssue(options, { assets, upscaleEnabled = false, prompt = "", prompts = [], effectivePrompt = prompt, negativePrompt = "", count = 1, width, height, context = 4096 } = {}) {
   try {
     const value = mossAdvancedWire(options);
     if (value.output === "latents" && upscaleEnabled) return "MOSS latent output cannot use inline upscale. Disable upscale or select images output.";
-    if (value.positive && (prompt.trim() || prompts.length)) return "Supplied positive embeddings replace both prompt fields. Clear the prompt and prompt batch to use them.";
+    const positiveIssue = mossPositivePromptIssue(value, { prompt, prompts, effectivePrompt });
+    if (positiveIssue) return positiveIssue;
     if (prompts.length && (prompts.length > 8 || prompts.some((text) => typeof text !== "string" || !text || [...text].length > 4000) || prompt !== prompts[0])) return "Native prompt batches require 1–8 nonempty prompts; the main prompt must equal the first row.";
     if ((value.negative || value.negativePrompts) && negativePrompt) return "Clear the broadcast negative prompt before supplying negative tensors or per-prompt negatives.";
     const batch = value.positive?.values.metadata?.shape?.[0] ?? Math.max(prompts.length, 1);

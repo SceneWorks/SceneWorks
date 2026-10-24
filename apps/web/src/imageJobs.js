@@ -83,7 +83,7 @@ export function buildEditJobBody({
     const refs = mossEditReferenceIds({ referenceAssetIds: referenceAssetIds ?? [], sourceAssetId });
     return {
       projectId: project.id, projectName: project.name ?? null, requestedGpu,
-      mode: "edit_image", model, prompt, negativePrompt: mossEditSettings.negativePrompt ?? "",
+      mode: "edit_image", model, prompt: mossEditSettings.promptBatch?.[0] ?? prompt, negativePrompt: mossEditSettings.negativePrompt ?? "",
       ...(mossEditSettings.promptBatch?.length ? { prompts: [...mossEditSettings.promptBatch] } : {}),
       seed: mossEditSettings.mossImageAdvanced?.noise || seed == null || seed === "" ? null : Number(seed), count: 1,
       width: mossEditSettings.width ?? width ?? 512, height: mossEditSettings.height ?? height ?? 512,

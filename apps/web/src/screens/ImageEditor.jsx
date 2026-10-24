@@ -2787,7 +2787,7 @@ export function ImageEditor() {
   async function runBoxEdit() {
     if (!boxes.length || !editModel || !working || aiOp) return;
     if (!mossEditReady || mossEditError) return;
-    const prompt = editPrompt.trim();
+    const prompt = mossEdit ? editPrompt : editPrompt.trim();
     let sourceFile;
     try {
       sourceFile = await bakeBoxesToFile();
@@ -3053,7 +3053,7 @@ export function ImageEditor() {
   }
 
   async function runEdit() {
-    const prompt = editPrompt.trim();
+    const prompt = mossEdit ? editPrompt : editPrompt.trim();
     if ((!prompt && !(mossEdit && mossEditSettings.mossImageAdvanced?.positive)) || !editModel || !working) return;
     // A required image-edit LoRA that isn't downloaded yet blocks the run (worker R5): the source
     // band renders the actionable Download note (epic 10871, sc-11069). Defensive — the Generate

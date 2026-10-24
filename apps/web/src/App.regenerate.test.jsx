@@ -69,6 +69,11 @@ it.each([[true, false, false], [false, false, false], [true, true, false], [fals
   await act(async () => [...viewer.querySelectorAll("button")].find((b) => b.textContent === "Re-Generate").click());
   await settle();
 
+  await vi.waitFor(async () => {
+    await settle();
+    expect(requests).toHaveLength(missingReference ? 0 : 1);
+    if (missingReference) expect(viewer.textContent).toContain("reference is missing");
+  });
   expect(requests).toHaveLength(missingReference ? 0 : 1);
   expect(document.body.querySelector('[role="dialog"]')).toBe(viewer);
   expect(viewer.querySelector("img")).toBe(image);

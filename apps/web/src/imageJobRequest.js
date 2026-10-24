@@ -1,3 +1,4 @@
+import { mossPositivePromptIssue } from "./mossImageAdvancedValidation.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./fitMode.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration } from "./upscaleEngines.js";
@@ -182,10 +183,18 @@ export function buildImageJobRequest(state) {
     styleText,
   });
 
+  const mossPrompts = mossEdit && state.mossPromptBatch?.length
+    ? state.mossPromptBatch.map((text) => composeImageJobPrompt({ promptToSend: text, sendStructured: false, styleText }).prompt)
+    : undefined;
+  const effectivePrompt = mossPrompts?.[0] ?? composedPrompt;
+  if (mossEdit) {
+    const issue = mossPositivePromptIssue(state.mossImageAdvanced, { prompt: promptToSend ?? "", prompts: state.mossPromptBatch ?? [], effectivePrompt });
+    if (issue) throw new Error(issue);
+  }
   return {
     mode,
-    prompt: composedPrompt,
-    ...(mossEdit && state.mossPromptBatch?.length ? { prompts: [...state.mossPromptBatch] } : {}),
+    prompt: effectivePrompt,
+    ...(mossPrompts ? { prompts: mossPrompts } : {}),
     negativePrompt,
     model,
     count: posePayload.length ? 1 : count,
@@ -204,7 +213,7 @@ export function buildImageJobRequest(state) {
     // stacked fragments — the server can't reconstruct a stack from one recipePresetId), so it
     // sends the composed prompt verbatim and this flag tells the server to skip its own
     // prefix/suffix fold (epic 11949, mirrors presetLorasResolvedClientSide).
-    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || undefined,
+    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || (mossEdit && Boolean(mossPrompts || state.mossImageAdvanced?.positive)) || undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,
@@ -280,7 +289,7 @@ export function buildImageJobRequest(state) {
       mossImage: state.mossImage,
       mossImageEdit: state.mossImageEdit,
       mossImageAdvanced: mossEdit ? state.mossImageAdvanced : undefined,
-      mossPromptBatch: mossEdit ? state.mossPromptBatch : undefined,
+      mossPromptBatch: mossPrompts,
       mossDmdSteps: state.mossDmdSteps,
       mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride
@@ -351,7 +360,7 @@ export function buildImageJobRequest(state) {
       //    to be a string so the round-trip re-selects the picker (see ImageStudio replay), so we
       //    store "" — the raw prompt lives in the caption blob, not here.
       styleId: styleApplied ? styleId : undefined,
-      styleUserPrompt: styleApplied ? (structuredInjected ? "" : promptToSend) : undefined,
+      styleUserPrompt: styleApplied ? (mossPrompts ? null : structuredInjected ? "" : promptToSend) : undefined,
       // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): the resolved gate + the editor's phase
       // list. buildImageJobAdvanced emits `advanced.phases` only when active + non-empty.
       multiPhaseActive,

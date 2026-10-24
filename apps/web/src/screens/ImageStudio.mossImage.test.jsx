@@ -243,4 +243,26 @@ describe("MOSS Image Studio", () => {
   }
  });
 
+ it("submits styled native batches consistently and replays effective rows without a second Style fold",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const recipe={model:BASE.id,mode:"edit_image",prompt:"  first row  ",normalizedSettings:{width:512,height:512,count:2},rawAdapterSettings:{referenceAssetIds:["ref-0"],promptBatch:["  first row  ","second row"],mossImageAdvanced:{output:"images"},styleId:"ghibli-style",stylePrompt:"  first row  "}};
+  const ctx=await render(baseContext({imageModels:[model],models:[model],studioLaunch:{id:"styled-batch",view:"Image",recipe}}));
+  expect(generateButton().disabled).toBe(false);await click(generateButton());
+  const first=ctx.createImageJob.mock.calls[0][0];expect(first.prompt).toBe(first.prompts[0]);expect(first.prompts).toHaveLength(2);
+  for(const row of first.prompts)expect(row).toContain("Style:");
+  expect(first.advanced.promptBatch).toEqual(first.prompts);expect(first.advanced.styleId).toBe("ghibli-style");expect(first.advanced).not.toHaveProperty("stylePrompt");
+  await render({...ctx,studioLaunch:{id:"styled-batch-replay",view:"Image",recipe:{...recipe,prompt:first.prompt,rawAdapterSettings:{...first.advanced,referenceAssetIds:first.referenceAssetIds}}}});
+  expect(generateButton().disabled).toBe(false);await click(generateButton());expect(ctx.createImageJob.mock.calls[1][0].prompts).toEqual(first.prompts);
+ });
+ it("blocks an already-selected Style with positive tensors and accepts an empty carrier after clearing it",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}},positive={id:"positive-style",type:"tensor",projectId:"project_1",tensor:{dtype:"float32",shape:[1,2,4096],byteLength:32768,sha256:"a".repeat(64)}};
+  const raw={referenceAssetIds:["ref-0"],mossImage:{max_sequence_length:2},mossImageAdvanced:{positive:{values:{assetId:positive.id,sha256:positive.tensor.sha256,metadata:positive.tensor}}},styleId:"ghibli-style",stylePrompt:""};
+  const recipe={model:BASE.id,mode:"edit_image",prompt:"",normalizedSettings:{width:512,height:512,count:1},rawAdapterSettings:raw};
+  const ctx=await render(baseContext({imageModels:[model],models:[model],assets:[...REFS,positive],studioLaunch:{id:"positive-style",view:"Image",recipe}}));
+  expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain("Clear the selected Style or prompt preset");expect(ctx.createImageJob).not.toHaveBeenCalled();
+  const cleared={...raw};delete cleared.styleId;delete cleared.stylePrompt;
+  await render({...ctx,studioLaunch:{id:"positive-no-style",view:"Image",recipe:{...recipe,rawAdapterSettings:cleared}}});
+  expect(generateButton().disabled).toBe(false);await click(generateButton());expect(ctx.createImageJob.mock.calls[0][0].prompt).toBe("");
+ });
+
 });

@@ -24,7 +24,6 @@ import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
 import { mossSeededRecipeReplay } from "./mossImage.js";
-import { regenerateImage } from "./regenerateImage.js";
 import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -2962,6 +2961,7 @@ export function App() {
 
   // Re-Generate is a background enqueue: never close the viewer, change pages, or touch a draft.
   async function sendAssetRecipeToQueue(asset) {
+    const { regenerateImage } = await import("./regenerateImage.js");
     const projectId = activeProjectRef.current?.id;
     return regenerateImage({
       asset,

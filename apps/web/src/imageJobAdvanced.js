@@ -119,7 +119,7 @@ export function buildImageJobAdvanced(state) {
       steps: editAdvanced.steps,
       guidanceScale: editAdvanced.guidanceScale,
       schedulerShift: editAdvanced.schedulerShift,
-      ...(styleId ? { styleId: editAdvanced.styleId, stylePrompt: editAdvanced.stylePrompt } : {}),
+      ...(styleId ? { styleId: editAdvanced.styleId, ...(Object.hasOwn(editAdvanced, "stylePrompt") ? { stylePrompt: editAdvanced.stylePrompt } : {}) } : {}),
 
     } : {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
