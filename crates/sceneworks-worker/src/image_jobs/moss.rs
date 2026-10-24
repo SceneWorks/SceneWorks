@@ -2279,7 +2279,10 @@ mod moss_consumer_tests {
             "mlx_moss_image_sft",
             Some(Arc::new(payload.clone())),
         );
-        let probe = Probe::new();
+        let probe = Probe {
+            expected_edit_inputs: RefCell::new(vec![(48, 16, vec![0; 48 * 16 * 3])]),
+            ..Probe::new()
+        };
         let refs = vec![Image {
             width: 48,
             height: 16,
