@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "kind": "preparation-not-campaign-evidence",
+  "inspectionBaseline": "b11766f52ca41288e850178185c68094ee08f749",
+  "source": {"repo":"WarmBloodAban/Minimax-h3_Singularity","revision":"a56850c870825d6a8ae501a595c4dbbbc77bbc7e"},
+  "catalogUrl": "https://huggingface.co/api/models/WarmBloodAban/Minimax-h3_Singularity/revision/a56850c870825d6a8ae501a595c4dbbbc77bbc7e?blobs=true",
+  "artifacts": [
+    {"artifact":"Minimax-h3_Singularity_ref2va_v2_int8.safetensors","expectedBytes":34004507622,"expectedSha256":"db3ec568863db6f5ec1840210d41653afef73d4df7b0cb489c52ad458b6f8a7f","pointerBlob":"caa69d94f48c71d9446314cabd797d3e770fc812"},
+    {"artifact":"Minimax-h3_Singularity_ref2va_v1.3_int8.safetensors","expectedBytes":34004507622,"expectedSha256":"551915097b8727537a82f3a2c5acec965165ec84e780b3e9a5f28ce867fddf08","pointerBlob":"44f0fbe87213f8dcfd610bc822645fb8a798e8a9"},
+    {"artifact":"Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors","expectedBytes":20967647456,"expectedSha256":"412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce","pointerBlob":"c29d28211a2a966a7cfd310e956aa36d2ac0e1bc"},
+    {"artifact":"Minimax-h3_Singularity_ref2va_v1.3_Pruned_w4a8.safetensors","expectedBytes":11767930768,"expectedSha256":"2a319b6fafbd646c123ac12a28b1908c7468b148a8c03164172b2f72370264ec","pointerBlob":"04c500320d7e2e13d56bdd9bb1fdb445975814ac"}
+  ],
+  "license": {"checkpointCardDeclaration":"apache-2.0","base":"MiniMaxAI/MiniMax-H3","inheritedTerms":"apps/desktop/licenses/minimax-h3/MiniMax-H3-Community-License.txt","note":"The card does not waive inherited component licenses or establish partition compatibility."},
+  "numeric": {
+    "tensor-mapping": {"program":"crates/sceneworks-core/tests/minimax_h3_import.rs","selector":"an_h3_dit_is_identified_by_its_tensors_not_by_its_name","meaning":"Content identification only; also run native/sharded worker load-seam tests. No independent numeric mapping vector exporter exists."},
+    "convrot": {
+      "program":"scripts/h3_convrot_int8_oracle.py",
+      "fixture":"tests/fixtures/h3_convrot_int8.json",
+      "referenceRevision":"f8b7e97a1418d2e529bd5405fbf86312be198ae6",
+      "producerRevision":"d6797787e6bdb1a1fb0094d588a26f8e71a1c757",
+      "referencePaths":["comfy_kitchen/tensor/int8_utils.py","comfy_kitchen/backends/cuda/ops/int8_linear.cu"],
+      "producerPath":"quant_int8_convrot.py",
+      "selector":"convrot_int8::native_projections_match_pinned_kitchen",
+      "ignored":true,
+      "comparison":"Native fixture checks group64/group256, F32/F16/BF16, rounding and saturation against actual pinned helper/quantizer arithmetic. Use source fixture per-dtype tolerances, never a hash/cosine pass.",
+      "networkNote":"Existing oracle fetches bounded pinned source text itself; execute only in separately approved validation, never during preparation. Verify captured source hashes against committed fixture before accepting regeneration."
+    },
+    "pruned-interpolation": {
+      "program":"scripts/h3_pruned_adaln_oracle.py",
+      "fixture":"tests/fixtures/h3_pruned_adaln.json",
+      "referenceRevision":"47b06ff920c16b4b7b36de068367a5de0e0968e9",
+      "referenceUrlPrefix":"https://raw.githubusercontent.com/deepbeepmeep/WanGP/47b06ff920c16b4b7b36de068367a5de0e0968e9/models/minimax_h3/",
+      "referenceSha256":{
+        "transformer.py":"5f0b81959522333830c7f3d422c2b0138b5f4fd37287a98ebb1705fd04f0ca50",
+        "prune_checkpoint.py":"91b0c55a1fa7dcff0acaad5d89df68a40cc54545f14c1a9d37342f703027d1f1",
+        "components/packing.py":"8374dcd5e4023acca6fbaed2ed2fc98eabf2f24b019f5c4bfae88b7e36a1fe5b"
+      },
+      "selector":"pruned_adaln::native_pruned_adaln_matches_pinned_reference",
+      "ignored":true,
+      "tolerances":{"coordinates_abs":0.000002,"projection_abs":0.00002,"candle_block_abs":0.00002,"mlx_block_abs":0.002},
+      "comparison":"Clamped endpoints and fractional timesteps, table coordinates, reduced block/final projections and folded bias; preserve the supplied basis rather than reconstructing one."
+    },
+    "w4a8": {
+      "program":"scripts/ci/generate_minimax_h3_w4a8_fixture.py",
+      "fixture":"tests/fixtures/minimax_h3_w4a8.json",
+      "referenceRevision":"d908d589fbda44595f6d78d9c47ef42ba4aa8fad",
+      "mergedTree":"06a261f8917d2e0486eee14fe665b545a4419ca6",
+      "mainRevision":"78b7fe78552944ffc5763d680ba57f023e7ab5f4",
+      "loaderRevision":"ad1d4e072bd2ed5eec1d30d07ec390f327a3af52",
+      "referenceUrlPrefix":"https://raw.githubusercontent.com/Comfy-Org/comfy-kitchen/d908d589fbda44595f6d78d9c47ef42ba4aa8fad/",
+      "kernelBlobs":[
+        {"path":"comfy_kitchen/tensor/w4a8_int8.py","blob":"3d9c0fa5d282a970ed52237a7fcd67a71642a21f","sha256":"9a1a7cc80798035528d8c9b443df1f22ad1abe74d46353dd282749e3579c868c"},
+        {"path":"comfy_kitchen/backends/cuda/ops/int8_linear.cu","blob":"4c7d49e72425aa868d388a5b73b98c585e1fbded","sha256":"f7ad0f88f7118e4c4b318b0f5ddb27684eaead5f34efd9fb780d12680b2c3f8c"},
+        {"path":"comfy_kitchen/backends/cuda/ops/w4a8_gemm.cu","blob":"21002ea10bf0d05d945083c61f79098324b76bb1","sha256":"7c8bfed0b6c05f67214b776c655aff1ab24018cee03e889346f5f9168273a58a"},
+        {"path":"comfy_kitchen/backends/cuda/ops/cutlass_gemm_int8.cu","blob":"f7142fa41973a808cd6a5fe4b0b1cd063a7b2a3b","sha256":"7e5a0da97cd50e14a503eaa6bb541b7e161b5d4197b9bdde70cb9e32e7102e27"}
+      ],
+      "selectors":["w4a8_compare::native_forward_matches_the_external_reference","w4a8_compare::mixed_w4a8_and_convrot_layers_keep_their_own_arithmetic"],
+      "ignored":true,
+      "referenceMeaning":"cpu-kernel-replay, not upstream CUDA execution or the numerically different portable fallback",
+      "comparison":"Exact packing/codebook, nonnegative FP8 relative scales, F32 FHT/absmax before source-type quotient casts, F32 bias cancellation, native tile boundaries and mixed ConvRot layers. All source-pinned case tolerances apply. Generator also hashes helper/registry sources listed in its PINNED_SOURCES."
+    }
+  },
+  "assets": {
+    "syntheticLicense":"CC0-1.0: newly authored mathematical color patterns, test motion and tone; no personal images/voice or borrowed film harness assets.",
+    "imageA":{"file":"red-grid.png","command":["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","color=c=red:s=576x320,drawgrid=w=32:h=32:t=2:c=white","-frames:v","1","-update","1","red-grid.png"]},
+    "imageB":{"file":"blue-grid.png","command":["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","color=c=blue:s=576x320,drawgrid=w=64:h=32:t=3:c=yellow","-frames:v","1","-update","1","blue-grid.png"]},
+    "clipA":{"file":"motion-a.mp4","command":["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","testsrc2=size=576x320:rate=24:duration=6","-f","lavfi","-i","sine=frequency=440:sample_rate=32000:duration=6","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac","-shortest","motion-a.mp4"]},
+    "clipB":{"file":"motion-b.mp4","command":["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","testsrc2=size=576x320:rate=24:duration=6,hflip","-f","lavfi","-i","sine=frequency=880:sample_rate=32000:duration=6","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac","-shortest","motion-b.mp4"]},
+    "tone":{"file":"tone.wav","command":["ffmpeg","-nostdin","-v","error","-f","lavfi","-i","sine=frequency=440:sample_rate=32000:duration=6","-ac","1","-c:a","pcm_s16le","tone.wav"],"meaning":"Routing/signal sensitivity only, NEVER voice faithfulness."},
+    "voiceB":{"file":"speech-reversed.wav","command":["ffmpeg","-nostdin","-v","error","-i","speech-32000.wav","-af","areverse","-c:a","pcm_s16le","speech-reversed.wav"],"meaning":"Sensitivity intervention derived from the same licensed natural recording, not a second speaker or a voice-quality reference."},
+    "voice":{
+      "repo":"hf-internal-testing/librispeech_asr_dummy",
+      "revision":"5be91486e11a2d616f4ec5db8d3fd248585ac07a",
+      "url":"https://huggingface.co/datasets/hf-internal-testing/librispeech_asr_dummy/resolve/5be91486e11a2d616f4ec5db8d3fd248585ac07a/clean/validation-00000-of-00001.parquet",
+      "rowId":"1272-128104-0000",
+      "format":"parquet audio.bytes; select by id, not incidental row offset",
+      "upstreamLicense":"CC-BY-4.0 LibriSpeech recordings; retain attribution",
+      "licenseUrl":"https://www.openslr.org/12",
+      "mirrorCardLicense":"Not declared. Confirm upstream recording provenance/license during authorized staging; no blanket mirror license inferred.",
+      "expectedMirrorBytes":9192059,
+      "staging":"Metadata only here. Extract this public row during authorized staging, retain its speaker/transcript/license, stream-hash actual audio, ffmpeg-resample to 32000 Hz. Natural speech required for voice-quality evaluation; a tone proves no voice fidelity."
+    }
+  },
+  "analyticalProfiles":{"source":"crates/contracts/gen-core/src/h3_memory.rs","type":"NativeAllocationFacts","methods":["precompute_peak_bytes","denoise_peak_bytes","precompute_peak_bytes_windowed","denoise_peak_bytes_windowed","resident_peak_bytes_windowed","peak_bytes"],"meaning":"Analytical source storage, scratch and stage bounds, NOT measured host/device peaks. h3_terminal_telemetry::Collector covers the denoise observer only; full-case/loading sampling remains separate."},
+  "sampling":{
+    "base":{"steps":50,"fps":24,"duration":5.1667,"width":576,"height":320,"source":"builtin.models.jsonc default NFE and minimum declared landscape canvas/duration; imported resolved trained contract overrides if different"},
+    "turboSource":"config/manifests/builtin.loras.jsonc sampling; imported topology/partition/source compatibility must be validated, not inferred from family name",
+    "turbo":[
+      {"id":"minimax_h3_turbo_4step_768p","steps":4,"schedulerShift":6,"audioSchedulerShift":3,"trainingShortEdge":768},
+      {"id":"minimax_h3_turbo_8step","steps":8,"schedulerShift":12,"audioSchedulerShift":3,"trainingShortEdge":544},
+      {"id":"minimax_h3_turbo_4step_v01","steps":4,"schedulerShift":12,"audioSchedulerShift":3,"trainingShortEdge":544},
+      {"id":"minimax_h3_ref2v_turbo_4step","steps":4,"schedulerShift":12,"audioSchedulerShift":3,"trainingShortEdge":544}
+    ]
+  },
+  "unresolvedInterfaces":[
+    "API driver emits transcripts, not h3_import_prepared_load/completedJob/peak receipts. Normalize actual captured source/job/output and actual observations into the existing receipt schema before run-case; there is no fictional producer command.",
+    "Native tests embed structured JSON and compare elementwise internally; no flat candidate/reference array export currently exists for terminal validateEvidence. Add actual output capture at existing fixture seam before verify; copying expected into candidate is forbidden.",
+    "JSON API interpreter has no restart or filesystem-mutation action. Use existing task-owned service lifecycle and focused tests for those transitions, never invented HTTP routes.",
+    "Independent trained fine-tune, hybrid source/companion and compatible full/pruned/hybrid LoRA/LoKr identities require staged licensed source contracts. Synthetic identification is not real-model generalization."
+  ]
+}

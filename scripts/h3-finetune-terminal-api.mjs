@@ -60,9 +60,10 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
         assert.equal(result.status, step.expectedJobStatus ?? 'completed', 'job did not complete as expected');
         activeJob = undefined;
       } else {
-        result = await request(step.method, expand(step.path, captures), expand(step.body, captures), step.expectedStatus);
-        // Submission identity is durable before waiting, including interruption/failure recovery.
-        if (['/api/v1/models/import', '/api/v1/video/jobs'].includes(step.path) && result?.id) activeJob = result.id;
+        const requestedRoute = expand(step.path, captures);
+        result = await request(step.method, requestedRoute, expand(step.body, captures), step.expectedStatus);
+        // Submission identity is durable before waiting, including replay/retry failure recovery.
+        if (step.method === 'POST' && result?.id && (['/api/v1/models/import', '/api/v1/video/jobs'].includes(requestedRoute) || /^\/api\/v1\/jobs\/[^/]+\/(retry|duplicate)$/.test(requestedRoute))) activeJob = result.id;
       }
       captures[step.id] = result;
       for (const check of step.assert ?? []) {

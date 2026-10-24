@@ -20,7 +20,7 @@ export const ARTIFACTS = [
 // Mechanism coverage, not a claim that every checkpoint supports every operation.
 export const SURFACE = {
   numeric: ['tensor-mapping', 'convrot', 'pruned-interpolation', 'w4a8'],
-  capability: ['text', 'image', 'first-last-frame', 'video', 'ordered-multimodal', 'audio-reference', 'hybrid', 'turbo', 'lora', 'lokr'],
+  capability: ['text', 'image', 'first-last-frame', 'last-frame-only', 'video', 'ordered-multimodal', 'audio-reference', 'hybrid', 'turbo', 'lora', 'lokr'],
   generalization: ['renamed', 'independent-finetune', 'native-single', 'sharded-diffusers', 'dense-f16', 'dense-bf16', 'dense-f32', 'existing-families', 'ltx-add-select-generate', 'compatible-base'],
   lifecycle: ['managed-linked-equivalence', 'restart-replay', 'source-drift', 'interruption-retry', 'removal', 'cancel', 'relink-rescan', 'leases', 'duplicate', 'bounded-loading', 'cold-warm-staged', 'provenance-license'],
 };
@@ -135,6 +135,21 @@ export async function decodeAV(file, command = exec) {
   }
   await command('ffmpeg', ['-v', 'error', '-xerror', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 300000, maxBuffer: 1048576 });
   return { sha256: await hashFile(file), streams };
+}
+export function sensitivityDecision(interventionDelta, repeatedBaselineDelta, minimumDelta, maximumBaselineDelta) {
+  positive(minimumDelta);
+  assert.ok(Number.isFinite(maximumBaselineDelta) && maximumBaselineDelta >= 0, 'predeclared baseline bound required');
+  for (const v of [interventionDelta, repeatedBaselineDelta]) assert.ok(Number.isFinite(v) && v >= 0);
+  assert.ok(repeatedBaselineDelta <= maximumBaselineDelta, 'nondeterministic baseline exceeds declared bound; unresolved sensitivity');
+  const threshold = Math.max(minimumDelta, 3 * repeatedBaselineDelta);
+  assert.ok(interventionDelta > threshold, 'conditioning/adapters ignored or below baseline noise floor');
+  return { interventionDelta, repeatedBaselineDelta, threshold };
+}
+export async function compareControlMedia(baseline, repeated, intervention, stream, minimumDelta, maximumBaselineDelta, decode = decodeAV, delta = decodedDelta) {
+  assert.ok(['video', 'audio'].includes(stream));
+  const media = await Promise.all([baseline, repeated, intervention].map(file => decode(file)));
+  const noise = await delta(baseline, repeated, stream), changed = await delta(baseline, intervention, stream);
+  return { ...sensitivityDecision(changed, noise, minimumDelta, maximumBaselineDelta), stream, media };
 }
 export async function decodedDelta(a, b, stream, command = exec) {
   const samples = async file => {
@@ -381,12 +396,21 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [mode, planFile, ...args] = process.argv.slice(2);
   try {
     if (mode === 'list') console.log(JSON.stringify({ source: SOURCE, cases: requiredCases() }, null, 2));
-    else {
+    else if (mode === 'compare-control') {
+      assert.equal(args.length, 5, 'compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA');
+      console.log(JSON.stringify(await compareControlMedia(planFile, args[0], args[1], args[2], Number(args[3]), Number(args[4])), null, 2));
+    } else if (mode === 'case-plan') {
+      const { concretePlan } = await import('./h3-finetune-terminal-cases.mjs');
+      console.log(JSON.stringify(concretePlan(planFile, args[0], args[1]), null, 2));
+    } else if (mode === 'prepare-cases') {
+      const { prepareCases } = await import('./h3-finetune-terminal-cases.mjs');
+      console.log(JSON.stringify(await prepareCases(await json(planFile), args[0]), null, 2));
+    } else {
       const p = validatePlan(await json(planFile));
       if (mode === 'run-case') console.log(JSON.stringify(await runCase(p, args[0], args[1], args[2])));
       else if (mode === 'verify') console.log(JSON.stringify(await verifyCampaign(p)));
       else if (mode === 'check-plan') console.log(`complete inventory: ${p.cases.length} cases; no execution claimed`);
-      else throw new Error('usage: h3-finetune-terminal.mjs list | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify PLAN');
+      else throw new Error('usage: h3-finetune-terminal.mjs list | case-plan SW_ROOT INFERENCE_ROOT STAGE_ROOT | prepare-cases PARAMETERS NEW_STAGE_ROOT | compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify PLAN');
     }
   } catch (e) { console.error(e.message); process.exitCode = 1; }
 }

@@ -1,0 +1,297 @@
+// Concrete sc-26691 case preparation for the existing terminal/API harness.
+// Pure data/scenario construction: no fetch, subprocess, app startup or model execution.
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+import { requiredCases, SOURCE, ARTIFACTS } from './h3-finetune-terminal.mjs';
+export const caseBook = JSON.parse(await readFile(new URL('../docs/testing/sc-26691-h3-cases.json', import.meta.url), 'utf8'));
+const clone = structuredClone;
+const cap = name => ({ $capture: name });
+const route = (...parts) => ({ $concat: parts });
+const eq = (pointer, equals) => ({ pointer, equals });
+const hex = v => assert.match(v ?? '', /^[a-f0-9]{64}$/);
+const absoluteSourcePath = v => typeof v === 'string' && (path.posix.isAbsolute(v) || path.win32.isAbsolute(v));
+const knownModes = ['text_to_video', 'image_to_video', 'first_last_frame', 'reference_to_video'];
+const lifecycleApi = new Set(['managed-linked-equivalence', 'restart-replay', 'removal', 'cancel', 'interruption-retry', 'bounded-loading', 'cold-warm-staged']);
+const hasScenario = c => c.group !== 'numeric' && !c.id.endsWith('.generalization.existing-families') && (c.group !== 'lifecycle' || lifecycleApi.has(c.id.split('.').slice(2).join('.')));
+export const fixtureBindings = {
+  generalization: {
+    renamed: ['sceneworks-core', 'minimax_h3_import', 'an_h3_dit_is_identified_by_its_tensors_not_by_its_name'],
+    'independent-finetune': ['sceneworks-core', 'minimax_h3_import', 'an_h3_dit_is_identified_by_its_tensors_not_by_its_name'],
+    'native-single': ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::native_and_sharded_plans_reach_the_real_h3_provider_load_seam'],
+    'sharded-diffusers': ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::linked_mixed_case_shards_reach_the_provider_as_lowercase_canonical_files'],
+    'dense-f16': ['sceneworks-core', 'minimax_h3_import', 'the_import_gate_admits_only_a_complete_dense_h3_component_directory'],
+    'dense-bf16': ['sceneworks-core', 'minimax_h3_import', 'the_import_gate_admits_only_a_complete_dense_h3_component_directory'],
+    'dense-f32': ['sceneworks-core', 'minimax_h3_import', 'the_import_gate_admits_only_a_complete_dense_h3_component_directory'],
+    'existing-families': ['sceneworks-core', 'checkpoint_ingest', null],
+    'ltx-add-select-generate': ['sceneworks-core', 'checkpoint_ingest', null],
+    'compatible-base': ['sceneworks-core', 'minimax_h3_import', 'compatible_base_downloads_never_replace_imported_task_partitions'],
+  },
+  lifecycle: {
+    'managed-linked-equivalence': ['sceneworks-core', 'minimax_h3_import', 'managed_and_linked_imports_persist_a_plan_the_h3_assembly_binds'],
+    'restart-replay': ['sceneworks-core', 'minimax_h3_import', 'weight_only_config_is_immutable_semantic_context_across_ownership_restart_and_normalization'],
+    'source-drift': ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::source_mutation_before_or_during_normalization_cannot_publish'],
+    'interruption-retry': ['sceneworks-core', 'minimax_h3_import', 'h3_interruption_retry_drift_relink_duplicates_and_leases_preserve_ownership'],
+    removal: ['sceneworks-core', 'checkpoint_derivative', 'removing_a_root_drops_its_derivatives_and_leaves_the_library_intact'],
+    cancel: ['sceneworks-core', 'checkpoint_ingest', 'a_cancelled_ingest_leaves_no_install_no_plan_and_no_record'],
+    'relink-rescan': ['sceneworks-core', 'checkpoint_plan_store', 'relinking_to_a_different_library_refuses_to_serve_the_old_plan'],
+    leases: ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::provider_resolution_holds_dense_and_native_source_leases_until_release'],
+    duplicate: ['sceneworks-core', 'minimax_h3_import', 'h3_interruption_retry_drift_relink_duplicates_and_leases_preserve_ownership'],
+    'bounded-loading': ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::imported_h3_admission_requires_a_known_sufficient_budget'],
+    'cold-warm-staged': ['sceneworks-worker', null, 'video_jobs::minimax_h3_import_tests::bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracting_main'],
+    'provenance-license': ['sceneworks-rust-api', null, 'custom_h3_import_requires_the_selected_base_component_license_acknowledgment'],
+  },
+};
+function cargo(root, backend, [pkg, target, selector], list = false) {
+  const argv = ['cargo', 'test', '--manifest-path', path.join(root, 'Cargo.toml'), '-p', pkg];
+  if (pkg === 'sceneworks-worker' && backend === 'cuda') argv.push('--features', 'backend-candle');
+  if (target) argv.push('--test', target);
+  else argv.push('--lib');
+  argv.push('--');
+  if (selector) argv.push(selector);
+  argv.push(...(list ? ['--list'] : ['--nocapture', '--test-threads=1']));
+  return argv;
+}
+export function nativeCommands(root, backend, check) {
+  assert.ok(['mlx', 'cuda'].includes(backend));
+  const pkg = backend === 'mlx' ? 'mlx-gen-minimax-h3' : 'candle-gen-minimax-h3';
+  const selectors = caseBook.numeric[check]?.selectors ?? [caseBook.numeric[check]?.selector];
+  assert.ok(selectors.every(s => s && s.includes('::')), 'native arithmetic selector required');
+  const base = ['cargo', 'test', '--manifest-path', path.join(root, 'Cargo.toml'), '-p', pkg, '--test', 'integration'];
+  if (backend === 'cuda') base.push('--features', 'cuda');
+  return {
+    // Unfiltered listing of the ACTUAL binary, never a hand-trimmed fixture population.
+    inventory: [...base, '--', '--list'],
+    commands: selectors.map(s => [...base, '--', s, '--exact', '--ignored', '--nocapture', '--test-threads=1']),
+    requirement: 'Each exact invocation must report >0 passed, zero failed/ignored and no SKIP; native device absence is failure. These are primitive fixtures, not real-model evidence.',
+  };
+}
+export function referenceCommand(root, check, referenceDir, outputDir) {
+  const n = caseBook.numeric[check]; assert.ok(n?.fixture);
+  const cmd = ['python3', '-I', path.join(root, n.program)];
+  if (check !== 'convrot') cmd.push('--reference-dir', referenceDir);
+  if (check === 'w4a8') cmd.push('--convrot-fixture', path.join(root, 'tests/fixtures/h3_convrot_int8.json'));
+  cmd.push('--output', path.join(outputDir, path.basename(n.fixture)));
+  if (check === 'w4a8') cmd.push('--receipt', path.join(outputDir, 'w4a8-reference-receipt.json'));
+  return cmd;
+}
+export function concretePlan(swRoot, inferenceRoot, stageRoot) {
+  for (const r of [swRoot, inferenceRoot, stageRoot]) assert.ok(path.isAbsolute(r), 'absolute coordinator staging paths required');
+  assert.deepEqual(caseBook.source, SOURCE);
+  assert.deepEqual(caseBook.artifacts.map(a => a.artifact), ARTIFACTS);
+  return {
+    kind: 'preparation-not-campaign-evidence', source: SOURCE,
+    inventoryCommand: ['node', path.join(swRoot, 'scripts/h3-finetune-terminal.mjs'), 'list'],
+    finalPair: 'Coordinator parameters AFTER full implementation/reviews, native-main merge and permanent pin; never these inspection anchors.',
+    unresolvedInterfaces: caseBook.unresolvedInterfaces,
+    cases: requiredCases().map(c => {
+      const check = c.id.split('.').slice(2).join('.');
+      const scenario = path.join(stageRoot, `${c.id}.scenario.json`);
+      const transcript = path.join(stageRoot, `${c.id}.api.json`);
+      const apiCommand = ['node', path.join(swRoot, 'scripts/h3-finetune-terminal-api.mjs'), scenario, transcript];
+      if (c.group === 'numeric' && check !== 'tensor-mapping') return {
+        ...c, ...nativeCommands(inferenceRoot, c.backend, check),
+        referenceCommand: referenceCommand(inferenceRoot, check, path.join(stageRoot, `reference-${check}`), path.join(stageRoot, c.id)),
+        reference: caseBook.numeric[check],
+        captureGap: 'Structured embedded fixture comparisons exist; flat terminal numeric arrays are NOT exported. Regenerate outside sources and compare to embedded fixture before compiling final clean pair. Do not overwrite pinned fixtures or manufacture candidate arrays.',
+      };
+      const binding = c.group === 'numeric'
+        ? ['sceneworks-core', 'minimax_h3_import', caseBook.numeric['tensor-mapping'].selector]
+        : fixtureBindings[c.group]?.[check];
+      return {
+        ...c, ...(hasScenario(c) ? { scenario, transcript } : {}),
+        commands: hasScenario(c) ? [apiCommand] : [cargo(swRoot, c.backend, binding)],
+        ...(binding ? { supportingFixture: cargo(swRoot, c.backend, binding), fixtureInventory: cargo(swRoot, c.backend, binding, true) } : {}),
+        ...(c.artifact ? { frozenArtifact: caseBook.artifacts.find(a => a.artifact === c.artifact) } : {}),
+        note: c.group === 'lifecycle' ? 'Lifecycle transition steps below plus source-bound fixture; restart/mutation/interrupt require task-owned external service/filesystem orchestration. Generation alone is NOT lifecycle acceptance.' : c.group === 'generalization' ? 'The actual staged real source must exercise this format/lineage. Supporting synthetic fixture alone is NOT real-model generalization.' : 'Actual app integration through existing API; requires staged scenario bindings and actual runtime receipt, not only HTTP success.',
+      };
+    }),
+  };
+}
+
+function validateExecution(e, c) {
+  assert.ok(e.label && /^[a-zA-Z0-9_-]+$/.test(e.label));
+  assert.ok(e.model?.modelId?.startsWith('imported_'), 'explicit non-stock imported modelId required');
+  assert.ok(absoluteSourcePath(e.model.sourcePath), 'staged absolute platform-native source path required'); hex(e.model.sha256);
+  if (e.model.sourceKind === 'directory' || e.model.sourceFormat === 'sharded-diffusers') {
+    assert.equal(e.model.sourceKind, 'directory', 'sharded sources are directories, never a fictional aggregate-hashed file');
+    assert.ok(e.model.files?.length > 0, 'directory source closure requires each actual file/hash');
+    for (const file of e.model.files) { assert.ok(absoluteSourcePath(file.path)); hex(file.sha256); }
+    assert.ok(e.model.files.some(f => f.sha256 === e.model.sha256), 'primary payload identity must be an actual source file, not a tree stamp');
+  }
+  if (c.artifact) {
+    assert.equal(e.model.sha256, caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256);
+    assert.equal(e.model.partition, 'ref2va');
+  }
+  // Preload import cancellation/retry has a source identity, not a fictional native load.
+  if (['cancel', 'interruption-retry'].includes(c.id.split('.').slice(2).join('.'))) return;
+  assert.ok(knownModes.includes(e.mode));
+  const check = c.id.split('.').slice(2).join('.');
+  const requiredMode = c.artifact ? 'reference_to_video' : c.group === 'capability' ? ({ text: 'text_to_video', image: 'image_to_video', 'last-frame-only': 'image_to_video', 'first-last-frame': 'first_last_frame', video: 'reference_to_video', 'ordered-multimodal': 'reference_to_video', 'audio-reference': 'reference_to_video' }[check]) : undefined;
+  if (requiredMode) assert.equal(e.mode, requiredMode, 'case must exercise its actual API operation');
+  if (check === 'ltx-add-select-generate') assert.equal(e.family, 'ltx', 'LTX parity must run LTX, not an H3 scenario with an LTX label');
+  if (check === 'independent-finetune') {
+    assert.ok(e.model.lineage?.source && e.model.lineage?.revision, 'independently identified trained source lineage required');
+    assert.ok(!caseBook.artifacts.some(a => a.expectedSha256 === e.model.sha256), 'renamed Singularity is not independent generalization');
+  }
+  const format = { 'native-single': 'native-single', 'sharded-diffusers': 'sharded-diffusers', 'dense-f16': 'f16', 'dense-bf16': 'bf16', 'dense-f32': 'f32' }[check];
+  if (format) assert.equal(e.model.sourceFormat, format, 'case must use its actual staged source format, not merely its label');
+  if (check === 'renamed') {
+    assert.ok(e.model.originalPath && e.model.originalPath !== e.model.sourcePath, 'supply original and actual renamed staged path');
+    assert.equal(e.model.originalSha256, e.model.sha256, 'renaming must preserve actual contents');
+  }
+  const bases = { fl2va: 'minimax_h3', ref2va: 'minimax_h3_ref', hybrid: 'minimax_h3' };
+  if (e.family !== 'ltx') {
+    assert.equal(e.model.baseModel, bases[e.model.partition], 'explicit compatible base/partition pair required');
+    assert.ok(['full', 'pruned'].includes(e.model.topology), 'topology and operation partition are separate: hybrid is not a pruning topology');
+    if (e.model.partition === 'hybrid') { assert.ok(e.model.companion?.source, 'explicit hybrid companion lineage required'); hex(e.model.companion?.sha256); }
+    assert.ok(e.model.supportedModes?.includes(e.mode), 'operation must come from the resolved imported contract');
+    assert.ok(e.model.partition === 'hybrid' || (e.mode === 'reference_to_video' ? e.model.partition === 'ref2va' : e.model.partition === 'fl2va'), 'declared partition does not support this operation');
+  }
+  const s = e.sampling;
+  assert.ok(s && s.contractSource && s.steps >= 2 && Number.isInteger(s.steps), 'declared trained NFE recipe required, not cheap 1-step');
+  for (const k of ['width', 'height', 'fps', 'duration']) assert.ok(Number.isFinite(s[k]) && s[k] > 0, `declared ${k} required`);
+  assert.ok(['q4', 'q8', 'bf16'].includes(e.model.componentTier));
+  if (e.family !== 'ltx' && s.advanced?.mlxQuantize !== undefined) assert.equal(Number(s.advanced.mlxQuantize), { bf16: 0, q4: 4, q8: 8 }[e.model.componentTier], 'explicit shared precision must match bound component tier; never silently demote');
+  assert.ok(e.model.components?.length > 0 && e.model.components.every(v => {
+    hex(v.sha256); return v.source && v.revision && v.licenseAcknowledged === true;
+  }), 'actual pinned licensed component closure required');
+  for (const a of e.adapters ?? []) {
+    hex(a.sha256); assert.ok(a.id && a.source && a.revision && a.compatibilitySource && a.licenseAcknowledged === true);
+    assert.equal(a.topology, e.model.topology, 'adapter topology must match source, not just dimensions');
+    assert.equal(a.partition, e.model.partition);
+  }
+}
+function conditioning(check, assets) {
+  const need = k => { assert.ok(typeof assets[k] === 'string' && assets[k].length > 0, `staged project asset required: ${k}`); return assets[k]; };
+  switch (check) {
+    case 'text': return [{}, { prompt: 'A blue cube slides left across a white table, synchronized soft impacts.' }];
+    case 'image': return [{ sourceAssetId: need('imageA') }, { sourceAssetId: need('imageB') }];
+    case 'last-frame-only': return [{ lastFrameAssetId: need('imageB') }, { lastFrameAssetId: need('imageA') }];
+    case 'first-last-frame': return [{ sourceAssetId: need('imageA'), lastFrameAssetId: need('imageB') }, { sourceAssetId: need('imageB'), lastFrameAssetId: need('imageA') }];
+    case 'video': return [{ sourceClipAssetIds: [need('clipA'), need('clipB')] }, { sourceClipAssetIds: [need('clipB'), need('clipA')] }, { sourceClipAssetIds: [need('clipA')] }];
+    case 'audio-reference': return [{ referenceAssetIds: [need('imageA')], referenceAudioAssetIds: [need('voiceA')] }, { referenceAssetIds: [need('imageA')], referenceAudioAssetIds: [need('voiceB')] }, { referenceAssetIds: [need('imageA')], referenceAudioAssetIds: [] }];
+    case 'ordered-multimodal': {
+      const b = { referenceAssetIds: [need('imageA'), need('imageB')], sourceClipAssetIds: [need('clipA'), need('clipB')], referenceAudioAssetIds: [need('voiceA'), need('voiceB')] };
+      return [b, ...Object.keys(b).flatMap(k => [{ ...b, [k]: [...b[k]].reverse() }, { ...b, [k]: [] }])];
+    }
+    default: return [{}];
+  }
+}
+function assertCoverage(c, executions) {
+  const check = c.id.split('.').slice(2).join('.');
+  if (['turbo', 'lora', 'lokr'].includes(check)) {
+    for (const cell of ['full', 'pruned', 'hybrid']) assert.ok(executions.some(e => (e.model.partition === 'hybrid' ? 'hybrid' : e.model.topology) === cell), `missing supported ${check}/${cell} cell`);
+    if (check === 'turbo') for (const r of caseBook.sampling.turbo) {
+      const selected = executions.filter(e => e.adapters?.some(a => a.id === r.id));
+      assert.ok(selected.length > 0, `missing declared recipe ${r.id}`);
+      for (const e of selected) {
+        for (const k of ['steps', 'schedulerShift', 'audioSchedulerShift']) assert.equal(e.sampling[k], r[k], `trained ${r.id}/${k}`);
+        assert.equal(Math.min(e.sampling.width, e.sampling.height), r.trainingShortEdge, 'trained turbo geometry required');
+      }
+    }
+    for (const e of executions) assert.ok(e.adapters?.length > 0 && (check === 'turbo' || e.adapters.some(a => a.kind === check)), `missing selected ${check}`);
+  }
+  if (check === 'hybrid') {
+    for (const mode of ['text_to_video', 'image_to_video', 'reference_to_video']) assert.ok(executions.some(e => e.mode === mode && e.model.partition === 'hybrid'), `hybrid must exercise ${mode}`);
+    for (const e of executions) assert.ok(e.model.companion && e.model.companion.source && e.model.companion.sha256, 'explicit hybrid companion lineage required');
+  }
+}
+export function buildScenario(c, p, executions) {
+  assert.ok(requiredCases().some(expected => expected.id === c.id));
+  assert.ok(executions?.length > 0, 'actual staged execution binding required');
+  assert.ok(p.projectId && Number.isInteger(p.seed) && typeof p.requestedGpu === 'string' && p.requestedGpu.length > 0);
+  assert.ok(p.timeoutSeconds > 0 && p.timeoutSeconds <= 7200);
+  const u = new URL(p.baseUrl); assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(u.hostname));
+  assertCoverage(c, executions);
+  if (c.group === 'capability') {
+    assert.ok(p.sensitivity?.minimumControlDelta > 0 && Number.isFinite(p.sensitivity.minimumControlDelta), 'predeclared decoded-media intervention threshold required');
+    assert.ok(Number.isFinite(p.sensitivity.maximumBaselineDelta) && p.sensitivity.maximumBaselineDelta >= 0, 'predeclared nondeterministic baseline bound required');
+  }
+  const check = c.id.split('.').slice(2).join('.');
+  assert.ok(hasScenario(c), 'this case uses its source-bound focused fixture, not a fake generation-only lifecycle scenario');
+  if (check === 'managed-linked-equivalence') {
+    assert.ok(executions.some(e => e.ownershipMode === 'linked') && executions.some(e => e.ownershipMode !== 'linked'), 'both managed and linked executions required');
+    assert.equal(new Set(executions.map(e => e.model.sha256)).size, 1, 'equivalent ownership must use the same source bytes');
+  }
+  if (check === 'cold-warm-staged') for (const label of ['cold', 'warm', 'staged']) assert.ok(executions.some(e => e.label === label), `missing ${label} execution; stage/cache state must also be observed, not inferred from the label`);
+  const steps = [], comparisons = [];
+  for (const e of executions) {
+    validateExecution(e, c);
+    const prefix = e.label;
+    const importBody = { modelId: e.model.modelId, name: `sc26691 ${prefix}`, sourcePath: e.model.sourcePath, expectedSha256: e.model.sha256, baseModel: e.model.baseModel, licenseAcknowledged: true };
+    if (e.model.sourceKind === 'directory') delete importBody.expectedSha256; // No invented directory digest; retain per-file closure in preparation plan.
+    if (e.family !== 'ltx') importBody.minimaxH3Partition = e.model.partition;
+    if (e.ownershipMode === 'linked') {
+      assert.ok(e.linkedRootId && e.linkedRelativePath);
+      delete importBody.sourcePath;
+      Object.assign(importBody, { ownershipMode: 'linked', linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath });
+    }
+    if (check === 'restart-replay') {
+      assert.ok(e.replayJobId && e.reuseInstalled, 'supply actual pre-restart completed job ID from task-owned persistent state');
+      steps.push({ id: `${prefix}_original`, method: 'GET', path: `/api/v1/jobs/${encodeURIComponent(e.replayJobId)}`, expectedStatus: 200, assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
+      steps.push({ id: `${prefix}_replay`, method: 'POST', path: `/api/v1/jobs/${encodeURIComponent(e.replayJobId)}/duplicate`, body: {}, expectedStatus: 201, assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed)] });
+      steps.push({ id: `${prefix}_replayed`, waitJob: cap(`${prefix}_replay/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
+      continue; // Actual process restart is an external precondition, never a fabricated HTTP call.
+    }
+    if (!e.reuseInstalled) {
+      steps.push({ id: `${prefix}_import`, method: 'POST', path: '/api/v1/models/import', body: importBody, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
+      if (['cancel', 'interruption-retry'].includes(check)) {
+        steps.push({ id: `${prefix}_cancel`, method: 'POST', path: route('/api/v1/jobs/', cap(`${prefix}_import/id`), '/cancel'), expectedStatus: 200 });
+        steps.push({ id: `${prefix}_cancelled`, waitJob: cap(`${prefix}_import/id`), expectedJobStatus: 'cancelled', assert: [eq('/status', 'cancelled')] });
+        if (check === 'interruption-retry') {
+          steps.push({ id: `${prefix}_retry`, method: 'POST', path: route('/api/v1/jobs/', cap(`${prefix}_import/id`), '/retry'), body: {}, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
+          steps.push({ id: `${prefix}_retried`, waitJob: cap(`${prefix}_retry/id`), assert: [eq('/result/modelId', e.model.modelId)] });
+        }
+        continue; // No successful native load is asserted for preload cancellation/refusal.
+      }
+      steps.push({ id: `${prefix}_installed`, waitJob: cap(`${prefix}_import/id`), assert: [eq('/result/modelId', e.model.modelId)] });
+    }
+    const requestedCheck = c.group === 'capability' && !['turbo', 'lora', 'lokr', 'hybrid'].includes(check) ? check : e.conditioning ?? (e.mode === 'reference_to_video' ? 'audio-reference' : e.mode === 'first_last_frame' ? 'first-last-frame' : e.mode === 'image_to_video' ? 'image' : 'text');
+    const selectedAdapters = (e.adapters ?? []).map(a => ({ id: a.id, weight: a.weight ?? 1 }));
+    const variants = conditioning(requestedCheck, p.assets ?? {});
+    if (['turbo', 'lora', 'lokr'].includes(check)) {
+      // Hold checkpoint, seed, NFE, shifts and geometry fixed; remove ONLY adapters.
+      variants.splice(1, variants.length, { ...variants[0], loras: [] });
+      variants[0] = { ...variants[0], loras: selectedAdapters };
+    }
+    // Real repeated-baseline floor, then one mechanism intervention at a time.
+    const variantsToRun = c.group === 'capability' ? [variants[0], variants[0], ...variants.slice(1)] : [variants[0]];
+    for (const [i, variant] of variantsToRun.entries()) {
+      const id = `${prefix}_av${i}`, s = e.sampling;
+      const body = {
+        projectId: p.projectId, model: e.reuseInstalled ? e.model.modelId : cap(`${prefix}_installed/result/modelId`), mode: e.mode,
+        prompt: 'A red cube slides right across a white table, synchronized soft impacts.', seed: p.seed,
+        requestedGpu: p.requestedGpu, duration: s.duration, fps: s.fps, width: s.width, height: s.height,
+        advanced: { ...(s.advanced ?? {}), ...(e.family === 'ltx' ? {} : { mlxQuantize: { bf16: 0, q4: 4, q8: 8 }[e.model.componentTier] }), steps: s.steps, ...(s.schedulerShift === undefined ? {} : { schedulerShift: s.schedulerShift }), ...(s.audioSchedulerShift === undefined ? {} : { audioSchedulerShift: s.audioSchedulerShift }) },
+        loras: selectedAdapters, ...variant,
+      };
+      steps.push({ id, method: 'POST', path: '/api/v1/video/jobs', body, expectedStatus: 201,
+        assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed), eq('/payload/mode', e.mode)] });
+      steps.push({ id: `${id}_done`, waitJob: cap(`${id}/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
+    }
+    if (check === 'removal') steps.push({ id: `${prefix}_removed`, method: 'DELETE', path: `/api/v1/models/${encodeURIComponent(e.model.modelId)}?permanent=true`, expectedStatus: 200, assert: [eq('/id', e.model.modelId), eq('/removedManifestEntry', true)] });
+    if (c.group === 'capability') comparisons.push({ label: prefix, baseline: `${prefix}_av0_done`, repeatedBaseline: `${prefix}_av1_done`, interventions: variantsToRun.slice(2).map((v, i) => ({ job: `${prefix}_av${i + 2}_done`, stream: check === 'audio-reference' || JSON.stringify(v.referenceAudioAssetIds) !== JSON.stringify(variants[0].referenceAudioAssetIds) ? 'audio' : 'video' })), stream: check === 'audio-reference' ? 'audio' : 'video', thresholds: clone(p.sensitivity), command: ['node', 'scripts/h3-finetune-terminal.mjs', 'compare-control', 'BASELINE_AV_FROM_ACTUAL_JOB', 'REPEATED_AV_FROM_ACTUAL_JOB', 'INTERVENTION_AV_FROM_ACTUAL_JOB', check === 'audio-reference' ? 'audio' : 'video', String(p.sensitivity.minimumControlDelta), String(p.sensitivity.maximumBaselineDelta)], policy: 'Bind checkpoint/source closure + seed + complete sampling/config; decode both AV streams. Measure repeated-baseline RMSE B. Predeclare intervention threshold T and require intervention RMSE > max(T,3*B). If noise floor is unstable, acceptance is unresolved, not any-hash-difference success.' });
+  }
+  assert.equal(new Set(steps.map(s => s.id)).size, steps.length, 'execution labels must be unique');
+  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons };
+}
+// Deliberately not a run-case plan: no invented evidence.json or successful runtime metrics.
+export async function prepareCases(parameters, destination) {
+  assert.match(parameters.sceneworks ?? '', /^[a-f0-9]{40}$/);
+  assert.match(parameters.inference ?? '', /^[a-f0-9]{40}$/);
+  assert.ok(path.isAbsolute(destination));
+  const plan = concretePlan(parameters.swRoot, parameters.inferenceRoot, destination);
+  const scenarios = [];
+  for (const c of requiredCases().filter(hasScenario)) {
+    const executions = parameters.bindings?.[c.id];
+    scenarios.push([c.id, buildScenario(c, { ...parameters, ...(parameters.backends?.[c.backend] ?? {}) }, executions)]);
+  }
+  // Exclusive directory: no overwrite/recovery of another campaign candidate.
+  await mkdir(destination);
+  for (const c of requiredCases().filter(c => c.group === 'numeric')) await mkdir(path.join(destination, c.id));
+  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
+  await writeFile(path.join(destination, 'case-plan.json'), JSON.stringify({ ...plan, cases, responsibleTask: 'sc-26691', sceneworks: parameters.sceneworks, inference: parameters.inference }, null, 2) + '\n', { flag: 'wx' });
+  for (const [id, scenario] of scenarios) await writeFile(path.join(destination, `${id}.scenario.json`), JSON.stringify(scenario, null, 2) + '\n', { flag: 'wx' });
+  return { cases: plan.cases.length, scenarios: scenarios.length, status: 'prepared-not-executed', unresolvedInterfaces: plan.unresolvedInterfaces };
+}
