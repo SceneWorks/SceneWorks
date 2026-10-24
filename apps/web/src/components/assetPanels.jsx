@@ -492,6 +492,7 @@ export function AssetGrid({
         ) : (
           <button
             className={tileClasses.join(" ")}
+            data-asset-id={asset.id}
             onClick={() => setSelectedAssetId(asset.id)}
             onContextMenu={suppressThumbnailContextMenu}
             onDoubleClick={() => onPreview(asset)}

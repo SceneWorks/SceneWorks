@@ -140,13 +140,13 @@ async function shell(page, kind, actions) {
   await click(page.locator('nav').getByRole('button', { name: 'Image', exact: true }), actions, 'Image navigation');
 }
 
-async function openAsset(page, asset, actions) {
+export async function openAsset(page, asset, actions) {
   requireThat(asset?.id && typeof asset.displayName === 'string' && asset.displayName, 'original asset lacks its UI identity');
   await click(page.locator('nav').getByRole('button', { name: 'Assets', exact: true }), actions, 'Assets navigation');
   await fill(page.getByRole('searchbox', { name: 'Search assets', exact: true }),asset.displayName,actions,'Search assets');
   await select(page.getByRole('combobox', { name: 'Asset type', exact: true }),'all',actions,'Asset type');
   // The accessible tile is source-owned in AssetGrid. Do not index a gallery by position.
-  const tile = page.locator('.asset-tile').filter({ has: page.locator('strong').filter({ hasText: new RegExp(`^${escapeRegExp(asset.displayName)}$`) }) });
+  const tile = page.locator(`.asset-tile[data-asset-id=${JSON.stringify(asset.id)}]`);
   await tile.waitFor({ state: 'visible' });
   requireThat(await tile.count() === 1, `original asset tile is ambiguous: ${asset.id}`);
   await tile.dblclick(); actions.push({ at: now(), action: 'open-asset', assetId: asset.id, displayName: asset.displayName });

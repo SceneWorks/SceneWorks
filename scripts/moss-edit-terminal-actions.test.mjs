@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -58,6 +58,23 @@ test('child environment isolates owned state/cache/auth and never invents a hard
   const config={stateRoot:'/private/owned/state',root:'/private/owned',backend:'cuda',port:17957,workerId:'worker',hfHome:'/private/owned/hf',candidateId:'candidate',sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,observationJournal:'/private/owned/journal'};
   const env=childEnvironment(config,'private-inert-token');assert.equal(env.CUDA_VISIBLE_DEVICES,CUDA_UUID);assert.equal(env.SCENEWORKS_GPU_ID,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'private-inert-token');assert.equal(env.HF_HOME,config.hfHome);assert.equal(env.SCENEWORKS_MOSS_CANDIDATE_ID,'candidate');
   assert.equal(Object.keys(env).some(name=>/OWNERSHIP|LEASE|AGENT_TOKEN/.test(name)),false);
+});
+test('owned installation stack enables a distinct CPU download claimant and requires its actual registration',async()=>{
+  for(const backend of ['mlx','cuda']) {
+    const config={stateRoot:'/private/owned/state',backend,port:17957,workerId:`native-${backend}`,hfHome:'/private/owned/hf'};
+    const native=childEnvironment(config,'private-inert-token'),api={...native,...utilityWorkerEnvironment(config)};
+    assert.equal(api.SCENEWORKS_RUN_UTILITY_INPROCESS,'1');assert.equal(api.SCENEWORKS_RUST_WORKER_GPU_ID,'cpu');assert.equal(api.SCENEWORKS_UTILITY_WORKERS,'1');
+    assert.notEqual(api.SCENEWORKS_WORKER_ID,native.SCENEWORKS_WORKER_ID);
+    const gpu={id:native.SCENEWORKS_WORKER_ID,gpuId:native.SCENEWORKS_GPU_ID,status:'idle',capabilities:['image_edit']};
+    const utility={id:api.SCENEWORKS_WORKER_ID,gpuId:api.SCENEWORKS_RUST_WORKER_GPU_ID,status:'idle',capabilities:['cpu','model_download']};
+    assert.equal(readyUtilityWorker([gpu],config.workerId),undefined);
+    assert.equal(readyUtilityWorker([gpu,utility],config.workerId),utility);
+    for(const changes of [{id:gpu.id},{gpuId:gpu.gpuId},{status:'busy'},{capabilities:['cpu']}])assert.equal(readyUtilityWorker([gpu,{...utility,...changes}],config.workerId),undefined);
+  }
+  const source=await readFile(resolve(sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs'),'utf8');
+  assert.match(source,/launch\('api',utilityWorkerEnvironment\(config\)\)/);
+  assert.match(source,/utility=readyUtilityWorker\(workers,config.workerId\)/);
+  assert.match(source,/utilityWorker:utility/);
 });
 test('stopped registry relocation preserves all identities and rejects any unrelated project path',()=>{
   const original=[{id:'same-project',path:'/old/data/projects/campaign.sceneworks',name:'actual',other:{jobId:'same-job'}}];

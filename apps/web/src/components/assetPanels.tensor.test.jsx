@@ -1,9 +1,27 @@
 import React, { act } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot, click } from "../testUtils/dom.js";
-import { FullscreenPreview } from "./assetPanels.jsx";
+import { AssetGrid, FullscreenPreview } from "./assetPanels.jsx";
 let root, container;
 afterEach(async () => { if (root) await unmountRoot(root, container); });
+describe("exact asset tile identity", () => {
+  it("distinguishes image and latent outputs with duplicate display names in the rendered grid", async () => {
+    ({ root, container } = mountRoot());
+    const assets = ["base-output", "base-duplicate", "sft-output"].map((id, index) => ({
+      id, type: index === 0 ? "image" : "tensor", displayName: "MOSS sampled latents 1", status: {},
+      file: { path: `${id}.${index === 0 ? "png" : "npy"}`, mimeType: index === 0 ? "image/png" : "application/x-npy" },
+    }));
+    const onPreview = vi.fn();
+    await act(async () => root.render(<AssetGrid assets={assets} onPreview={onPreview} setSelectedAssetId={vi.fn()} />));
+    expect(container.querySelectorAll(".asset-tile strong")).toHaveLength(3);
+    for (const asset of assets) {
+      const tiles = container.querySelectorAll(`.asset-tile[data-asset-id="${asset.id}"]`);
+      expect(tiles).toHaveLength(1);
+      await act(async () => tiles[0].dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+      expect(onPreview).toHaveBeenLastCalledWith(asset);
+    }
+  });
+});
 describe("native tensor result viewer", () => {
   it("exposes exact tensor and companion downloads and recipe replay without fabricated image or canvas affordances", async () => {
     ({ root, container } = mountRoot());

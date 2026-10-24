@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { captureUi, capturePackageInstallUi, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
+import { captureUi, capturePackageInstallUi, openAsset, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
 import { createPlan, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
 
 const inputs = { provenance: 'inert browser route fixture', single_case: { references: ['B'], width: 768, height: 512, prompt: 'single' },
@@ -123,4 +123,29 @@ test('driver has no direct mutation transport or network interception fallback',
   assert.match(source,/await import\(pathToFileURL\(playwrightModule\)\.href\)/);
   assert.match(source,/Network\.eventSourceMessageReceived/);
   assert.match(source,/await verifyReplayForm\(page, expected, actions\)/);
+});
+
+// Inert locator protocol only: no browser, API, window or generated image is started.
+function assetLibrary(assets) {
+  const opened=[];let search='',type='';
+  const control={async click(){},async fill(value){search=value;},async inputValue(){return search;},async selectOption(value){type=value;}};
+  const page={getByRole(role){return role==='combobox'?{...control,async inputValue(){return type;}}:{...control,async waitFor(){}};},locator(selector){
+    if(selector==='nav')return {getByRole(){return control;}};
+    const match=/^\.asset-tile\[data-asset-id=(".*")\]$/.exec(selector);assert.ok(match,`selection must use exact asset identity: ${selector}`);
+    const matches=assets.filter(asset=>asset.id===JSON.parse(match[1]));
+    return {async waitFor(){},async count(){return matches.length;},async dblclick(){opened.push(matches[0]);}};
+  }};return {page,opened};
+}
+test('replay opens the exact asset when retained outputs share the same display name',async()=>{
+  const assets=['base-advanced','base-duplicate','sft-advanced'].map(id=>({id,displayName:'MOSS sampled latents 1'}));
+  const library=assetLibrary(assets),actions=[];
+  await openAsset(library.page,assets[2],actions);
+  assert.deepEqual(library.opened,[assets[2]]);assert.equal(actions.at(-1).assetId,'sft-advanced');
+});
+test('replay refuses missing or ambiguous asset IDs even when their display names match',async()=>{
+  const asset={id:'same-id',displayName:'MOSS sampled latents 1'};
+  for(const assets of [[],[asset,{...asset}]]){
+    const library=assetLibrary(assets);
+    await assert.rejects(openAsset(library.page,asset,[]),/ambiguous/);assert.deepEqual(library.opened,[]);
+  }
 });
