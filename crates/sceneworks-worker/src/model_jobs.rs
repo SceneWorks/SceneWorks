@@ -5871,8 +5871,12 @@ async fn import_plan_context(
     job: &JobSnapshot,
     source: &Path,
 ) -> WorkerResult<std::collections::BTreeMap<String, Value>> {
-    let mut context = std::collections::BTreeMap::new();
     let entry = job.payload.get("manifestEntry").and_then(Value::as_object);
+    let mut context = entry
+        .map(sceneworks_core::model_artifacts::provenance::import_declaration_context)
+        .transpose()
+        .map_err(WorkerError::InvalidPayload)?
+        .unwrap_or_default();
     if !entry.is_some_and(sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family) {
         return Ok(context);
     }

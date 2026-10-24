@@ -1120,6 +1120,27 @@ impl ImportPlanV1 {
             }
             previous = Some(layer.layer_id.clone());
         }
+        // Optional for historical plans. Once present this authority has the same structural
+        // contract as the published context schema, while all unrelated loader context remains open.
+        if let Some(declaration) = self.context.get("modelDeclaration") {
+            if declaration
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_f64)
+                != Some(1.0)
+                || !declaration
+                    .get("baseLineage")
+                    .is_some_and(serde_json::Value::is_object)
+                || !declaration
+                    .get("declaredSemantics")
+                    .is_some_and(serde_json::Value::is_object)
+                || !declaration
+                    .get("inheritedLicenseAcknowledgments")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|components| components.iter().all(serde_json::Value::is_object))
+            {
+                return Err(invalid("invalid immutable model declaration"));
+            }
+        }
         Ok(())
     }
 

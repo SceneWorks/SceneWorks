@@ -13,6 +13,8 @@ pub mod external_library;
 pub mod local_preference;
 #[path = "model_artifacts/promotion.rs"]
 pub mod promotion;
+#[path = "model_artifacts/provenance.rs"]
+pub mod provenance;
 #[path = "resolved_cache.rs"]
 pub mod resolved_cache;
 

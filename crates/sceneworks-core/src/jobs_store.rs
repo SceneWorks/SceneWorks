@@ -661,6 +661,9 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
+        // Only the API's validated-plan handoff may freeze this write-once column.
+        ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1112,10 +1115,30 @@ impl JobsStore {
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_model_provenance(request, None)
+    }
+
+    /// Enqueue and freeze a SERVER-VALIDATED source projection in one transaction, before a worker
+    /// can claim the row. Raw client payload metadata is never a value for this argument.
+    pub fn create_job_with_model_provenance(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, None)?;
+        let mut job = self.create_job_on_connection(&transaction, request, None)?;
+        if let Some(provenance) = provenance {
+            transaction.execute(
+                "update jobs set model_provenance_json = ?1 where id = ?2",
+                params![dumps(provenance)?, job.id],
+            )?;
+            job.extra.insert(
+                crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                provenance.clone(),
+            );
+        }
         transaction.commit()?;
         Ok(job)
     }
@@ -1135,6 +1158,59 @@ impl JobsStore {
         let job = self.create_job_on_connection(&transaction, request, Some(id))?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Persist the validated plan projection exactly once. Worker progress, payload replacement,
+    /// retries, and startup migrations never write this column. A later disagreement refuses rather
+    /// than relabeling assets already produced by this job. `provenance` is server-derived only.
+    pub fn freeze_model_provenance(
+        &self,
+        job_id: &str,
+        provenance: &Value,
+    ) -> JobsStoreResult<Value> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let stored: Option<String> = transaction
+            .query_row(
+                "select model_provenance_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        if let Some(stored) = stored {
+            let stored: Value = serde_json::from_str(&stored)?;
+            if &stored != provenance {
+                return Err(JobsStoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "job model provenance is immutable",
+                )));
+            }
+            return Ok(stored);
+        }
+        transaction.execute(
+            "update jobs set model_provenance_json = ?1 where id = ?2",
+            params![dumps(provenance)?, job_id],
+        )?;
+        transaction.commit()?;
+        Ok(provenance.clone())
+    }
+
+    /// Read the immutable handoff after a restart without guessing from mutable model metadata.
+    pub fn model_provenance(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let stored: Option<String> = connection
+            .query_row(
+                "select model_provenance_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        stored
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Promote a `pending_caption` job to `queued`, optionally rewriting its payload first
@@ -1979,9 +2055,18 @@ impl JobsStore {
                 max_attempts: MAX_JOB_ATTEMPTS,
             });
         }
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = if same_source {
+            job.extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                .cloned()
+        } else {
+            None
+        };
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        let job = self.create_job_on_connection(
+        let mut job = self.create_job_on_connection(
             &transaction,
             CreateJob {
                 job_type: job.job_type,
@@ -1999,6 +2084,15 @@ impl JobsStore {
             },
             None,
         )?;
+        if same_source {
+            transaction.execute("update jobs set model_provenance_json = (select source.model_provenance_json from jobs source where source.id = ?1) where id = ?2", params![job_id, job.id])?;
+            if let Some(provenance) = source_provenance {
+                job.extra.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance,
+                );
+            }
+        }
         transaction.commit()?;
         Ok(job)
     }
@@ -2012,11 +2106,20 @@ impl JobsStore {
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = if same_source {
+            job.extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                .cloned()
+        } else {
+            None
+        };
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
-        let job = self.create_job_on_connection(
+        let mut job = self.create_job_on_connection(
             &transaction,
             CreateJob {
                 job_type: job.job_type,
@@ -2033,6 +2136,15 @@ impl JobsStore {
             },
             None,
         )?;
+        if same_source {
+            transaction.execute("update jobs set model_provenance_json = (select source.model_provenance_json from jobs source where source.id = ?1) where id = ?2", params![job_id, job.id])?;
+            if let Some(provenance) = source_provenance {
+                job.extra.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance,
+                );
+            }
+        }
         transaction.commit()?;
         Ok(job)
     }
@@ -3119,6 +3231,16 @@ impl JobsStore {
             // Reuse the result we already read above (same transaction/row) rather
             // than re-selecting result_json each update (sc-4274 / F-CORE-14).
             merge_training_sample_history(Some(&current.result), result);
+            result.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
+            if let Some(provenance) = current
+                .extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+            {
+                result.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance.clone(),
+                );
+            }
         }
         transaction.execute(
             "
@@ -3757,6 +3879,19 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let mut extra = ExtraFields::default();
     extra.insert("revision".to_owned(), Value::from(revision));
     extra.insert("queueRank".to_owned(), Value::from(queue_rank));
+    if let Some(encoded) = row.get::<_, Option<String>>("model_provenance_json")? {
+        let provenance: Value = serde_json::from_str(&encoded).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        extra.insert(
+            crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+            provenance,
+        );
+    }
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,

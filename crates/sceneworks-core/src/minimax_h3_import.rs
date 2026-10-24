@@ -7,12 +7,9 @@
 //! Every supported operation denoises with the imported bytes; resident components are named
 //! load-time companions only. The worker revalidates this binding before loading.
 
-use std::sync::LazyLock;
-
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_import::{CheckpointContainerV1, ImportPlanV1};
-use crate::jsonc::strip_jsonc_comments;
 
 /// The catalog family token of every MiniMax-H3 checkpoint, builtin or imported.
 pub const MINIMAX_H3_IMPORT_FAMILY: &str = "minimax-h3";
@@ -372,6 +369,7 @@ pub fn verify_entry_assembly(
     entry: &Map<String, Value>,
     plan: &ImportPlanV1,
 ) -> Result<MiniMaxH3ImportAssembly, String> {
+    crate::model_artifacts::provenance::validate_entry_declaration(plan, entry)?;
     let assembly = MiniMaxH3ImportAssembly::from_declared_plan(plan, entry)?;
     let config = bound_config(&plan.context)?
         .ok_or("the import plan has no bound configuration; re-import the checkpoint")?;
@@ -469,39 +467,12 @@ pub fn stamp_imported_minimax_h3_entry(
     }
 }
 
-/// The shipped task surfaces, parsed once. Geometry and operation policy come from the catalog,
-/// while imported bytes and explicit task compatibility retain their independent identities.
-static BUILTIN_PARTITION_ENTRIES: LazyLock<Option<Vec<Map<String, Value>>>> = LazyLock::new(|| {
-    let (_, contents) = crate::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")?;
-    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(contents)).ok()?;
-    Some(
-        manifest
-            .get("models")?
-            .as_array()?
-            .iter()
-            .filter_map(|model| {
-                matches!(
-                    model.get("id").and_then(Value::as_str),
-                    Some(MINIMAX_H3_BASE_PARTITION_MODEL | MINIMAX_H3_REFERENCE_PARTITION_MODEL)
-                )
-                .then(|| model.as_object().cloned())
-                .flatten()
-            })
-            .collect(),
-    )
-});
-
 fn builtin_base_partition_entry() -> Option<&'static Map<String, Value>> {
     builtin_partition_entry(MINIMAX_H3_BASE_PARTITION_MODEL)
 }
 
 fn builtin_partition_entry(id: &str) -> Option<&'static Map<String, Value>> {
-    BUILTIN_PARTITION_ENTRIES
-        .as_ref()?
-        .iter()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+    crate::builtin_manifests::builtin_model_entry(id)
 }
 
 fn builtin_reference_partition_entry() -> Option<&'static Map<String, Value>> {
@@ -775,9 +746,10 @@ pub fn import_config_download(base: &Value, tier: &str, os: &str) -> Result<Valu
 /// not filled: they state what the provider serves for this partition (its modes, its 17n+5
 /// duration lattice, its single fps, its step floor), and a value left over from an import request
 /// that guessed the wrong type (an image entry's capabilities) would advertise operations nothing
-/// can run. Everything descriptive (`ui`, licence text, memory hints) is `or_insert`, so an author's
-/// wording wins. Deliberately NOT copied: the builtin's downloads and paths (the imported DiT is its
-/// own weights), `mlx.repo` (the builtin tier repo), and `loraCompatibility` — adapter and turbo
+/// can run. Descriptive metadata retains the author's wording; inherited component terms and
+/// attribution are unioned afterward and cannot be erased by that wording or a false flag.
+/// Deliberately NOT copied: the builtin's downloads and paths (the imported DiT is its own
+/// weights), `mlx.repo` (the builtin tier repo), and `loraCompatibility` — adapter and turbo
 /// support on imported H3 checkpoints is a later story, and advertising adapters the imported route
 /// refuses would admit jobs nothing can run.
 pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) {
@@ -833,6 +805,8 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
             }
         }
     }
+    let license_components = inherited_component_entries(entry);
+    crate::license_acknowledgments::apply_inherited_component_licenses(entry, &license_components);
     if partition == MiniMaxH3Partition::Hybrid {
         entry.insert(
             "capabilities".to_owned(),
@@ -851,6 +825,22 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
     }
     // Withdraw the family-wide adapter advertisement `apply_model_manifest_defaults` synthesizes.
     entry.remove("loraCompatibility");
+}
+
+/// Trusted license owners of the components reused by this declaration. These rows describe
+/// component obligations, not ownership of the imported DiT. Reuse the existing builtin cache.
+pub fn inherited_component_entries(entry: &Map<String, Value>) -> Vec<Value> {
+    let Ok(partition) = MiniMaxH3Partition::from_entry(entry) else {
+        return Vec::new();
+    };
+    let mut ids = std::collections::BTreeSet::from([MINIMAX_H3_BASE_PARTITION_MODEL]);
+    if partition == MiniMaxH3Partition::Fl2va {
+        ids.insert(MINIMAX_H3_REFERENCE_PARTITION_MODEL);
+    }
+    ids.into_iter()
+        .filter_map(builtin_partition_entry)
+        .map(crate::license_acknowledgments::component_license_metadata)
+        .collect()
 }
 
 #[cfg(test)]

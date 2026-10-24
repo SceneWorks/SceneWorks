@@ -175,9 +175,190 @@ pub fn revoke_acknowledgment(path: &Path, model_id: &str) -> Result<bool, Acknow
     Ok(removed)
 }
 
+/// Copy only obligation metadata from a trusted component row, not its downloads, runtime policy,
+/// or model payload. The raw catalog keys are retained for the shared acknowledgment projection.
+pub(crate) fn component_license_metadata(entry: &serde_json::Map<String, Value>) -> Value {
+    let mut metadata = serde_json::Map::new();
+    for key in [
+        "id",
+        "name",
+        "license",
+        "licenseUrl",
+        "licenseNotice",
+        "gated",
+        "requiresLicenseAcknowledgment",
+    ] {
+        if let Some(value) = entry.get(key) {
+            metadata.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(attribution) = entry.get("ui").and_then(|ui| ui.get("attribution")) {
+        metadata.insert("ui".into(), json!({"attribution":attribution}));
+    }
+    Value::Object(metadata)
+}
+
+/// Add the terms of the components actually reused by an imported model. `components` must come
+/// from the trusted catalog/validated assembly, never from fine-tune metadata. Recomputing this
+/// projection discards a caller-supplied inherited set; an author's own terms remain independent.
+pub fn apply_inherited_component_licenses(
+    entry: &mut serde_json::Map<String, Value>,
+    components: &[Value],
+) {
+    let mut inherited = BTreeMap::new();
+    for component in components {
+        let Some(id) = component
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let required = component.get("gated").and_then(Value::as_bool) == Some(true)
+            || component
+                .get("requiresLicenseAcknowledgment")
+                .and_then(Value::as_bool)
+                == Some(true);
+        inherited.insert(
+            id,
+            json!({
+                "modelId": id,
+                "name": component.get("name").and_then(Value::as_str).unwrap_or(id),
+                "license": component.get("license").cloned().unwrap_or(Value::Null),
+                "licenseUrl": component.get("licenseUrl").cloned().unwrap_or(Value::Null),
+                "licenseNotice": component.get("licenseNotice").cloned().unwrap_or(Value::Null),
+                "termsSha256": terms_sha256(component),
+                "attribution": component.pointer("/ui/attribution").cloned().unwrap_or(Value::Null),
+                "requiresLicenseAcknowledgment": required,
+            }),
+        );
+    }
+    let mut notice = entry
+        .get("licenseNotice")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let mut attribution = entry
+        .get("ui")
+        .and_then(|ui| ui.get("attribution"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    for component in inherited.values() {
+        if component["requiresLicenseAcknowledgment"] == true {
+            entry.insert(
+                "requiresLicenseAcknowledgment".to_owned(),
+                Value::Bool(true),
+            );
+        }
+        if let Some(terms) = component["licenseNotice"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+        {
+            if !notice.contains(terms) {
+                if !notice.is_empty() {
+                    notice.push_str("\n\n");
+                }
+                notice.push_str(component["name"].as_str().unwrap_or("Component"));
+                notice.push_str(": ");
+                notice.push_str(terms);
+            }
+        }
+        // The primary fine-tune URL may name different author terms. Keep every component's full
+        // license location visible in the existing notice surfaces, including URL-only licenses.
+        if let Some(url) = component["licenseUrl"]
+            .as_str()
+            .filter(|url| !url.trim().is_empty())
+        {
+            if !notice.contains(url) {
+                if !notice.is_empty() {
+                    notice.push_str("\n\n");
+                }
+                notice.push_str(component["name"].as_str().unwrap_or("Component"));
+                notice.push_str(" full component license: ");
+                notice.push_str(url);
+            }
+        }
+        if let Some(text) = component["attribution"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+        {
+            if !attribution.split(" · ").any(|part| part == text) {
+                if !attribution.is_empty() {
+                    attribution.push_str(" · ");
+                }
+                attribution.push_str(text);
+            }
+        }
+    }
+    if !notice.is_empty() {
+        entry.insert("licenseNotice".to_owned(), Value::String(notice));
+    }
+    if !attribution.is_empty() {
+        let ui = entry.entry("ui").or_insert_with(|| json!({}));
+        if !ui.is_object() {
+            *ui = json!({});
+        }
+        ui.as_object_mut()
+            .expect("object above")
+            .insert("attribution".to_owned(), Value::String(attribution));
+    }
+    entry.insert(
+        "inheritedLicenseAcknowledgments".to_owned(),
+        Value::Array(inherited.into_values().collect()),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fine_tune_terms_cannot_erase_component_acknowledgments_or_attribution() {
+        let component = json!({"id":"base", "name":"Base components", "license":"restricted",
+            "licenseNotice":"Inherited terms", "licenseUrl":"https://component.test/LICENSE", "requiresLicenseAcknowledgment":true,
+            "ui":{"attribution":"Base attribution"}});
+        let mut imported = json!({"id":"custom", "license":"MIT", "licenseNotice":"Author terms", "licenseUrl":"https://author.test/MIT",
+            "requiresLicenseAcknowledgment":false, "ui":{"attribution":"Author"},
+            "inheritedLicenseAcknowledgments":[]})
+        .as_object()
+        .unwrap()
+        .clone();
+        apply_inherited_component_licenses(&mut imported, &[component.clone(), component.clone()]);
+        let once = imported.clone();
+        apply_inherited_component_licenses(&mut imported, std::slice::from_ref(&component));
+        assert_eq!(
+            imported, once,
+            "applying defaults twice must not duplicate terms"
+        );
+        assert_eq!(imported["license"], "MIT");
+        assert_eq!(imported["requiresLicenseAcknowledgment"], true);
+        assert!(imported["licenseNotice"]
+            .as_str()
+            .unwrap()
+            .contains("Author terms"));
+        assert!(imported["licenseNotice"]
+            .as_str()
+            .unwrap()
+            .contains("Inherited terms"));
+        assert_eq!(imported["licenseUrl"], "https://author.test/MIT");
+        assert!(imported["licenseNotice"]
+            .as_str()
+            .unwrap()
+            .contains("https://component.test/LICENSE"));
+        assert_eq!(imported["ui"]["attribution"], "Author · Base attribution");
+        assert_eq!(
+            imported["inheritedLicenseAcknowledgments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            imported["inheritedLicenseAcknowledgments"][0]["termsSha256"],
+            terms_sha256(&component)
+        );
+    }
 
     fn entry(notice: &str) -> Value {
         json!({"id": "yue2", "licenseUrl": "https://example.test/LICENSE", "licenseNotice": notice})

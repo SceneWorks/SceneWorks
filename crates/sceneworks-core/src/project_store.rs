@@ -3260,6 +3260,8 @@ impl ProjectStore {
             // `../../../../etc/passwd` in the one field sc-15950/sc-15952 turn into a cache path.
             // The guard has to be a removal, not an ordering.
             extra.remove(IMPORTED_WORKFLOW_KEY);
+            // Upload/edit metadata is not authority for model identity or inherited obligations.
+            extra.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
             if let Some(workflow) = normalized
                 .workflow
                 .as_ref()
@@ -3274,6 +3276,7 @@ impl ProjectStore {
                 object.insert("extra".to_owned(), Value::Object(extra));
             }
         }
+        self.inherit_model_provenance(&project_path, &mut asset)?;
         let sidecar_path = media_path.with_extension("sceneworks.json");
         write_json(&sidecar_path, &asset)?;
         index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
@@ -3327,7 +3330,8 @@ impl ProjectStore {
                 ));
             }
         }
-        let asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
+        let mut asset = build_generated_asset_sidecar(project_id, job_id, generation_set_id, fact);
+        self.inherit_model_provenance(&project_path, &mut asset)?;
         let media_path = project_path.join(media_rel);
         let sidecar_path = media_path.with_extension("sceneworks.json");
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
@@ -3344,6 +3348,45 @@ impl ProjectStore {
         index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
         index_mutation.commit();
         Ok(asset)
+    }
+
+    /// Keep immutable model ancestry through edits, media conversion, and multi-input generation,
+    /// including producer types that do not themselves load a checkpoint. Flatten and deduplicate
+    /// commitments rather than recursively copying entire parent assets or mutable recipes.
+    fn inherit_model_provenance(
+        &self,
+        project_path: &Path,
+        asset: &mut Value,
+    ) -> ProjectStoreResult<()> {
+        let parents = asset
+            .pointer("/lineage/parents")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut inherited = std::collections::BTreeMap::new();
+        for parent in parents.iter().filter_map(Value::as_str) {
+            let path = match self.find_asset_sidecar(project_path, parent) {
+                Ok(path) => path,
+                Err(ProjectStoreError::NotFound(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            let source: Value = read_json(&path)?;
+            if let Some(provenance) = source.get("modelProvenance") {
+                inherited.insert(serde_json::to_string(provenance)?, provenance.clone());
+            }
+            for provenance in source
+                .pointer("/lineage/modelProvenance")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                inherited.insert(serde_json::to_string(provenance)?, provenance.clone());
+            }
+        }
+        if !inherited.is_empty() {
+            asset["lineage"]["modelProvenance"] = Value::Array(inherited.into_values().collect());
+        }
+        Ok(())
     }
 
     /// Resolve + guard a worker pose-detect cache preview
@@ -6263,6 +6306,12 @@ fn build_generated_asset_sidecar(
         "recipe": recipe,
         "lineage": lineage,
     });
+    // The API replaces this fact from its immutable job/plan binding before any producer reaches
+    // this common sidecar boundary. Keep the same projection in the saved recipe and asset row.
+    if let Some(provenance) = fact.get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY) {
+        asset["modelProvenance"] = provenance.clone();
+        asset["recipe"]["modelProvenance"] = provenance.clone();
+    }
     // Record the originating studio so the Asset Library can exclude Character
     // Studio test outputs (sc-2024). Derived from recipe mode + media type.
     let origin = asset_origin(&asset);

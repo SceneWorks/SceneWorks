@@ -25,6 +25,7 @@ mod model_library;
 mod moss_image;
 mod projects;
 mod prompt_batches;
+mod provenance;
 mod recipe_presets;
 mod server;
 mod startup;

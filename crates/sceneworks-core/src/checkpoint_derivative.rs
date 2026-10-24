@@ -110,7 +110,8 @@ impl CheckpointDerivativeKindV1 {
 }
 
 /// Everything a derivative is keyed on beyond the checkpoint's own content and semantic plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CheckpointDerivativeRequestV1 {
     pub kind: CheckpointDerivativeKindV1,
     /// The family adapter that produces this derivative, and the version of its output format.
@@ -345,28 +346,7 @@ impl CheckpointDerivativeStore {
         resolved: &ResolvedCheckpointV1,
         request: &CheckpointDerivativeRequestV1,
     ) -> Result<DerivedArtifactPlan, CheckpointDerivativeError> {
-        let identity = self.identity(resolved, request)?;
-        let mut files = Vec::with_capacity(request.outputs.len());
-        for output in &request.outputs {
-            let relative = validate_output_path(output)?;
-            files.push(ArtifactFile::new(relative).map_err(|error| {
-                CheckpointDerivativeError::InvalidRequest {
-                    reason: error.to_string(),
-                }
-            })?);
-        }
-        let member = ResolvedBundleMember {
-            role: ArtifactMemberRole::Primary,
-            // The derivative kind, again: `component_id` is key material, and naming the kind
-            // here rather than the checkpoint keeps the key content-addressed.
-            component_id: Some(request.kind.as_str().to_owned()),
-            source: identity.clone(),
-            tier: None,
-            source_subpath: PathBuf::new(),
-            destination: PathBuf::new(),
-            files,
-        };
-        Ok(DerivedArtifactPlan::new(identity, vec![member])?)
+        derivative_plan(self.identity(resolved, request)?, request)
     }
 
     pub fn cache_key(
@@ -400,11 +380,110 @@ impl CheckpointDerivativeStore {
         let cache_key = self.cache_key(resolved, request)?;
         let resolver =
             ModelArtifactResolver::new(crate::hf_home::model_source_library(&self.data_dir));
-        Ok(self.cache.acquire_complete(
+        let lease = self.cache.acquire_complete(
             &cache_key,
             &resolver,
             &derivative_owner(&resolved.checkpoint_id),
-        )?)
+        )?;
+        if lease.is_some() {
+            // An additive sidecar, not a journal-format change: old builds must still be able to
+            // read both metadata slots after rollback. Written only while the exact artifact is leased.
+            let receipt = serde_json::json!({"schemaVersion":1,"cacheKey":cache_key,
+                "semanticDigest":resolved.record.plan.semantic_digest,"request":request});
+            let path = self
+                .cache
+                .entry_path(&cache_key)?
+                .join("checkpoint-conversion.receipt.json");
+            crate::store_util::atomic_write(
+                &path,
+                &serde_json::to_vec(&receipt).map_err(|e| {
+                    CheckpointDerivativeError::InvalidRequest {
+                        reason: e.to_string(),
+                    }
+                })?,
+            )
+            .map_err(|e| CheckpointDerivativeError::InvalidRequest {
+                reason: e.to_string(),
+            })?;
+        }
+        Ok(lease)
+    }
+
+    /// Redeem a reported conversion only for this immutable model commitment. The shared key
+    /// derivation binds source content, declared semantics, codec/version, backend and output shape;
+    /// a valid receipt belonging to another checkpoint can never be attached to these assets.
+    pub fn verified_provenance_receipt(
+        &self,
+        cache_key: &str,
+        provenance: &serde_json::Value,
+    ) -> Result<serde_json::Value, CheckpointDerivativeError> {
+        let invalid = |reason: String| CheckpointDerivativeError::InvalidRequest { reason };
+        let path = self
+            .cache
+            .entry_path(cache_key)?
+            .join("checkpoint-conversion.receipt.json");
+        let bytes = std::fs::read(path).map_err(|e| invalid(e.to_string()))?;
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        if receipt["schemaVersion"] != 1
+            || receipt["cacheKey"] != cache_key
+            || receipt["semanticDigest"] != provenance["plan"]["semanticDigest"]
+        {
+            return Err(invalid(
+                "conversion receipt does not match the immutable model plan".into(),
+            ));
+        }
+        let request: CheckpointDerivativeRequestV1 =
+            serde_json::from_value(receipt["request"].clone())
+                .map_err(|e| invalid(e.to_string()))?;
+        request.validate()?;
+        let text = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("invalid model provenance identity".into()))
+        };
+        let semantic = text(&provenance["plan"]["semanticDigest"])?;
+        let family = text(&provenance["family"])?;
+        let sources = provenance["sources"]
+            .as_array()
+            .ok_or_else(|| invalid("model provenance has no sources".into()))?;
+        let layers = sources
+            .iter()
+            .map(|source| {
+                Ok((
+                    text(&source["layerId"])?,
+                    text(&source["role"])?,
+                    text(&source["sha256"])?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CheckpointDerivativeError>>()?;
+        let revision = derivative_revision_for_sources(
+            &semantic,
+            &family,
+            layers
+                .iter()
+                .map(|(id, role, hash)| (id.as_str(), role.as_str(), hash.as_str())),
+            &request,
+        );
+        let identity = ArtifactIdentity::pinned(DERIVATIVE_REPOSITORY, revision, request.variant())
+            .map_err(|e| invalid(e.to_string()))?;
+        let expected = derivative_plan(identity.clone(), &request)?.cache_key()?;
+        if expected != cache_key {
+            return Err(invalid(
+                "conversion belongs to another source, declaration, or codec".into(),
+            ));
+        }
+        let resolver =
+            ModelArtifactResolver::new(crate::hf_home::model_source_library(&self.data_dir));
+        let lease = self
+            .cache
+            .acquire_complete(cache_key, &resolver, "checkpoint-provenance")?
+            .ok_or_else(|| invalid("conversion is not a complete verified artifact".into()))?;
+        let result = serde_json::json!({"kind":"checkpoint_derivative","cacheKey":cache_key,
+            "identity":identity,"request":request,"semanticDigest":semantic});
+        drop(lease);
+        Ok(result)
     }
 
     /// Produce the derivative if the cache does not already hold it.
@@ -591,6 +670,33 @@ impl CheckpointDerivativeStore {
     }
 }
 
+fn derivative_plan(
+    identity: ArtifactIdentity,
+    request: &CheckpointDerivativeRequestV1,
+) -> Result<DerivedArtifactPlan, CheckpointDerivativeError> {
+    let files = request
+        .outputs
+        .iter()
+        .map(|output| {
+            ArtifactFile::new(validate_output_path(output)?).map_err(|e| {
+                CheckpointDerivativeError::InvalidRequest {
+                    reason: e.to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let member = ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: Some(request.kind.as_str().to_owned()),
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination: PathBuf::new(),
+        files,
+    };
+    Ok(DerivedArtifactPlan::new(identity, vec![member])?)
+}
+
 /// The logical model owner recorded on the cache's session records and pins for a derivative.
 fn derivative_owner(checkpoint_id: &str) -> String {
     format!("checkpoint-derivative:{checkpoint_id}")
@@ -607,6 +713,29 @@ fn derivative_revision(
     resolved: &ResolvedCheckpointV1,
     request: &CheckpointDerivativeRequestV1,
 ) -> String {
+    derivative_revision_for_sources(
+        &resolved.record.plan.semantic_digest,
+        &resolved.plan.family,
+        resolved.plan.layers.iter().map(|layer| {
+            (
+                layer.layer_id.as_str(),
+                layer.role.as_str(),
+                match &layer.source {
+                    SourceLocatorV1::Linked { fingerprint, .. } => fingerprint.as_str(),
+                    SourceLocatorV1::Managed { sha256, .. } => sha256.as_str(),
+                },
+            )
+        }),
+        request,
+    )
+}
+
+fn derivative_revision_for_sources<'a>(
+    semantic_digest: &str,
+    family: &str,
+    layers: impl ExactSizeIterator<Item = (&'a str, &'a str, &'a str)>,
+    request: &CheckpointDerivativeRequestV1,
+) -> String {
     let mut hasher = Sha256::new();
     let mut field = |value: &[u8]| {
         hasher.update((value.len() as u64).to_le_bytes());
@@ -614,20 +743,13 @@ fn derivative_revision(
     };
     field(b"sceneworks.checkpoint.derivative.v1");
     field(&CHECKPOINT_DERIVATIVE_FORMAT_VERSION.to_le_bytes());
-    // Semantic plan. The plan's SEMANTIC digest, deliberately, not its `plan_id`: the plan id is
-    // derived from the checkpoint's locator, so folding it in would key one checkpoint's
-    // derivative differently in two libraries holding the same bytes.
-    field(resolved.record.plan.semantic_digest.as_bytes());
-    field(resolved.plan.family.as_bytes());
-    // Content: every layer's role and the exact bytes the plan was compiled from.
-    field(&(resolved.plan.layers.len() as u64).to_le_bytes());
-    for layer in &resolved.plan.layers {
-        field(layer.layer_id.as_bytes());
-        field(layer.role.as_bytes());
-        match &layer.source {
-            SourceLocatorV1::Linked { fingerprint, .. } => field(fingerprint.as_bytes()),
-            SourceLocatorV1::Managed { sha256, .. } => field(sha256.as_bytes()),
-        }
+    field(semantic_digest.as_bytes());
+    field(family.as_bytes());
+    field(&(layers.len() as u64).to_le_bytes());
+    for (id, role, hash) in layers {
+        field(id.as_bytes());
+        field(role.as_bytes());
+        field(hash.as_bytes());
     }
     // Adapter, codec and backend representation.
     field(request.kind.as_str().as_bytes());

@@ -2100,21 +2100,63 @@ pub(crate) async fn persist_reported_assets(
         .unwrap_or_default()
         .to_owned();
     let generation_set = result.get("generationSet").cloned();
-    // The job row is authoritative for the project id (never the worker payload).
-    let job = store_call(state.clone(), {
+    // The job row owns project and source identity. Neither a worker report nor a client-supplied
+    // modelProvenance block can relabel generated media. Freeze the validated plan independently
+    // of mutable payload/result JSON; recovery reuses that exact commitment.
+    let data_dir = state.settings.data_dir.clone();
+    let (job, model_provenance) = store_call(state.clone(), {
         let job_id = job_id.to_owned();
-        move |store, _timeout| store.get_job(&job_id)
+        move |store, _timeout| {
+            let job = store.get_job(&job_id)?;
+            let provenance = match store.model_provenance(&job_id)? {
+                Some(provenance) => Some(provenance),
+                None => {
+                    let provenance = job
+                        .payload
+                        .get("modelManifestEntry")
+                        .and_then(Value::as_object)
+                        .map(|entry| {
+                            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                                &data_dir, entry,
+                            )
+                        })
+                        .transpose()
+                        .map_err(|error| {
+                            JobsStoreError::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                error,
+                            ))
+                        })?
+                        .flatten();
+                    provenance
+                        .as_ref()
+                        .map(|provenance| store.freeze_model_provenance(&job_id, provenance))
+                        .transpose()?
+                }
+            };
+            Ok((job, provenance))
+        }
     })
     .await?;
+    sceneworks_core::model_artifacts::provenance::stamp_asset_provenance(
+        &mut asset_writes,
+        model_provenance.as_ref(),
+    );
     stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
     crate::yue2_jobs::stamp_export_usage_policies(&job.job_type, &job.payload, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
     let job_id_owned = job_id.to_owned();
+    let provenance_data_dir = state.settings.data_dir.clone();
     let built = project_call(state.clone(), move |store| {
         // An asset derived from a policy-bearing input inherits its usage policy (sc-22999).
         crate::yue2_jobs::inherit_usage_policies(&store, &project_id, &mut asset_writes)?;
+        sceneworks_core::model_artifacts::provenance::verify_asset_derivative_provenance(
+            &provenance_data_dir,
+            &mut asset_writes,
+        )
+        .map_err(ProjectStoreError::BadRequest)?;
         if let Some(generation_set) = generation_set.as_ref() {
             store.write_generation_set(
                 &project_id,

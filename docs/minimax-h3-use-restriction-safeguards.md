@@ -62,6 +62,43 @@ machine (the remote-access lane, epic 4484), a workflow envelope's suggested act
 | `POST /api/v1/loras/import` | **Yes** — same 403, same repo-keyed predicate. This route takes a caller-supplied `repo`/`sourceUrl` and **never consults the LoRA catalog** for it, so what the LoRA catalog declares has no bearing on what it can reach. | `queue_lora_import_job`, `apps/rust-api/src/loras.rs` |
 | `POST /api/v1/loras/:id/download` | **Yes** — same 403, same repo-keyed predicate, on the repo it resolves **from the catalog entry** named by the path id. A caller cannot point this route at a repo (an unknown id 404s, a body `repo` is inert), but that is a claim about who *chooses* the repo, not about whether the chosen repo is restricted — so it was gated. | `create_lora_download_job`, `apps/rust-api/src/loras.rs` |
 
+**Imported fine-tunes and reused components (sc-26690).** A fine-tune's own license is separate
+from the licenses of its compatible base's reused components. The server derives
+`inheritedLicenseAcknowledgments` from trusted component catalog entries, unions their notices
+and UI attribution with the author's metadata, and ORs the acknowledgment requirement. An author
+cannot clear these obligations with `requiresLicenseAcknowledgment: false`, an empty inherited
+list, or replacement license text. Import acceptance records each required component's model ID
+and exact terms digest in the existing server acknowledgment store; withdrawal or changed terms
+requires accepting those terms again. This is an acknowledgment, not a claim that SceneWorks
+owns or redistributes the imported DiT.
+Component full-license URLs also remain visible in the merged notice when the fine-tune's own
+primary license URL points elsewhere; accepting an author license does not hide component terms.
+
+New plan-backed imports bind a compact `modelDeclaration` (compatible-base lineage, declared
+semantics, and inherited component terms) in the existing immutable import plan context. The
+`modelProvenance` projection records that plan's identities, per-source hashes and source
+revisions where known, plus the bound configuration's hash and provenance without duplicating
+its JSON payload. Generated image, video, audio, document, vector and depth sidecars and their
+recipes use the same server-derived projection; worker or upload metadata cannot replace it.
+The job store freezes the projection independently of mutable payload/result JSON. Edits and
+multi-input derivatives retain parent model commitments in `lineage.modelProvenance`.
+
+Actual checkpoint conversions add source/semantic-plan/codec/backend-bound receipts beside the
+existing shared-cache receipt, while the exact derivative is leased. The asset handoff validates
+that identity and complete artifact before retaining conversion history. This does not change
+the cache metadata journal format, copy model weights, or relabel a stock component as the
+imported denoiser. Historical IDs and plans remain readable: unknown historical declarations
+and missing conversion receipts remain unknown, rather than being filled from today's catalog.
+
+The sc-26690 CPU proof exercises the real inspector with a tiny synthetic Krea checkpoint, then
+the durable job store, shared derivative cache/lease, six generated-asset sidecar/recipe/index
+paths, restart read-back, and an edited upload's inherited ancestry. A separate H3 component
+fixture exercises inherited-term union and acknowledgment acceptance/withdrawal. API regressions
+also cover the refusal and recovery boundaries. These are persistence and licensing proofs, not
+model-inference executions or numerical-fidelity claims; real MLX/CUDA generation remains the
+epic's terminal evidence. Schema/migration regressions retain unknown historical provenance and
+reject malformed declarations, changed source commitments, and forged conversion history.
+
 `model_convert` is on the list for a reason that is not obvious from its payload: it names no `repo`
 at all. Its LTX arm hands the payload's **`baseRepo`** to `ensure_ltx_upscaler_cached` →
 `ensure_hf_files_cached` — a real download — and `upscalerFile` is a **glob**, so `"**"` pulls the

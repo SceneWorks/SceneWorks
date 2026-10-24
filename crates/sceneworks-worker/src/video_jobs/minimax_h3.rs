@@ -2163,6 +2163,19 @@ fn record_imported_minimax_h3_identity(
     shared_tier: &str,
 ) {
     if let Value::Object(raw) = raw_settings {
+        // Advanced settings cannot claim a conversion. Only the lease retained through this
+        // render names an actual shared-cache derivative; the API redeems its bound receipt.
+        raw.remove("checkpointDerivative");
+        if let Some(derivative) = &dit._derivative {
+            let cache_key = derivative
+                .artifact()
+                .cache_key()
+                .expect("leased artifact identity is validated");
+            raw.insert(
+                "checkpointDerivative".to_owned(),
+                json!({"cacheKey":cache_key}),
+            );
+        }
         raw.insert(
             "importPlan".to_owned(),
             json!({

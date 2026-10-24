@@ -866,6 +866,83 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     })
 }
 
+/// Fine-tune license text never replaces obligations of the components it actually reuses.
+/// The caller supplies a server-resolved entry; new imports use their immutable declaration and
+/// older H3 entries derive obligations from the trusted builtin component catalog.
+pub(crate) async fn ensure_inherited_component_licenses_acknowledged(
+    state: &AppState,
+    entry: &JsonObject,
+    license_acknowledged: bool,
+) -> Result<(), ApiError> {
+    use sceneworks_core::license_acknowledgments as acknowledgments;
+    let declaration =
+        sceneworks_core::model_artifacts::provenance::import_declaration_context(entry)
+            .map_err(ApiError::bad_request)?;
+    let bound = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry,
+    )
+    .map_err(ApiError::bad_request)?;
+    let inherited = bound
+        .as_ref()
+        .and_then(|value| value.get("baseLineage"))
+        .and_then(|_| {
+            bound
+                .as_ref()
+                .and_then(|value| value.get("inheritedLicenseAcknowledgments"))
+        })
+        .or_else(|| {
+            declaration
+                .get("modelDeclaration")
+                .and_then(|value| value.get("inheritedLicenseAcknowledgments"))
+        });
+    let path = acknowledgments::acknowledgments_file(&state.settings.config_dir);
+    for component in inherited.and_then(Value::as_array).into_iter().flatten() {
+        if component
+            .get("requiresLicenseAcknowledgment")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            continue;
+        }
+        let id = component
+            .get("modelId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad_request("Inherited component license has no model identity")
+            })?;
+        let terms = json!({"id":id,"license":component.get("license"),
+            "licenseUrl":component.get("licenseUrl"),"licenseNotice":component.get("licenseNotice")});
+        if component.get("termsSha256").and_then(Value::as_str)
+            != Some(acknowledgments::terms_sha256(&terms).as_str())
+        {
+            return Err(ApiError::bad_request(
+                "Inherited component license commitment is invalid",
+            ));
+        }
+        if license_acknowledged {
+            acknowledgments::record_acknowledgment(
+                &path,
+                &terms,
+                "api-import-components",
+                &sceneworks_core::time::utc_now(),
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        } else if acknowledgments::current_acknowledgment(&path, &terms)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .is_none()
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: format!("Component '{id}' requires accepting its inherited license. Accept the component terms on the Models screen or send licenseAcknowledged: true."),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE), context: None,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Every payload key that can name a Hugging Face repo the WORKER will fetch (sc-17227). Keep this
 /// aligned with the worker's own readers: `run_model_download_job` / `run_model_import_job` /
 /// `run_lora_*_job` take `repo` (`crates/sceneworks-worker/src/model_jobs.rs`), and
@@ -4065,6 +4142,14 @@ pub(crate) async fn queue_model_import_job(
             object.insert("importComponentTier".to_owned(), json!(tier));
         }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
+    }
+    if let Some(entry) = manifest_entry.as_object() {
+        ensure_inherited_component_licenses_acknowledged(
+            &state,
+            entry,
+            payload.license_acknowledged,
+        )
+        .await?;
     }
     let ownership_mode = payload.ownership_mode;
     let mut payload = to_json_object(&payload)?;
