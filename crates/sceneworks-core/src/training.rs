@@ -769,6 +769,8 @@ pub struct TrainingConfig {
     pub resolution: u32,
     /// Checkpoint cadence, in steps.
     pub save_every: u32,
+    /// MOSS uses a literal nonnegative seed, including zero. Its Studio Randomize
+    /// action persists a concrete value; there is no negative/None Auto sentinel.
     pub seed: i64,
     /// Optimizer name, kept a free string to stay engine-agnostic.
     pub optimizer: String,
@@ -4130,6 +4132,9 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    if target.kernel == "moss_image_lora" {
+        moss_training_seed(config.seed)?;
+    }
     validate_advertised_advanced_choices(target, config)?;
     if iris::is_iris_training_kernel(&target.kernel) {
         iris::validate_iris_training_config(target, config)?;
@@ -4487,6 +4492,15 @@ fn validate_advertised_advanced_choices(
     Ok(())
 }
 
+/// Checked MOSS literal seed lowering. Zero remains zero; negatives are not an
+/// implicit Auto request. Other training families retain their existing policies.
+pub fn moss_training_seed(seed: i64) -> Result<u64, TrainingPlanError> {
+    u64::try_from(seed).map_err(|_| TrainingPlanError::InvalidField {
+        field: "seed".to_owned(),
+        message: "MOSS seed must be a literal nonnegative whole number, including zero.".to_owned(),
+    })
+}
+
 /// Convert a product alpha JSON number into the native f32 contract without letting a
 /// mathematically positive f64 overflow to infinity or underflow to zero at the boundary.
 pub fn training_alpha_f32(alpha: &ContractNumber) -> Result<f32, TrainingPlanError> {
@@ -4678,6 +4692,15 @@ fn validate_resolution_buckets_for_target(
         });
     }
     let ResolutionBucketConfig::Legacy(buckets) = buckets else {
+        if target.kernel != "moss_image_lora" {
+            return Err(TrainingPlanError::InvalidField {
+                field: RESOLUTION_BUCKETS_KEY.to_owned(),
+                message: format!(
+                    "{} supports square resolution buckets only; width/height buckets require a MOSS training target.",
+                    target.name
+                ),
+            });
+        }
         return Ok(());
     };
     let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {

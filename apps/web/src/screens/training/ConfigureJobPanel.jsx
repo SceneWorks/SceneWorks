@@ -22,6 +22,7 @@ import {
   optionLabel,
   qualityPresetLabel,
   rangeOptions,
+  randomTrainingSeed,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -980,6 +981,23 @@ export function ConfigureJobPanel({
                   {numericInput(field, field === "alpha" && isMossTrainingTarget ? { min: "0", step: "any" } : {}, true)}
                 </label>
               ))}
+              {isMossTrainingTarget ? (
+                <div className="form-row training-seed-control">
+                  <label title="A literal nonnegative whole seed, including zero. Randomize chooses and saves a concrete value before submission.">
+                    Seed
+                    {numericInput("seed", { min: "0", step: "1", "aria-label": "MOSS training seed" }, true)}
+                  </label>
+                  <button
+                    aria-label="Randomize seed"
+                    className="secondary-action"
+                    onClick={() => updateConfigDraft("seed", randomTrainingSeed())}
+                    title="Randomize seed"
+                    type="button"
+                  >
+                    <Icon.Refresh size={14} />
+                  </button>
+                </div>
+              ) : null}
               {/* Real hyperparameters the config validates (sc-10689). They live here
                   beside the other numeric knobs so every `> 0` error the rule set can
                   raise names an input the user can reach. The draft always seeds a
@@ -1225,13 +1243,21 @@ export function ConfigureJobPanel({
             <div className="training-advanced-toggles">
               {isMossTrainingTarget ? (
                 <>
-                  <label className="training-checkbox-field" title="MOSS keeps the frozen VAE cache enabled; native training refuses it off.">
-                    <input checked disabled type="checkbox" />
-                    Cache VAE latents (required)
+                  <label className="training-checkbox-field" title="Reuse frozen VAE latents, or turn off to encode training images on demand.">
+                    <input
+                      checked={configDraft.cacheLatents !== false}
+                      onChange={(event) => updateConfigDraft("cacheLatents", event.target.checked)}
+                      type="checkbox"
+                    />
+                    Cache VAE latents
                   </label>
-                  <label className="training-checkbox-field" title="MOSS keeps frozen text embeddings cached; native training refuses it off.">
-                    <input checked disabled type="checkbox" />
-                    Cache text embeddings (required)
+                  <label className="training-checkbox-field" title="Reuse frozen text embeddings, or turn off to encode captions on demand.">
+                    <input
+                      checked={configDraft.cacheTextEmbeddings !== false}
+                      onChange={(event) => updateConfigDraft("cacheTextEmbeddings", event.target.checked)}
+                      type="checkbox"
+                    />
+                    Cache text embeddings
                   </label>
                 </>
               ) : null}
@@ -1347,6 +1373,8 @@ export function ConfigureJobPanel({
                 </span>
                 <button
                   className="secondary-action"
+                  disabled={!isMossTrainingTarget && !rectangularBuckets}
+                  title={!isMossTrainingTarget && !rectangularBuckets ? "Width × height buckets require a MOSS training target." : undefined}
                   onClick={() => updateConfigDraft("resolutionBuckets", resolutionBuckets.map((row) => {
                     const edge = row.resolution ?? row.width ?? row.height ?? configDraft.resolution ?? "";
                     return rectangularBuckets

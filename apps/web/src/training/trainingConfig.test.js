@@ -49,6 +49,7 @@ import {
   resolutionBucketsMax,
   resolutionBucketStride,
   seedResolutionBuckets,
+  randomTrainingSeed,
   targetSupportsResolutionBuckets,
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
@@ -1829,8 +1830,8 @@ describe("bucket ladder follows Resolution (sc-2124)", () => {
   });
 });
 
-// MOSS uses literal native module paths, finite fractional alpha, required frozen caches and either
-// bucket wire form. Mutation: normalize module aliases, omit a cache, square a rectangle, or coerce
+// MOSS uses literal native module paths, finite fractional alpha, independent frozen-encoder cache
+// controls and either bucket wire form. Mutation: normalize module aliases, omit a cache, square a rectangle, or coerce
 // alpha to an integer ⇒ red.
 describe("MOSS training draft serialization", () => {
   const moss = {
@@ -1862,7 +1863,7 @@ describe("MOSS training draft serialization", () => {
     },
   };
 
-  it("persists literal modules, required caches, fractional alpha and a portrait rectangle", () => {
+  it("persists literal modules, independent caches, fractional alpha and a portrait rectangle", () => {
     const draft = {
       ...configDraftFromTarget(moss, dataset, ["auto"]),
       alpha: "0.5",
@@ -1893,6 +1894,52 @@ describe("MOSS training draft serialization", () => {
     )).toEqual([]);
   });
 
+  it("persists literal seeds, explicit zero and one concrete Randomize result without Auto semantics", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    expect(draft.seed).toBe("42");
+    const seedIssues = (seed) => configValidation(
+      { ...draft, seed: String(seed) }, { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "seed");
+    for (const seed of [0, 42, 1_000_000_001, Number.MAX_SAFE_INTEGER]) {
+      expect(seedIssues(seed), String(seed)).toEqual([]);
+    }
+    for (const seed of ["", "-1", "1.5", "NaN", "Infinity", "9223372036854775808"]) {
+      expect(seedIssues(seed).length, seed).toBeGreaterThan(0);
+    }
+    expect(seedIssues("9223372036854775807")[0].message).toMatch(/browser cannot represent.*exactly/i);
+    let draws = 0;
+    const concrete = randomTrainingSeed(() => { draws += 1; return 0.25; });
+    expect(concrete).toBe("250000000");
+    for (const seed of ["0", concrete]) {
+      const snapshot = trainingConfigSnapshot({
+        activeDataset: dataset, configDraft: { ...draft, seed }, selectedPreset: null, selectedTarget: moss,
+      });
+      const replay = trainingConfigSnapshot({
+        activeDataset: dataset,
+        configDraft: configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]),
+        selectedPreset: null, selectedTarget: moss,
+      });
+      expect(snapshot.config.seed).toBe(Number(seed));
+      expect(replay.config.seed).toBe(snapshot.config.seed);
+    }
+    expect(draws).toBe(1);
+  });
+
+  it("checks native f32 alpha boundaries without an arbitrary MOSS maximum", () => {
+    const draft = configDraftFromTarget(moss, dataset, ["auto"]);
+    const alphaIssues = (alpha) => configValidation(
+      { ...draft, alpha }, { activeDataset: dataset, selectedTarget: moss },
+    ).filter((entry) => entry.field === "alpha");
+    for (const alpha of ["0.5", "129", "1e-45", "3.4028234663852886e38"]) {
+      expect(alphaIssues(alpha), alpha).toEqual([]);
+    }
+    for (const alpha of ["0", "-1", "1e-100", "1e40", "Infinity", "NaN"]) {
+      expect(alphaIssues(alpha).length, alpha).toBeGreaterThan(0);
+    }
+    expect(alphaIssues("1e-100")[0].message).toMatch(/f32/i);
+    expect(alphaIssues("1e40")[0].message).toMatch(/f32/i);
+  });
+
   it("refuses mixed, incomplete and duplicate rectangular geometry without changing portrait order", () => {
     const draft = configDraftFromTarget(moss, dataset, ["auto"]);
     const messages = (rows) => configValidation(
@@ -1904,6 +1951,9 @@ describe("MOSS training draft serialization", () => {
       { resolution: "1024", repeats: "1" },
     ]).join(" ")).toMatch(/square or rectangular/i);
     expect(messages([{ width: "768", repeats: "1" }]).join(" ")).toMatch(/resolution or width/i);
+    expect(messages([{ width: "4294967296", height: "1024", repeats: "1" }]).join(" ")).toMatch(/u32/i);
+    expect(messages([{ width: "1024", height: "4294967296", repeats: "1" }]).join(" ")).toMatch(/u32/i);
+    expect(messages([{ width: "4294967264", height: "1024", repeats: "1" }])).toEqual([]);
     expect(messages([
       { width: "768", height: "1024", repeats: "1" },
       { width: "768", height: "1024", repeats: "2" },
@@ -1918,6 +1968,48 @@ describe("MOSS training draft serialization", () => {
       { width: 768, height: 1024, repeats: 1 },
       { width: 1024, height: 768, repeats: 1 },
     ]);
+  });
+
+  it.each([[false, false], [false, true], [true, false], [true, true]])(
+    "saves and reloads independent cache choices (%s, %s) and an explicit all-module edit",
+    (cacheLatents, cacheTextEmbeddings) => {
+      const preset = { config: { ...moss.defaults, advanced: {
+        ...moss.defaults.advanced,
+        loraTargetModules: ["q"],
+        cacheLatents: !cacheLatents,
+        cacheTextEmbeddings: !cacheTextEmbeddings,
+      } } };
+      const seeded = configDraftFromTarget(moss, dataset, ["auto"], "", preset);
+      expect(seeded.cacheLatents).toBe(!cacheLatents);
+      expect(seeded.cacheTextEmbeddings).toBe(!cacheTextEmbeddings);
+      const snapshot = trainingConfigSnapshot({
+        activeDataset: dataset,
+        configDraft: { ...seeded, loraTargetModules: "", cacheLatents, cacheTextEmbeddings },
+        selectedPreset: preset,
+        selectedTarget: moss,
+      });
+      expect(snapshot.config.advanced).toMatchObject({
+        loraTargetModules: [], cacheLatents, cacheTextEmbeddings,
+      });
+      const restored = configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]);
+      expect(restored.loraTargetModules).toBe("");
+      expect(restored.cacheLatents).toBe(cacheLatents);
+      expect(restored.cacheTextEmbeddings).toBe(cacheTextEmbeddings);
+      expect(preset.config.advanced.loraTargetModules).toEqual(["q"]);
+    },
+  );
+
+  it("refuses rectangular plans for square-only targets without removing legacy buckets", () => {
+    const squareTarget = { ...moss, kernel: "z_image_lora" };
+    const draft = configDraftFromTarget(squareTarget, dataset, ["auto"]);
+    const bucketIssues = (rows) => configValidation(
+      { ...draft, resolutionBuckets: rows },
+      { activeDataset: dataset, selectedTarget: squareTarget },
+    ).filter((entry) => entry.field === "resolutionBuckets");
+    expect(bucketIssues([{ width: "768", height: "1024", repeats: "1" }]).map(
+      (entry) => entry.message,
+    ).join(" ")).toMatch(/square resolution buckets only/i);
+    expect(bucketIssues([{ resolution: "1024", repeats: "2" }])).toEqual([]);
   });
 });
 

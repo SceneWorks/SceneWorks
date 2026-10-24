@@ -583,25 +583,31 @@ describe("SettingsScreen remote access (desktop)", () => {
   });
 });
 
-// epic 7819 Phase 2: live-apply the GPU memory target (sc-7824, no worker restart) and show live
-// MLX memory telemetry (sc-7825) on macOS with a known unified-memory total.
-describe("SettingsScreen GPU memory (desktop macOS)", () => {
+// Existing global target: preserve macOS telemetry and transport the same fraction
+// for native MOSS CUDA training. These are UI/RPC-shape tests, not device evidence.
+describe("SettingsScreen GPU memory (desktop)", () => {
   let container;
   let root;
   let invoke;
   let SettingsScreen;
   const GIB = 1024 * 1024 * 1024;
   let telemetry;
+  let gpuInfo;
+  let appSettings;
+  let limitFailure;
 
   beforeEach(async () => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
     telemetry = { activeBytes: 20 * GIB, peakBytes: 40 * GIB, cacheBytes: 2 * GIB, limitBytes: 64 * GIB };
-    invoke = vi.fn(async (command) => {
+    gpuInfo = { platform: "macos", devices: ["Apple M3 Max"], unifiedMemoryMb: 131072 };
+    appSettings = {};
+    limitFailure = null;
+    invoke = vi.fn(async (command, args) => {
       switch (command) {
         case "get_app_settings":
-          return {}; // no cap → slider starts at 100% (Off)
+          return appSettings; // no cap → slider starts at 100% (Off)
         case "get_gpu_info":
-          return { platform: "macos", devices: ["Apple M3 Max"], unifiedMemoryMb: 131072 };
+          return gpuInfo;
         case "list_credentials":
           return [];
         case "get_remote_access":
@@ -609,7 +615,9 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
         case "get_gpu_telemetry":
           return telemetry;
         case "set_gpu_memory_limit":
-          return { gpuMemoryLimitFraction: 0.5 };
+          if (limitFailure) throw new Error(limitFailure);
+          appSettings = { ...appSettings, gpuMemoryLimitFraction: args.fraction };
+          return appSettings;
         default:
           return null;
       }
@@ -679,7 +687,47 @@ describe("SettingsScreen GPU memory (desktop macOS)", () => {
     });
     expect(invoke).toHaveBeenCalledWith("set_gpu_memory_limit", { fraction: 0.5 });
     expect(invoke).not.toHaveBeenCalledWith("restart_worker");
-    expect(container.textContent).toContain("applies within a couple of seconds");
+    expect(container.textContent).toContain("for new jobs — no restart needed");
+  });
+
+  it.each(["windows", "linux"])("uses the same global fraction for MOSS on %s without inventing selected-device bytes", async (platform) => {
+    gpuInfo = { platform, devices: ["NVIDIA 16 GiB", "NVIDIA 48 GiB"], gpuMemoryMb: 49152 };
+    await render();
+    const input = container.querySelector('[aria-label="MOSS training GPU memory target (percent of selected GPU VRAM)"]');
+    expect(input).toBeTruthy();
+    await changeField(input, "50");
+    await act(async () => { input.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true })); });
+    expect(invoke).toHaveBeenCalledWith("set_gpu_memory_limit", { fraction: 0.5 });
+    expect(container.textContent).toContain("50% of each selected GPU's VRAM");
+    expect(container.textContent).toContain("For native MOSS training only");
+    expect(container.textContent).toContain("not host RAM or another GPU");
+    expect(container.textContent).not.toContain("Live MLX memory");
+    expect(container.textContent).not.toContain("24 GiB of 48 GiB");
+    await changeField(input, "100");
+    await act(async () => { input.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true })); });
+    expect(invoke).toHaveBeenCalledWith("set_gpu_memory_limit", { fraction: null });
+    expect(invoke).not.toHaveBeenCalledWith("restart_worker");
+  });
+
+  it("makes unknown CUDA memory metadata actionable rather than inventing a budget", async () => {
+    gpuInfo = { platform: "windows", devices: ["NVIDIA unknown memory"] };
+    await render();
+    expect(container.querySelector('[aria-label="MOSS training GPU memory target (percent of selected GPU VRAM)"]')).toBeNull();
+    expect(container.textContent).toContain("GPU memory target unavailable");
+    expect(container.textContent).toContain("Check the driver and retry");
+  });
+
+  it("restores the previous target and surfaces a failed handoff RPC", async () => {
+    appSettings = { gpuMemoryLimitFraction: 0.5 };
+    limitFailure = "GPU memory target was not applied: fixture write failure";
+    await render();
+    const input = slider();
+    expect(input.value).toBe("50");
+    await changeField(input, "75");
+    await act(async () => { input.dispatchEvent(new window.MouseEvent("mouseup", { bubbles: true })); });
+    expect(input.value).toBe("50");
+    expect(container.textContent).toContain("was not applied");
+    expect(invoke).not.toHaveBeenCalledWith("restart_worker");
   });
 });
 

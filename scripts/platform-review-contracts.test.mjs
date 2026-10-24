@@ -1305,7 +1305,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only \}\}$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_moss_native_validation \}\}$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
@@ -4725,7 +4725,7 @@ function mlxJobSteps(workflow, job) {
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
 // caught it: that assertion exists precisely so a guard living outside the scanned job cannot
 // ship unpinned, and the fix it asks for is to enumerate that job, which is this.
-const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx"];
 
 function mlxGuardSteps(workflow) {
   return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
@@ -4738,6 +4738,14 @@ function mlxGuardSteps(workflow) {
 // string from an `else` fallthrough and from a following `-d` re-check, and the two
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
+  {
+    step: "Refuse conflicting MOSS validation inputs before compiler setup",
+    detects: "a MOSS model-validation dispatch combined with another profile or provisioning selector",
+    branch: [
+      'if [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then',
+    ],
+    diagnostic: /^echo '::error::MOSS native validation must be dispatched alone:/,
+  },
   {
     step: "Verify capabilities.mlx.json content against a fresh dump",
     detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
@@ -4907,6 +4915,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Refuse conflicting MOSS validation inputs before compiler setup": null,
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",

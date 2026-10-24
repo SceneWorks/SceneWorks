@@ -54,13 +54,98 @@ impl AppPaths {
 }
 
 /// Filename (under [`AppPaths::config_dir`]) of the live GPU-memory-limit handoff the desktop
-/// shell writes whenever the Settings slider changes, and the running MLX worker re-reads between
-/// jobs (epic 7819, sc-7824). A bare decimal byte count; `0` means "no limit". Keeping it in the
+/// shell writes whenever the Settings slider changes, and workers re-read between
+/// jobs. A legacy decimal byte count (macOS), or `{fraction: number}` for per-device
+/// native training (Candle); bare `0` means "no limit". Keeping it in the
 /// shared config dir — which the desktop injects into the worker as `SCENEWORKS_CONFIG_DIR` — lets
 /// the cap change live without a worker restart. An absent file leaves the worker on whatever it
 /// applied at spawn from `SCENEWORKS_GPU_MEMORY_LIMIT_BYTES`.
 pub fn gpu_memory_limit_file(config_dir: &Path) -> PathBuf {
     config_dir.join("gpu_memory_limit")
+}
+
+/// Explicit user memory request carried by the existing live handoff. Legacy
+/// byte counts remain unchanged; a fraction is resolved by native training on
+/// its actual selected device, never against a desktop's largest GPU or host RAM.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GpuMemoryLimitRequest {
+    Bytes(u64),
+    Fraction(f32),
+}
+
+/// Parse only the established decimal-byte form or the additive fraction object.
+/// Unknown/corrupt input is an error, never an implicit removal of a user cap.
+pub fn parse_gpu_memory_limit_request(raw: &str) -> Result<GpuMemoryLimitRequest, String> {
+    if let Ok(bytes) = raw.trim().parse::<u64>() {
+        return Ok(GpuMemoryLimitRequest::Bytes(bytes));
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct FractionRequest {
+        fraction: f64,
+    }
+    let request: FractionRequest = serde_json::from_str(raw).map_err(|_| {
+        "GPU memory handoff must be a whole byte count or {fraction: number}.".to_owned()
+    })?;
+    let fraction = request.fraction;
+    if !fraction.is_finite() || fraction <= 0.0 || fraction > 1.0 {
+        return Err(
+            "GPU memory fraction must be finite and greater than 0 and at most 1.".to_owned(),
+        );
+    }
+    let native = fraction as f32;
+    if !native.is_finite() || native <= 0.0 {
+        return Err(
+            "GPU memory fraction must be representable as a positive finite f32.".to_owned(),
+        );
+    }
+    Ok(GpuMemoryLimitRequest::Fraction(native))
+}
+
+#[cfg(test)]
+mod gpu_memory_limit_request_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_byte_and_fraction_requests_preserve_off_and_checked_boundaries() {
+        assert_eq!(
+            parse_gpu_memory_limit_request("0\n").unwrap(),
+            GpuMemoryLimitRequest::Bytes(0)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(&u64::MAX.to_string()).unwrap(),
+            GpuMemoryLimitRequest::Bytes(u64::MAX)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(r#"{"fraction":0.5}"#).unwrap(),
+            GpuMemoryLimitRequest::Fraction(0.5)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(r#"{"fraction":1}"#).unwrap(),
+            GpuMemoryLimitRequest::Fraction(1.0)
+        );
+        for invalid in [
+            "",
+            "-1",
+            "1.5",
+            "18446744073709551616",
+            "null",
+            "false",
+            "[]",
+            r#"{"fraction":0}"#,
+            r#"{"fraction":-0.5}"#,
+            r#"{"fraction":1.00000001}"#,
+            r#"{"fraction":1e-100}"#,
+            r#"{"fraction":"0.5"}"#,
+            r#"{"fraction":0.5,"bytes":100}"#,
+            r#"{"fraction":null}"#,
+        ] {
+            assert!(
+                parse_gpu_memory_limit_request(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
 }
 
 /// Filename (under [`AppPaths::config_dir`]) where the MLX worker publishes live GPU-memory

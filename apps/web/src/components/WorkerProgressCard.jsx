@@ -792,6 +792,8 @@ export function WorkerProgressCard({
   // sc-25785: a training retry either resumes from the checkpoint the API recorded when the run
   // stopped, or explicitly restarts from step 0 (a bare retry would inherit a resumed plan's flag).
   const isTraining = job.type === "lora_train" || job.type === "control_training";
+  const isMossTraining = isTraining && job.payload?.plan?.target?.kernel === "moss_image_lora";
+  const trainingSeed = job.payload?.plan?.config?.seed;
   const resumeStep = job.result?.resumeCheckpointStep;
   const canResumeTraining = canRetry && isTraining && job.status !== "completed" && Number.isInteger(resumeStep);
   const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
@@ -897,6 +899,17 @@ export function WorkerProgressCard({
         </span>
       </div>
       <ProgressBar status={job.status} progress={job.progress} />
+      {isMossTraining ? (
+        <p className="worker-progress-card__message" aria-label="Persisted MOSS training seed">
+          Training seed: {Number.isSafeInteger(trainingSeed) && trainingSeed >= 0
+            ? String(trainingSeed)
+            : trainingSeed == null
+              ? "Unavailable in this job's persisted plan"
+              : !Number.isInteger(trainingSeed) || trainingSeed < 0
+                ? "Invalid seed in this persisted plan"
+                : "Exact seed is outside this browser's integer range; inspect the persisted plan via the API"}
+        </p>
+      ) : null}
       {job.error ? (
         <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}

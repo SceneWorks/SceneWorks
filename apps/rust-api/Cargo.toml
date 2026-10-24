@@ -66,6 +66,8 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 backend-candle = ["sceneworks-worker/backend-candle"]
 
 [dev-dependencies]
+# CPU-native dataset/train/save/API/library/generation witness, never a runtime feature.
+sceneworks-worker = { path = "../../crates/sceneworks-worker", features = ["test-support"] }
 sceneworks-core = { path = "../../crates/sceneworks-core", features = ["test-support"] }
 # Advance only a fixture runtime clock at verified job boundaries in cancellation tests.
 tokio = { version = "1.40", features = ["test-util"] }

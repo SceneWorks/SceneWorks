@@ -4291,8 +4291,8 @@ fn rectangular_resolution_buckets_are_strict_and_ordered() {
     let target = registry
         .targets
         .iter()
-        .find(|target| target.id == "z_image_turbo_lora")
-        .expect("bucket target");
+        .find(|target| target.id == "moss_image_base_lora")
+        .expect("MOSS bucket target");
     let mut config = target.defaults.clone();
     config.advanced.insert(
         "resolutionBuckets".to_owned(),
@@ -4317,6 +4317,26 @@ fn rectangular_resolution_buckets_are_strict_and_ordered() {
         ])),
     );
     validate_training_config_for_target(target, &config).expect("rectangular bucket config");
+    let legacy_target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("legacy square bucket target");
+    let mut legacy_config = legacy_target.defaults.clone();
+    legacy_config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        config.advanced["resolutionBuckets"].clone(),
+    );
+    assert!(matches!(
+        validate_training_config_for_target(legacy_target, &legacy_config),
+        Err(TrainingPlanError::InvalidField { field, .. }) if field == "resolutionBuckets"
+    ));
+    legacy_config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([{"resolution": 1024, "repeats": 2}]),
+    );
+    validate_training_config_for_target(legacy_target, &legacy_config)
+        .expect("legacy square buckets remain supported");
 
     for rows in [
         json!([{"resolution": 768, "repeats": 1}, {"width": 768, "height": 1024, "repeats": 1}]),
@@ -4326,6 +4346,125 @@ fn rectangular_resolution_buckets_are_strict_and_ordered() {
     ] {
         config.advanced.insert("resolutionBuckets".to_owned(), rows);
         assert!(parse_resolution_bucket_config(&config.advanced).is_err());
+    }
+}
+
+#[test]
+fn moss_seed_contract_preserves_literals_and_rejects_negative_missing_and_overflow() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "moss_image_base_lora")
+        .unwrap();
+    assert_eq!(target.defaults.seed, 42);
+    let mut config = target.defaults.clone();
+    for seed in [0, 42, 1_000_000_001, i64::MAX] {
+        config.seed = seed;
+        validate_training_config_for_target(target, &config).unwrap();
+        let restored: TrainingConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(restored.seed, seed);
+    }
+    for seed in [-1, i64::MIN] {
+        config.seed = seed;
+        assert!(
+            matches!(validate_training_config_for_target(target, &config),
+            Err(TrainingPlanError::InvalidField { field, .. }) if field == "seed")
+        );
+    }
+    for invalid in [
+        Value::Null,
+        json!("42"),
+        json!(1.5),
+        json!(9_223_372_036_854_775_808_u64),
+    ] {
+        let mut value = serde_json::to_value(&target.defaults).unwrap();
+        value["seed"] = invalid;
+        assert!(serde_json::from_value::<TrainingConfig>(value).is_err());
+    }
+    let mut missing = serde_json::to_value(&target.defaults).unwrap();
+    missing.as_object_mut().unwrap().remove("seed");
+    assert!(serde_json::from_value::<TrainingConfig>(missing).is_err());
+}
+
+#[test]
+fn moss_saved_plans_preserve_checkpoint_method_dataset_and_supported_controls() {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    for target_id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+        let target = registry
+            .targets
+            .iter()
+            .find(|target| target.id == target_id)
+            .unwrap();
+        for method in ["lora", "lokr"] {
+            let mut config = target.defaults.clone();
+            config.alpha = serde_json::from_value(json!(0.5)).unwrap();
+            config.rank = 8;
+            config.seed = 173;
+            config.batch_size = 2;
+            config.gradient_accumulation = 3;
+            config
+                .advanced
+                .insert("networkType".to_owned(), json!(method));
+            config
+                .advanced
+                .insert("decomposeFactor".to_owned(), json!(4));
+            config.advanced.insert(
+                "loraTargetModules".to_owned(),
+                json!(["q", "layers.0.proj.ffn_up_gate"]),
+            );
+            config
+                .advanced
+                .insert("cacheLatents".to_owned(), json!(false));
+            config
+                .advanced
+                .insert("cacheTextEmbeddings".to_owned(), json!(true));
+            config
+                .advanced
+                .insert("gradientCheckpointing".to_owned(), json!(false));
+            config
+                .advanced
+                .insert("lrScheduler".to_owned(), json!("cosine"));
+            config.advanced.insert("lrWarmupSteps".to_owned(), json!(2));
+            config.advanced.insert(
+                "resolutionBuckets".to_owned(),
+                json!([
+                    {"width": 768, "height": 1024, "repeats": 2},
+                    {"width": 1024, "height": 768, "repeats": 1}
+                ]),
+            );
+            let expected = serde_json::to_value(&config).unwrap();
+            let plan = build_training_plan(BuildTrainingPlan {
+                job_id: "job_moss_saved",
+                target,
+                dataset: &dataset,
+                config,
+                preset: None,
+                lora_id: "lora_moss_saved",
+                base_model_path: format!("/data/models/{}", target.base_model),
+                dataset_root: Path::new("/data/training/ds_abc123"),
+                output_dir: Path::new("/data/loras/lora_moss_saved"),
+                file_name: "moss.safetensors".to_owned(),
+                created_at: "2026-10-22T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+            let restored: TrainingPlan =
+                serde_json::from_value(serde_json::to_value(&plan).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&restored.config).unwrap(), expected);
+            assert_eq!(restored.target.target_id, target_id);
+            assert_eq!(restored.target.base_model, target.base_model);
+            assert_eq!(restored.dataset.dataset_id, plan.dataset.dataset_id);
+            assert_eq!(
+                restored.dataset.dataset_version,
+                plan.dataset.dataset_version
+            );
+            assert_eq!(
+                serde_json::to_value(restored.dataset.items).unwrap(),
+                serde_json::to_value(plan.dataset.items).unwrap()
+            );
+        }
     }
 }
 

@@ -39,10 +39,11 @@ use sceneworks_core::training::latent_perceptual::{
     LATENT_LPIPS, VAE_ANCHOR,
 };
 use sceneworks_core::training::{
-    parse_resolution_buckets, subject_mask_loss_weights, technique_value, TrainingPlan,
-    GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT,
-    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY,
-    SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    parse_resolution_bucket_config, subject_mask_loss_weights, technique_value,
+    ResolutionBucketConfig, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
+    GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
+    RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY,
+    WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
@@ -869,6 +870,8 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     })?;
     let advanced = &plan.config.advanced;
     if plan.target.kernel == "moss_image_lora" {
+        sceneworks_core::training::moss_training_seed(plan.config.seed)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
         if let Some(options) = advanced.get("modelOptions") {
             let options = options.as_object().ok_or_else(|| {
                 WorkerError::InvalidPayload("MOSS modelOptions must be an object".into())
@@ -903,8 +906,10 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
             }
         }
         for key in ["cacheLatents", "cacheTextEmbeddings"] {
-            if advanced.get(key).is_some_and(|v| v != &Value::Bool(true)) {
-                return Err(WorkerError::InvalidPayload(format!("MOSS {key} must be true; native training freezes and caches the VAE/text encoder")));
+            if advanced.get(key).is_some_and(|value| !value.is_boolean()) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "MOSS {key} must be true or false"
+                )));
             }
         }
     }
@@ -1086,9 +1091,17 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
     // refuses it (E3) — before any load, on both the dry and the real path.
-    let buckets = parse_resolution_buckets(advanced).map_err(|message| {
+    let buckets = parse_resolution_bucket_config(advanced).map_err(|message| {
         WorkerError::InvalidPayload(format!("Training config field {message}"))
     })?;
+    if matches!(&buckets, Some(ResolutionBucketConfig::AspectRatio(_)))
+        && plan.target.kernel != "moss_image_lora"
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Width/height buckets require a MOSS training target; this trainer supports square buckets only."
+                .to_owned(),
+        ));
+    }
     if buckets.is_some() && !descriptor.techniques.resolution_buckets {
         return Err(WorkerError::InvalidPayload(format!(
             "Native trainer '{engine_id}' does not support multi-resolution buckets \
@@ -1173,6 +1186,14 @@ fn training_request_from_plan(
     prepared_inputs: &mut PreparedTrainingInputs,
     masks_pending: bool,
 ) -> WorkerResult<TrainingRequest> {
+    let moss_seed = if plan.target.kernel == "moss_image_lora" {
+        Some(
+            sceneworks_core::training::moss_training_seed(plan.config.seed)
+                .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     // Iris depth / restoration (sc-25687 / sc-25688): an item is an image plus its task sidecar(s),
     // resolved under the dataset root; the engine options bag is the only `model_options` key.
     if let Some(objective) =
@@ -1264,6 +1285,19 @@ fn training_request_from_plan(
         })
         .collect::<WorkerResult<Vec<_>>>()?;
     let mut config = engine_training_config(plan);
+    if let Some(seed) = moss_seed {
+        config.seed = seed;
+        match settings.requested_gpu_memory_limit()? {
+            sceneworks_core::app_paths::GpuMemoryLimitRequest::Bytes(bytes) => {
+                config.memory_limit_bytes = (bytes != 0).then_some(bytes);
+                config.memory_limit_fraction = None;
+            }
+            sceneworks_core::app_paths::GpuMemoryLimitRequest::Fraction(fraction) => {
+                config.memory_limit_bytes = None;
+                config.memory_limit_fraction = Some(fraction);
+            }
+        }
+    }
     apply_depth_anchoring(settings, plan, &mut config)?;
     apply_body_losses(settings, plan, &mut config)?;
     apply_face_losses(settings, plan, &mut config)?;
@@ -2551,6 +2585,13 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
         // `resolution`, exactly as before).
         resolution_buckets: map_resolution_buckets(advanced),
+        aspect_ratio_buckets: map_aspect_ratio_buckets(advanced),
+        cache_latents: advanced_bool(advanced, "cacheLatents", true),
+        cache_text_embeddings: advanced_bool(advanced, "cacheTextEmbeddings", true),
+        // The global operational cap is supplied where Settings is available, not
+        // from the free-form advanced bag or the numerical recovery identity.
+        memory_limit_bytes: None,
+        memory_limit_fraction: None,
         // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
         // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
         // the plan enables it.
@@ -2616,9 +2657,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
-    match parse_resolution_buckets(advanced) {
-        Ok(None) => Vec::new(),
-        Ok(Some(buckets)) => buckets
+    match parse_resolution_bucket_config(advanced) {
+        Ok(None | Some(ResolutionBucketConfig::AspectRatio(_))) => Vec::new(),
+        Ok(Some(ResolutionBucketConfig::Legacy(buckets))) => buckets
             .into_iter()
             .map(|bucket| gen_core::ResolutionBucket {
                 resolution: bucket.resolution,
@@ -2627,6 +2668,31 @@ fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBuck
             .collect(),
         Err(_) => vec![gen_core::ResolutionBucket {
             resolution: 0,
+            repeats: 0,
+        }],
+    }
+}
+
+/// Keep the additive rectangular list separate from the legacy square list. Invalid
+/// data fails closed even if a caller bypasses the shared plan preflight.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioBucket> {
+    match parse_resolution_bucket_config(advanced) {
+        Ok(None | Some(ResolutionBucketConfig::Legacy(_))) => Vec::new(),
+        Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
+            .into_iter()
+            .map(|bucket| gen_core::AspectRatioBucket {
+                width: bucket.width,
+                height: bucket.height,
+                repeats: bucket.repeats,
+            })
+            .collect(),
+        Err(_) => vec![gen_core::AspectRatioBucket {
+            width: 0,
+            height: 0,
             repeats: 0,
         }],
     }
@@ -3106,6 +3172,33 @@ pub(crate) async fn run_training_execution_drive(
         + 'static,
     launcher: std::sync::Arc<dyn crate::iris_dist::RankLauncher>,
 ) -> WorkerResult<()> {
+    run_training_execution_drive_observing_cancel(
+        api,
+        settings,
+        job,
+        plan,
+        load_trainer,
+        launcher,
+        |_| {},
+    )
+    .await
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_execution_drive_observing_cancel(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    load_trainer: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Trainer>>
+        + Send
+        + 'static,
+    launcher: std::sync::Arc<dyn crate::iris_dist::RankLauncher>,
+    observe_request: impl FnOnce(&TrainingRequest) + Send + 'static,
+) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     let prepared_run = prepare_training_run(
@@ -3171,7 +3264,12 @@ pub(crate) async fn run_training_execution_drive(
     }
     // sc-25785: a step-0 run clears an earlier run's resume bundles; a resume run reports the
     // checkpoint it continues from, so the job records it from its first progress update.
-    let resume_checkpoint_step = match prepare_training_resume_dir(
+    let prepare_resume = if plan.target.kernel == "moss_image_lora" {
+        prepare_moss_training_resume_dir
+    } else {
+        prepare_training_resume_dir
+    };
+    let resume_checkpoint_step = match prepare_resume(
         prepared_run.request.config.resume,
         &prepared_run.request.output_dir,
         &prepared_run.request.file_name,
@@ -3261,6 +3359,9 @@ pub(crate) async fn run_training_execution_drive(
             // on first need — in `train()`, or in `validate()` when custom `lora_target_modules`
             // need the loaded model. So `load_trainer` reads no weights, and a base-load failure
             // surfaces from `validate`/`train` instead (see `trainer_validate_error`).
+            // Production supplies a no-op. The opt-in test bridge may inspect the
+            // exact prepared request and clone its flag; it never replaces or resets it.
+            observe_request(&request);
             let spec = load_inputs.load_spec(engine_id, &request.config.train_dtype);
             let operation = (|| {
                 let mut trainer = load_trainer(engine_id, &spec).map_err(|error| {
@@ -3700,6 +3801,24 @@ fn resolve_sample_root(
     }
 }
 
+/// Bundle verification reads tensor hashes, so keep it off the async executor. This
+/// is also used after cancellation has drained and joined the owned trainer task.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn verified_moss_resume_step(
+    settings: &Settings,
+    plan: &TrainingPlan,
+) -> WorkerResult<Option<u32>> {
+    let output_dir =
+        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
+    let file_name = plan.output.file_name.clone();
+    tokio::task::spawn_blocking(move || latest_moss_training_resume_step(&output_dir, &file_name))
+        .await
+        .map_err(|error| task_join_error("MOSS checkpoint verification", error))?
+}
+
 /// Consume training events from the blocking thread: stream staged progress, poll
 /// cancel ~every 2s (draining after a cancel so the blocking sender never blocks),
 /// and on the final `Done` event report completion with the result the UI shows.
@@ -3824,7 +3943,14 @@ pub(crate) async fn consume_training_events(
                         // An Iris checkpoint is not a generic resume bundle: the run resumes from
                         // the Training Studio (`resumeFromJobId`), so the Queue's retry-resume
                         // (sc-25785) is never offered for it.
-                        if !sceneworks_core::training::iris::is_iris_training_kernel(
+                        if plan.target.kernel == "moss_image_lora" {
+                            resume_checkpoint_step = verified_moss_resume_step(settings, plan).await?;
+                            if resume_checkpoint_step.is_none() {
+                                return Err(WorkerError::InvalidPayload(
+                                    "MOSS reported a checkpoint without a verified recovery bundle.".to_owned(),
+                                ));
+                            }
+                        } else if !sceneworks_core::training::iris::is_iris_training_kernel(
                             &plan.target.kernel,
                         ) {
                             resume_checkpoint_step = Some(step);
@@ -3895,6 +4021,12 @@ pub(crate) async fn consume_training_events(
                         backend,
                     );
                     result.extend(run_notes.clone());
+                    if plan.target.kernel == "moss_image_lora" {
+                        result.insert(
+                            "resumeCheckpointStep".to_owned(),
+                            json!(verified_moss_resume_step(settings, plan).await?),
+                        );
+                    }
                     let artifact = match &plan.target.output_kind {
                         sceneworks_core::training::TrainingOutputKind::BaseCheckpoint => {
                             "Full base checkpoint"
@@ -3967,7 +4099,19 @@ pub(crate) async fn consume_training_events(
                     Some(result),
                 )
             }
-            None => ("LoRA training canceled by user.".to_owned(), None),
+            None => {
+                let result = if plan.target.kernel == "moss_image_lora" {
+                    let mut result = JsonObject::new();
+                    result.insert(
+                        "resumeCheckpointStep".to_owned(),
+                        json!(verified_moss_resume_step(settings, plan).await?),
+                    );
+                    Some(result)
+                } else {
+                    None
+                };
+                ("LoRA training canceled by user.".to_owned(), result)
+            }
         };
         update_job(
             api,
@@ -4211,16 +4355,20 @@ fn training_result(
     result.insert("rank".to_owned(), json!(plan.config.rank));
     result.insert("alpha".to_owned(), json!(plan.config.alpha));
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
-    // sc-2127: a bucketed run trains at every listed resolution (which replace `resolution`), so
-    // record the rows it actually trained on. Absent for a single-resolution run.
-    if let Ok(Some(buckets)) = parse_resolution_buckets(&plan.config.advanced) {
-        result.insert(
-            RESOLUTION_BUCKETS_KEY.to_owned(),
-            json!(buckets
+    // Keep the validated wire form and row order in provenance: legacy squares train every
+    // item at every row, whereas MOSS rectangles assign each item to one geometry.
+    if let Ok(Some(buckets)) = parse_resolution_bucket_config(&plan.config.advanced) {
+        let rows = match buckets {
+            ResolutionBucketConfig::Legacy(buckets) => buckets
                 .iter()
                 .map(|bucket| json!({ "resolution": bucket.resolution, "repeats": bucket.repeats }))
-                .collect::<Vec<_>>()),
-        );
+                .collect::<Vec<_>>(),
+            ResolutionBucketConfig::AspectRatio(buckets) => buckets
+                .iter()
+                .map(|bucket| json!({ "width": bucket.width, "height": bucket.height, "repeats": bucket.repeats }))
+                .collect::<Vec<_>>(),
+        };
+        result.insert(RESOLUTION_BUCKETS_KEY.to_owned(), json!(rows));
     }
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
@@ -7870,6 +8018,169 @@ mod tests {
                 json!(config.model_options),
                 json!({"vae_posterior":"posterior_mean_v1"})
             );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_request_reads_live_global_budget_with_one_immutable_worker_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(dir.path().to_path_buf());
+        settings.config_dir = dir.path().join("config");
+        settings.gpu_memory_limit_bytes = 128 * 1024 * 1024;
+        std::fs::create_dir_all(&settings.config_dir).unwrap();
+        let settings = settings;
+        let image = dir.path().join("datasets/ds-1/image.png");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        image::RgbImage::from_pixel(32, 32, image::Rgb([9, 17, 31]))
+            .save(&image)
+            .unwrap();
+        let target = sceneworks_core::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "moss_image_base_lora")
+            .unwrap();
+        let mut value = plan_json(
+            dir.path(),
+            &target.kernel,
+            &target.base_model,
+            "lora",
+            &[image.to_str().unwrap()],
+        );
+        value["target"]["targetId"] = json!(target.id);
+        value["target"]["family"] = json!(target.family);
+        value["config"] = serde_json::to_value(&target.defaults).unwrap();
+        let plan = parse(value);
+        let path = sceneworks_core::app_paths::gpu_memory_limit_file(&settings.config_dir);
+        for (raw, bytes, fraction) in [
+            ("64", Some(64), None),
+            (r#"{"fraction":0.5}"#, None, Some(0.5)),
+            (r#"{"fraction":0.75}"#, None, Some(0.75)),
+            ("0", None, None),
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            let request = training_request_from_plan(
+                &settings,
+                &plan,
+                &mut PreparedTrainingInputs::default(),
+                false,
+            )
+            .unwrap();
+            assert_eq!(request.config.memory_limit_bytes, bytes);
+            assert_eq!(request.config.memory_limit_fraction, fraction);
+        }
+        assert_eq!(settings.gpu_memory_limit_bytes, 128 * 1024 * 1024);
+        for seed in [0, 42, i64::MAX] {
+            let mut literal = plan.clone();
+            literal.config.seed = seed;
+            validate_training_target_config(&literal).unwrap();
+            let request = training_request_from_plan(
+                &settings,
+                &literal,
+                &mut PreparedTrainingInputs::default(),
+                false,
+            )
+            .unwrap();
+            assert_eq!(request.config.seed, u64::try_from(seed).unwrap());
+        }
+        for seed in [-1, i64::MIN] {
+            let mut invalid = plan.clone();
+            invalid.config.seed = seed;
+            assert!(validate_training_target_config(&invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("seed"));
+            assert!(training_request_from_plan(
+                &settings,
+                &invalid,
+                &mut PreparedTrainingInputs::default(),
+                false
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("seed"));
+        }
+        std::fs::write(&path, r#"{"fraction":"off"}"#).unwrap();
+        assert!(training_request_from_plan(
+            &settings,
+            &plan,
+            &mut PreparedTrainingInputs::default(),
+            false
+        )
+        .is_err());
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_requests_preserve_independent_caches_rectangles_and_global_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(dir.path().to_path_buf());
+        let root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&root).unwrap();
+        let image = root.join("moss.png");
+        image::RgbImage::from_pixel(32, 32, image::Rgb([9, 17, 31]))
+            .save(&image)
+            .unwrap();
+        let targets = sceneworks_core::training::builtin_training_targets();
+        for base in ["moss_image_base", "moss_image_sft"] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.base_model == base)
+                .unwrap();
+            for network in ["lora", "lokr"] {
+                for (cache_latents, cache_text) in
+                    [(false, false), (false, true), (true, false), (true, true)]
+                {
+                    let mut value = plan_json(
+                        dir.path(),
+                        &target.kernel,
+                        base,
+                        network,
+                        &[image.to_str().unwrap()],
+                    );
+                    value["target"]["targetId"] = json!(target.id);
+                    value["target"]["family"] = json!(target.family);
+                    value["config"] = serde_json::to_value(&target.defaults).unwrap();
+                    value["config"]["advanced"]["networkType"] = json!(network);
+                    value["config"]["advanced"]["cacheLatents"] = json!(cache_latents);
+                    value["config"]["advanced"]["cacheTextEmbeddings"] = json!(cache_text);
+                    value["config"]["advanced"]["resolutionBuckets"] = json!([
+                        {"width": 768, "height": 1024, "repeats": 2},
+                        {"width": 1024, "height": 768, "repeats": 1}
+                    ]);
+                    let plan = parse(value);
+                    validate_training_target_config(&plan).unwrap();
+                    for cap in [0, 1_048_576] {
+                        settings.gpu_memory_limit_bytes = cap;
+                        let request = training_request_from_plan(
+                            &settings,
+                            &plan,
+                            &mut PreparedTrainingInputs::default(),
+                            false,
+                        )
+                        .unwrap();
+                        assert_eq!(request.config.cache_latents, cache_latents);
+                        assert_eq!(request.config.cache_text_embeddings, cache_text);
+                        assert_eq!(request.config.memory_limit_bytes, (cap != 0).then_some(cap));
+                        assert!(request.config.resolution_buckets.is_empty());
+                        let geometry = request
+                            .config
+                            .aspect_ratio_buckets
+                            .iter()
+                            .map(|bucket| (bucket.width, bucket.height, bucket.repeats))
+                            .collect::<Vec<_>>();
+                        assert_eq!(geometry, [(768, 1024, 2), (1024, 768, 1)]);
+                    }
+                }
+            }
         }
     }
 

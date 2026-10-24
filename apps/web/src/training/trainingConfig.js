@@ -356,6 +356,12 @@ export function loraTargetModulesSnapshot(value) {
     .filter(Boolean);
 }
 
+// Match the editor's existing Randomize convention. This chooses a concrete
+// draft value; it is not an Auto sentinel or a maximum for manually entered seeds.
+export function randomTrainingSeed(random = Math.random) {
+  return String(Math.floor(random() * 1_000_000_000));
+}
+
 // The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
 // the current one (or just the current one when the target advertises none), one repeat each, so a
 // fresh list trains exactly the sizes the target already offers and the user tunes the mix.
@@ -827,6 +833,10 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     trainingAdapterRepo: asText(advanced.trainingAdapterRepo),
     trainingAdapterVersion: normalizeTrainingAdapterVersion(advanced.trainingAdapterVersion),
     gradientCheckpointing: !gradientCheckpointingUnsupported(target) && advanced.gradientCheckpointing !== false,
+    ...(target?.kernel === "moss_image_lora" ? {
+      cacheLatents: advanced.cacheLatents !== false,
+      cacheTextEmbeddings: advanced.cacheTextEmbeddings !== false,
+    } : {}),
     resolution: numericDraft(defaults.resolution),
     precision: asText(advanced.mixedPrecision),
     saveEvery: numericDraft(defaults.saveEvery),
@@ -910,6 +920,9 @@ function validateResolutionBuckets(rows, target, issues) {
       return;
     }
     const nextForm = square ? "square" : "rectangular";
+    if (rectangular && target?.kernel !== "moss_image_lora") {
+      issues.push(issue.error(field, "This target supports square resolution buckets only"));
+    }
     if (form && form !== nextForm) {
       issues.push(issue.error(field, "Use square or rectangular buckets, not both"));
       return;
@@ -917,8 +930,8 @@ function validateResolutionBuckets(rows, target, issues) {
     form = nextForm;
     const dimensions = square ? ["resolution"] : ["width", "height"];
     const values = dimensions.map((key) => numberFromDraft(row?.[key]));
-    if (values.some((value) => value === null || !Number.isInteger(value) || value <= 0 || value % resolutionBucketStride !== 0)) {
-      issues.push(issue.error(field, `Bucket ${n}: ${square ? "resolution" : "width and height"} must be positive ${resolutionBucketStride}px multiples`));
+    if (values.some((value) => value === null || !Number.isInteger(value) || value <= 0 || value > 0xffffffff || value % resolutionBucketStride !== 0)) {
+      issues.push(issue.error(field, `Bucket ${n}: ${square ? "resolution" : "width and height"} must be positive u32 ${resolutionBucketStride}px multiples`));
     } else if (square && offered.length && !offered.includes(values[0])) {
       issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
     } else {
@@ -1069,6 +1082,19 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
+    } else if (field === "alpha" && selectedTarget?.kernel === "moss_image_lora") {
+      const nativeAlpha = Math.fround(value);
+      if (!Number.isFinite(nativeAlpha) || nativeAlpha <= 0) {
+        issues.push(issue.error(field, "Alpha must be representable as a positive finite f32"));
+      }
+    }
+  }
+  if (selectedTarget?.kernel === "moss_image_lora") {
+    const seed = numberFromDraft(configDraft.seed);
+    if (seed === null || seed < 0 || !Number.isInteger(seed)) {
+      issues.push(issue.error("seed", "Seed must be zero or a positive whole number"));
+    } else if (!Number.isSafeInteger(seed)) {
+      issues.push(issue.error("seed", "This browser cannot represent that seed exactly; choose a smaller integer or submit the exact i64 through the API"));
     }
   }
   // Weight noising: optional, but when set it must sit inside the API's bound (same max, E6),
@@ -1324,11 +1350,13 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     networkType,
     // LoKr factor only matters for lokr; omit it otherwise so lora jobs stay clean.
     decomposeFactor: networkType === "lokr" ? numberFromDraft(configDraft.decomposeFactor) : undefined,
-    // MOSS defaults already persist [] (all modules) and both required caches.
-    // Only a nonblank edit replaces that literal native module list.
-    ...(selectedTarget?.kernel === "moss_image_lora" && configDraft.loraTargetModules.trim()
-      ? { loraTargetModules: loraTargetModulesSnapshot(configDraft.loraTargetModules) }
-      : {}),
+    // Explicit edits override preset defaults, including an empty module list (all)
+    // and either cache being off. Never resurrect a preset's old selection.
+    ...(selectedTarget?.kernel === "moss_image_lora" ? {
+      loraTargetModules: loraTargetModulesSnapshot(configDraft.loraTargetModules),
+      cacheLatents: configDraft.cacheLatents !== false,
+      cacheTextEmbeddings: configDraft.cacheTextEmbeddings !== false,
+    } : {}),
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),

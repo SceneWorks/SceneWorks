@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import workerReport from "../../training/irisDatasetReport.fixture.json";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setInput } from "../../testUtils/dom.js";
 
 import {
@@ -57,6 +57,7 @@ const VALID_DRAFT = {
   batchSize: 1,
   gradientAccumulation: 1,
   saveEvery: 250,
+  seed: 42,
 };
 
 const TARGET = { id: "t1", name: "Target One", baseModel: "base" };
@@ -1020,6 +1021,12 @@ describe("ConfigureJobPanel resolution buckets", () => {
     );
     expect(toggle().checked).toBe(true);
     expect(editor().getAttribute("aria-invalid")).toBeNull();
+    const rectangleToggle = [...editor().querySelectorAll("button")].find(
+      (button) => button.textContent === "Use width × height buckets",
+    );
+    expect(rectangleToggle.disabled).toBe(true);
+    act(() => rectangleToggle.click());
+    expect(calls).toEqual([]);
     const repeats = container.querySelector('[aria-label="Bucket 1 repeats"]');
     expect(repeats.value).toBe("16");
     expect(repeats.getAttribute("max")).toBe("100");
@@ -1038,6 +1045,59 @@ describe("ConfigureJobPanel resolution buckets", () => {
       ["resolutionBuckets", [...rows([512, 16], [1024, 1]), { resolution: String(VALID_DRAFT.resolution), repeats: "1" }]],
       ["resolutionBuckets", null],
     ]);
+  });
+
+  it("edits literal MOSS seed zero and randomizes a concrete draft exactly once", () => {
+    const calls = [];
+    const moss = { ...bucketTarget, kernel: "moss_image_lora" };
+    const random = vi.spyOn(Math, "random").mockReturnValue(0.25);
+    try {
+      mount(<ConfigureJobPanel {...baseProps({
+        showAdvancedConfig: true, selectedTarget: moss, configDraft: VALID_DRAFT,
+        updateConfigDraft: (field, value) => calls.push([field, value]),
+      })} />);
+      const seed = container.querySelector('[aria-label="MOSS training seed"]');
+      expect(seed.value).toBe("42");
+      expect(seed.getAttribute("min")).toBe("0");
+      expect(seed.getAttribute("max")).toBeNull();
+      const randomize = container.querySelector('[title="Randomize seed"]');
+      expect(randomize.getAttribute("aria-label")).toBe("Randomize seed");
+      expect(randomize.closest("label")).toBeNull();
+      random.mockClear();
+      act(() => randomize.click());
+      expect(random).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual([["seed", "250000000"]]);
+      act(() => setInput(seed, "0"));
+      expect(calls[1]).toEqual(["seed", "0"]);
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it("lets MOSS users independently change both frozen-encoder cache controls", () => {
+    const calls = [];
+    const moss = { ...bucketTarget, kernel: "moss_image_lora" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: moss,
+          configDraft: { ...VALID_DRAFT, cacheLatents: false, cacheTextEmbeddings: true },
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    const cache = (text) => [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.trim() === text).querySelector("input");
+    const latents = cache("Cache VAE latents");
+    const embeddings = cache("Cache text embeddings");
+    expect(latents.disabled).toBe(false);
+    expect(embeddings.disabled).toBe(false);
+    expect(latents.checked).toBe(false);
+    expect(embeddings.checked).toBe(true);
+    act(() => latents.click());
+    act(() => embeddings.click());
+    expect(calls).toEqual([["cacheLatents", true], ["cacheTextEmbeddings", false]]);
   });
 
   it("seeds and edits true MOSS rectangles without inventing module aliases", () => {
