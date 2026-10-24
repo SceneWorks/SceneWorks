@@ -1697,8 +1697,10 @@ mod tests {
         .is_err());
         assert_eq!(writes.get(), 0);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "corrupt");
-        let mut configured = AppSettings::default();
-        configured.gpu_memory_limit_fraction = Some(0.5);
+        let configured = AppSettings {
+            gpu_memory_limit_fraction: Some(0.5),
+            ..AppSettings::default()
+        };
         initialize_gpu_memory_limit_file_at(&path, &configured, |settings| {
             let body = gpu_memory_limit_handoff(settings.gpu_memory_limit_fraction, None, false)?;
             atomic_write(&path, &body)
@@ -1715,8 +1717,10 @@ mod tests {
 
     #[test]
     fn memory_setting_rpc_path_persists_and_rolls_back_if_live_handoff_fails() {
-        let mut initial = AppSettings::default();
-        initial.gpu_memory_limit_fraction = Some(0.25);
+        let initial = AppSettings {
+            gpu_memory_limit_fraction: Some(0.25),
+            ..AppSettings::default()
+        };
         let mut saves = Vec::new();
         let error = set_gpu_memory_limit_using(
             Some(0.5),
