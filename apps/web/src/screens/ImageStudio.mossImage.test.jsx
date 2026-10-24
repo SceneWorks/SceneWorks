@@ -215,6 +215,15 @@ describe("MOSS Image Studio", () => {
   await click(generateButton());expect(ctx.createImageJob).toHaveBeenCalledTimes(1);const body=ctx.createImageJob.mock.calls[0][0];expect(body).toMatchObject({prompt:"",count:2,seed:null,width:512,height:512,referenceAssetIds:["ref-0"]});expect(body.advanced.mossImageAdvanced).toEqual(native);expect(body.advanced.mossImage.training_shift).toBe(2.5);expect(body.advanced.mossImageSampleIndex).toBeUndefined();
   await render({...ctx,assets:[...REFS,positive]});expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain("exact noise tensor is missing");
  });
+ it.each(["missing adapter", "missing reference", "missing noise"])("blocks Re-Generate with %s before enqueue",async(issue)=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:issue==="missing adapter"?"missing":"installed"}}};
+  const raw={referenceAssetIds:[issue==="missing reference"?"deleted-ref":"ref-0"],mossImageEdit:{reference_max_edge:512,use_kv_cache:true}};
+  if(issue==="missing noise") raw.mossImageAdvanced={noise:{assetId:"deleted-noise",dtype:"float32",shape:[1,128,32,32],sha256:"a".repeat(64)},output:"images"};
+  const ctx=await render(baseContext({imageModels:[model],models:[model],studioLaunch:{id:`regenerate-${issue}`,view:"Image",autoGenerate:true,replaySeed:null,recipe:{mode:"edit_image",model:BASE.id,prompt:"edit",normalizedSettings:{width:512,height:512,count:1},rawAdapterSettings:raw}}}));
+  expect(generateButton().disabled).toBe(true);
+  expect(ctx.createImageJob).not.toHaveBeenCalled();
+  expect(ctx.setActiveView).not.toHaveBeenCalledWith("Queue");
+ });
  it("keeps missing reference identities visible and blocks replay instead of reusing the output",async()=>{
   const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
   const ctx=await render(baseContext({imageModels:[model],studioLaunch:{id:"missing-edit",view:"Image",recipe:{mode:"edit_image",model:BASE.id,prompt:"edit",rawAdapterSettings:{referenceAssetIds:["deleted-ref"],mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}}}}));

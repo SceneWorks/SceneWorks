@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan } from './lib/moss-edit-terminal.mjs';
-import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound } from './lib/moss-edit-terminal-observation.mjs';
+import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -240,6 +240,14 @@ test('exact source-bound host sum is unreachable, including all dtypes/roles/fra
   const source=hostSourceFixture(),proof=deriveHostTensorBound(source);assert.equal(proof.maximumDataSum,1342242816);assert.equal(proof.maxRequestBytes,1342308352);assert.equal(proof.headroom,65536);assert.equal(proof.maximumFileFraming,20540);assert.equal(proof.maximumOwnedHostBytes,1879117836);assert.ok(proof.maximumDataSum+proof.maximumFileFraming<proof.maxRequestBytes);assert.ok(proof.excludes.includes('reference image pixels'));
   let maximum=0;for(let batch=1;batch<=8;batch++)for(let count=1;batch*count<=8;count++)maximum=Math.max(maximum,2*batch*4096*4096*4+2*batch*4096+(batch*count)*128*256*256*4);assert.equal(maximum,proof.maximumDataSum);
   for(const mutate of [value=>value.advanced=value.advanced.replace('meta.shape[0] > 8','meta.shape[0] > 9'),value=>value.tensor=value.tensor.replace('1280 * 1024','1279 * 1024'),value=>value.advanced=value.advanced.replace('pub output: O,','pub output: O,\npub extra_tensor: X,'),value=>value.manifest=value.manifest.replaceAll('4096','8192')]){const changed=structuredClone(source);mutate(changed);assert.throws(()=>deriveHostTensorBound(changed));}
+});
+test('integrated advanced tensor source recomputes the exact host envelope and rejects source drift',async()=>{
+  const proof=await hostTensorInvariant(sourceRoot),text={};
+  assert.equal(proof.maximumDataSum,1342242816);assert.equal(proof.headroom,65536);
+  for(const [key,identity] of Object.entries(proof.sources))text[key]=await readFile(resolve(sourceRoot,identity.file),'utf8');
+  assert.deepEqual(deriveHostTensorBound(text).observed,proof.observed);
+  const changed={...text,advanced:text.advanced.replace('meta.shape[0] > 8','meta.shape[0] > 9')};
+  assert.notEqual(changed.advanced,text.advanced);assert.throws(()=>deriveHostTensorBound(changed),/envelope changed/);
 });
 test('host slot submits exact small over-budget NPY declaration and retains actual import refusal/no new asset',async()=>{
   const root=await temporary('host-budget'),bytes=hostBudgetHeader(),specification=hostGuardSpec();await writeFile(resolve(root,'request.npy'),bytes);assert.equal(bytes.length,128);const header=bytes.subarray(10).toString();assert.match(header,/\(1, 134217729\)/);assert.equal(134217729*4,512*1024*1024+4);let calls=0;
