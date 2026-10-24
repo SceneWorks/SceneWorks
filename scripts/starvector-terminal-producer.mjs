@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // SC-22261 controller: all threshold decisions belong to the pinned inference validator.
+import { metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { lstat, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
@@ -316,7 +318,7 @@ export async function executeTuple({ sceneWorksRoot, planPath, inferenceRoot, we
 
 export function executeNodeRoute(command, options = {}) {
   // Native Windows process creation cannot interpret a JavaScript shebang.
-  return execFile(process.execPath, [command], options);
+  return execFileWithFds(process.execPath, [command], metalChildOptions(options), execFile);
 }
 
 export async function verifyTupleExecution(root, expected) {

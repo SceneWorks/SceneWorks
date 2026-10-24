@@ -49,6 +49,21 @@ from pathlib import Path
 
 HARD_STOP_EXIT = 97
 
+def inherited_metal_fds():
+    if sys.platform != "darwin" or "SCENEWORKS_METAL_EXECUTION_LOCK_FD" not in os.environ:
+        return ()
+    import importlib.util
+    source = Path(__file__).resolve().parent / "ci/metal_execution_fds.py"
+    name = "sceneworks_metal_execution_fds"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, source)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module.inherited_metal_fds()
+
+
 
 class SystemClock:
     """The production monotonic source: real elapsed time and real waits.
@@ -368,7 +383,7 @@ def sentinel_main(
             raise RuntimeError(f"sentinel retained live descendants: {survivors}")
 
     control = socket.socket(fileno=control_fd)
-    anchor = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--anchor"])
+    anchor = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--anchor"], pass_fds=inherited_metal_fds())
     child = None
     try:
         control.sendall(f"R {anchor.pid}\n".encode())
@@ -379,7 +394,7 @@ def sentinel_main(
             if attestation_path is not None:
                 environment["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"] = attestation_path
             child = subprocess.Popen(
-                command, preexec_fn=restore_child_signals, env=environment,
+                command, preexec_fn=restore_child_signals, env=environment, pass_fds=inherited_metal_fds(),
             )
     except BaseException:
         cleanup_descendants()
@@ -585,7 +600,7 @@ class OwnedGroup:
         try:
             self.child = subprocess.Popen(
                 sentinel, start_new_session=True, preexec_fn=unblock_monitor_signals,
-                pass_fds=(child_control.fileno(),),
+                pass_fds=(child_control.fileno(),) + inherited_metal_fds(),
             )
         except BaseException:
             parent_control.close()

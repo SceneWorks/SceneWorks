@@ -21,6 +21,7 @@
 *.csv           text diff
 *.Dockerfile    text diff
 *.dockerfile    text diff
+*.dict          text diff
 *.env           text diff
 *.example       text diff
 *.gitattributes text diff
@@ -47,6 +48,7 @@
 *.mjs           text diff
 *.mts           text diff
 *.orig          text diff
+*.patch         text diff
 *.plist         text diff
 *.ps1           text diff
 *.py            text diff
@@ -55,6 +57,7 @@
 *.sh            text diff
 *.sha256        text diff
 *.snap          text diff
+*.spdx          text diff
 *.sql           text diff
 *.svelte        text diff
 *.svg           text diff
@@ -80,6 +83,11 @@ COPYRIGHT       text diff
 Dockerfile      text diff
 Justfile        text diff
 LICENSE         text diff
+LICENSE-CMUDICT text diff
+LICENSE-CEPHES  text diff
+LICENSE_APACHE-2.0 text diff
+LICENSE_MIT     text diff
+NOTICE          text diff
 Makefile        text diff
 pre-commit      text diff
 pre-push        text diff
@@ -103,6 +111,9 @@ pre-push        text diff
 *.safetensors binary
 *.bin   binary
 *.pt    binary
+*.pth   binary
+*.npy   binary
+*.npz   binary
 *.ckpt  binary
 *.gguf  binary
 *.onnx  binary

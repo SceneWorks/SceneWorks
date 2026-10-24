@@ -56,10 +56,9 @@
 # environment for the SDXL family" and the `SCENEWORKS_PULID_WEIGHTS` block list the exact file
 # names each directory must hold.
 #
-# THE SCARCE RESOURCE IS THE GPU, NOT THE RUNNER. Each job takes a job-level `concurrency` group
-# keyed on (backend, runner) with `cancel-in-progress: false`, so two campaigns can never share one
-# box's GPU: the second dispatch queues behind the first rather than fighting it for unified memory
-# (MLX) or VRAM (CUDA).
+# Ready requests keep distinct per-run keys rather than evicting an older pending request.
+# Actual shared-host exclusion is the canonical Mac flock or exact Windows CUDA UUID lease,
+# not Actions concurrency or a claim about how many runner services share a physical host.
 name: Memory catalog campaign
 
 on:
@@ -267,7 +266,7 @@ jobs:
     # rather than a free-text label.
     runs-on: ${{ startsWith(inputs.runner_label, 'nax') && fromJSON('["self-hosted","macOS","ARM64","nax"]') || fromJSON('["self-hosted","macOS","ARM64","rw-krea"]') }}
     concurrency:
-      group: memory-catalog-campaign-mlx-${{ startsWith(inputs.runner_label, 'nax') && 'nax' || 'rw-krea' }}
+      group: memory-catalog-campaign-mlx-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
     # The full MLX walk is ~147 anchors of real GPU renders, so this is deliberately a two-day
     # ceiling rather than a measured budget. Each anchor is bounded on its own by the harness
@@ -358,9 +357,11 @@ jobs:
         env:
           CARGO_PROFILE_RELEASE_STRIP: "none"
         run: |
+          set -o pipefail
           build() {
             cargo build --release --locked -p sceneworks-memory-adapter \
-              --features mlx --bin memory-mlx-adapter "$@"
+              --features mlx --bin memory-mlx-adapter --message-format=json-render-diagnostics "$@" \
+              | tee "$RUNNER_TEMP/memory-catalog-build.jsonl"
           }
           if ! build; then
             ls -la "$CARGO_TARGET_DIR"/release/deps/libmlx_macros* \
@@ -370,7 +371,12 @@ jobs:
             build -v 2>&1 | grep -E 'Running .*(mlx_macros|mlx_internal_macros|pmetal_mlx_rs)' | cut -c1-4000 || true
             exit 1
           fi
+          # Adapter target is runner-installation-private (github.workspace sibling); Actions
+          # executes one scheduled job at a time per runner service. It is not a host-wide cache.
           echo "ADAPTER=$CARGO_TARGET_DIR/release/memory-mlx-adapter" >> "$GITHUB_ENV"
+          # Static libmlx/libmlxc are already in the adapter. Bind the selected build's metallib
+          # to a private job path so source-build fallback cannot use ~/.cache/pmetal/lib.
+          node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/memory-catalog-build.jsonl"
 
       - name: Bind the operator-staged identity bundles
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
@@ -418,7 +424,7 @@ jobs:
     # choice here: both Windows runners are processes on ONE box.
     runs-on: [self-hosted, Windows, X64, cuda]
     concurrency:
-      group: memory-catalog-campaign-candle-cuda
+      group: memory-catalog-campaign-candle-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
     # Shorter than the MLX ceiling because the candle plan is a smaller set of anchors, but still a
     # day: same reasoning -- a wedge ceiling, not a measured budget.
@@ -605,14 +611,11 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           if errorlevel 1 exit /b 1
+          rem Workspace target belongs to this runner service, which schedules one job at a time.
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
 
-      # BEFORE the walk, and it FAILS THE JOB rather than warning (sc-22738). Run 34272596969 spent
-      # 51 guarded renders -- about an hour of GPU time -- refusing every peak as contaminated by
-      # pid 6308, an adapter orphaned by the cancelled run before it. See the script's header.
-      - name: Census the profiled GPU
-        run: bash scripts/ci/memory-catalog/gpu-preflight.sh
-
+      # The owned UUID guard below supplies trusted inventory and idle/post-idle checks without
+      # the former name-based process reap or CUDA-ordinal-as-NVML-index ambiguity.
       - name: Bind the operator-staged identity bundles
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
@@ -621,9 +624,12 @@ jobs:
 
       - name: Walk the catalog
         id: walk
+        shell: powershell
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: bash scripts/ci/memory-catalog/run.sh
+        run: |
+          python -I scripts/ci/windows_cuda_execution.py --actor memory-catalog-candle --budget-minutes 1440 --cuda-ordinals 0 -- bash scripts/ci/memory-catalog/run.sh
+          if ($LASTEXITCODE -ne 0) { throw 'owned CUDA catalog walk failed' }
 
       - name: Push whatever landed
         if: ${{ always() }}

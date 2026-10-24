@@ -187,7 +187,7 @@ on:
 # no ordering between them) and queue only once the pool is saturated. Do NOT collapse
 # this back to `group: ...${{ github.ref }}`.
 concurrency:
-  group: macos-mlx-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: macos-mlx-${{ github.event_name == 'workflow_dispatch' && format('manual-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'pull_request' && github.ref || github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # BUILD ARTIFACTS OUTSIDE THE DIRECTORY `actions/checkout` CLEANS.
@@ -600,7 +600,20 @@ jobs:
       # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
       # 26.2, so the NAX kernels compile in and the fast path is actually built.
       - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
-        run: cargo build -p sceneworks-worker
+        run: |
+          set -o pipefail
+          cargo build -p sceneworks-worker --message-format=json-render-diagnostics \
+            | tee "$RUNNER_TEMP/nax-native-build.jsonl"
+          mkdir -p "$RUNNER_TEMP/nax-native-binding"
+          WORK_DIR_NATIVE="$RUNNER_TEMP/nax-native-binding" \
+            node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/nax-native-build.jsonl" --debug-worker
+      - name: Retain selected native kernel binding metadata
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nax-native-binding-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
+          if-no-files-found: warn
       # THE ONLY REASON THIS JOB IS SELF-HOSTED.
       #
       # `nax_guard` exercises a 16-bit fused SDPA against an f32 reference and goes red
@@ -624,7 +637,9 @@ jobs:
       # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
       # would re-dark every non-worker crate.
       - name: NAX 16-bit SDPA guard (needs M5 matrix units)
-        run: cargo test -p sceneworks-worker --test nax_guard
+        run: >-
+          python3.12 -I scripts/ci/metal_execution_lock.py --wait-seconds 2700 --
+          cargo test -p sceneworks-worker --test nax_guard
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -880,7 +895,7 @@ jobs:
       # Release cell of the same rev and deployment target and point the release build at it. With
       # no Release asset published the adapter builds libmlx from source: an EMPTY
       # PMETAL_MLX_PREBUILT_DIR is pmetal-mlx-sys's cmake path, and the source build populates the
-      # metallib cache the empty PMETAL_METALLIB_PATH then falls back to.
+      # selected native output is subsequently bound job-private; no global metallib fallback.
       - name: Fetch prebuilt MLX (Release) for the release-built calibration adapter
         if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference) }}
         run: |
@@ -905,8 +920,14 @@ jobs:
           QWEN_TIER: ${{ inputs.qwen_tier }}
         run: |
           printf '.calibration/\n' >> .git/info/exclude
+          set -o pipefail
           cargo build --release --locked -p sceneworks-memory-adapter \
-            --features mlx --bin memory-mlx-adapter
+            --features mlx --bin memory-mlx-adapter --message-format=json-render-diagnostics \
+            | tee "$RUNNER_TEMP/manual-native-release-build.jsonl"
+          mkdir -p "$SCENEWORKS_MEMORY_CAPTURE_DIR"
+          PMETAL_METALLIB_PATH="$(WORK_DIR_NATIVE="$SCENEWORKS_MEMORY_CAPTURE_DIR" \
+            node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/manual-native-release-build.jsonl" --print-path)"
+          export PMETAL_METALLIB_PATH
           node scripts/memory-calibration-harness.mjs capture \
             --plan config/memory-calibration-plan.json \
             --anchor "qwen_image:${QWEN_TIER}:mlx" \
@@ -935,8 +956,14 @@ jobs:
           SCENEWORKS_Z_IMAGE_REVISION: ${{ inputs.z_image_revision }}
         run: |
           printf '.calibration/\n' >> .git/info/exclude
+          set -o pipefail
           cargo build --release --locked -p sceneworks-memory-adapter \
-            --features mlx --bin memory-mlx-adapter
+            --features mlx --bin memory-mlx-adapter --message-format=json-render-diagnostics \
+            | tee "$RUNNER_TEMP/manual-native-release-build.jsonl"
+          mkdir -p "$RUNNER_TEMP/z-image-native-binding"
+          PMETAL_METALLIB_PATH="$(WORK_DIR_NATIVE="$RUNNER_TEMP/z-image-native-binding" \
+            node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/manual-native-release-build.jsonl" --print-path)"
+          export PMETAL_METALLIB_PATH
           node scripts/memory-calibration-harness.mjs capture \
             --plan config/memory-calibration-plan.json \
             --anchor z_image_turbo:q4:mlx \
@@ -953,4 +980,5 @@ jobs:
           name: sc-16059-mlx-anchor-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/sc-16059-mlx-fresh.json
+            ${{ runner.temp }}/z-image-native-binding/native-metallib-binding.json
           if-no-files-found: error
