@@ -4,10 +4,19 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
+import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer } from './h3-finetune-terminal-api.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
+function peakObservation(bytes, method, phase) {
+  const start = '2026-10-24T00:00:00.000Z', end = '2026-10-24T00:00:00.050Z';
+  const cumulative = ['mlx-allocator-cumulative-high-water', 'os-rss-high-water'].includes(method);
+  return { method, sampled: method.startsWith('sampled-'), intervalMs: method.startsWith('sampled-') ? 50 : null,
+    bounds: [...(phase === 'loading' ? ['full-case-load-inclusive-upper-bound'] : []), ...(method === 'sampled-device-used' ? ['observed-device-global-bound'] : [])],
+    samples: [{ at: start, bytes: bytes / 2 }, { at: end, bytes }], window: { start, end, phase, coverage: phase === 'loading' ? 'full-case-load-inclusive' : 'full-case' },
+    attribution: { pid: process.pid, deviceId: 'synthetic-device', scope: cumulative ? 'process-lifetime' : method === 'sampled-device-used' ? 'device' : 'process', meaning: 'Synthetic CPU observation fixture, not real measurement', includesPriorAllocations: cumulative, includesOtherProcesses: method === 'sampled-device-used' },
+    blindspots: method.startsWith('sampled-') ? ['Transients between samples can be missed'] : cumulative ? ['Counter includes allocations before the observation window'] : [] };
+}
 async function fixture(t, group = 'artifact') {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'h3-terminal-fixture-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -15,7 +24,7 @@ async function fixture(t, group = 'artifact') {
   const hash = await hashFile(input);
   const p = { version: 1, sceneworks: sw, inference: inf, source: SOURCE, output: dir, responsibleTask: 'sc-26691', nextAuthorizedAction: 'Coordinator authorizes exact next Actions case; no automatic retry.', cases: requiredCases().map(c => ({ ...c, command: ['node', 'controlled-fixture.mjs'], timeoutSeconds: 10, evidence: 'evidence.json', loadHostBudgetBytes: 1000, loadDeviceBudgetBytes: 2000, minimumControlDelta: 0.1, controlStream: 'video', referenceRevision: 'c'.repeat(40), referenceCommand: ['node', 'controlled-reference.mjs'], referenceOutput: 'reference.json', tolerance: { atol: 0.001, rtol: 0.001 }, inputs: [{ path: input, sha256: hash, role: 'checkpoint', artifact: c.artifact }, { path: input, sha256: hash, role: 'reference' }] })) };
   const c = p.cases.find(c => c.group === group);
-  const e = { status: 'executed', sceneworks: sw, inference: inf, caseId: c.id, backend: c.backend, source: SOURCE, artifact: c.artifact, hardware: { device: 'synthetic CPU fixture only', driver: 'fixture' }, runtimeIdentity: { checkpointSha256: hash, planId: 'synthetic-plan', semanticDigest: hash, topology: 'fixture', quantization: 'fixture', components: [], adapters: [], operation: 'fixture', samplingPolicy: { steps: 2, schedulerShift: null }, seed: 42 }, metrics: { hostPeakBytes: 100, devicePeakBytes: 200, loadHostPeakBytes: 90, loadDevicePeakBytes: 180, sampleIntervalMs: 50, hostMethod: 'sampled-rss', deviceMethod: 'native-allocated-high-water' }, files: ['trace.json'], av: 'synthetic-av.bin', control: { intervention: 'replace conditioning', checkpointSha256: hash, seed: 42, av: 'control-av.bin' }, reference: { revision: c.referenceRevision, sha256: hash }, numeric: { candidate: 'candidate.json', reference: 'reference.json' } };
+  const e = { status: 'executed', sceneworks: sw, inference: inf, caseId: c.id, backend: c.backend, source: SOURCE, artifact: c.artifact, hardware: { device: 'synthetic CPU fixture only', driver: 'fixture' }, runtimeIdentity: { checkpointSha256: hash, planId: 'synthetic-plan', semanticDigest: hash, topology: 'fixture', quantization: 'fixture', components: [], adapters: [], operation: 'fixture', samplingPolicy: { steps: 2, schedulerShift: null }, seed: 42 }, metrics: { hostPeakBytes: 100, devicePeakBytes: 200, loadHostPeakBytes: 90, loadDevicePeakBytes: 180, observations: { host: peakObservation(100, 'sampled-process-rss', 'case'), device: peakObservation(200, 'sampled-native-allocated', 'case'), loadHost: peakObservation(90, 'sampled-process-rss', 'loading'), loadDevice: peakObservation(180, 'sampled-native-allocated', 'loading') } }, files: ['trace.json'], av: 'synthetic-av.bin', control: { intervention: 'replace conditioning', checkpointSha256: hash, seed: 42, av: 'control-av.bin' }, reference: { revision: c.referenceRevision, sha256: hash }, numeric: { candidate: 'candidate.json', reference: 'reference.json' } };
   e.testInputSha256 = hash;
   e.completedJob = { id: 'synthetic-job', status: 'completed', providerId: 'synthetic-native-provider', output: e.av };
   e.loadEvent = { event: 'h3_import_prepared_load', jobId: e.completedJob.id, provider: e.completedJob.providerId, backend: c.backend, native_backend: c.backend, seal_validated: true, cache_state: 'Cold', identity: JSON.stringify({ checkpointId: 'synthetic-checkpoint', planId: e.runtimeIdentity.planId, semanticDigest: hash, assembly: {}, sourceFiles: [{ path: input, sha256: hash }] }), prepared_sources: JSON.stringify([{ path: input, sha256: hash }]), operation: e.runtimeIdentity.operation, seed: 42, steps: 'Some(2)', scheduler_shift: 'None' };
@@ -65,9 +74,9 @@ for (const [name, mutate] of [
   ['wrong output binding', e => e.completedJob.output = 'unrelated-av.bin'],
   ['missing AV', e => delete e.av],
   ['missing metrics', e => delete e.metrics],
-  ['residency deltas mislabeled as peaks', e => e.metrics.deviceMethod = 'pre-post-residency-delta'],
+  ['residency deltas mislabeled as peaks', e => e.metrics.observations.device.method = 'pre-post-residency-delta'],
   ['missing load peak', e => delete e.metrics.loadDevicePeakBytes],
-  ['loading budget exceeded', e => e.metrics.loadHostPeakBytes = 1001],
+  ['loading budget exceeded', e => { e.metrics.loadHostPeakBytes = 1001; e.metrics.observations.loadHost.samples[1].bytes = 1001; }],
   ['missing runtime component hash', e => e.runtimeIdentity.components = [{ sha256: 'e'.repeat(64) }]],
   ['not actually executed', e => e.status = 'planned'],
   ['missing hardware', e => e.hardware = {}],
@@ -152,6 +161,34 @@ test('delivery records reject old CI, wrong main pin and unresolved limitations'
   validateDelivery(p);
   for (const mutate of [d => d.requiredCI[0].headSha = 'f'.repeat(40), d => d.sceneworksMain.inferencePin = sw, d => d.limitations.push('Missing CUDA AV')]) {
     const copy = structuredClone(p); mutate(copy.delivery); assert.throws(() => validateDelivery(copy));
+  }
+});
+test('honest sampled CUDA process/device-used peaks do not require native allocator highwater', async t => {
+  const f = await fixture(t);
+  for (const method of ['sampled-process-cuda-used', 'sampled-device-used']) {
+    f.e.metrics.observations.device = peakObservation(200, method, 'case');
+    f.e.metrics.observations.loadDevice = peakObservation(180, method, 'loading');
+    validatePeakMetrics(f.e.metrics, { ...f.c, backend: 'cuda' });
+  }
+});
+test('MLX cumulative allocator highwater is accepted honestly as process-global, not phase-local', async t => {
+  const f = await fixture(t);
+  f.e.metrics.observations.device = peakObservation(200, 'mlx-allocator-cumulative-high-water', 'case');
+  f.e.metrics.observations.loadDevice = peakObservation(180, 'mlx-allocator-cumulative-high-water', 'loading');
+  validatePeakMetrics(f.e.metrics, f.c);
+  f.e.metrics.observations.loadDevice.attribution.includesPriorAllocations = false;
+  assert.throws(() => validatePeakMetrics(f.e.metrics, f.c), /not window-local/);
+});
+test('sampled peak receipts reject missing cadence/attribution/blindspots, invented maxima and acquisition-only windows', async t => {
+  const f = await fixture(t);
+  for (const mutate of [
+    o => delete o.intervalMs, o => o.attribution = {}, o => o.blindspots = [], o => o.bounds = [],
+    o => o.samples = [], o => o.samples[1].bytes = 201,
+    o => o.window.coverage = 'source-acquisition-through-provider-handle',
+    o => o.samples[1].at = '2026-10-24T00:00:01Z',
+  ]) {
+    const metrics = structuredClone(f.e.metrics); mutate(metrics.observations.loadDevice);
+    assert.throws(() => validatePeakMetrics(metrics, f.c));
   }
 });
 test('newly prepared native derivatives are verified by bytes without invented pre-run hashes', async t => {

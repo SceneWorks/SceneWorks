@@ -157,6 +157,42 @@ const contained = (base, name) => {
   assert.ok(rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel), 'evidence path escapes case directory');
   return p;
 };
+export function validatePeakMetrics(metrics, c) {
+  const hostMethods = ['sampled-process-rss', 'os-rss-high-water'];
+  const deviceMethods = ['sampled-process-cuda-used', 'sampled-device-used', 'sampled-native-allocated', 'native-allocated-high-water', 'mlx-allocator-cumulative-high-water'];
+  for (const [name, bytesKey] of [['host', 'hostPeakBytes'], ['device', 'devicePeakBytes'], ['loadHost', 'loadHostPeakBytes'], ['loadDevice', 'loadDevicePeakBytes']]) {
+    positive(metrics?.[bytesKey]);
+    const o = metrics.observations?.[name], device = name.toLowerCase().includes('device');
+    assert.ok((device ? deviceMethods : hostMethods).includes(o?.method), 'honest peak observation method required');
+    assert.equal(o.sampled, o.method.startsWith('sampled-'));
+    if (o.method === 'sampled-process-cuda-used') assert.equal(c.backend, 'cuda');
+    if (o.method === 'mlx-allocator-cumulative-high-water') assert.equal(c.backend, 'mlx');
+    const start = Date.parse(o.window?.start), end = Date.parse(o.window?.end);
+    assert.ok(Number.isFinite(start) && Number.isFinite(end) && end >= start, 'observed peak window required');
+    assert.equal(o.window.phase, name.startsWith('load') ? 'loading' : 'case');
+    assert.ok((name.startsWith('load') ? ['full-case-load-inclusive', 'native-loading-windows'] : ['full-case']).includes(o.window.coverage), 'source acquisition alone does not cover deferred native loading');
+    if (o.window.coverage === 'full-case-load-inclusive') assert.ok(o.bounds?.includes('full-case-load-inclusive-upper-bound'), 'whole-case bound is not an exact loading-phase peak');
+    assert.ok(o.attribution?.scope && o.attribution?.meaning, 'peak attribution and exact meaning required');
+    if (device) assert.ok(o.attribution.deviceId, 'device attribution required');
+    if (o.method === 'sampled-device-used') {
+      assert.equal(o.attribution.scope, 'device'); assert.equal(o.attribution.includesOtherProcesses, true);
+      assert.ok(o.bounds?.includes('observed-device-global-bound'), 'device-global bound is not model/process allocation evidence');
+    } else assert.ok(Number.isSafeInteger(o.attribution.pid) && o.attribution.pid > 0, 'process attribution required');
+    assert.ok(Array.isArray(o.blindspots) && o.blindspots.every(v => typeof v === 'string' && v.length > 0));
+    assert.ok(Array.isArray(o.samples) && o.samples.length > 0, 'actual peak observations required');
+    if (o.sampled) { positive(o.intervalMs); assert.ok(o.samples.length >= 2 && o.blindspots.length > 0, 'sampled peaks must disclose sampling blindspots'); }
+    if (o.method === 'mlx-allocator-cumulative-high-water' || o.method === 'os-rss-high-water') {
+      assert.equal(o.attribution.scope, 'process-lifetime');
+      assert.equal(o.attribution.includesPriorAllocations, true, 'cumulative highwater is not window-local');
+    }
+    for (const sample of o.samples) {
+      const at = Date.parse(sample.at);
+      assert.ok(at >= start && at <= end && Number.isFinite(sample.bytes) && sample.bytes >= 0, 'sample outside observation window or invalid bytes');
+    }
+    assert.equal(o.samples.reduce((peak, sample) => Math.max(peak, sample.bytes), 0), metrics[bytesKey], 'peak differs from retained observations');
+  }
+  assert.ok(metrics.loadHostPeakBytes <= c.loadHostBudgetBytes && metrics.loadDevicePeakBytes <= c.loadDeviceBudgetBytes, 'loading exceeds declared budgets');
+}
 export function normalizeLoadEvent(raw) {
   const fields = raw?.fields ?? raw;
   assert.equal(fields?.event, 'h3_import_prepared_load');
@@ -209,12 +245,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       assert.ok(declared || (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)), 'undeclared prepared source outside task state');
       assert.equal(await hashFile(input.path), input.sha256, 'prepared source content changed');
     }
-    positive(e.metrics?.hostPeakBytes); positive(e.metrics?.devicePeakBytes);
-    positive(e.metrics?.loadHostPeakBytes); positive(e.metrics?.loadDevicePeakBytes);
-    if (e.metrics.hostMethod?.startsWith('sampled-') || e.metrics.deviceMethod?.startsWith('sampled-')) positive(e.metrics.sampleIntervalMs);
-    assert.ok(['sampled-rss', 'os-rss-high-water'].includes(e.metrics.hostMethod), 'honest host metric method required');
-    assert.ok(['sampled-native-allocated', 'native-allocated-high-water'].includes(e.metrics.deviceMethod), 'honest native metric method required');
-    assert.ok(e.metrics.loadHostPeakBytes <= c.loadHostBudgetBytes && e.metrics.loadDevicePeakBytes <= c.loadDeviceBudgetBytes, 'loading exceeds declared budgets');
+    validatePeakMetrics(e.metrics, c);
   } else assert.ok(c.inputs.some(i => i.sha256 === e.testInputSha256), 'executed test input identity required');
   const files = [];
   for (const name of e.files ?? []) { const f = contained(dir, name); files.push({ path: name, sha256: await hashFile(f) }); }
