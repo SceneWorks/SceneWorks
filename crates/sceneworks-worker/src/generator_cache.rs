@@ -1378,6 +1378,7 @@ where
     .await
 }
 
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 #[allow(clippy::too_many_arguments)]
 async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
