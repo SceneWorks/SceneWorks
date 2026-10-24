@@ -5696,12 +5696,14 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
     contract.asset_facts.overlay_bytes = GIB / 4;
     let projection = |base: &str, w4a8: bool, rows| NativeProjection {
         base: base.into(),
+        descriptor_bytes: 0,
         input: 1024,
         output: 2048,
         rotation_group: 256,
         activation_width: if w4a8 { 2 } else { activation_width },
         w4a8,
         bias_width: Some(4),
+        bias_dtype: Some(gen_core::weightsmeta::Dtype::F32),
         rows,
     };
     contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
@@ -5711,9 +5713,11 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
         decoder_workspace: None,
         native_quant: Some(NativeAllocationFacts {
             conditioning: None,
+            conditioning_stream: None,
             conditioning_resident_bytes: GIB,
             conditioning_load_bytes: GIB / 2,
             video_decode_resident_bytes: GIB,
+            video_decode_load_bytes: 0,
             audio_decode_resident_bytes: GIB / 2,
             audio_decode_load_bytes: GIB / 4,
             default_evaluations: 50,
@@ -5728,6 +5732,8 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
                 NativeTaskAllocation {
                     reference_task: false,
                     patch_size: [1, 2, 2],
+                    window: None,
+                    constructor_bytes: 0,
                     resident_bytes: 8 * GIB,
                     evicted_bytes: 6 * GIB,
                     table_bytes_per_timestep: GIB / 64,
@@ -5740,6 +5746,8 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
                 NativeTaskAllocation {
                     reference_task: true,
                     patch_size: [1, 2, 2],
+                    window: None,
+                    constructor_bytes: 0,
                     resident_bytes: 10 * GIB,
                     evicted_bytes: 0,
                     table_bytes_per_timestep: 0,
@@ -5997,6 +6005,121 @@ fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() 
     }
 }
 
+#[test]
+fn native_quant_windowed_dit_and_conditioner_reach_rung_four_without_full_component_floor() {
+    use gen_core::h3_memory::{window::WindowAllocation, NativeProjection, RowDomain};
+    let mut contract = native_quant_contract(VideoLane::Mlx, 2);
+    let window_projection = |base: &str, rows| NativeProjection {
+        base: base.into(),
+        descriptor_bytes: 0,
+        input: 1024,
+        output: 2048,
+        rotation_group: 256,
+        activation_width: 2,
+        w4a8: false,
+        bias_width: Some(4),
+        bias_dtype: Some(gen_core::weightsmeta::Dtype::F32),
+        rows,
+    };
+    let projections = vec![
+        window_projection("token_refiner.attn.to_q", RowDomain::Conditioning),
+        window_projection("transformer_blocks.0.attn.to_q", RowDomain::Packed),
+        window_projection("transformer_blocks.1.attn.to_q", RowDomain::Packed),
+    ];
+    let inventory = vec![
+        ("token_refiner.attn.to_q.weight".into(), GIB),
+        ("transformer_blocks.0.attn.to_q.weight".into(), 4 * GIB),
+        ("transformer_blocks.1.attn.to_q.weight".into(), 4 * GIB),
+    ];
+    let plan = WindowAllocation::from_resident_tensors(&inventory, &projections, 0, true).unwrap();
+    let native = contract
+        .phase_facts
+        .as_mut()
+        .unwrap()
+        .native_quant
+        .as_mut()
+        .unwrap();
+    let mut task = native.tasks[0].clone();
+    task.resident_bytes = 9 * GIB + 4 * 256 * 256;
+    task.evicted_bytes = 0;
+    task.table_bytes_per_timestep = 0;
+    task.projections = projections;
+    task.window = Some(plan);
+    native.tasks = vec![task];
+    native.conditioning_stream = Some(gen_core::StreamedWeightFacts {
+        resident_bytes: 2 * GIB,
+        stacks: vec![vec![2 * GIB; 7]],
+    });
+    contract.asset_facts.transformer_bytes = native.tasks[0].resident_bytes;
+    contract.asset_facts.conditioning_bytes = 16 * GIB;
+    contract.asset_facts.decoder_bytes = GIB;
+    contract.asset_facts.base_bytes = contract.asset_facts.transformer_bytes + 17 * GIB;
+    contract.asset_facts.overlay_bytes = 0;
+    contract.lifecycle.transformer_window_materialization = true;
+    let cap = contract
+        .strategies
+        .iter_mut()
+        .find(|cap| cap.strategy == MemoryStrategy::BoundedTransformerResidency)
+        .unwrap();
+    cap.support = MemoryStrategySupport::Implemented;
+    cap.parameters.transformer_window_sizes = vec![1];
+    cap.parameters.transformer_window_components = vec![gen_core::TransformerComponent::Both];
+    contract = with_load_shape(contract, LoadShape::DeferredMaterialization);
+    assert!(
+        contract.conformance_errors().is_empty(),
+        "{:?}",
+        contract.conformance_errors()
+    );
+    let request = native_quant_request(&[]);
+    let geometry = geometry(124, VideoGeometryRole::Requested);
+    let mut selector = native_quant_selector(&contract, request, VideoLane::Mlx);
+    selector.budget = budget(12.0);
+    let verdict = selector.select(geometry);
+    assert!(matches!(verdict, VideoRungSelection::Selected { rung: StrategyRung::BoundedTransformerResidency, .. }), "actual root/current-window and TE inventory must fit without charging full components: {verdict:?}");
+    let selected = &selector.selections[0];
+    assert_eq!(
+        selected.selection.parameters.transformer_window_size,
+        Some(1)
+    );
+    assert_eq!(
+        selected.selection.parameters.window_component(),
+        gen_core::TransformerComponent::Both
+    );
+    let native = contract
+        .phase_facts
+        .as_ref()
+        .unwrap()
+        .native_quant
+        .as_ref()
+        .unwrap();
+    let rows = request.rows_at(native, geometry).unwrap();
+    let weights = video_floor_weights_bytes(
+        &selector,
+        geometry,
+        selected.selection,
+        &contract.engaged_composition(selected.selection.strategy),
+    )
+    .unwrap();
+    let expected_weights = native
+        .resident_peak_bytes_windowed(rows, Some(1))
+        .unwrap()
+        .max(4 * GIB)
+        .max(GIB);
+    assert_eq!(
+        weights, expected_weights,
+        "ordinary raw floor consumes correlated native and TE residency without scratch"
+    );
+    let expected = weights
+        .saturating_add(GIB)
+        .max(
+            native
+                .precompute_peak_bytes_windowed(rows, Some(1))
+                .unwrap(),
+        )
+        .max(native.denoise_peak_bytes_windowed(rows, Some(1)).unwrap());
+    assert_eq!(selected.predicted_peak_bytes, expected);
+}
+
 fn native_quant_with_conditioning_contract(lane: VideoLane) -> MemoryProviderContract {
     let mut contract = native_quant_contract(lane, 2);
     let native = contract
@@ -6190,6 +6313,27 @@ fn native_quant_constructor_peaks_are_not_summed_with_forward_workspace() {
         .unwrap();
         assert_eq!(actual.conditioning_bytes, constructor_conditioning);
         assert_eq!(actual.decode_bytes, constructor_decode);
+        let video_constructor = constructor_decode + GIB;
+        contract
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap()
+            .video_decode_load_bytes = video_constructor;
+        let video = native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            zero,
+        )
+        .unwrap();
+        assert_eq!(
+            video.decode_bytes, video_constructor,
+            "video cast constructors are a separate maximum, not forward co-residency"
+        );
     }
 }
 

@@ -1458,7 +1458,7 @@ impl PhasePeaks {
 /// compare them, never sum them. No host RSS/device sum and no second policy allowance here.
 fn native_quant_phase_floor(
     contract: &MemoryProviderContract,
-    _selection: &MemorySelection,
+    selection: &MemorySelection,
     request: Option<NativeQuantRequest<'_>>,
     geometry: VideoAdmissionGeometry,
     mut ordinary: PhasePeaks,
@@ -1475,20 +1475,8 @@ fn native_quant_phase_floor(
             "native H3 allocation estimate requires the resolved request carrier".into(),
         )
     })?;
-    let shape = gen_core::veda::workspace::Request {
-        width: geometry.width,
-        height: geometry.height,
-        frames: geometry.estimate_frames(),
-        count: geometry.batch,
-        ..request.shape
-    };
-    let rows = native.request_rows(
-        shape,
-        request
-            .evaluations
-            .map(|evaluations| evaluations as usize)
-            .unwrap_or(native.default_evaluations),
-    )?;
+    let shape = request.shape_at(geometry);
+    let rows = request.rows_at(native, geometry)?;
     let facts = contract.asset_facts;
     // H3's native pipeline unconditionally releases the conditioner and reference VAEs before
     // loading the DiT, even on Resident (PreserveLoadDefaults). Do not invent TE/VAE co-residency
@@ -1498,9 +1486,19 @@ fn native_quant_phase_floor(
         .saturating_sub(facts.transformer_bytes)
         .saturating_sub(facts.conditioning_bytes)
         .saturating_sub(facts.decoder_bytes);
+    let window = if contract
+        .engages_selection(selection, MemoryStrategy::BoundedTransformerResidency)
+        && selection.parameters.window_component().includes_dit()
+    {
+        selection.parameters.transformer_window_size
+    } else {
+        None
+    };
+    // The source-owned window plan correlates root/refiner, current window, shared native
+    // storage and retained tables. A full-component native floor would erase a valid rung 4.
     let native_denoise = native
-        .precompute_peak_bytes(rows)
-        .max(native.denoise_peak_bytes(rows))
+        .precompute_peak_bytes_windowed(rows, window)?
+        .max(native.denoise_peak_bytes_windowed(rows, window)?)
         .saturating_add(unclassified)
         .saturating_add(facts.overlay_bytes);
     ordinary.denoise_bytes = ordinary.denoise_bytes.max(native_denoise);
@@ -1524,6 +1522,7 @@ fn native_quant_phase_floor(
             native
                 .video_decode_resident_bytes
                 .saturating_add(workspace.video_decode_bytes)
+                .max(native.video_decode_load_bytes)
                 .max(
                     native
                         .audio_decode_resident_bytes
@@ -1557,6 +1556,69 @@ fn floor_phase_peaks(
     }
 }
 
+/// Native deferred H3 owns correlated root/window/cache residency, including the selected TE
+/// inventory. Correct the ordinary weights term BEFORE adding its existing activation allowance;
+/// otherwise a legacy full-component floor would erase the valid windowed native prediction.
+fn video_floor_weights_bytes(
+    selector: &LadderVideoSelector<'_>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> gen_core::Result<u64> {
+    let contract = selector.contract;
+    if selector.backend() == MemoryBackend::Mlx
+        && contract.engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency)
+    {
+        if let Some(native) = contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+        {
+            let request = selector.native_quant_request.ok_or_else(|| {
+                gen_core::Error::Unsupported(
+                    "native H3 window estimate requires the resolved request carrier".into(),
+                )
+            })?;
+            let rows = request.rows_at(native, geometry)?;
+            let component = selection.parameters.window_component();
+            let dit_window = component
+                .includes_dit()
+                .then_some(selection.parameters.transformer_window_size)
+                .flatten();
+            let dit = native.resident_peak_bytes_windowed(rows, dit_window)?;
+            let facts = contract.asset_facts;
+            let conditioning = native
+                .conditioning_stream
+                .as_ref()
+                .filter(|_| component.includes_text_encoder())
+                .map_or(facts.conditioning_bytes, |stream| {
+                    stream.peak_bytes(selection.parameters.transformer_window_size)
+                });
+            let encode = if request.shape.conditioning.is_empty() {
+                0
+            } else {
+                native.conditioning_resident_bytes
+            };
+            let unclassified = facts
+                .base_bytes
+                .saturating_sub(facts.conditioning_bytes)
+                .saturating_sub(facts.transformer_bytes)
+                .saturating_sub(facts.decoder_bytes);
+            return Ok(conditioning
+                .max(encode)
+                .max(native.video_decode_resident_bytes)
+                .max(native.audio_decode_resident_bytes)
+                .max(dit.saturating_add(facts.overlay_bytes))
+                .saturating_add(unclassified));
+        }
+    }
+    Ok(if selector.backend() == MemoryBackend::Mlx {
+        crate::mlx_fit_gate::mlx_fallback_weights_bytes(contract, engaged, selection.parameters)
+    } else {
+        crate::mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged)
+    })
+}
+
 /// The historical activation floor, strengthened by the provider's own decode working set when the
 /// selected runtime bundle exposes one. The generic allowance remains a lower bound: a decode-only
 /// profile cannot prove that conditioning or denoise need less activation memory. Conversely, a
@@ -1567,14 +1629,20 @@ fn profiled_floor_phase_peaks(
     selection: MemorySelection,
     engaged: &[MemoryStrategy],
 ) -> (PhasePeaks, Option<&'static str>) {
-    let weights = if selector.backend() == MemoryBackend::Mlx {
-        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
-            selector.contract,
-            engaged,
-            selection.parameters,
-        )
-    } else {
-        crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged)
+    let weights = match video_floor_weights_bytes(selector, geometry, selection, engaged) {
+        Ok(weights) => weights,
+        Err(error) => {
+            *selector.profile_error.borrow_mut() = Some(error.to_string());
+            // Never graded: the selector propagates the provider accounting error as a refusal.
+            return (
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                },
+                None,
+            );
+        }
     };
     let scalar = weights.saturating_add(selector.headroom_bytes);
     let generic = PhasePeaks {
@@ -2096,20 +2164,19 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // Deriving it as `peak - counted_weights` gets both shapes right by construction and
             // can never exceed the peak it grades, which a declared constant can (warm path, small
             // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
-            let unmodeled_activation_bytes =
-                matches!(basis, CandidateBasis::EstimateFloor).then(|| {
-                    let weights = if backend == MemoryBackend::Mlx {
-                        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
-                            self.contract,
-                            &engaged,
-                            parameters,
-                        )
-                    } else {
-                        crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
-                    };
-                    let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
-                    predicted_peak_bytes.saturating_sub(counted_weights)
-                });
+            let unmodeled_activation_bytes = if matches!(basis, CandidateBasis::EstimateFloor) {
+                let weights = match video_floor_weights_bytes(self, geometry, selection, &engaged) {
+                    Ok(weights) => weights,
+                    Err(error) => {
+                        *self.profile_error.borrow_mut() = Some(error.to_string());
+                        return VideoRungSelection::Undecidable;
+                    }
+                };
+                let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
+                Some(predicted_peak_bytes.saturating_sub(counted_weights))
+            } else {
+                None
+            };
             if strategy == MemoryStrategy::Resident {
                 self.resident_floors.push((
                     geometry,
@@ -3316,6 +3383,31 @@ fn refusal_is_a_margin_artifact(
 pub(crate) struct NativeQuantRequest<'a> {
     pub(crate) shape: gen_core::veda::workspace::Request<'a>,
     pub(crate) evaluations: Option<u32>,
+}
+
+impl<'a> NativeQuantRequest<'a> {
+    fn shape_at(self, geometry: VideoAdmissionGeometry) -> gen_core::veda::workspace::Request<'a> {
+        gen_core::veda::workspace::Request {
+            width: geometry.width,
+            height: geometry.height,
+            frames: geometry.estimate_frames(),
+            count: geometry.batch,
+            ..self.shape
+        }
+    }
+
+    fn rows_at(
+        self,
+        native: &gen_core::h3_memory::NativeAllocationFacts,
+        geometry: VideoAdmissionGeometry,
+    ) -> gen_core::Result<gen_core::h3_memory::NativeRows> {
+        native.request_rows(
+            self.shape_at(geometry),
+            self.evaluations
+                .map(|n| n as usize)
+                .unwrap_or(native.default_evaluations),
+        )
+    }
 }
 
 /// Everything `admit_video_generation` needs that is not on the generator.
