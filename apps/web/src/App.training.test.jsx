@@ -973,6 +973,72 @@ describe("SceneWorks app shell", () => {
     ]);
   });
 
+  it.each([false, true])("handles caption completion with unsaved edits=%s", async (dirty) => {
+    let completed = false;
+    const original = singleItemDataset();
+    original.items[0].caption.text = "";
+    const generated = { text: "A person wearing a red jacket.", source: "auto", triggerWords: [], mode: "subjectOnly" };
+    const loadDataset = vi.fn(async () => completed
+      ? { ...original, version: 4, items: original.items.map((item) => ({ ...item, caption: generated })) }
+      : original);
+    const updateDataset = vi.fn(async (id, payload) => ({ ...original, ...payload, id, version: 5 }));
+    const refreshDatasets = vi.fn(async () => []);
+    const context = (jobs) => withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+      datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+      jobs,
+      loadDataset,
+      updateDataset,
+      onRefreshDatasets: refreshDatasets,
+    });
+    root = createRoot(container);
+    await act(async () => root.render(context([])));
+    await openPortraitSet();
+    if (dirty) await changeField(field(container, "Dataset name"), "Renamed portraits");
+
+    completed = true;
+    const jobs = [{
+      id: "caption-completed", type: "training_caption", status: "completed", projectId: "project-a",
+      payload: { datasetId: "dataset-a" }, result: { captionedItemCount: 1 },
+    }];
+    await act(async () => root.render(context(jobs)));
+    await settle();
+
+    if (dirty) {
+      expect(field(container, "Dataset name").value).toBe("Renamed portraits");
+      expect(loadDataset).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        [...container.querySelectorAll("button")].find((button) => button.textContent === "Save dataset").click();
+      });
+      await settle();
+      expect(updateDataset).toHaveBeenCalledWith("dataset-a", expect.objectContaining({
+        name: "Renamed portraits", preserveCaptionItemIds: ["item_0001"],
+      }));
+    } else {
+      expect(container.querySelector(".training-caption-card-text").value).toBe(generated.text);
+      expect(container.textContent).toContain("Captioning completed for 1 image.");
+      expect(refreshDatasets).toHaveBeenCalledTimes(1);
+      expect(loadDataset).toHaveBeenCalledTimes(2);
+    }
+    const refreshCount = refreshDatasets.mock.calls.length;
+    expect(refreshCount).toBeGreaterThan(0);
+    await act(async () => root.render(context([...jobs])));
+    await settle();
+    expect(updateDataset).toHaveBeenCalledTimes(dirty ? 1 : 0);
+    if (!dirty) {
+      expect(refreshDatasets).toHaveBeenCalledTimes(refreshCount);
+      // An older-created job completing later must not be hidden by the handled job at index 0.
+      await act(async () => root.render(context([
+        ...jobs,
+        { ...jobs[0], id: "older-caption-completed-later" },
+      ])));
+      await settle();
+      expect(refreshDatasets).toHaveBeenCalledTimes(2);
+      expect(loadDataset).toHaveBeenCalledTimes(3);
+    }
+  });
+
   it("queues a caption job for all images via the caption dialog (sc-2025)", async () => {
     const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
     const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));

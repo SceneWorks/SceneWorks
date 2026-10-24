@@ -14,7 +14,7 @@ pub(crate) async fn list_jobs(
         let jobs = store.list_jobs(
             query.project_id.as_deref(),
             query.status.as_deref(),
-            query.limit.unwrap_or(100),
+            query.limit.unwrap_or(MAX_LISTED_JOBS),
         );
         Ok((sweep, jobs))
     })
