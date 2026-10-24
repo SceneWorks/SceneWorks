@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { auditLedger, initializeLedger, planHash, reserveInvocation } from './flux3-image-klein-terminal-budget.mjs';
-import { assertFinishedPng, executeRetainedReplayPrefix, objectHash, retainedReplayBody, RETAINED_REPLAY_FIRST, RETAINED_REPLAY_NEXT, sha256, validateReplayPrefixBaseline } from './flux3-image-klein-terminal-driver.mjs';
+import { assertFinishedPng, executeRetainedReplayPrefix, objectHash, replayComparison, retainedReplayBody, RETAINED_REPLAY_FIRST, RETAINED_REPLAY_NEXT, sha256, validateReplayPrefixBaseline } from './flux3-image-klein-terminal-driver.mjs';
 import { selectProductInvocation } from './flux3-image-klein-terminal-session.mjs';
 import { makeReplayBaselineFixture, prepareReplayRequestFixture } from './lib/flux3-replay-prefix-fixtures.mjs';
 
@@ -287,4 +287,14 @@ test('CPU historical GPU UUID cannot be rebound to destination when cross-device
   const baseline = await validate(f);
   assert.equal(baseline.oldDevice.physicalGpuId, '1');
   assert.deepEqual(baseline.deviceTransition, f.authorization.deviceTransition);
+});
+
+test('comparison label distinguishes same-physical-device from cross-device without binary or source claims', () => {
+  const previousDevice = {physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'};
+  const same = replayComparison({previousDevice,nextDevice:structuredClone(previousDevice),previousSourceSha:'a'.repeat(40),nextSourceSha:'b'.repeat(40)});
+  assert.deepEqual(same, {kind:'CROSS_SOURCE_SAME_PHYSICAL_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON',samePhysicalDeviceClaim:true,sameBinaryClaim:false,sameSourceClaim:false});
+  const cross = replayComparison({previousDevice,nextDevice:{physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'}});
+  assert.deepEqual(cross, {kind:'CROSS_SOURCE_CROSS_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON',samePhysicalDeviceClaim:false,sameBinaryClaim:false,sameSourceClaim:false});
+  assert.deepEqual(replayComparison(undefined), {kind:'FRESH_PROCESS_EXACT_OUTPUT_COMPARISON',samePhysicalDeviceClaim:false,sameBinaryClaim:false,sameSourceClaim:false});
+  assert.equal(replayComparison({previousDevice,nextDevice:{...previousDevice,pciBusId:'00000000:21:00.0'}}).samePhysicalDeviceClaim, false, 'a mixed tuple is never a same-physical claim');
 });

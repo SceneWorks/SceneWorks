@@ -401,6 +401,16 @@ export function retainedReplayBody(prefix, projectId, authoredBody) {
   assert.deepEqual(request, { ...prefix.recordedReplayRequest, projectId }, 'retained replay inference parameters changed');
   assert.deepEqual(request, authoredBody); return request;
 }
+/** Exact comparison label/claims for a retained baseline. The same-physical-device claim is derived
+ * only from the two bound fixed device tuples; a source transition is never a driver or binary claim. */
+export function replayComparison(deviceTransition) {
+  if (!deviceTransition) return { kind: 'FRESH_PROCESS_EXACT_OUTPUT_COMPARISON', samePhysicalDeviceClaim: false, sameBinaryClaim: false, sameSourceClaim: false };
+  const { previousDevice, nextDevice } = deviceTransition;
+  const samePhysical = previousDevice.physicalGpuId === nextDevice.physicalGpuId
+    && previousDevice.gpuUuid.toLowerCase() === nextDevice.gpuUuid.toLowerCase()
+    && previousDevice.pciBusId.toLowerCase() === nextDevice.pciBusId.toLowerCase();
+  return { kind: samePhysical ? 'CROSS_SOURCE_SAME_PHYSICAL_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON' : 'CROSS_SOURCE_CROSS_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON', samePhysicalDeviceClaim: samePhysical, sameBinaryClaim: false, sameSourceClaim: false };
+}
 export async function executeRetainedReplayPrefix(session, cell, body, project, report, generate) {
   const prefix = session.replayPrefix;
   assert(cell.caseId === RETAINED_REPLAY_CASE && cell.kind === 'replay' && cell.backend === 'candle' && prefix?.caseId === cell.caseId);
@@ -416,7 +426,8 @@ export async function executeRetainedReplayPrefix(session, cell, body, project, 
     assert.equal(actual.pciBusId?.toLowerCase(), expected.pciBusId.toLowerCase());
     assert.equal(actual.logicalCudaOrdinal, 0);
   }
-  report.replayComparison = { kind: prefix.deviceTransition ? 'CROSS_SOURCE_CROSS_DEVICE_FRESH_PROCESS_EXACT_OUTPUT_COMPARISON' : 'FRESH_PROCESS_EXACT_OUTPUT_COMPARISON', samePhysicalDeviceClaim: false, sameBinaryClaim: false, sameSourceClaim: false, historicalSourceSha: prefix.oldSourceSha, destinationSourceSha: prefix.deviceTransition?.nextSourceSha, historicalDevice: prefix.oldDevice, ...(prefix.deviceTransition ? { approvedDeviceTransition: prefix.deviceTransition, destinationDevice: session.deviceAtLaunch } : {}), exclusiveThroughputClaim: false, historicalMemoryTransferred: false };
+  const comparison = replayComparison(prefix.deviceTransition);
+  report.replayComparison = { ...comparison, historicalSourceSha: prefix.oldSourceSha, destinationSourceSha: prefix.deviceTransition?.nextSourceSha, historicalDevice: prefix.oldDevice, ...(prefix.deviceTransition ? { approvedDeviceTransition: prefix.deviceTransition, destinationDevice: session.deviceAtLaunch } : {}), exclusiveThroughputClaim: false, historicalMemoryTransferred: false };
   report.carriedBaseline = { caseId: prefix.caseId, invocationId: prefix.consumedInvocationId, sourceSha: prefix.oldSourceSha, authorizationSha256: prefix.authorizationSha256, jobId: prefix.oldJobId, pngSha256: prefix.pngSha256, sidecarSha256: prefix.sidecarSha256, firstRequestSha256: prefix.firstRequestSha256, secondRecordedRequestSha256: prefix.secondRecordedRequestSha256, historicalExecutionStatus: 'FAILED', historicalFailureKind: 'GPU_COUNTER_MEASUREMENT_FAILED', semanticAcceptance: 'PENDING', evidenceRole: 'RETAINED_RENDER_BASELINE_NOT_NEW_GENERATION' };
   await generate(request); // Production supplies ONLY runImage; CLI cannot inject a callback.
   assert.equal(report.outputs.length, 1, 'continuation creates only the actual second output');
