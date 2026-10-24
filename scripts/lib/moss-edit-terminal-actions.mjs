@@ -8,6 +8,24 @@ import { deflateSync } from 'node:zlib';
 import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, Api } from './moss-edit-terminal.mjs';
 
 const execFile = promisify(callback);
+export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha) {
+  requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&sourceSha===dispatchSha&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires the exact workflow source SHA and inference-main pin');
+  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind'];
+  requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&required.every(key=>typeof value[key]==='string'&&value[key])&&Object.keys(value).every(key=>[...required,...optional].includes(key)&&typeof value[key]==='string'),'MOSS dispatch JSON has missing, unknown or non-string fields');
+  requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.candidate_id)&&/^[a-f0-9]{64}$/.test(value.bundle_manifest_sha256),'MOSS dispatch candidate or manifest SHA is invalid');
+  requireThat(['upload','execute','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute or verify');
+  const empty=keys=>keys.every(key=>value[key]===undefined||value[key]==='');
+  if(value.phase==='upload') {
+    requireThat(['bundle','review'].includes(value.upload_kind)&&typeof value.upload_path==='string'&&value.upload_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.upload_path)===value.upload_path,'MOSS upload requires a canonical directory inside the owned epic run');
+    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id']),'MOSS upload cannot consume execution or prior artifact IDs');
+  } else {
+    requireThat([value.bundle_run_id,value.bundle_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS execution/verify requires exact bundle IDs');
+    requireThat(empty(['upload_path','upload_kind']),'MOSS execution/verify cannot upload host files');
+    if(value.phase==='verify')requireThat([value.execution_run_id,value.review_artifact_id,value.review_run_id??value.bundle_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS verify requires exact execution run, attempt and review artifact/run IDs');
+    else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id']),'MOSS execute cannot consume prior execution or review evidence');
+  }
+  return Object.fromEntries([...required,...optional].map(key=>[key,value[key]??(key==='execution_run_attempt'?'1':key==='review_run_id'&&value.phase==='verify'?value.bundle_run_id:'')]));
+}
 export const CUDA_UUID = 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe';
 export const CUDA_PCI = '00000000:C1:00.0';
 export const delay = ms => new Promise(done=>setTimeout(done,ms));
@@ -28,7 +46,9 @@ export async function sourceIdentity(config) {
   requireThat(sources.sceneworks.head===config.sourceSha && sources.inference.head===config.inferenceSha,'Actions checkout differs from the exact paired dispatch sources');
   const manifests=await Promise.all(['Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml'].map(path=>readFile(resolve(config.sourceRoot,path),'utf8')));
   validateInferencePins(manifests,await readFile(resolve(config.sourceRoot,'Cargo.lock'),'utf8'),config.inferenceSha);
-  for(const [path,revision] of [[config.sourceRoot,config.sourceSha],[config.inferenceRoot,config.inferenceSha]])await execFile('git',['-C',path,'merge-base','--is-ancestor',revision,'origin/main']);
+  // SceneWorks is the stationary permanent-pin feature candidate: its campaign
+  // must pass before that feature merges to main. Only inference has landed.
+  await execFile('git',['-C',config.inferenceRoot,'merge-base','--is-ancestor',config.inferenceSha,'origin/main']);
   return sources;
 }
 export function childEnvironment(config,token) {

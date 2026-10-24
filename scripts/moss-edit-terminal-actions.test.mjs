@@ -4,10 +4,10 @@ import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng } from './lib/moss-edit-terminal.mjs';
+import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
@@ -129,6 +129,43 @@ test('Actions retains exact paired sources/builds and all phases without a fake 
   for(const label of ['rw-starvector','real-weights','execute-mlx:','execute-cuda:','verify-retained:','artifact-ids:','bundle_manifest_sha256:','if: always()','execution_run_attempt:'])assert.ok(workflow.includes(label),label);
   assert.match(workflow,/needs: execute-mlx/);assert.match(workflow,/CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe/);assert.doesNotMatch(workflow,/continue-on-error|pull_request:|^  push:|lease-helper|owner-token|SCENEWORKS_.*LEASE/i);assert.ok(controller.indexOf('await verifyBuild(config)')<controller.indexOf('const stack=await startStack(config,token);let stopped'));
   const config=runtimeConfig({sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,candidateId:'candidate',backends:{cuda:{hfHome:'/source/cache',port:17957,installAdapter:true,editAdapterFiles:['weights'],packageFiles:[{file:'weights',sha256:'a'.repeat(64)}]}}},{sourceRoot,inferenceRoot:'/inference',root:'/private/run',backend:'cuda',buildRoot:'/builds',bundleRoot:'/bundle'});assert.equal(config.hfHome,resolve('/private/run/hf'));assert.equal(config.packageSource,resolve('/source/cache'));
+});
+test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-ref native phases',async()=>{
+  const execute={candidate_id:'sc-26752-final',bundle_run_id:'123',bundle_artifact_id:'456',bundle_manifest_sha256:'f'.repeat(64),phase:'execute'},validate=value=>validateDispatchEnvelope(JSON.stringify(value),identity.sourceSha,identity.inferenceSha,identity.sourceSha);
+  assert.deepEqual(validate(execute),{...execute,execution_run_id:'',execution_run_attempt:'1',review_artifact_id:'',review_run_id:'',upload_path:'',upload_kind:''});
+  const verify={...execute,phase:'verify',execution_run_id:'789',execution_run_attempt:'2',review_artifact_id:'987',review_run_id:'999'};assert.deepEqual(validate(verify),{...verify,upload_path:'',upload_kind:''});
+  const upload={candidate_id:execute.candidate_id,bundle_manifest_sha256:execute.bundle_manifest_sha256,phase:'upload',upload_kind:'bundle',upload_path:'/Users/michael/.codex/epic-runs/sc-26752/sealed-final-inputs'};
+  assert.equal(validate(upload).bundle_run_id,'');assert.equal(validate({...upload,upload_kind:'review'}).phase,'upload');
+  for(const value of [null,[],{}, {...execute,extra:'unexpected'},{...execute,bundle_run_id:123},{...execute,bundle_artifact_id:'../other'},{...execute,candidate_id:'../other'},{...execute,bundle_manifest_sha256:'wrong'},{...execute,phase:'build'},{...execute,execution_run_id:'789'},{...verify,execution_run_id:''},{...verify,review_artifact_id:''},{...verify,execution_run_attempt:'0'}])assert.throws(()=>validate(value));
+  assert.throws(()=>validateDispatchEnvelope('{',identity.sourceSha,identity.inferenceSha,identity.sourceSha));
+  assert.throws(()=>validateDispatchEnvelope(JSON.stringify(execute),'feature/branch',identity.inferenceSha,identity.sourceSha));
+  assert.throws(()=>validateDispatchEnvelope(JSON.stringify(execute),identity.sourceSha,'main',identity.sourceSha));
+  assert.throws(()=>validateDispatchEnvelope(JSON.stringify(execute),identity.sourceSha,identity.inferenceSha,'0'.repeat(40)));
+  for(const change of [{upload_path:'/Users/michael/.codex/epic-runs/sc-26752/../private'},{upload_path:'/private/foreign'},{upload_kind:'credentials'},{bundle_run_id:'123'},{execution_run_id:'789'}])assert.throws(()=>validate({...upload,...change}));
+  const dispatcher=await readFile(resolve(sourceRoot,'.github/workflows/memory-catalog-campaign.yml'),'utf8'),workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
+  assert.match(dispatcher,/moss-edit-terminal:\s+if:.*inputs\.profile == 'moss-edit-terminal'[\s\S]*?needs: moss-dispatch[\s\S]*?uses: \.\/\.github\/workflows\/moss-edit-terminal\.yml/);
+  assert.match(dispatcher,/validateDispatchEnvelope\(process\.env\.MOSS_DISPATCH,process\.env\.MOSS_SOURCE_SHA,process\.env\.MOSS_INFERENCE_SHA,process\.env\.GITHUB_SHA\)/);
+  for(const backend of ['mlx','candle'])assert.ok(dispatcher.includes(`(inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == '${backend}'`));
+  for(const profile of ['qwen-image-2-1-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights'])assert.ok(dispatcher.includes(`inputs.profile == '${profile}'`));
+  assert.match(workflow,/workflow_call:/);assert.match(workflow,/SCENEWORKS_INFERENCE_READ_TOKEN:\s+required: false/);
+  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,4);
+  assert.match(workflow,/test "\$RUNNER_NAME" = nax-macos/);assert.match(workflow,/run-id: \$\{\{ inputs.review_run_id \|\| inputs.bundle_run_id \}\}/);
+});
+test('first bundle copies only exact fixed inputs, provenance and declared fixtures, then seals every byte',async()=>{
+  const root=await temporary('first-bundle'),input=resolve(root,'original.png'),receipt=resolve(root,'source.json'),numeric=resolve(root,'numeric.json'),fixture=resolve(root,'guard.npy');
+  const pixels=rgbPng(1,1,Buffer.from([10,20,30]));await writeFile(input,pixels);await writeFile(receipt,'actual source receipt');await writeFile(numeric,'actual numerical receipt');await writeFile(fixture,'actual guard fixture');
+  const inputs={provenance:'generated inputs; no camera-photo claim',assets:['B','L','P','G'].map(id=>({id,path:input,sha256:sha(pixels),source_receipt:receipt,receipt_sha256:sha('actual source receipt')})),single_case:{references:['B'],width:768,height:512,prompt:'fixed single prompt'},four_case:{references:['B','L','P','G'],width:512,height:768,prompt:'fixed four prompt',mandatory_preservation:['identity','bottle','lamp','poster'],typography_scope:'exact lettering excluded'},common:{seed:173,steps:30,guidance_scale:4,inference_shift:5}};
+  const campaign={sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,candidateId:identity.candidateId,approvedBy:'fixture',approvalEvidenceSha256:'e'.repeat(64),phase18ReviewSha256:'e'.repeat(64),finalSourceReviewSha256:'e'.repeat(64),cacheTolerance:0.001,numericalCarryForward:{file:'numeric.json',sha256:sha('actual numerical receipt')},guardFixtures:[{file:'guard.npy',sha256:sha('actual guard fixture')}],guardRequests:Object.fromEntries(createPlan(inputs).requiredGuardCases.map(name=>[name,{request:{},expectedStatus:400}]))};
+  await save(resolve(root,'campaign.json'),campaign);await save(resolve(root,'inputs.json'),inputs);const output=resolve(root,'sealed'),inventory=await createBundle(resolve(root,'campaign.json'),resolve(root,'inputs.json'),output);
+  assert.equal((await validateUpload(output,'bundle',inventory.sha256,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId)).inputManifest,'inputs.json');
+  const copied=await json(resolve(output,'inputs.json'));assert.deepEqual(copied.common,inputs.common);assert.deepEqual(copied.four_case,inputs.four_case);assert.equal(copied.provenance,inputs.provenance);
+  for(const item of copied.assets){assert.equal((await fileIdentity(resolve(output,item.path))).sha256,sha(pixels));assert.equal((await fileIdentity(resolve(output,item.source_receipt))).sha256,item.receipt_sha256);}
+  await assert.rejects(()=>createBundle(resolve(root,'campaign.json'),resolve(root,'inputs.json'),output),/EEXIST/);
+  await writeFile(resolve(output,'unexpected'),'not reviewed');await assert.rejects(()=>validateUpload(output,'bundle',inventory.sha256,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId),/files\/bytes/);
+  const reviews=resolve(root,'reviews');await save(resolve(reviews,'external/actual-review.json'),{observer:'root actual observer',verdict:'AWAITING'});const reviewInventory=await inventoryReview(reviews,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId);
+  await validateUpload(reviews,'review',reviewInventory.sha256,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId);
+  await assert.rejects(()=>validateUpload(reviews,'review',reviewInventory.sha256,'0'.repeat(40),campaign.inferenceSha,campaign.candidateId),/source\/candidate/);
+  await writeFile(resolve(reviews,'external/actual-review.json'),'changed verdict');await assert.rejects(()=>validateUpload(reviews,'review',reviewInventory.sha256,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId),/files\/bytes/);
 });
 test('actual PNG workflow inspector evidence preserves original exported bytes and rejects substitutions',async()=>{
   const contract=await json(resolve(sourceRoot,'scripts/fixtures/moss-edit-product-contract-v2.json')),bytes=rgbPng(1,1,Buffer.from([1,2,3]));

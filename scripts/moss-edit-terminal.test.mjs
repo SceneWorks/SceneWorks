@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
-import { mkdtemp, mkdir, writeFile, readFile, cp } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, cp, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { sourceIdentity } from './lib/moss-edit-terminal-actions.mjs';
 
 globalThis.fetch = async () => { throw new Error('LIVE_API_FORBIDDEN_IN_PURE_TESTS'); };
 const contract = await json(fileURLToPath(new URL('./fixtures/moss-edit-product-contract-v2.json',import.meta.url)));
@@ -221,6 +222,31 @@ async function gitFixture(directory,manifest,extraFiles = {}) {
   await writeFile(resolve(directory,'.git','refs','heads','main'),`${head}\n`);await writeFile(resolve(directory,'.git','refs','remotes','origin','main'),`${head}\n`);await writeFile(resolve(directory,'Cargo.toml'),manifest);
   execFileSync('git',['-C',directory,'read-tree','HEAD'],{env:{...process.env,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'}});return head;
 }
+test('Actions accepts a clean stationary SceneWorks feature candidate only with exact pins and inference on main', async () => {
+  const directory=await temporary('actions-source-barrier'),inference=resolve(directory,'inference'),product=resolve(directory,'product');
+  const inferenceHead=await gitFixture(inference,'[package]\nname="fixture-inference"\n');
+  const pinnedProduct=async revision=>{
+    const manifest=`[dependencies]\ninference={git="https://github.com/SceneWorks/inference",rev="${revision}"}\n`;
+    return gitFixture(product,manifest,{'crates/sceneworks-worker/Cargo.toml':manifest,'crates/sceneworks-memory-adapter/Cargo.toml':manifest,'Cargo.lock':`source = "git+https://github.com/SceneWorks/inference?rev=${revision}#${revision}"\n`});
+  };
+  const productMain=await pinnedProduct(inferenceHead);
+  const manifest=await readFile(resolve(product,'Cargo.toml'),'utf8');
+  const sourceSha=await gitFixture(product,manifest,{'crates/sceneworks-worker/Cargo.toml':manifest,'crates/sceneworks-memory-adapter/Cargo.toml':manifest,'Cargo.lock':await readFile(resolve(product,'Cargo.lock'),'utf8'),'terminal-candidate.txt':'stationary feature candidate\n'});
+  await writeFile(resolve(product,'.git/refs/remotes/origin/main'),`${productMain}\n`);
+  assert.throws(()=>execFileSync('git',['-C',product,'merge-base','--is-ancestor',sourceSha,'origin/main']));
+  const config={sourceRoot:product,inferenceRoot:inference,sourceSha,inferenceSha:inferenceHead};
+  assert.deepEqual(await sourceIdentity(config),{sceneworks:treeIdentity(product),inference:treeIdentity(inference)});
+  await assert.rejects(()=>sourceIdentity({...config,sourceSha:productMain}),/exact paired dispatch sources/);
+  await writeFile(resolve(product,'terminal-candidate.txt'),'changed after freeze\n');
+  await assert.rejects(()=>sourceIdentity(config),/must be clean/);
+  await writeFile(resolve(product,'terminal-candidate.txt'),'stationary feature candidate\n');
+  const unmergedInference=await gitFixture(inference,'[package]\nname="unmerged-fixture-inference"\n');
+  await writeFile(resolve(inference,'.git/refs/remotes/origin/main'),`${inferenceHead}\n`);
+  await assert.rejects(()=>sourceIdentity({...config,inferenceSha:unmergedInference}),/manifest pin/);
+  await unlink(resolve(product,'terminal-candidate.txt'));
+  const unmergedProduct=await pinnedProduct(unmergedInference);
+  await assert.rejects(()=>sourceIdentity({...config,sourceSha:unmergedProduct,inferenceSha:unmergedInference}),error=>error.code===1&&error.cmd.includes('merge-base --is-ancestor'));
+});
 test('bounded API-free prepare to actual clean-source freeze writes a valid lock and refuses reuse or tampered metric source', async () => {
   const directory=await temporary('prepare-freeze'),source=resolve(directory,'original.png');await writeFile(source,png([10,20,30]));
   const manifest={...structuredClone(inputs),assets:['B','L','P','G'].map(id=>({id,path:source,sha256:sha(png([10,20,30])),receipt_sha256:'e'.repeat(64)}))};

@@ -6,7 +6,7 @@ import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
+import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
 import { command, sourceIdentity, filesUnder, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
@@ -54,6 +54,40 @@ export async function validateBundle(root,expectedSha,sourceSha,inferenceSha,can
   requireThat(canonical(actual)===canonical(inventory.files),'campaign bundle files/bytes differ from immutable inventory');
   const bundle=await json(resolve(root,'campaign.json'));requireThat(bundle.sourceSha===sourceSha&&bundle.inferenceSha===inferenceSha&&bundle.candidateId===candidateId,'bundle differs from exact paired sources/candidate dispatch');
   return bundle;
+}
+export async function createBundle(campaignPath,inputManifest,out) {
+  const campaign=await json(campaignPath),inputs=await json(inputManifest),base=dirname(resolve(campaignPath));
+  requireThat(/^[a-f0-9]{40}$/.test(campaign.sourceSha)&&/^[a-f0-9]{40}$/.test(campaign.inferenceSha)&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(campaign.candidateId),'bundle needs exact reviewed source/candidate identities');
+  const plan=createPlan(inputs);requireThat(canonical(Object.keys(campaign.guardRequests??{}).sort())===canonical(plan.requiredGuardCases.slice().sort()),'bundle must declare every source-owned refusal case');
+  requireThat(campaign.approvedBy&&[campaign.approvalEvidenceSha256,campaign.phase18ReviewSha256,campaign.finalSourceReviewSha256].every(value=>/^[a-f0-9]{64}$/.test(value??'')),'bundle needs actual approval/review provenance');
+  requireThat(Number.isFinite(campaign.cacheTolerance)&&campaign.cacheTolerance>=0&&campaign.cacheTolerance<=1,'bundle needs its predeclared cache comparison tolerance');
+  await mkdir(out,{mode:0o700});
+  const copy=async(source,file,hash)=>{requireThat((await fileIdentity(source)).sha256===hash,'bundle source bytes differ from declared SHA256');const target=safePath(out,file);await mkdir(dirname(target),{recursive:true,mode:0o700});await cp(source,target,{errorOnExist:true,force:false,dereference:true});await chmod(target,0o600);};
+  for(const item of inputs.assets) {
+    await copy(resolve(dirname(resolve(inputManifest)),item.path),`inputs/${item.id}.png`,item.sha256);item.path=`inputs/${item.id}.png`;
+    if(item.source_receipt){await copy(resolve(dirname(resolve(inputManifest)),item.source_receipt),`inputs/${item.id}.source-receipt.json`,item.receipt_sha256);item.source_receipt=`inputs/${item.id}.source-receipt.json`;}
+  }
+  const copied=new Map();
+  for(const item of [campaign.numericalCarryForward,...(campaign.guardFixtures??[]).flatMap(fixture=>[fixture,fixture.corruptWith].filter(Boolean))]) {
+    requireThat(item?.file&&/^[a-f0-9]{64}$/.test(item.sha256??''),'bundle requires declared numerical/fixture bytes and SHA256');
+    if(copied.has(item.file)){requireThat(copied.get(item.file)===item.sha256,'conflicting fixture SHA256');continue;}
+    await copy(safePath(base,item.file),item.file,item.sha256);copied.set(item.file,item.sha256);
+  }
+  campaign.inputManifest='inputs.json';await save(resolve(out,'inputs.json'),inputs);await save(resolve(out,'campaign.json'),campaign);
+  await save(resolve(out,'bundle-inventory.json'),{files:await filesUnder(out)});
+  const inventory=await fileIdentity(resolve(out,'bundle-inventory.json'));await validateBundle(out,inventory.sha256,campaign.sourceSha,campaign.inferenceSha,campaign.candidateId);return inventory;
+}
+export async function inventoryReview(root,sourceSha,inferenceSha,candidateId) {
+  requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&/^[a-f0-9]{40}$/.test(inferenceSha)&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(candidateId),'review upload needs exact source/candidate identities');
+  const files=await filesUnder(root);requireThat(files.length>0,'review artifact cannot be empty');
+  await save(resolve(root,'review-inventory.json'),{sourceSha,inferenceSha,candidateId,files});return fileIdentity(resolve(root,'review-inventory.json'));
+}
+export async function validateUpload(root,kind,expectedSha,sourceSha,inferenceSha,candidateId) {
+  if(kind==='bundle')return validateBundle(root,expectedSha,sourceSha,inferenceSha,candidateId);
+  requireThat(kind==='review','unknown MOSS upload kind');
+  const file=resolve(root,'review-inventory.json');requireThat((await fileIdentity(file)).sha256===expectedSha,'review inventory differs from dispatch');
+  const inventory=await json(file);requireThat(inventory.sourceSha===sourceSha&&inventory.inferenceSha===inferenceSha&&inventory.candidateId===candidateId,'review upload source/candidate differs');
+  requireThat(canonical(inventory.files)===canonical((await filesUnder(root)).filter(item=>item.file!=='review-inventory.json')),'review upload files/bytes differ from inventory');return inventory;
 }
 export async function arrangeBuilds(root) {
   const entries=await readdir(root,{withFileTypes:true});
@@ -358,6 +392,9 @@ export async function finalize(config) {
 }
 export async function main(args=process.argv.slice(2)) {
   const [phase,...rest]=args;
+  if(phase==='bundle'&&rest.length===3){const result=await createBundle(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
+  if(phase==='inventory-review'&&rest.length===4){const result=await inventoryReview(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
+  if(phase==='validate-upload'&&rest.length===6)return validateUpload(...rest);
   if(phase==='arrange-builds'&&rest.length===1)return arrangeBuilds(rest[0]);
   if(phase==='validate-bundle'&&rest.length===5)return validateBundle(...rest);
   if(phase==='configure-env'&&rest.length===0) {
@@ -365,7 +402,7 @@ export async function main(args=process.argv.slice(2)) {
     return configure(resolve(env.MOSS_BUNDLE,'campaign.json'),env.MOSS_SOURCE,env.MOSS_INFERENCE,env.MOSS_ROOT,env.MOSS_BACKEND,env.MOSS_BUILDS);
   }
   if(phase==='configure'&&rest.length===6)return configure(...rest);
-  requireThat(rest.length===1,'Usage: validate-bundle ROOT SHA SOURCE INFERENCE CANDIDATE | configure BUNDLE SOURCE INFERENCE ROOT BACKEND BUILDS | configure-env | arrange-builds DOWNLOAD_ROOT | build CONFIG | provision-browser CONFIG | execute CONFIG | finalize CONFIG');
+  requireThat(rest.length===1,'Usage: bundle CAMPAIGN INPUT_MANIFEST FRESH_ROOT | inventory-review ROOT SOURCE INFERENCE CANDIDATE | validate-upload ROOT KIND SHA SOURCE INFERENCE CANDIDATE | validate-bundle ROOT SHA SOURCE INFERENCE CANDIDATE | configure BUNDLE SOURCE INFERENCE ROOT BACKEND BUILDS | configure-env | arrange-builds DOWNLOAD_ROOT | build CONFIG | provision-browser CONFIG | execute CONFIG | finalize CONFIG');
   const config=await json(rest[0]);
   if(phase==='build')return buildBackend(config);
   if(phase==='provision-browser')return provisionBrowser(config);

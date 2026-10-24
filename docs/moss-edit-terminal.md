@@ -353,12 +353,87 @@ capacity acceptance. Coordinator owns final source acceptance and campaign.
 
 `.github/workflows/moss-edit-terminal.yml` is manual and final-campaign only.
 Dispatch only after 55/56/57 and the feature code have merged, the integrated
-requirements/source review has finished, inference is on main, and SceneWorks
-main has the permanent inference pin with clean stationary paired sources.
+requirements review and inference source review have finished, inference is on
+main, and the clean stationary SceneWorks feature candidate has the permanent
+inference pin. SceneWorks final source review and its main merge follow the
+accepted campaign and final paired validation.
 `source_sha`, `inference_sha`, and `candidate_id` must match the reviewed input
 artifact. Actions scheduling is sufficient; there is no GPU ownership census,
 lease, cross-repository lock, or agent token. Never dispatch this campaign to
 validate an intermediate implementation change.
+
+Before this new workflow reaches main, use the already registered Memory catalog
+dispatcher at the exact stationary feature commit. Its MOSS profile calls this
+reusable workflow from the same commit and skips both catalog jobs. The dispatcher
+rejects unknown/malformed JSON fields and a `ref` differing from its actual SHA
+before either native backend starts. Keep dispatch inputs in a private JSON file:
+
+```json
+{
+  "profile": "moss-edit-terminal",
+  "ref": "EXACT_SCENEWORKS_SHA40",
+  "inference_sha": "EXACT_INFERENCE_MAIN_SHA40",
+  "moss_terminal": "{\"candidate_id\":\"sc-26752-final\",\"bundle_run_id\":\"RUN_ID\",\"bundle_artifact_id\":\"ARTIFACT_ID\",\"bundle_manifest_sha256\":\"SHA256\",\"phase\":\"execute\"}"
+}
+```
+
+```sh
+gh workflow run memory-catalog-campaign.yml --repo SceneWorks/SceneWorks --ref EXACT_SCENEWORKS_SHA40 --json < /ABSOLUTE/moss-dispatch.json
+```
+
+For retained verification, use the same source/pin/bundle/candidate with
+`phase:"verify"` and the exact `execution_run_id`, `execution_run_attempt`,
+`review_run_id` and `review_artifact_id` inside `moss_terminal`. No main bootstrap
+or catalog measurement run is required for this route.
+
+Create the first input artifact without an earlier artifact or credential copy.
+The prepared corpus is
+`/Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json`; its four
+original PNGs and source receipts retain the generated-source caveat, exact
+prompts, seed173/settings and ordered B,L,P,G roles. Complete the existing
+`campaign.json` contract below against final source, then run:
+
+```sh
+node scripts/moss-edit-terminal-actions.mjs bundle /ABSOLUTE/REVIEWED/campaign.json /Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json /Users/michael/.codex/epic-runs/sc-26752/FRESH-SEALED-BUNDLE
+```
+
+The command copies the exact original PNG/receipt bytes, numerical carry-forward
+and declared guard fixtures, changes only their manifest paths to bundle-relative
+paths, and writes the complete `bundle-inventory.json`. It prints that manifest's
+SHA256. Declared numerical/fixture paths resolve beside `campaign.json`; no model
+packages, caches or credentials are copied. Reusing a destination fails.
+
+Using the same outer `profile`, `ref` and `inference_sha`, set `moss_terminal` to
+this JSON string and dispatch the registered command above:
+
+```json
+{
+  "candidate_id": "sc-26752-final",
+  "bundle_manifest_sha256": "PRINTED_SHA256",
+  "phase": "upload",
+  "upload_kind": "bundle",
+  "upload_path": "/Users/michael/.codex/epic-runs/sc-26752/FRESH-SEALED-BUNDLE"
+}
+```
+
+The upload job requires runner `nax-macos`, the actual preparation Mac carrying
+`rw-starvector`, and reads the exact sealed directory from that same filesystem.
+It verifies all identities/hashes before uploading `moss-bundle-CANDIDATE-RUN-ATTEMPT`.
+Read its real run/artifact IDs and use them for `phase:"execute"`. Upload is CPU
+file preparation; it starts no native build, stack, browser or model.
+
+After execution, the coordinator inspects actual pairs/crops and writes the real
+quality/external review files. Seal that existing review directory separately:
+
+```sh
+node scripts/moss-edit-terminal-actions.mjs inventory-review /Users/michael/.codex/epic-runs/sc-26752/ACTUAL-REVIEWS SOURCE_SHA40 INFERENCE_SHA40 CANDIDATE
+```
+
+Dispatch the same upload phase with `upload_kind:"review"`, its directory and
+printed review inventory SHA. The resulting later run/artifact IDs become
+`review_run_id`/`review_artifact_id` for verify. Inventory/upload do not create a
+verdict; retained verification still requires actual observer evidence for every
+existing obligation.
 
 The workflow runs these concrete phases:
 
@@ -417,6 +492,9 @@ The controller CLI is `scripts/moss-edit-terminal-actions.mjs`:
 
 ```text
 validate-bundle BUNDLE_ROOT INVENTORY_SHA SOURCE_SHA INFERENCE_SHA CANDIDATE_ID
+bundle CAMPAIGN_JSON INPUT_MANIFEST FRESH_BUNDLE_ROOT
+inventory-review REVIEW_ROOT SOURCE_SHA INFERENCE_SHA CANDIDATE_ID
+validate-upload ROOT KIND INVENTORY_SHA SOURCE_SHA INFERENCE_SHA CANDIDATE_ID
 configure BUNDLE_JSON SOURCE_ROOT INFERENCE_ROOT FRESH_ROOT BACKEND BUILD_ROOT
 configure-env
 build RUNTIME_JSON
