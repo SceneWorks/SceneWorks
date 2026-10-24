@@ -13019,9 +13019,14 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .preview-modal {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 12px;
-  width: min(1120px, 96vw);
-  max-height: 94vh;
+  width: min(1120px, calc(100vw - 48px));
+  max-width: 100%;
+  height: min(94vh, calc(100dvh - 48px));
+  /* Reserve the footer's height; only the media row gives up space. */
+  overflow: hidden;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
@@ -13040,9 +13045,12 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-modal-stage {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .preview-modal-stage img,
@@ -13051,11 +13059,17 @@ details[open] > summary.lora-scope-group-heading::before,
   width: 100%;
 }
 
+.preview-modal-stage video {
+  max-height: 100%;
+}
+
 /* Zoom/pan viewport for image previews (sc-8728). The viewport clips the scaled
    image; the inner wrapper carries the translate+scale transform. */
 .preview-zoom-viewport {
   position: relative;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   overflow: hidden;
   touch-action: none;
   cursor: default;
@@ -13078,11 +13092,16 @@ details[open] > summary.lora-scope-group-heading::before,
    pixels. Pan is driven by per-pointermove React state, not a CSS animation, so
    the hint bought no smoothness anyway. */
 .preview-zoom-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
   transform-origin: 0 0;
 }
 
 .preview-zoom-inner img {
   display: block;
+  max-height: 100%;
   -webkit-user-drag: none;
   user-select: none;
 }
@@ -13120,6 +13139,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-nav-button {
   width: 40px;
   height: 64px;
+  min-height: 0;
+  max-height: 100%;
   padding: 0;
   border-radius: var(--r-md);
   background: var(--surface-2);
@@ -13144,10 +13165,18 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-modal-meta {
   display: grid;
   gap: 3px;
-  min-width: min(100%, 280px);
+  flex: 1 1 100%;
+  min-width: 0;
+  /* Very large prompts scroll here, never the footer's action row. */
+  max-height: 20vh;
+  overflow: auto;
 }
 
-.preview-modal-meta strong,
+.preview-modal-meta strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .preview-modal-meta span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -13169,6 +13198,8 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   gap: 12px;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   width: 100%;
   align-items: center;
   justify-content: center;
@@ -13178,8 +13209,10 @@ details[open] > summary.lora-scope-group-heading::before,
   flex: 1 1 0;
   min-width: 0;
   margin: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  height: 100%;
   align-items: center;
   gap: 8px;
 }
@@ -13188,7 +13221,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .preview-compare-pane video {
   width: 100%;
   min-width: 0;
-  max-height: 70vh;
+  max-height: 100%;
+  justify-self: center;
   object-fit: contain;
 }
 
@@ -13223,15 +13257,19 @@ details[open] > summary.lora-scope-group-heading::before,
 /* In compare mode both panes must fit the black fullscreen stage without cropping. */
 .preview-modal.is-fullscreen .preview-compare-pane img,
 .preview-modal.is-fullscreen .preview-compare-pane video {
-  max-height: 92vh;
+  max-height: 100%;
 }
 
 .preview-actions {
   gap: 8px;
   justify-content: flex-end;
+  margin-left: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .preview-actions button {
+  max-width: 100%;
   min-height: 32px;
   padding: 0 12px;
   font-size: 12.5px;
@@ -13296,7 +13334,7 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .preview-modal.is-fullscreen .preview-modal-stage img,
 .preview-modal.is-fullscreen .preview-modal-stage video {
-  max-height: 100vh;
+  max-height: 100%;
 }
 
 /* Auto-fading "Press Esc to exit" hint shown on entering fullscreen. */
