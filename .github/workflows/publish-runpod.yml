@@ -29,7 +29,7 @@ env:
 jobs:
   publish:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -176,6 +176,7 @@ jobs:
           push: false
           load: true
           tags: sceneworks-candle-smoke:ci
+          cache-from: type=gha,scope=runpod-amd64
       - name: Check standalone candle identities and bind writes
         id: smoke_candle_runtime
         timeout-minutes: 5
