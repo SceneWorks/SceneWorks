@@ -1529,3 +1529,320 @@ async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_re
     .await
     .is_err());
 }
+
+async fn moss_consumer_reference_assets(app: axum::Router, project: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (index, (width, height, pixel)) in [(48, 16, 73), (16, 48, 127), (32, 32, 211)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([pixel; 3]),
+        ))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project}/assets"),
+            &format!("slot-{index}.png"),
+            "image/png",
+            png.get_ref(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{asset}");
+        ids.push(asset["id"].as_str().unwrap().to_owned());
+    }
+    ids
+}
+
+#[tokio::test]
+async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_refuses_bad_later_slots(
+) {
+    let _hf = isolate_hf_cache();
+    for candle_required in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        setup(&temp);
+        super::yue2_catalog::seed_snapshot(
+            &temp,
+            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        );
+        let mut settings = test_settings(&temp);
+        settings.candle_required = candle_required;
+        let (app, state) = create_app_with_state(settings).unwrap();
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"MOSS semantic slots"}),
+        )
+        .await;
+        let project_id = project["id"].as_str().unwrap();
+        let ids = moss_consumer_reference_assets(app.clone(), project_id).await;
+        let (_, foreign_project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"Other project"}),
+        )
+        .await;
+        let foreign =
+            moss_consumer_reference_assets(app.clone(), foreign_project["id"].as_str().unwrap())
+                .await;
+        let slots = [&ids[0], &ids[1], &ids[0], &ids[2]];
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for count in 1..=4 {
+                for use_kv_cache in [false, true] {
+                    let references = &slots[..count];
+                    let body = json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"make image 1 blue 日本語","negativePrompt":"blur",
+                        "referenceAssetIds":references,"sourceAssetId":references[0],"referenceAssetId":references[0],
+                        "advanced":{"mossImageEdit":{"reference_max_edge":32,"use_kv_cache":use_kv_cache},"mossImageEditExecutionReport":{"forged":true}}});
+                    let (status, job) =
+                        request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
+                    assert_eq!(status, StatusCode::CREATED, "{model} {count}: {job}");
+                    assert_eq!(job["payload"]["referenceAssetIds"], json!(references));
+                    assert_eq!(
+                        job["payload"]["advanced"]["mossImageEdit"]["use_kv_cache"],
+                        use_kv_cache
+                    );
+                    assert!(job["payload"]["advanced"]
+                        .get("mossImageEditExecutionReport")
+                        .is_none());
+                    let (status, stored) = request(
+                        app.clone(),
+                        "GET",
+                        &format!("/api/v1/jobs/{}", job["id"].as_str().unwrap()),
+                        Value::Null,
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::OK, "{stored}");
+                    assert_eq!(stored["payload"]["referenceAssetIds"], json!(references));
+                    for action in ["duplicate", "retry"] {
+                        let route =
+                            format!("/api/v1/jobs/{}/{action}", job["id"].as_str().unwrap());
+                        let (status, replay) =
+                            request(app.clone(), "POST", &route, json!({"payloadChanges":{}}))
+                                .await;
+                        assert_eq!(status, StatusCode::CREATED, "{replay}");
+                        assert_eq!(replay["payload"]["referenceAssetIds"], json!(references));
+                        let reversed = references.iter().rev().collect::<Vec<_>>();
+                        let (status, replay) = request(app.clone(), "POST", &route,
+                            json!({"payloadChanges":{"referenceAssetIds":reversed,"sourceAssetId":reversed[0],"referenceAssetId":reversed[0]}})).await;
+                        assert_eq!(status, StatusCode::CREATED, "{replay}");
+                        assert_eq!(replay["payload"]["referenceAssetIds"], json!(reversed));
+                        let before = state
+                            .jobs_store
+                            .list_jobs(Some(project_id), None, 500)
+                            .unwrap()
+                            .len();
+                        let (status, error) = request(app.clone(), "POST", &route,
+                            json!({"payloadChanges":{"referenceAssetIds":[ids[0],ids[0],ids[0],ids[0],ids[0]]}})).await;
+                        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+                        assert_eq!(
+                            state
+                                .jobs_store
+                                .list_jobs(Some(project_id), None, 500)
+                                .unwrap()
+                                .len(),
+                            before
+                        );
+                    }
+                }
+            }
+            for (references, expected_status) in [
+                (json!([]), StatusCode::BAD_REQUEST),
+                (
+                    json!([ids[0], ids[0], ids[0], ids[0], ids[0]]),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (json!([ids[0], null]), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!([ids[0], 42]), StatusCode::UNPROCESSABLE_ENTITY),
+                (json!([ids[0], " bad"]), StatusCode::BAD_REQUEST),
+                (
+                    json!([ids[0], ids[1], "missing-reference"]),
+                    StatusCode::BAD_REQUEST,
+                ),
+                (json!([ids[0], ids[1], foreign[0]]), StatusCode::BAD_REQUEST),
+            ] {
+                let before = state
+                    .jobs_store
+                    .list_jobs(Some(project_id), None, 500)
+                    .unwrap()
+                    .len();
+                let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs",
+                    json!({"projectId":project_id,"model":model,"mode":"edit_image","prompt":"edit","referenceAssetIds":references})).await;
+                assert_eq!(status, expected_status, "{references}: {error}");
+                assert_eq!(
+                    state
+                        .jobs_store
+                        .list_jobs(Some(project_id), None, 500)
+                        .unwrap()
+                        .len(),
+                    before
+                );
+            }
+            // Generic image creation remains forbidden; it must not bypass the typed validator.
+            let (status, error) = request(app.clone(), "POST", "/api/v1/jobs",
+                json!({"type":"image_edit","requestedGpu":"auto","projectId":project_id,
+                    "payload":{"model":model,"mode":"edit_image","prompt":"edit","referenceAssetIds":slots}})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+            assert!(
+                error.to_string().contains("must be created via POST"),
+                "{error}"
+            );
+        }
+    }
+}
+
+// Adapted from the accepted Studio56 MCP/real-REST fixture, restricted to existing55
+// reference transport. No advanced56 API, workflow/history implementation or worker is imported.
+#[tokio::test]
+async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    };
+    use rmcp::ServiceExt;
+    let _hf = isolate_hf_cache();
+    for candle_required in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        setup(&temp);
+        super::yue2_catalog::seed_snapshot(
+            &temp,
+            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut settings = test_settings(&temp);
+        settings.trust_loopback = true;
+        settings.candle_required = candle_required;
+        settings.mcp_api_url = format!("http://{addr}");
+        let (app, state) = create_app_with_state(settings).unwrap();
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({"name":"MOSS MCP slots"}),
+        )
+        .await;
+        let project_id = project["id"].as_str().unwrap();
+        let ids = moss_consumer_reference_assets(app.clone(), project_id).await;
+        let slots = [
+            ids[0].clone(),
+            ids[1].clone(),
+            ids[0].clone(),
+            ids[2].clone(),
+        ];
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = rmcp::model::ClientInfo::default()
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+            ))
+            .await
+            .unwrap();
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for count in 1..=4 {
+                for reverse in [false, true] {
+                    let mut references = slots[..count].to_vec();
+                    if reverse {
+                        references.reverse();
+                    }
+                    let prompt = format!("{model} {count} {reverse}: make image 1 blue 日本語");
+                    let args = json!({"projectId":project_id,"mode":"edit_image","model":model,"prompt":prompt,"negativePrompt":"blur",
+                        "referenceAssetIds":references,"sourceAssetId":references[0],"referenceAssetId":references[0],"seed":0});
+                    let call = client.call_tool(
+                        CallToolRequestParams::new("generate_image")
+                            .with_arguments(args.as_object().unwrap().clone()),
+                    );
+                    let observe = async {
+                        for _ in 0..100 {
+                            let jobs = state
+                                .jobs_store
+                                .list_jobs(Some(project_id), None, 500)
+                                .unwrap();
+                            if let Some(job) = jobs.iter().find(|job| {
+                                job.payload.get("prompt").and_then(Value::as_str)
+                                    == Some(prompt.as_str())
+                                    && job.status.as_str() != "canceled"
+                            }) {
+                                let payload = job.payload.clone();
+                                state.jobs_store.cancel_job(&job.id).unwrap();
+                                return Some(payload);
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        None
+                    };
+                    let (result, payload) =
+                        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                            tokio::join!(call, observe)
+                        })
+                        .await
+                        .unwrap();
+                    let payload = payload.unwrap_or_else(|| {
+                        panic!("real MCP must persist ordered slots: {result:?}")
+                    });
+                    assert_eq!(payload["referenceAssetIds"], json!(references));
+                    assert_eq!(payload["prompt"], prompt);
+                    assert_eq!(payload["negativePrompt"], "blur");
+                    assert_eq!(payload["count"], 1);
+                    assert_eq!(payload["seed"], 0);
+                    assert_eq!(
+                        payload["advanced"]["mossImageEdit"],
+                        json!({"reference_max_edge":512,"use_kv_cache":true})
+                    );
+                    assert_eq!(
+                        result.unwrap().is_error,
+                        Some(true),
+                        "owned test cancels after enqueue; no native render"
+                    );
+                }
+            }
+            for references in [
+                json!([]),
+                json!([ids[0], ids[0], ids[0], ids[0], ids[0]]),
+                json!([ids[0], ids[1], "missing-reference"]),
+            ] {
+                let before = state
+                    .jobs_store
+                    .list_jobs(Some(project_id), None, 500)
+                    .unwrap()
+                    .len();
+                let args = json!({"projectId":project_id,"mode":"edit_image","model":model,"prompt":"refuse","referenceAssetIds":references});
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    client.call_tool(
+                        CallToolRequestParams::new("generate_image")
+                            .with_arguments(args.as_object().unwrap().clone()),
+                    ),
+                )
+                .await
+                .unwrap();
+                assert!(match result {
+                    Err(_) => true,
+                    Ok(ref value) => value.is_error == Some(true),
+                });
+                assert_eq!(
+                    state
+                        .jobs_store
+                        .list_jobs(Some(project_id), None, 500)
+                        .unwrap()
+                        .len(),
+                    before
+                );
+            }
+        }
+        let _ = client.cancel().await;
+        server.abort();
+        let _ = server.await;
+    }
+}

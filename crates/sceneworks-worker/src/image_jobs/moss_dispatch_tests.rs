@@ -17,6 +17,7 @@ mod dispatch_transaction_tests {
         ApiCancel,
     }
     struct Control {
+        backend: &'static str,
         budget: Mutex<gen_core::MemoryBudget>,
         attempt: Mutex<Attempt>,
         loads: AtomicUsize,
@@ -28,10 +29,13 @@ mod dispatch_transaction_tests {
         api_cancel: AtomicBool,
         posts: Mutex<Vec<Value>>,
         jobs: Mutex<std::collections::HashMap<String, Value>>,
+        expected_references: Mutex<Vec<(u32, u32, Vec<u8>)>>,
+        use_kv_cache: AtomicBool,
     }
     impl Control {
         fn new() -> Self {
             Self {
+                backend: "candle",
                 budget: Mutex::new(gen_core::MemoryBudget {
                     total_bytes: 100,
                     committed_bytes: 30,
@@ -48,10 +52,23 @@ mod dispatch_transaction_tests {
                 api_cancel: false.into(),
                 posts: Mutex::new(Vec::new()),
                 jobs: Mutex::new(Default::default()),
+                expected_references: Mutex::new(vec![(48, 16, vec![73; 48 * 16 * 3])]),
+                use_kv_cache: false.into(),
             }
         }
         fn committed(&self, bytes: u64) {
             self.budget.lock().unwrap().committed_bytes = bytes;
+        }
+        fn assert_references(&self, references: &[Image], use_kv_cache: bool) {
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|image| (image.width, image.height, image.pixels.clone()))
+                    .collect::<Vec<_>>(),
+                *self.expected_references.lock().unwrap(),
+                "all decoded semantic RGB slots retain order and identity"
+            );
+            assert_eq!(use_kv_cache, self.use_kv_cache.load(Ordering::SeqCst));
         }
     }
     struct FixtureRuntime {
@@ -107,14 +124,9 @@ mod dispatch_transaction_tests {
                     request.moss_image.unwrap().acceleration,
                     MossImageAcceleration::Off
                 );
-                assert_eq!(input.references.len(), 1);
-                assert_eq!(
-                    (input.references[0].width, input.references[0].height),
-                    (48, 16)
-                );
-                assert_eq!(input.references[0].pixels, vec![73; 48 * 16 * 3]);
+                self.control
+                    .assert_references(input.references, input.edit_options.use_kv_cache);
                 assert_eq!(input.edit_options.reference_max_edge, 32);
-                assert!(!input.edit_options.use_kv_cache);
             } else {
                 assert!(input.references.is_empty());
             }
@@ -152,6 +164,11 @@ mod dispatch_transaction_tests {
                 &["fixture negative"]
             );
             self.control.warm.fetch_add(1, Ordering::SeqCst);
+            self.control
+                .assert_references(inputs.references, inputs.use_kv_cache);
+            *self.inner.expected_edit_inputs.borrow_mut() =
+                self.control.expected_references.lock().unwrap().clone();
+            self.inner.expected_edit_cache.set(inputs.use_kv_cache);
             self.inner.moss_image_edit_request_peak(request, inputs)
         }
         fn generate(
@@ -175,6 +192,8 @@ mod dispatch_transaction_tests {
                 &["fixture negative"]
             );
             self.control.renders.fetch_add(1, Ordering::SeqCst);
+            self.control
+                .assert_references(inputs.references, inputs.use_kv_cache);
             let attempt = *self.control.attempt.lock().unwrap();
             self.inner.failure.set(attempt == Attempt::Fail);
             self.inner.cancel.set(attempt == Attempt::CancelAfterOutput);
@@ -301,13 +320,14 @@ mod dispatch_transaction_tests {
         settings: &Settings,
         project: &str,
         project_path: &Path,
-        reference: &str,
+        references: &[String],
         variant: MossImageVariant,
         edit: bool,
         runtime: Arc<FixtureRuntime>,
         control: Arc<Control>,
     ) -> (WorkerResult<()>, Vec<Value>, String) {
         let model = variant.provider_id();
+        let backend = control.backend;
         let manifest = json!({"limits":{"minDimension":16},"conditionalComponents":[{
         "provider":"huggingface","repo":"synthetic/moss-edit-dispatch-fixture","revision":"synthetic",
         "componentId":"moss-image-edit","requiredFor":["moss_image_edit"],"files":["fixture.bin"]}]});
@@ -315,11 +335,10 @@ mod dispatch_transaction_tests {
         "prompt":"blue cup","width":16,"height":16,"count":1,"modelManifestEntry":manifest,
         "advanced":{"mossImage":{"acceleration":"off"}}});
         if edit {
-            payload["referenceAssetIds"] = json!([reference]);
+            payload["referenceAssetIds"] = json!(references);
             payload["advanced"]["mossImageAdvanced"] =
                 json!({"negativePrompts":["fixture negative"]});
-            payload["advanced"]["mossImageEdit"] =
-                json!({"reference_max_edge":32,"use_kv_cache":false});
+            payload["advanced"]["mossImageEdit"] = json!({"reference_max_edge":32,"use_kv_cache":control.use_kv_cache.load(Ordering::SeqCst)});
         }
         let id = format!("moss-dispatch-{}", Uuid::new_v4());
         control
@@ -335,7 +354,7 @@ mod dispatch_transaction_tests {
         let plan = ImagePlan::with_count_and_adapter(
             &request,
             1,
-            moss_adapter_label(model, "candle"),
+            moss_adapter_label(model, backend),
             Some(Arc::new(job.payload.clone())),
         );
         let mut writes = vec![];
@@ -345,23 +364,40 @@ mod dispatch_transaction_tests {
             control.loads.fetch_add(1, Ordering::SeqCst);
             let mut inner = Probe::new();
             inner.descriptor.id = model;
-            inner.descriptor.backend = "candle";
+            inner.descriptor.backend = backend;
             Ok(Box::new(TransactionProbe { inner, control }))
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            generate_candle_stream_using(
-                &ApiClient::new(settings),
-                settings,
-                &job,
-                &plan,
-                project_path,
-                "cuda:fixture",
-                &mut writes,
-                load,
-                runtime,
-            ),
-        )
+        let api = ApiClient::new(settings);
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            if backend == "candle" {
+                generate_candle_stream_using(
+                    &api,
+                    settings,
+                    &job,
+                    &plan,
+                    project_path,
+                    "cuda:fixture",
+                    &mut writes,
+                    load,
+                    runtime,
+                )
+                .await
+            } else {
+                // This is the shared MLX transaction with an injected CPU provider, not Metal math.
+                generate_moss_stream_with_runtime(
+                    &api,
+                    settings,
+                    &job,
+                    &plan,
+                    project_path,
+                    &mut writes,
+                    load,
+                    runtime,
+                    backend,
+                )
+                .await
+            }
+        })
         .await
         .expect("bounded actual dispatch/cache/event transaction");
         // Mirror the actual outer worker boundary: staged edits publish only after the native
@@ -373,7 +409,7 @@ mod dispatch_transaction_tests {
                     &ApiClient::new(settings),
                     &job,
                     &plan,
-                    "candle",
+                    backend,
                     &writes,
                     batch,
                 )
@@ -437,7 +473,7 @@ mod dispatch_transaction_tests {
                     &settings,
                     &project.id,
                     Path::new(&project.path),
-                    &reference,
+                    std::slice::from_ref(&reference),
                     variant,
                     edit,
                     runtime.clone(),
@@ -597,5 +633,257 @@ mod dispatch_transaction_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn candle_moss_sft_dispatch_runs_real_cache_admission_events_and_reentry() {
         exercise_candle_moss_dispatch(MossImageVariant::Sft).await;
+    }
+
+    async fn exercise_multi_reference_dispatch(variant: MossImageVariant, backend: &'static str) {
+        use sha2::Digest;
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("private-hf");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", hub.to_str().unwrap()),
+            ("HUGGINGFACE_HUB_CACHE", hub.to_str().unwrap()),
+        ]);
+        let control = Arc::new(Control {
+            backend,
+            ..Control::new()
+        });
+        let (url, server) = transaction_api(control.clone()).await;
+        let mut settings = Settings::for_test(temp.path().join(variant.provider_id()));
+        settings.api_url = url;
+        settings.access_token = None;
+        settings.backend_candle_enabled = true;
+        let store = ProjectStore::new(settings.data_dir.clone(), "test");
+        let project = store.create_project("MOSS ordered slots").unwrap();
+        let project_path = Path::new(&project.path);
+        let mut ids = Vec::new();
+        let mut images = Vec::new();
+        for (index, (width, height, pixel)) in [(48, 16, 73), (16, 48, 127), (32, 32, 211)]
+            .into_iter()
+            .enumerate()
+        {
+            let source = settings.data_dir.join(format!("reference-{index}.png"));
+            image::RgbImage::from_pixel(width, height, image::Rgb([pixel; 3]))
+                .save(&source)
+                .unwrap();
+            ids.push(
+                store
+                    .import_asset(
+                        &project.id,
+                        sceneworks_core::project_store::UploadAsset {
+                            filename: format!("reference-{index}.png"),
+                            content_type: Some("image/png".into()),
+                            source_path: source,
+                            source_asset_id: None,
+                            provenance: None,
+                        },
+                    )
+                    .unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+            images.push((width, height, vec![pixel; (width * height * 3) as usize]));
+        }
+        std::fs::write(
+            settings.data_dir.join("synthetic-provider.bin"),
+            b"synthetic-source-a",
+        )
+        .unwrap();
+        let (cache, join) = crate::generator_cache::GeneratorCacheHandle::isolated();
+        let runtime = Arc::new(FixtureRuntime {
+            control: control.clone(),
+            cache: cache.clone(),
+        });
+        // Real asset decode, ordered full-slice dispatch and provider-cache transport only.
+        // The injected 73-byte estimate is deliberately synthetic; native memory math is not tested here.
+        for use_kv_cache in [false, true] {
+            control.use_kv_cache.store(use_kv_cache, Ordering::SeqCst);
+            for ordinals in [
+                vec![0, 1],
+                vec![1, 0],
+                vec![0, 1, 0],
+                vec![1, 0, 0],
+                vec![0, 1, 0, 2],
+                vec![2, 0, 1, 0],
+                vec![1, 2, 1],
+                vec![2],
+            ] {
+                let references = ordinals.iter().map(|&i| ids[i].clone()).collect::<Vec<_>>();
+                let expected = ordinals
+                    .iter()
+                    .map(|&i| images[i].clone())
+                    .collect::<Vec<_>>();
+                *control.expected_references.lock().unwrap() = expected.clone();
+                if control.loads.load(Ordering::SeqCst) == 0 {
+                    let (result, writes, _) = dispatch_attempt(
+                        &settings,
+                        &project.id,
+                        project_path,
+                        &references,
+                        variant,
+                        true,
+                        runtime.clone(),
+                        control.clone(),
+                    )
+                    .await;
+                    assert!(result.unwrap_err().to_string().contains("additional bytes"));
+                    assert!(writes.is_empty());
+                    assert_eq!(
+                        control.loads.load(Ordering::SeqCst),
+                        0,
+                        "cold full-slice refusal precedes factory"
+                    );
+                    control.committed(0);
+                }
+                let (result, writes, _) = dispatch_attempt(
+                    &settings,
+                    &project.id,
+                    project_path,
+                    &references,
+                    variant,
+                    true,
+                    runtime.clone(),
+                    control.clone(),
+                )
+                .await;
+                result.unwrap();
+                assert_eq!(writes.len(), 1);
+                assert_eq!(
+                    control.loads.load(Ordering::SeqCst),
+                    1,
+                    "changed slots/cache option reuse owned weights"
+                );
+                assert_eq!(
+                    writes[0]["adapter"],
+                    moss_adapter_label(variant.provider_id(), backend)
+                );
+                let report =
+                    &writes[0]["rawAdapterSettings"][sceneworks_core::moss_image::EDIT_REPORT_KEY];
+                assert_eq!(report["use_kv_cache"], use_kv_cache);
+                let receipts = report["references"].as_array().unwrap();
+                assert_eq!(receipts.len(), expected.len());
+                for (receipt, (width, height, pixels)) in receipts.iter().zip(&expected) {
+                    assert_eq!(receipt["original_dimensions"], json!([width, height]));
+                    assert_eq!(
+                        receipt["pixels_sha256"],
+                        format!("{:x}", sha2::Sha256::digest(pixels))
+                    );
+                }
+                assert!(project_path
+                    .join(writes[0]["mediaPath"].as_str().unwrap())
+                    .is_file());
+                control.committed(30); // Warm credit belongs only to the unchanged owned weights.
+                for outcome in [Attempt::Fail, Attempt::CancelAfterOutput] {
+                    *control.attempt.lock().unwrap() = outcome;
+                    let files = image_files(&project_path.join("assets/images"));
+                    let reads = control.reads.load(Ordering::SeqCst);
+                    let (result, writes, id) = dispatch_attempt(
+                        &settings,
+                        &project.id,
+                        project_path,
+                        &references,
+                        variant,
+                        true,
+                        runtime.clone(),
+                        control.clone(),
+                    )
+                    .await;
+                    assert!(result.is_err());
+                    assert!(writes.is_empty());
+                    assert_eq!(
+                        control.reads.load(Ordering::SeqCst),
+                        reads,
+                        "failure/cancel cannot read prior slot receipts"
+                    );
+                    assert_eq!(image_files(&project_path.join("assets/images")), files);
+                    assert!(!control.posts.lock().unwrap().iter().any(|p| p["job"] == id
+                        && p["body"]["result"]["assetWrites"]
+                            .as_array()
+                            .is_some_and(|v| !v.is_empty())));
+                }
+                *control.attempt.lock().unwrap() = Attempt::Success;
+                // The next success changes the slot list on the same live provider after these errors.
+            }
+        }
+        // Last error/cancel must also permit a clean, changed two-slot reentry.
+        let references = vec![ids[2].clone(), ids[1].clone()];
+        *control.expected_references.lock().unwrap() = vec![images[2].clone(), images[1].clone()];
+        let (result, writes, _) = dispatch_attempt(
+            &settings,
+            &project.id,
+            project_path,
+            &references,
+            variant,
+            true,
+            runtime.clone(),
+            control.clone(),
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(
+            writes[0]["rawAdapterSettings"][sceneworks_core::moss_image::EDIT_REPORT_KEY]
+                ["references"][0]["original_dimensions"],
+            json!([32, 32])
+        );
+        assert_eq!(control.loads.load(Ordering::SeqCst), 1);
+        let before = (
+            control.cold.load(Ordering::SeqCst),
+            control.warm.load(Ordering::SeqCst),
+            control.renders.load(Ordering::SeqCst),
+        );
+        for invalid in [
+            vec![],
+            vec![ids[0].clone(); 5],
+            vec![ids[0].clone(), "missing-later-slot".into()],
+        ] {
+            let (result, writes, _) = dispatch_attempt(
+                &settings,
+                &project.id,
+                project_path,
+                &invalid,
+                variant,
+                true,
+                runtime.clone(),
+                control.clone(),
+            )
+            .await;
+            assert!(result.is_err());
+            assert!(writes.is_empty());
+        }
+        assert_eq!(
+            (
+                control.cold.load(Ordering::SeqCst),
+                control.warm.load(Ordering::SeqCst),
+                control.renders.load(Ordering::SeqCst)
+            ),
+            before,
+            "invalid slots refuse before any peak or render"
+        );
+        assert_eq!(control.loads.load(Ordering::SeqCst), 1);
+        assert_eq!(control.ordinary.load(Ordering::SeqCst), 0);
+        drop(runtime);
+        drop(cache);
+        join.join().unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candle_moss_base_multi_reference_slots_reach_cold_warm_render_and_reentry() {
+        exercise_multi_reference_dispatch(MossImageVariant::Base, "candle").await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn candle_moss_sft_multi_reference_slots_reach_cold_warm_render_and_reentry() {
+        exercise_multi_reference_dispatch(MossImageVariant::Sft, "candle").await;
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mlx_moss_base_multi_reference_slots_reach_cold_warm_render_and_reentry() {
+        exercise_multi_reference_dispatch(MossImageVariant::Base, "mlx").await;
+    }
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mlx_moss_sft_multi_reference_slots_reach_cold_warm_render_and_reentry() {
+        exercise_multi_reference_dispatch(MossImageVariant::Sft, "mlx").await;
     }
 }

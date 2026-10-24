@@ -130,19 +130,28 @@ const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
-fn moss_edit_candle_named_lane_and_claim_share_strict_typed_contract() {
+fn moss_edit_candle_named_lane_and_claim_share_ordered_reference_contract() {
     let worker = gpu_worker(CANDLE_CAPS);
     for model in ["moss_image_base", "moss_image_sft"] {
         for reference in [
             json!({"sourceAssetId":"ref"}),
             json!({"referenceAssetId":"ref"}),
             json!({"referenceAssetIds":["ref"],"sourceAssetId":"ref"}),
+            json!({"referenceAssetIds":["ref","other"]}),
+            json!({"referenceAssetIds":["ref","other","ref"],"referenceAssetId":"ref"}),
+            json!({"referenceAssetIds":["other","ref","third","ref"],"sourceAssetId":"other","referenceAssetId":"other"}),
         ] {
             let mut payload = object(
                 json!({"model":model,"mode":"edit_image","prompt":"make it blue",
                 "advanced":{"mossImageEdit":{"reference_max_edge":256,"use_kv_cache":false}}}),
             );
             payload.extend(object(reference));
+            if payload.contains_key("referenceAssetIds") {
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&payload).unwrap()),
+                    payload["referenceAssetIds"]
+                );
+            }
             for job in [
                 image_generate_job(json!(payload)),
                 image_edit_job(json!(payload)),
@@ -158,14 +167,22 @@ fn moss_edit_candle_named_lane_and_claim_share_strict_typed_contract() {
             assert!(!crate::moss_image::edit_backend_eligible(model, "unknown"));
             for patch in [
                 json!({"referenceAssetIds":[] ,"sourceAssetId":null,"referenceAssetId":null}),
-                json!({"referenceAssetIds":["ref","other"]}),
-                json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"]}),
+                json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other","ref","other","ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other",null],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other",3],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other","ref",""],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other"," ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":"ref"}),
+                json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
+                json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
                 json!({"maskAssetId":"mask"}),
                 json!({"loras":[{"id":"custom"}]}),
                 json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
                 json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
                 json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
                 json!({"advanced":{"controlImage":"pose"}}),
+                json!({"mode":"text_to_image","advanced":{}}),
             ] {
                 let mut invalid = payload.clone();
                 invalid.extend(object(patch));
@@ -180,6 +197,7 @@ fn moss_edit_candle_named_lane_and_claim_share_strict_typed_contract() {
             image_job_candle_lane(&ordinary),
             Some(CandleImageLane::TextToImage)
         );
+        assert!(worker_supports_job(&worker, &ordinary));
     }
     assert!(!crate::moss_image::edit_backend_eligible(
         "krea_2_raw",

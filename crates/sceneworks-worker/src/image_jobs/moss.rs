@@ -1715,6 +1715,8 @@ mod moss_consumer_tests {
         report: RefCell<Option<MossImageExecutionReport>>,
         edit_report: RefCell<Option<gen_core::moss_image_edit::MossImageEditExecutionReport>>,
         edit_inputs: RefCell<Vec<(u32, u32, Vec<u8>)>>,
+        expected_edit_inputs: RefCell<Vec<(u32, u32, Vec<u8>)>>,
+        expected_edit_cache: Cell<bool>,
         failure: Cell<bool>,
         cancel: Cell<bool>,
         reads: Cell<usize>,
@@ -1738,6 +1740,8 @@ mod moss_consumer_tests {
                 report: RefCell::new(None),
                 edit_report: RefCell::new(None),
                 edit_inputs: RefCell::new(Vec::new()),
+                expected_edit_inputs: RefCell::new(vec![(48, 16, vec![73; 48 * 16 * 3])]),
+                expected_edit_cache: Cell::new(false),
                 failure: Cell::new(false),
                 cancel: Cell::new(false),
                 reads: Cell::new(0),
@@ -1783,10 +1787,15 @@ mod moss_consumer_tests {
                 inputs.advanced.output,
             ));
             assert_eq!(inputs.reference_max_edge, 32);
-            assert!(!inputs.use_kv_cache);
+            assert_eq!(inputs.use_kv_cache, self.expected_edit_cache.get());
             assert_eq!(
-                (inputs.references[0].width, inputs.references[0].height),
-                (48, 16)
+                inputs
+                    .references
+                    .iter()
+                    .map(|image| (image.width, image.height, image.pixels.clone()))
+                    .collect::<Vec<_>>(),
+                *self.expected_edit_inputs.borrow(),
+                "the typed peak receives every semantic RGB slot in request order"
             );
             Ok(73)
         }
@@ -1929,7 +1938,10 @@ mod moss_consumer_tests {
                     .map(|(image, dimensions)| MossImageEditReferenceReceipt {
                         original_dimensions: [image.width, image.height],
                         encoded_dimensions: dimensions,
-                        pixels_sha256: "a".repeat(64),
+                        pixels_sha256: {
+                            use sha2::Digest;
+                            format!("{:x}", sha2::Sha256::digest(&image.pixels))
+                        },
                         resized_pixels_sha256: "b".repeat(64),
                         latent_sha256: "c".repeat(64),
                     })
