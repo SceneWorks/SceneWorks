@@ -60,6 +60,21 @@ describe("background image regeneration", () => {
     expect(asset.recipe.rawAdapterSettings).toHaveProperty("mossImageExecutionReport");
   });
 
+  it("strips every receipt while preserving nested controls and the original recipes", () => {
+    const original = { ...asset, generationSet: { recipe: { ...asset.recipe,
+      rawAdapterSettings: { steps: 14, mossImage: { acceleration: "off" }, promptBatch: ["cat", "dog"],
+        checkpointWeightFacts: { receipt: true }, memoryStrategy: "resident",
+        memoryEvidenceRevision: "revision", realModelInference: true } } } };
+    const before = JSON.stringify(original);
+    const request = imageRecipeRequest(original);
+    for (const key of ["promptBatch", "upscale", "hiresFix", "mossImageExecutionReport", "checkpointWeightFacts", "memoryStrategy", "memoryEvidenceRevision", "realModelInference", "promptEnhancement"]) {
+      expect(request.advanced).not.toHaveProperty(key);
+    }
+    expect(request).toMatchObject({ prompts: ["cat", "dog"], upscale: { enabled: true, factor: 2 },
+      hiresFix: { enabled: true, upscaleBy: 2 }, advanced: { steps: 28, mossImage: { acceleration: "off" } } });
+    expect(JSON.stringify(original)).toBe(before);
+  });
+
   it("preserves native prompt batches and their per-prompt count", () => {
     const request = imageRecipeRequest({ ...asset, generationSet: { recipe: { ...asset.recipe,
       rawAdapterSettings: { promptBatch: ["cat", "dog"], mossImage: { acceleration: "off" } } } } });

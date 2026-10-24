@@ -19,10 +19,17 @@ export function imageRecipeRequest(asset) {
   }
   const [width, height] = (recipeResolution(recipe) ?? "").split("x").map(Number);
   const advanced = { ...raw };
-  // Output receipts are not authored generation controls.
-  for (const key of ["promptBatch", "upscale", "hiresFix", "mossImageExecutionReport", "checkpointWeightFacts", "memoryStrategy", "memoryEvidenceRevision", "realModelInference", "promptEnhancement"]) {
-    delete advanced[key];
-  }
+  // Keep removals explicit for workflow-share coverage: this replays existing controls, it
+  // authors no new advanced keys. Processing inputs move to the request fields below.
+  delete advanced.promptBatch;
+  delete advanced.upscale;
+  delete advanced.hiresFix;
+  delete advanced.mossImageExecutionReport;
+  delete advanced.checkpointWeightFacts;
+  delete advanced.memoryStrategy;
+  delete advanced.memoryEvidenceRevision;
+  delete advanced.realModelInference;
+  delete advanced.promptEnhancement;
   const prompts = Array.isArray(raw.promptBatch) ? raw.promptBatch : [];
   return {
     mode: recipe.mode ?? "text_to_image",
