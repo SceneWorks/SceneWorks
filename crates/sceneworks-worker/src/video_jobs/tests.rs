@@ -2680,7 +2680,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let mono = tracks[0];
     let mismatched = mono
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 1.0 / 32_768.0)
         .count();
     assert_eq!(
@@ -2696,7 +2698,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let stereo = tracks[1];
     let distinct = stereo
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 0.1)
         .count();
     assert!(
@@ -9907,7 +9911,7 @@ fn scail2_dir() -> Option<PathBuf> {
 fn scail2_smoke_color_mask(w: u32, h: u32, bg: [u8; 3]) -> Image {
     let (wu, hu) = (w as usize, h as usize);
     let mut px = vec![0u8; wu * hu * 3];
-    for chunk in px.chunks_exact_mut(3) {
+    for chunk in px.as_chunks_mut::<3>().0 {
         chunk.copy_from_slice(&bg);
     }
     for y in (hu / 4)..(3 * hu / 4) {

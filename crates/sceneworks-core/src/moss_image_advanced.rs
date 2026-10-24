@@ -440,8 +440,10 @@ impl OwnedInputs {
         };
         let floats = |r: &TensorRef| -> Result<Vec<f32>, String> {
             Ok(bytes(r)?
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().expect("four bytes")))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect())
         };
         let positive = options

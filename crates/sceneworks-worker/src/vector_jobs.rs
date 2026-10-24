@@ -7519,7 +7519,9 @@ mod tests {
             );
             assert!(
                 comparison_pixels(&canonical.svg, 512)
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|pixel| pixel[3] != 0),
                 "{label} canonical render is empty"
             );

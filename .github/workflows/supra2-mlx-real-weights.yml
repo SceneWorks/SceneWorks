@@ -51,7 +51,7 @@ jobs:
           [[ "$RUNNER_NAME" == "nax-macos-2" ]] || { echo "::error::Supra2 MLX evidence runs only on nax-macos-2"; exit 1; }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Fetch Release libmlx or use its source build
         run: |
           set +e

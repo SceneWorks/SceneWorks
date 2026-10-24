@@ -8952,7 +8952,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
         &resized
     };
     let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
-    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+    for (rgb, a) in image.pixels.as_chunks::<3>().0.iter().zip(plane.as_raw().iter()) {
         pixels.extend_from_slice(rgb);
         pixels.push(*a);
     }
@@ -8968,7 +8968,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
 fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, image::GrayImage)> {
     let mut rgb = Vec::with_capacity(image.pixels.len() / 4 * 3);
     let mut plane = Vec::with_capacity(image.pixels.len() / 4);
-    for pixel in image.pixels.chunks_exact(4) {
+    for pixel in image.pixels.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
         plane.push(pixel[3]);
     }

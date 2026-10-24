@@ -201,8 +201,10 @@ pub fn inspect(path: &Path) -> Result<TensorMetadata, String> {
         hash.update(&buffer[..n]);
         let valid = if metadata.dtype == "float32" {
             buffer[..n]
-                .chunks_exact(4)
-                .all(|b| f32::from_le_bytes(b.try_into().expect("four bytes")).is_finite())
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|b| f32::from_le_bytes(*b).is_finite())
         } else {
             buffer[..n].iter().all(|b| *b <= 1)
         };
