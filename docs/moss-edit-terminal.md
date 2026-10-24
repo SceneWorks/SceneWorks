@@ -88,8 +88,8 @@ credential in JSON, an API URL or argv. The existing product `/mcp` is mounted
 in the API; it has no separate stdio binary. Initialize/session/version headers,
 SSE progress, tool invocation and result links use that existing transport.
 
-After merged54/55/56 source review, final integration review and the coordinator's
-frozen-protocol approval have actual SHA identities:
+After the existing integrated epic-requirements/code review, inference pre-merge
+source review and coordinator's frozen-protocol approval have actual SHA identities:
 
 ```sh
 node scripts/moss-edit-terminal.mjs freeze /ABSOLUTE/launch.json
@@ -355,8 +355,9 @@ capacity acceptance. Coordinator owns final source acceptance and campaign.
 Dispatch only after 55/56/57 and the feature code have merged, the integrated
 requirements review and inference source review have finished, inference is on
 main, and the clean stationary SceneWorks feature candidate has the permanent
-inference pin. SceneWorks final source review and its main merge follow the
-accepted campaign and final paired validation.
+inference pin. The existing focused review of the final pin/generated/repair delta must also
+precede the campaign. SceneWorks main merge follows accepted campaign evidence
+and final paired validation; no additional whole-branch review is implied.
 `source_sha`, `inference_sha`, and `candidate_id` must match the reviewed input
 artifact. Actions scheduling is sufficient; there is no GPU ownership census,
 lease, cross-repository lock, or agent token. Never dispatch this campaign to
@@ -519,7 +520,14 @@ missing, substituted or changed bytes fail before native build/execution.
 - `sourceSha`, `inferenceSha`, `candidateId`, `inputManifest`,
   `numericalCarryForward:{file,sha256}`, and the existing approved report
   provenance fields `approvedBy`, `approvalEvidenceSha256`,
-  `phase18ReviewSha256`, `finalSourceReviewSha256`.
+  `phase18ReviewSha256`, `inferencePreMergeReviewSha256`. The former binds the
+  existing combined integrated epic-requirements/code review report or summary;
+  the latter explicitly binds the already-required inference whole-delta source
+  review completed before inference merges to main and the permanent pin. A
+  single actual report covering both may supply both digests. These fields do
+  not assert a post-campaign SceneWorks review or require a new review cycle.
+  The ambiguous historical `finalSourceReviewSha256` field is not accepted as
+  a substitute; no actual campaign was frozen under that preparation contract.
 - `backends.mlx` and `.cuda`: actual host-local read-only source `hfHome`, unused
   loopback `port`, complete `packageFiles:[{file,sha256}]`,
   `installAdapter:true`, and exact relative `editAdapterFiles` (both `adapter_config.json` and

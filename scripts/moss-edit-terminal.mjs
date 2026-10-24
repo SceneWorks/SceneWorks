@@ -64,7 +64,7 @@ export async function prepare(inputPath, out) {
     inferenceMainRef: 'origin/main',
     files: { harness: fileURLToPath(import.meta.url), harnessLibrary: fileURLToPath(new URL('./lib/moss-edit-terminal.mjs', import.meta.url)), apiBinary: '/ABSOLUTE/BUILT/API', workerBinary: '/ABSOLUTE/BUILT/WORKER', webPackage: '/ABSOLUTE/WEB/BUILD/INVENTORY.json', packages: '/ABSOLUTE/VERIFIED/PACKAGE/INVENTORY.json', toolchain: '/ABSOLUTE/ACTUAL/TOOLCHAIN.json', numericalCarryForward: '/ABSOLUTE/SOURCE/BOUND/NUMERICAL/RECEIPT.json' },
     backends: { mlx: { apiUrl: 'http://127.0.0.1:8000', projectId: 'ACTUAL-ISOLATED-PROJECT', workerId:'ACTUAL-OWNED-WORKER', workerGpuId:'mlx', tokenEnv: 'MOSS_TERMINAL_API_TOKEN' }, cuda: { apiUrl: 'http://ADMITTED-WINDOWS-HOST:8000', projectId: 'ACTUAL-ISOLATED-PROJECT', workerId:'ACTUAL-OWNED-WORKER', workerGpuId:'1', tokenEnv: 'MOSS_TERMINAL_API_TOKEN' } },
-    guardRequests: Object.fromEntries(LATENT_UPSCALE_GUARDS.map(name => [name, latentUpscaleGuard(name)])), approvedBy: '', approvalEvidenceSha256: '', phase18ReviewSha256: '', finalSourceReviewSha256: '',
+    guardRequests: Object.fromEntries(LATENT_UPSCALE_GUARDS.map(name => [name, latentUpscaleGuard(name)])), approvedBy: '', approvalEvidenceSha256: '', phase18ReviewSha256: '', inferencePreMergeReviewSha256: '',
   });
   console.log(JSON.stringify({ status: 'DRAFT', version: VERSION, renderExecutions: plan.renderExecutions, guards: plan.requiredGuardCases.length, next: 'Complete launcher, cache metric, source reviews, package/toolchain inventories and coordinator freeze before any execution.' }));
 }
@@ -85,7 +85,7 @@ export async function freeze(configPath) {
   const { config, root, plan } = await load(configPath);
   requireThat(typeof config.candidateId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(config.candidateId),'actual stable campaign candidate ID required');
   validatePlan(plan, await json(resolve(root, 'inputs.original.json')));
-  requireThat(config.approvedBy && [config.approvalEvidenceSha256, config.phase18ReviewSha256, config.finalSourceReviewSha256].every(v => /^[a-f0-9]{64}$/.test(v ?? '')), 'coordinator approval and completed final integrated/source review identities required');
+  requireThat(config.approvedBy && [config.approvalEvidenceSha256, config.phase18ReviewSha256, config.inferencePreMergeReviewSha256].every(v => /^[a-f0-9]{64}$/.test(v ?? '')), 'coordinator approval, integrated requirements review and inference pre-merge source review identities required');
   for (const name of plan.requiredGuardCases) {
     const guard = config.guardRequests[name];
     if (LATENT_UPSCALE_GUARDS.includes(name)) {
@@ -110,7 +110,7 @@ export async function freeze(configPath) {
   for (const backend of ['mlx','cuda']) artifacts[backend] = validateArtifactInventory(await json(config.artifactInventories[backend]),backend,sources);
   requireThat(plan.cacheComparisonPolicy.implementationSha256 === files.harnessLibrary.sha256,'cache metric must freeze the actual source-owned implementation');
   const sharedFiles = Object.fromEntries(Object.entries(files).filter(([name]) => !BACKEND_FILES.includes(name)));
-  const lock = { version: VERSION, candidateId:config.candidateId, createdAt: new Date().toISOString(), planSha256: digest(plan), guardRequestsSha256: digest(config.guardRequests), inputIdentitiesSha256: digest(await json(resolve(root, 'input-identities.json'))), sources, files:sharedFiles, artifacts, approvals: { by: config.approvedBy, evidence: config.approvalEvidenceSha256, phase18Review: config.phase18ReviewSha256, finalSourceReview: config.finalSourceReviewSha256 }, counts: { renders: plan.renderExecutions, guards: plan.requiredGuardCases.length*2, guardCasesPerBackend:plan.requiredGuardCases.length } };
+  const lock = { version: VERSION, candidateId:config.candidateId, createdAt: new Date().toISOString(), planSha256: digest(plan), guardRequestsSha256: digest(config.guardRequests), inputIdentitiesSha256: digest(await json(resolve(root, 'input-identities.json'))), sources, files:sharedFiles, artifacts, approvals: { by: config.approvedBy, evidence: config.approvalEvidenceSha256, phase18Review: config.phase18ReviewSha256, inferencePreMergeReview: config.inferencePreMergeReviewSha256 }, counts: { renders: plan.renderExecutions, guards: plan.requiredGuardCases.length*2, guardCasesPerBackend:plan.requiredGuardCases.length } };
   await verifyFrozenSources(config, lock);
   executionBinding(config,lock,files); // Validate the actual local endpoint before writing the immutable lock.
   await save(resolve(root, 'protocol.lock.json'), lock);

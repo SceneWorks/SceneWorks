@@ -257,14 +257,17 @@ test('bounded API-free prepare to actual clean-source freeze writes a valid lock
   const manifestPin=`[dependencies]\ninference={git="https://github.com/SceneWorks/inference",rev="${inferenceHead}"}\n`,lockPin=`source = "git+https://github.com/SceneWorks/inference?rev=${inferenceHead}#${inferenceHead}"\n`;
   await gitFixture(product,manifestPin,{'crates/sceneworks-worker/Cargo.toml':manifestPin,'crates/sceneworks-memory-adapter/Cargo.toml':manifestPin,'Cargo.lock':lockPin});
   const launcher=await json(resolve(output,'launch.example.json')),artifact=resolve(directory,'fixture-inventory.json');await save(artifact,{fixture:true});
-  Object.assign(launcher,{sources:{sceneworks:product,inference},approvedBy:'PURE_FIXTURE_ONLY',approvalEvidenceSha256:'f'.repeat(64),phase18ReviewSha256:'f'.repeat(64),finalSourceReviewSha256:'f'.repeat(64)});
+  Object.assign(launcher,{sources:{sceneworks:product,inference},approvedBy:'PURE_FIXTURE_ONLY',approvalEvidenceSha256:'f'.repeat(64),phase18ReviewSha256:'f'.repeat(64),inferencePreMergeReviewSha256:'f'.repeat(64)});
   for(const key of ['apiBinary','workerBinary','webPackage','packages','toolchain','numericalCarryForward'])launcher.files[key]=artifact;
   const sources={sceneworks:treeIdentity(product),inference:treeIdentity(inference)},files=Object.fromEntries(await Promise.all(BACKEND_FILES.map(async name=>[name,await fileIdentity(artifact)])));
   for(const backend of ['mlx','cuda']) {launcher.artifactInventories[backend]=resolve(directory,`${backend}-inventory.json`);await save(launcher.artifactInventories[backend],{backend,sources,files});}
   for(const name of p.requiredGuardCases)launcher.guardRequests[name]=LATENT_UPSCALE_GUARDS.includes(name)?{...latentUpscaleGuard(name),noProviderLoadProbe:'inert-source-fixture'}:{request:{},expectedStatus:400,errorIncludes:['fixture rejection'],noProviderLoadProbe:'inert-source-fixture'};
   launcher.guardRequests['corrupt-adapter']={request:{},expectedStatus:201,expectedTerminal:'failed',errorIncludes:['MOSS edit frozen component identity mismatch'],noProviderLoadProbe:'inert-source-fixture'};
-  const configPath=resolve(output,'launch.json');await save(configPath,launcher);await freeze(configPath);
+  const configPath=resolve(output,'launch.json'),legacy={...launcher,finalSourceReviewSha256:launcher.inferencePreMergeReviewSha256};delete legacy.inferencePreMergeReviewSha256;
+  const legacyPath=resolve(output,'legacy-launch.json');await save(legacyPath,legacy);await assert.rejects(()=>freeze(legacyPath),/inference pre-merge source review identities/);
+  await save(configPath,launcher);await freeze(configPath);
   const lock=await json(resolve(output,'protocol.lock.json'));assert.equal(lock.sources.inference.head,inferenceHead);assert.equal(lock.counts.renders,50);assert.equal(lock.counts.guards,58);assert.equal(lock.counts.guardCasesPerBackend,29);assert.equal(lock.files.harnessLibrary.sha256,p.cacheComparisonPolicy.implementationSha256);
+  assert.equal(lock.approvals.inferencePreMergeReview,launcher.inferencePreMergeReviewSha256);assert.equal('finalSourceReview' in lock.approvals,false);
   assert.equal(JSON.stringify(lock).includes(directory),false);assert.equal('launcherSha256' in lock,false);await frozen(configPath);
   const relocated=resolve(directory,'second-host');await mkdir(relocated);await cp(product,resolve(relocated,'product'),{recursive:true});await cp(inference,resolve(relocated,'inference'),{recursive:true});
   const second=resolve(relocated,'candidate');await mkdir(second);for(const file of ['protocol.lock.json','cases.json','inputs.original.json','input-identities.json'])await cp(resolve(output,file),resolve(second,file));

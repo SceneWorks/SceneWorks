@@ -63,7 +63,7 @@ export async function createBundle(campaignPath,inputManifest,out) {
   const campaign=await json(campaignPath),inputs=await json(inputManifest),base=dirname(resolve(campaignPath));
   requireThat(/^[a-f0-9]{40}$/.test(campaign.sourceSha)&&/^[a-f0-9]{40}$/.test(campaign.inferenceSha)&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(campaign.candidateId),'bundle needs exact reviewed source/candidate identities');
   const plan=createPlan(inputs);requireThat(canonical(Object.keys(campaign.guardRequests??{}).sort())===canonical(plan.requiredGuardCases.slice().sort()),'bundle must declare every source-owned refusal case');
-  requireThat(campaign.approvedBy&&[campaign.approvalEvidenceSha256,campaign.phase18ReviewSha256,campaign.finalSourceReviewSha256].every(value=>/^[a-f0-9]{64}$/.test(value??'')),'bundle needs actual approval/review provenance');
+  requireThat(campaign.approvedBy&&[campaign.approvalEvidenceSha256,campaign.phase18ReviewSha256,campaign.inferencePreMergeReviewSha256].every(value=>/^[a-f0-9]{64}$/.test(value??'')),'bundle needs actual approval, integrated requirements review and inference pre-merge source review provenance');
   requireThat(Number.isFinite(campaign.cacheTolerance)&&campaign.cacheTolerance>=0&&campaign.cacheTolerance<=1,'bundle needs its predeclared cache comparison tolerance');
   await mkdir(out,{mode:0o700});
   const copy=async(source,file,hash)=>{requireThat((await fileIdentity(source)).sha256===hash,'bundle source bytes differ from declared SHA256');const target=safePath(out,file);await mkdir(dirname(target),{recursive:true,mode:0o700});await cp(source,target,{errorOnExist:true,force:false,dereference:true});await chmod(target,0o600);};
@@ -272,7 +272,7 @@ async function launcher(config,projectId) {
     sources:{sceneworks:config.sourceRoot,inference:config.inferenceRoot},inferenceMainRef:'origin/main',files,
     artifactInventories:Object.fromEntries(['mlx','cuda'].map(backend=>[backend,resolve(config.buildRoot,backend,'inventory.json')])),
     backends:{[config.backend]:{apiUrl:`http://127.0.0.1:${config.port}`,projectId,workerId:config.workerId,workerGpuId:config.backend==='cuda'?'1':'mlx',tokenEnv:'MOSS_EDIT_ACTIONS_TOKEN'}},
-    guardRequests:config.guardRequests,approvedBy:config.approvedBy,approvalEvidenceSha256:config.approvalEvidenceSha256,phase18ReviewSha256:config.phase18ReviewSha256,finalSourceReviewSha256:config.finalSourceReviewSha256};
+    guardRequests:config.guardRequests,approvedBy:config.approvedBy,approvalEvidenceSha256:config.approvalEvidenceSha256,phase18ReviewSha256:config.phase18ReviewSha256,inferencePreMergeReviewSha256:config.inferencePreMergeReviewSha256};
 }
 async function actualJournal(config,expected,after) {
   const deadline=Date.now()+10000;let lastError;
