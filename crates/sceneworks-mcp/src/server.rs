@@ -2384,6 +2384,42 @@ mod tests {
     }
 
     #[test]
+    fn moss_edit_body_preserves_semantic_reference_slots_for_the_shared_validator() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for refs in [
+                vec!["a"],
+                vec!["a", "b"],
+                vec!["a", "b", "a"],
+                vec!["c", "a", "b", "a"],
+            ] {
+                let args = args_from(
+                    json!({"projectId":"p","model":model,"mode":"edit_image","prompt":"edit",
+                    "referenceAssetIds":refs,"sourceAssetId":refs[0],"referenceAssetId":refs[0]}),
+                );
+                let body = image_job_body(&args).unwrap();
+                assert_eq!(body["referenceAssetIds"], json!(refs));
+                assert_eq!(body["count"], 1);
+                assert_eq!(
+                    sceneworks_core::moss_image::edit_reference_ids(body.as_object().unwrap())
+                        .unwrap(),
+                    refs
+                );
+            }
+            let empty = args_from(
+                json!({"projectId":"p","model":model,"mode":"edit_image","prompt":"edit","referenceAssetIds":[]}),
+            );
+            assert!(image_job_body(&empty).is_err());
+            let five = args_from(
+                json!({"projectId":"p","model":model,"mode":"edit_image","prompt":"edit","referenceAssetIds":["a","a","a","a","a"]}),
+            );
+            let body = image_job_body(&five).unwrap();
+            assert_eq!(body["referenceAssetIds"].as_array().unwrap().len(), 5);
+            assert!(
+                sceneworks_core::moss_image::edit_reference_ids(body.as_object().unwrap()).is_err()
+            );
+        }
+    }
+    #[test]
     fn image_job_body_maps_every_optional_field() {
         let args = args_from(json!({
             "projectId": "p1",
