@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // sc-26757 native Actions controller. Imports are inert; only explicit CLI phases execute.
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir, lstat, realpath, mkdtemp, unlink, rmdir } from 'node:fs/promises';
 import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
@@ -200,18 +200,40 @@ export async function prepareHostGuard(config) {
 export async function adapterRefusalState(config,name,specification) {
   if(!['missing-adapter','corrupt-adapter'].includes(name))return {observation:null,restore:async()=>{}};
   requireThat(config.editAdapterFiles?.includes(specification.adapterFile),'adapter refusal must name an exact owned edit-package file');
-  const path=safePath(config.hfHome,specification.adapterFile),original=await readFile(path),expected=config.packageFiles.find(item=>item.file===specification.adapterFile);
-  requireThat(expected?.sha256===sha(original),'adapter refusal initial bytes differ from frozen package inventory');
-  let corruptSha256=null;
-  if(name==='missing-adapter')await rename(path,`${path}.moss-terminal-missing`);
-  else {
-    const bytes=Buffer.from(specification.corruptBytesBase64??'','base64');requireThat(bytes.length>0&&sha(bytes)===specification.corruptSha256&&sha(bytes)!==expected.sha256,'actual immutable corrupt adapter bytes required');
-    await writeFile(path,bytes);corruptSha256=sha(bytes);
-  }
-  return {observation:{candidateId:config.candidateId,file:specification.adapterFile,beforeSha256:expected.sha256,state:name,actualSha256:corruptSha256},async restore(){
-    if(name==='missing-adapter')await rename(`${path}.moss-terminal-missing`,path);else await writeFile(path,original);
+  let path=safePath(config.hfHome,specification.adapterFile);
+  const expected=config.packageFiles.find(item=>item.file===specification.adapterFile);
+  requireThat(config.hfHome===resolve(config.root,'hf'),'adapter refusal requires the owned HF projection');
+  const home=await realpath(config.hfHome),parent=await realpath(dirname(path));
+  requireThat(home===resolve(await realpath(config.root),'hf'),'adapter refusal requires a private HF directory');
+  if(parent!==home)contained(home,parent);
+  path=resolve(parent,basename(path));
+  const original=await lstat(path);
+  requireThat(original.isFile()&&!original.isSymbolicLink()&&original.nlink===1,'adapter refusal requires a private regular file');
+  requireThat(expected?.sha256===(await fileIdentity(path)).sha256,'adapter refusal initial bytes differ from frozen package inventory');
+  const bytes=name==='corrupt-adapter'?Buffer.from(specification.corruptBytesBase64??'','base64'):null;
+  if(bytes)requireThat(bytes.length>0&&sha(bytes)===specification.corruptSha256&&sha(bytes)!==expected.sha256,'actual immutable corrupt adapter bytes required');
+  const backup=await mkdtemp(resolve(parent,'.moss-terminal-original-')),saved=resolve(backup,'original');
+  let moved=false,restored=false;
+  const verifySaved=async()=>{
+    const info=await lstat(saved);
+    requireThat(info.isFile()&&info.nlink===1&&info.dev===original.dev&&info.ino===original.ino,'owned adapter backup was replaced');
+    requireThat((await fileIdentity(saved)).sha256===expected.sha256,'owned adapter backup changed');
+  };
+  const restore=async()=>{
+    if(restored)return;
+    await verifySaved();
+    // Unlink the negative fixture itself; never follow a replacement link.
+    await unlink(path).catch(error=>{if(error.code!=='ENOENT')throw error;});
+    await rename(saved,path);moved=false;
     requireThat((await fileIdentity(path)).sha256===expected.sha256,'owned adapter fixture failed to restore exact bytes');
-  }};
+    await rmdir(backup);restored=true;
+  };
+  try {
+    await rename(path,saved);moved=true;
+    await verifySaved();
+    if(bytes)await writeFile(path,bytes,{flag:'wx',mode:0o600});
+  }catch(error){if(moved)await restore();else await rmdir(backup);throw error;}
+  return {observation:{candidateId:config.candidateId,file:specification.adapterFile,beforeSha256:expected.sha256,state:name,actualSha256:bytes?sha(bytes):null},restore};
 }
 export async function buildBackend(config) {
   const sources=await sourceIdentity(config),out=resolve(config.buildRoot,config.backend);await mkdir(out,{recursive:true,mode:0o700});

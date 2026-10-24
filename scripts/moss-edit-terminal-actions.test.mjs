@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -273,4 +273,30 @@ test('host slot submits exact small over-budget NPY declaration and retains actu
   const api={async request(path,options={}){if(options.method!=='POST')return [{id:'existing-actual-asset'}];calls++;assert.equal(path,'/api/v1/projects/actual-project/assets');assert.deepEqual(Buffer.from(await options.body.get('file').arrayBuffer()),bytes);const error=Error('actual source import refusal');error.status=400;error.responseBody='tensor payload exceeds budget';throw error;}};
   await submitGuard(api,specification,{projectId:'actual-project',upload:specification.upload},root);assert.equal(calls,1);assert.equal((await json(resolve(root,'response.json'))).body,'tensor payload exceeds budget');assert.deepEqual(await json(resolve(root,'assets-before.json')),await json(resolve(root,'assets-after.json')));
   const changed=await temporary('host-created');await writeFile(resolve(changed,'request.npy'),bytes);let reads=0;const wrong={async request(path,options={}){if(options.method!=='POST')return reads++?[{id:'unexpected-created'}]:[];const error=Error('refusal');error.status=400;error.responseBody='tensor payload exceeds budget';throw error;}};await assert.rejects(()=>submitGuard(wrong,specification,{projectId:'actual-project'},changed),/created an asset/);
+});
+
+test('adapter disk backup restores through guard failure and never follows replacement links',async t=>{
+  const root=await temporary('restore-links');t.after(()=>rm(root,{recursive:true,force:true}));
+  const home=resolve(root,'hf'),file='hub/edit.safetensors',path=resolve(home,file),original=Buffer.from('exact owned adapter'),foreign=resolve(root,'shared-target');
+  await mkdir(resolve(home,'hub'),{recursive:true});await writeFile(path,original);await writeFile(foreign,'shared bytes');
+  const config={root,hfHome:home,candidateId:'inert',editAdapterFiles:[file],packageFiles:[{file,sha256:sha(original)}]},corrupt=Buffer.from('corrupt');
+  const mutation=await adapterRefusalState(config,'corrupt-adapter',{adapterFile:file,corruptBytesBase64:corrupt.toString('base64'),corruptSha256:sha(corrupt)});
+  try{await unlink(path);await symlink(foreign,path);throw Error('inert guard failure');}catch(error){assert.match(error.message,/guard failure/);}finally{await mutation.restore();}
+  assert.deepEqual(await readFile(path),original);assert.equal(await readFile(foreign,'utf8'),'shared bytes');
+  assert.deepEqual(await readdir(resolve(home,'hub')),['edit.safetensors']);await mutation.restore();
+  await assert.rejects(()=>adapterRefusalState(config,'corrupt-adapter',{adapterFile:file,corruptBytesBase64:corrupt.toString('base64'),corruptSha256:'0'.repeat(64)}),/immutable corrupt/);
+  assert.deepEqual(await readFile(path),original);assert.deepEqual(await readdir(resolve(home,'hub')),['edit.safetensors']);
+});
+test('adapter refusal rejects shared symlink, hardlink and escaped parent projections without mutation',async t=>{
+  const root=await temporary('unsafe-adapter');t.after(()=>rm(root,{recursive:true,force:true}));
+  const home=resolve(root,'hf'),shared=resolve(root,'shared'),bytes=Buffer.from('shared immutable adapter');await mkdir(home);await mkdir(shared);await writeFile(resolve(shared,'adapter'),bytes);
+  for(const kind of ['symlink','hardlink','parent']) {
+    const file=kind==='parent'?'alias/adapter':kind,path=resolve(home,file);
+    if(kind==='symlink')await symlink(resolve(shared,'adapter'),path);
+    else if(kind==='hardlink')await link(resolve(shared,'adapter'),path);
+    else await symlink(shared,resolve(home,'alias'));
+    const config={root,hfHome:home,candidateId:'inert',editAdapterFiles:[file],packageFiles:[{file,sha256:sha(bytes)}]};
+    await assert.rejects(()=>adapterRefusalState(config,'missing-adapter',{adapterFile:file}),/private regular|escaped/);
+    assert.deepEqual(await readFile(resolve(shared,'adapter')),bytes);
+  }
 });

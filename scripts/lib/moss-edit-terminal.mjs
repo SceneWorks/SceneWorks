@@ -1,6 +1,6 @@
 // sc-26757: product evidence only. This module never loads a model or a GPU.
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, stat, readdir, unlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat, readdir, unlink, open } from 'node:fs/promises';
 import { resolve, relative, isAbsolute, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { inflateSync } from 'node:zlib';
@@ -24,9 +24,25 @@ export function safePath(root, name) {
   return path;
 }
 export async function fileIdentity(path) {
-  const info = await stat(path);
-  requireThat(info.isFile(), 'identity requires a regular file');
-  return { byteLength: info.size, sha256: sha(await readFile(path)) };
+  requireThat((await stat(path)).isFile(), 'identity requires a regular file');
+  const file = await open(path, 'r');
+  try {
+    const before = await file.stat({ bigint: true });
+    requireThat(before.isFile(), 'identity requires a regular file');
+    requireThat(before.size <= BigInt(Number.MAX_SAFE_INTEGER), 'identity file size exceeds exact byte count');
+    const hash = createHash('sha256'), buffer = Buffer.allocUnsafe(1024 * 1024);
+    let byteLength = 0;
+    for (;;) {
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      byteLength += bytesRead;
+      requireThat(BigInt(byteLength) <= before.size, 'identity file changed while hashing');
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+    const same = info => ['dev','ino','size','mtimeNs','ctimeNs'].every(key => info[key] === before[key]);
+    requireThat(BigInt(byteLength) === before.size && same(await file.stat({ bigint: true })) && same(await stat(path, { bigint: true })), 'identity file changed while hashing');
+    return { byteLength, sha256: hash.digest('hex') };
+  } finally { await file.close(); }
 }
 export function treeIdentity(path) {
   const git = args => execFileSync('git', ['-C', path, ...args], { encoding: 'utf8' }).trim();

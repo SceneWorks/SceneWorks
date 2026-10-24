@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
-import { mkdtemp, mkdir, writeFile, readFile, cp, unlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +11,7 @@ import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { sourceIdentity } from './lib/moss-edit-terminal-actions.mjs';
+import { adapterRefusalState } from './moss-edit-terminal-actions.mjs';
 
 globalThis.fetch = async () => { throw new Error('LIVE_API_FORBIDDEN_IN_PURE_TESTS'); };
 const contract = await json(fileURLToPath(new URL('./fixtures/moss-edit-product-contract-v2.json',import.meta.url)));
@@ -379,4 +380,48 @@ test('v4 Editor adoption retains authenticated product read-back and final valid
   assert.equal(calls.length,4);assert.equal(calls[1][1].raw,true);assert.equal((await validateRetainedEditor(state,f.row,f.expected,f.capture,dest)).assetId,f.asset.id);
   const altered=structuredClone(f.capture);altered.history.hydrationObserved=false;await assert.rejects(()=>validateRetainedEditor(state,f.row,f.expected,altered,dest),/capture\/reserved intent changed/);
   await writeFile(resolve(dest,'source-served.png'),png([99,20,30]));await assert.rejects(()=>validateRetainedEditor(state,f.row,f.expected,f.capture,dest),/bytes changed/);
+});
+
+test('file identity streams exact empty, small and chunk-boundary bytes and follows HF aliases',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-identity-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  for(const size of [0,17,1024*1024-1,1024*1024,1024*1024+19]) {
+    const bytes=Buffer.alloc(size);for(let i=0;i<size;i++)bytes[i]=i%251;
+    const path=resolve(root,`bytes-${size}`);await writeFile(path,bytes);
+    assert.deepEqual(await fileIdentity(path),{byteLength:size,sha256:sha(bytes)});
+  }
+  await symlink(resolve(root,'bytes-17'),resolve(root,'hf-alias'));
+  assert.deepEqual(await fileIdentity(resolve(root,'hf-alias')),await fileIdentity(resolve(root,'bytes-17')));
+  await assert.rejects(()=>fileIdentity(root),/regular file/);
+});
+test('file identity hashes a real sparse file larger than 2 GiB with an independent incremental digest',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-identity-large-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const home=resolve(root,'hf');await mkdir(home);
+  const path=resolve(home,'large.safetensors'),size=2**31+19,prefix=Buffer.from('first bytes'),suffix=Buffer.from('last exact bytes');
+  const file=await open(path,'wx');try{await file.truncate(size);await file.write(prefix,0,prefix.length,0);await file.write(suffix,0,suffix.length,size-suffix.length);}finally{await file.close();}
+  const expected=createHash('sha256').update(prefix),zeros=Buffer.alloc(7*1024*1024);
+  for(let remaining=size-prefix.length-suffix.length;remaining>0;){const n=Math.min(remaining,zeros.length);expected.update(zeros.subarray(0,n));remaining-=n;}
+  expected.update(suffix);
+  const identity={byteLength:size,sha256:expected.digest('hex')};assert.deepEqual(await fileIdentity(path),identity);
+  const config={root,hfHome:home,candidateId:'inert-large',editAdapterFiles:['large.safetensors'],packageFiles:[{file:'large.safetensors',sha256:identity.sha256}]};
+  const corrupt=Buffer.from('inert corrupt fixture'),mutation=await adapterRefusalState(config,'corrupt-adapter',{adapterFile:'large.safetensors',corruptBytesBase64:corrupt.toString('base64'),corruptSha256:sha(corrupt)});
+  try{assert.deepEqual(await readFile(path),corrupt);}finally{await mutation.restore();}
+  assert.equal(mutation.observation.beforeSha256,identity.sha256);
+});
+test('file identity rejects deterministic in-place mutation, replacement, truncation and growth',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-identity-change-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const probe=await open(resolve(root,'probe'),'wx'),prototype=Object.getPrototypeOf(probe),read=prototype.read;await probe.close();
+  for(const kind of ['mutation','replacement','truncation','growth']) {
+    const path=resolve(root,kind),bytes=Buffer.alloc(1024*1024+19,7);await writeFile(path,bytes);let changed=false;
+    const mocked=t.mock.method(prototype,'read',async function(...args){
+      const result=await read.apply(this,args);
+      if(!changed&&result.bytesRead){changed=true;
+        if(kind==='replacement'){const other=resolve(root,'replacement-new');await writeFile(other,bytes);await rename(other,path);}
+        else if(kind==='truncation')await truncate(path,3);
+        else if(kind==='growth'){const handle=await open(path,'a');try{await handle.write(Buffer.from('extra'));}finally{await handle.close();}}
+        else {const handle=await open(path,'r+');try{await handle.write(Buffer.from([8]),0,1,0);}finally{await handle.close();}}
+      }
+      return result;
+    });
+    try{await assert.rejects(()=>fileIdentity(path),/changed while hashing/);assert.equal(changed,true);}finally{mocked.mock.restore();}
+  }
 });
