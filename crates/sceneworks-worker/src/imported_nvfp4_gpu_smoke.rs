@@ -432,6 +432,13 @@ async fn imported_nvfp4_worker_gpu_smoke() {
                     .all(|line| *line == expected_source),
             "manual device provenance must be revalidated for the actual inference pin"
         );
+        // The declared engine pin is not the complete effective producer: bind the
+        // exact, separately audited ZIP9 leaf source identities compiled into this test.
+        use sha2::{Digest, Sha256};
+        let security_backport_manifest_sha256 = format!(
+            "{:x}",
+            Sha256::digest(include_bytes!("../../../vendor/zip9-source-overrides.json"))
+        );
         let mut generated = std::fs::File::open(&rendered_path)
             .expect("the genuinely generated image remains readable before TempDir drop");
         let mut copied = std::fs::OpenOptions::new()
@@ -449,6 +456,8 @@ async fn imported_nvfp4_worker_gpu_smoke() {
                 "kind": "source-enforced-postload-receipt",
                 "audited_app_revision": "f71f3ab4235494356ab03da2ad99aff5527ce0ff",
                 "inference_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+                "security_backport_manifest_sha256": security_backport_manifest_sha256,
+                "effective_source": "declared inference pin plus exact leaf security overrides; collector verifies full Cargo source graph and unchanged CUDA anchors",
                 "anchors": [
                     "crates/media/candle-gen/candle-gen-krea/src/loader.rs:from_pinned_native_file_for/native_import_residency:333-346,1415-1416",
                     "crates/media/candle-gen/candle-gen/src/logical_weights.rs:CandleCodecResidency::probe/cuda_meets_sm120_floor:148-152,282-304",

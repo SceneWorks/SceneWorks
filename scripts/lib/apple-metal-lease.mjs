@@ -1,7 +1,7 @@
 // Narrow parent -> owned-child FD handoff. No service API, PID substitution, broker, or model
 // option change. The frozen Python protocol acquires the SAME open-file-description as Node.
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomBytes } from "node:crypto";
+import { randomInt } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { constants, openSync, closeSync, lstatSync, fstatSync } from "node:fs";
 import { performance } from "node:perf_hooks";
@@ -10,6 +10,11 @@ import { METAL_LOCK_FD, METAL_LOCK_PATH, METAL_LOCK_PROTOCOL, metalExecutionWait
 
 const bridgePath = fileURLToPath(new URL("../ci/metal_execution_node_bridge.py", import.meta.url));
 const scope = new AsyncLocalStorage();
+// A seek changes the OFD offset, not file length/content. Keep its positive generation cookie
+// within signed 32-bit file offsets: Linux filesystems may reject the old 48-bit seek range.
+// It is not an authorization token; canonical inode + kernel flock remain mandatory, and a
+// newly reopened foreign description has offset zero, never this positive cookie.
+const OFD_MARKER_MAX = 0x7fffffff;
 const noopLease = Object.freeze({ childOptions: (options) => options, close: async () => {}, record: () => null });
 
 function descriptorOptions(fd, options, environment) {
@@ -38,7 +43,7 @@ export function createMacMetalLeaseFactory({
   bridge = bridgePath, canonicalPath = METAL_LOCK_PATH,
   spawnImpl = spawn, spawnSyncImpl = spawnSync, open = openSync, close = closeSync,
   lstat = (file) => lstatSync(file, { bigint: true }), fstat = (fd) => fstatSync(fd, { bigint: true }),
-  now = () => performance.now(), marker = () => randomBytes(6).readUIntBE(0, 6) + 1,
+  now = () => performance.now(), marker = () => randomInt(1, OFD_MARKER_MAX + 1),
 } = {}) {
   async function invoke(mode, waitSeconds, fd = null, offset = null) {
     const args = ["-I", bridge, "--mode", mode, "--wait-seconds", String(waitSeconds)];
@@ -71,7 +76,15 @@ export function createMacMetalLeaseFactory({
       if (mark) args.push("--marker-offset", String(offset));
       const options = descriptorOptions(fd, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 5000 }, environment);
       const result = spawnSyncImpl(python, args, options);
-      if (result.error || result.status !== 0 || JSON.parse(result.stdout).offset !== offset) throw new Error("Metal open-file-description was lost/reused; refusing to close or launch");
+      let observed = null, parseError = null;
+      try { observed = JSON.parse(result.stdout).offset; } catch (error) { parseError = error.message; }
+      if (result.error || result.status !== 0 || result.signal || observed !== offset || parseError) {
+        const detail = { phase: mark ? "mark" : "verify", expectedOffset: offset, observedOffset: observed,
+          status: result.status, signal: result.signal, errorCode: result.error?.code ?? null,
+          error: String(result.error?.message ?? "").slice(0, 256), parseError,
+          stderr: String(result.stderr ?? "").slice(0, 512), stdout: String(result.stdout ?? "").slice(0, 256) };
+        throw new Error(`Metal open-file-description was lost/reused; refusing to close or launch; inspect=${JSON.stringify(detail)}`);
+      }
     };
     if (inherited !== undefined) {
       if (!/^[0-9]+$/.test(inherited) || !Number.isSafeInteger(Number(inherited)) || Number(inherited) < 3) throw new Error("invalid inherited Metal descriptor");
@@ -88,6 +101,7 @@ export function createMacMetalLeaseFactory({
     try {
       captured = identity(fd, canonicalPath, fstat, lstat);
       offset = owned ? marker() : null;
+      if (owned && (!Number.isSafeInteger(offset) || offset <= 0 || offset > OFD_MARKER_MAX)) throw new Error("invalid portable owned-description marker");
       // Mark synchronously before the first asynchronous acquisition yield. Even an acquisition
       // failure must not close a foreign FD reopened on the same canonical inode.
       if (owned) { inspectOffset(true); marked = true; }

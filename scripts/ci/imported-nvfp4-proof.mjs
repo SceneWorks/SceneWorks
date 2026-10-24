@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { SECURITY_BACKPORT_MANIFEST_SHA256, verifySecuritySources } from './zip9-source-overrides.mjs';
 
 export const CASE = Object.freeze({
   package: 'sceneworks-worker', target_kind: 'lib',
@@ -20,6 +21,7 @@ export const DEVICE_PROOF = Object.freeze({
   kind: 'source-enforced-postload-receipt',
   audited_app_revision: 'f71f3ab4235494356ab03da2ad99aff5527ce0ff',
   inference_revision: '91ffb4a819aa2990c652db2d881ba0b9b10126ce',
+  security_backport_manifest_sha256: SECURITY_BACKPORT_MANIFEST_SHA256,
 });
 const FILE_LIMITS = Object.freeze({
   'discovery.log': 8 * 1024 * 1024, 'execution.log': 8 * 1024 * 1024,
@@ -97,6 +99,9 @@ export function validateEvidence(evidence) {
   assert(/^[a-f0-9]{40}$/.test(evidence.source?.revision));
   assert(/^[a-f0-9]{40}$/.test(evidence.source?.tree));
   assert.equal(evidence.inference_source?.revision, DEVICE_PROOF.inference_revision);
+  assert.equal(evidence.inference_source.security_overrides?.kind, 'exact-pinned-leaf-security-backport');
+  assert.equal(evidence.inference_source.security_overrides.manifest_sha256, SECURITY_BACKPORT_MANIFEST_SHA256);
+  assert(/^[a-f0-9]{64}$/.test(evidence.inference_source.security_overrides.cargo_source_graph_sha256));
   assert.equal(evidence.case?.package, CASE.package);
   assert.equal(evidence.case?.target_kind, 'lib');
   assert.equal(evidence.case?.execution_role, 'direct');
@@ -246,7 +251,8 @@ export async function main() {
     assert(checkpoint, 'SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT is required');
     evidence.fixture_identity = await checkpointIdentity(checkpoint);
     const cargo = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
-    const metadata = JSON.parse(execFileSync(cargo, ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 }));
+    const metadata = JSON.parse(execFileSync(cargo, ['metadata', '--locked', '--offline', '--features', 'sceneworks-worker/backend-candle', '--format-version', '1'], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }));
+    evidence.inference_source.security_overrides = await verifySecuritySources(metadata);
     const worker = metadata.packages.find((pkg) => pkg.name === CASE.package);
     const libraries = worker?.targets.filter((target) => target.kind.includes('lib')) ?? [];
     assert.equal(libraries.length, 1, 'fixed worker case must belong to an existing library test target');
@@ -261,6 +267,11 @@ export async function main() {
     const completionFile = await regularOutput(directory, 'completion.json');
     const packet = JSON.parse(await fs.readFile(path.join(directory, 'completion.json'), 'utf8'));
     evidence.test_counts = validateExecution(execution.log, execution.code, fqn, packet);
+    const afterMetadata = JSON.parse(execFileSync(cargo, ['metadata', '--locked', '--offline', '--features', 'sceneworks-worker/backend-candle', '--format-version', '1'], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 }));
+    assert.deepEqual(await verifySecuritySources(afterMetadata), evidence.inference_source.security_overrides,
+      'effective security source graph changed during the model proof');
+    assert.equal(git(['rev-parse', 'HEAD']), evidence.source.revision);
+    assert.equal(git(['status', '--porcelain', '--untracked-files=no']), '', 'proof source changed during execution');
     evidence.actual_devices = evidence.test_counts.actual_devices;
     evidence.body_completed = evidence.test_counts.body_completed;
     evidence.configuration = packet.configuration;

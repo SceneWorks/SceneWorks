@@ -40,6 +40,62 @@ async function fileReady(file) {
   assert.fail(`owned CPU child did not create ${file}`);
 }
 
+test("default OFD cookie stays within a portable seek ceiling while real inode/flock proof remains mandatory", { skip: process.platform === "win32" }, async () => {
+  const f = await fdLeaseFixture(); let lease;
+  const markers = [], ceiling = 0x7fffffff;
+  try {
+    lease = await f.acquire({ spawnSyncImpl: (program, args, options) => {
+      const at = args.indexOf("--marker-offset");
+      if (at >= 0) {
+        const offset = Number(args[at + 1]); markers.push(offset);
+        // Model a filesystem's real SEEK_SET ceiling, not a platform skip or fabricated proof.
+        if (offset > ceiling) return { status: 1, signal: null, stdout: "", stderr: "OSError: [Errno 22] Invalid argument" };
+      }
+      return spawnSync(program, args, options);
+    } })(2);
+    assert.equal(markers.length, 1); assert.ok(Number.isSafeInteger(markers[0]) && markers[0] > 0 && markers[0] <= ceiling);
+    assert.equal(f.competitor().status, 17, "the real private kernel flock must still exclude another OFD");
+    assert.equal((await readFile(f.canonicalPath)).length, 0, "marking never writes or allocates lock-file contents");
+    await lease.close(); lease = null; assert.equal(f.competitor().status, 0);
+  } finally { if (lease) await lease.close(); await rm(f.directory, { recursive: true, force: true }); }
+});
+for (const offset of [1, 0x7fffffff]) test(`portable OFD boundary ${offset} retains real kernel ownership`, { skip: process.platform === "win32" }, async () => {
+  const f = await fdLeaseFixture(); let lease;
+  try {
+    lease = await f.acquire({ marker: () => offset })(2); assert.equal(f.competitor().status, 17);
+    await lease.close(); lease = null; assert.equal(f.competitor().status, 0);
+    assert.equal((await readFile(f.canonicalPath)).length, 0);
+  } finally { if (lease) await lease.close(); await rm(f.directory, { recursive: true, force: true }); }
+});
+test("old 48-bit/nonpositive cookies refuse before seek in both Node and bridge, with no fallback", { skip: process.platform === "win32" }, async () => {
+  const f = await fdLeaseFixture();
+  try {
+    for (const offset of [0, 2 ** 48 - 1]) {
+      let fd, marked = false;
+      try {
+        await assert.rejects(f.acquire({ marker: () => offset, open: (...args) => { fd = openSync(...args); return fd; },
+          spawnSyncImpl: () => { marked = true; assert.fail("invalid cookie must not reach a seek"); } })(2), /invalid portable owned-description marker/);
+        assert.equal(marked, false);
+        const result = spawnSync(f.pythonPath, ["-I", f.bridge, "--mode", "inspect", "--wait-seconds", "1", "--marker-offset", String(offset)], {
+          encoding: "utf8", stdio: ["ignore", "pipe", "pipe", fd], env: { ...process.env, [METAL_LOCK_FD]: "3" },
+        });
+        assert.equal(result.status, 1); assert.match(result.stderr, /invalid portable owned-description marker/);
+      } finally { if (fd !== undefined) closeSync(fd); }
+    }
+  } finally { await rm(f.directory, { recursive: true, force: true }); }
+});
+test("failed seek retains bounded phase/status/errno diagnostics and never grants a lease", { skip: process.platform === "win32" }, async () => {
+  const f = await fdLeaseFixture(); let fd;
+  try {
+    await assert.rejects(f.acquire({ marker: () => 42, open: (...args) => { fd = openSync(...args); return fd; },
+      spawnSyncImpl: () => ({ status: 1, signal: null, stdout: "", stderr: "OSError: [Errno 22] Invalid argument" }),
+    })(2), (error) => /description was lost\/reused/.test(error.message)
+      && error.message.includes('"phase":"mark"') && error.message.includes('"expectedOffset":42')
+      && error.message.includes('"status":1') && error.message.includes("Errno 22"));
+    assert.equal(f.competitor().status, 0, "a failed mark did not grant kernel ownership");
+  } finally { if (fd !== undefined) closeSync(fd); await rm(f.directory, { recursive: true, force: true }); }
+});
+
 test("real Node lease survives bridge exit, start returns with actual worker PID, and stop/reload release correctly", { skip: process.platform === "win32" }, async () => {
   const f = await fdLeaseFixture(); let done;
   const ready = path.join(f.directory, "ready"), release = path.join(f.directory, "release");

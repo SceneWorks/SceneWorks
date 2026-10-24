@@ -77,7 +77,10 @@ test('fixed direct-case JSON is compatible with common-v1 source/device/body/out
   const value = {
     schema_version: 1, accepted: true,
     source: { revision: '1'.repeat(40), tree: '2'.repeat(40) },
-    inference_source: { revision: DEVICE_PROOF.inference_revision },
+    inference_source: { revision: DEVICE_PROOF.inference_revision, security_overrides: {
+      kind: 'exact-pinned-leaf-security-backport', manifest_sha256: DEVICE_PROOF.security_backport_manifest_sha256,
+      cargo_source_graph_sha256: '4'.repeat(64),
+    } },
     case: { ...CASE, target: 'sceneworks_worker', fqn },
     host: { platform: 'win32', machine: 'x64', runner: 'owned-fixture' },
     actual_devices: ['candle-cuda'], device_provenance: DEVICE_PROOF,
@@ -90,6 +93,9 @@ test('fixed direct-case JSON is compatible with common-v1 source/device/body/out
   validateEvidence(value);
   for (const mutate of [
     (copy) => { copy.source.tree = ''; },
+    (copy) => { delete copy.inference_source.security_overrides; },
+    (copy) => { copy.inference_source.security_overrides.manifest_sha256 = '0'.repeat(64); },
+    (copy) => { copy.inference_source.security_overrides.cargo_source_graph_sha256 = ''; },
     (copy) => { copy.actual_devices = ['cpu']; },
     (copy) => { copy.test_counts.passed = 0; },
     (copy) => { copy.body_completed = 0; },

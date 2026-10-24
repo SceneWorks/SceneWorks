@@ -71,6 +71,10 @@ fn resolved_commit(source: &str) -> Option<&str> {
 /// Core check, separated from file I/O so the red paths below are testable: every patched Candle
 /// package must resolve from the inference repo at the same commit as sceneworks-gen-core.
 fn check_lock(lock: &str) -> Result<(), String> {
+    check_lock_with_security(lock, None)
+}
+
+fn check_lock_with_security(lock: &str, verified_security_pin: Option<&str>) -> Result<(), String> {
     let packages = parse_lock_packages(lock);
     let gen_core = packages
         .iter()
@@ -90,6 +94,12 @@ fn check_lock(lock: &str) -> Result<(), String> {
             ));
         };
         let Some(source) = source else {
+            if crate_name == "candle-core"
+                && verified_security_pin.is_some()
+                && verified_security_pin == resolved_commit(gen_core)
+            {
+                continue;
+            }
             return Err(format!(
                 "{crate_name} has no source (unexpected path dependency)"
             ));
@@ -128,7 +138,50 @@ fn candle_kernels_resolves_through_the_inference_patch() {
     let lock_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
     let lock = std::fs::read_to_string(&lock_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", lock_path.display()));
-    if let Err(msg) = check_lock(&lock) {
+    let root = lock_path.parent().expect("workspace root");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("vendor/zip9-source-overrides.json"))
+            .expect("security provenance"),
+    )
+    .expect("security provenance JSON");
+    let pin = manifest["engine_revision"]
+        .as_str()
+        .expect("security source revision");
+    let core = manifest["packages"]
+        .as_array()
+        .expect("security leaves")
+        .iter()
+        .find(|package| package["name"] == "candle-core")
+        .expect("Candle security leaf");
+    assert_eq!(core["upstream_revision"], pin);
+    assert_eq!(core["path"], "vendor/zip9-candle-core");
+    assert_eq!(core["version"], "0.10.2");
+    for file in core["files"]
+        .as_array()
+        .expect("complete source identities")
+    {
+        use sha2::{Digest, Sha256};
+        let name = file["path"].as_str().expect("source path");
+        assert!(
+            name.starts_with("vendor/zip9-candle-core/") && !name.split('/').any(|p| p == "..")
+        );
+        let bytes = std::fs::read(root.join(name)).expect("actual Candle security source");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            file["sha256"].as_str().unwrap(),
+            "{name}"
+        );
+        if !matches!(
+            name.strip_prefix("vendor/zip9-candle-core/"),
+            Some("Cargo.toml" | "src/npy.rs" | "src/pickle.rs" | "tests/zip9_security_tests.rs")
+        ) {
+            assert_eq!(
+                file["sha256"], file["upstream_sha256"],
+                "non-ZIP source changed: {name}"
+            );
+        }
+    }
+    if let Err(msg) = check_lock_with_security(&lock, Some(pin)) {
         panic!("{msg}");
     }
 }
@@ -172,6 +225,28 @@ fn guard_rejects_upstream_or_missing_candle_metal_kernels() {
     assert!(check_lock(&missing)
         .unwrap_err()
         .contains("exactly one candle-metal-kernels"));
+}
+
+#[test]
+fn local_core_requires_verified_same_revision_security_source() {
+    let path_core = GOOD_LOCK.replacen(
+        "name = \"candle-core\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd\"",
+        "name = \"candle-core\"\nversion = \"0.10.2\"",
+        1,
+    );
+    assert!(check_lock(&path_core).is_err());
+    assert!(check_lock_with_security(&path_core, Some("wrong-revision")).is_err());
+    assert_eq!(
+        check_lock_with_security(&path_core, Some("d68b8b457d76e0472393f0d7bfe0e79ae68278dd")),
+        Ok(())
+    );
+    let foreign_kernel =
+        path_core.replacen("name = \"candle-kernels\"", "name = \"foreign-kernels\"", 1);
+    assert!(check_lock_with_security(
+        &foreign_kernel,
+        Some("d68b8b457d76e0472393f0d7bfe0e79ae68278dd")
+    )
+    .is_err());
 }
 
 #[test]

@@ -41,8 +41,10 @@ def main(argv=None):
     if raw is None or not raw.isdecimal() or int(raw) < 3:
         raise ValueError('real inherited descriptor required')
     fd = int(raw)
-    if args.marker_offset is not None and not 0 < args.marker_offset <= (1 << 53) - 1:
-        raise ValueError('invalid private owned-description marker')
+    # Match the Node producer's portable positive signed-32-bit seek range. This is an OFD
+    # generation cookie, not file data or an authorization token; never retry a failed seek.
+    if args.marker_offset is not None and not 0 < args.marker_offset <= (1 << 31) - 1:
+        raise ValueError('invalid portable owned-description marker')
     if args.mode == 'inspect':
         protocol._validate(protocol.CANONICAL_PATH, fd)
         if args.marker_offset is not None:
