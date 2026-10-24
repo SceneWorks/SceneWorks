@@ -408,4 +408,82 @@ async fn imported_nvfp4_worker_gpu_smoke() {
         checkpoint.display(),
         rendered_path.display(),
     );
+
+    let test_fqn = std::thread::current()
+        .name()
+        .expect("the libtest case has an actual FQN")
+        .to_owned();
+    if let Some(output_dir) = std::env::var_os("MODEL_PROOF_OUTPUT_DIR") {
+        let output_dir = PathBuf::from(output_dir);
+        assert!(output_dir.is_absolute() && output_dir.is_dir());
+        // This is a source-enforced receipt proof, NOT a direct Tensor/device readback.
+        // Keep it bound to the exact inference producer audited for this manual case.
+        let expected_source = "source = \"git+https://github.com/SceneWorks/inference?rev=91ffb4a819aa2990c652db2d881ba0b9b10126ce#91ffb4a819aa2990c652db2d881ba0b9b10126ce\"";
+        let inference_sources = include_str!("../../../Cargo.lock")
+            .lines()
+            .filter(|line| {
+                line.starts_with("source = \"git+https://github.com/SceneWorks/inference?rev=")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !inference_sources.is_empty()
+                && inference_sources
+                    .iter()
+                    .all(|line| *line == expected_source),
+            "manual device provenance must be revalidated for the actual inference pin"
+        );
+        let mut generated = std::fs::File::open(&rendered_path)
+            .expect("the genuinely generated image remains readable before TempDir drop");
+        let mut copied = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_dir.join("generated-image"))
+            .expect("create an owned proof image, never replace an existing file");
+        std::io::copy(&mut generated, &mut copied).expect("preserve the actual generated image");
+        let packet = json!({
+            "schema_version": 1,
+            "test_fqn": test_fqn,
+            "status": "completed",
+            "actual_devices": ["candle-cuda"],
+            "device_provenance": {
+                "kind": "source-enforced-postload-receipt",
+                "audited_app_revision": "f71f3ab4235494356ab03da2ad99aff5527ce0ff",
+                "inference_revision": "91ffb4a819aa2990c652db2d881ba0b9b10126ce",
+                "anchors": [
+                    "crates/media/candle-gen/candle-gen-krea/src/loader.rs:from_pinned_native_file_for/native_import_residency:333-346,1415-1416",
+                    "crates/media/candle-gen/candle-gen/src/logical_weights.rs:CandleCodecResidency::probe/cuda_meets_sm120_floor:148-152,282-304",
+                    "crates/media/candle-gen/candle-gen-krea/src/loader.rs:LogicalWeightReader::open_with_capability:416-423",
+                    "crates/contracts/gen-core/src/checkpoint_facts.rs:NativeWithoutCapability:1024-1032",
+                    "crates/media/candle-gen/candle-gen-krea/src/pipeline.rs:load_native_dit_at_dtype:1000-1074",
+                    "crates/media/candle-gen/candle-gen-krea/src/lib.rs:Generator::checkpoint_weight_facts:732-734",
+                    "crates/sceneworks-worker/src/image_jobs/checkpoint_plan.rs:same-model post-success facts:2014-2024"
+                ],
+                "scope": "nonzero native NVFP4 materialization from the same successfully generated request; CUDA-only production probe, not a device ordinal or host/default context",
+                "test_only_override": "the dependency's private forced-packed CPU helper is cfg(test)-only and is not compiled into a worker dependency"
+            },
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_path": checkpoint,
+            "runtime_facts": raw.get(crate::checkpoint_weight_facts_host::FACTS_RAW_SETTINGS_KEY)
+                .expect("the checked runtime receipt remains present"),
+            "configuration": {
+                "route": "candle_checkpoint_plan", "provider": "krea_2_turbo",
+                "model_id": model_id, "geometry": [rendered.width, rendered.height],
+                "prompt": "a red fox in a sunlit autumn forest, sharp focus",
+                "negative_prompt": "", "count": 1, "seed": 42, "steps": 1,
+                "features": ["backend-candle"], "source_codec": NVFP4_CODEC_ID,
+                "execution_representation": representation, "rgb_std": std
+            },
+            "output": "generated-image"
+        });
+        let mut completion = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output_dir.join("completion.json"))
+            .expect("create the owned post-inference completion packet");
+        serde_json::to_writer_pretty(&mut completion, &packet)
+            .expect("persist the correlated runtime facts and exact device provenance");
+        eprintln!("\nMODEL_INFERENCE_DEVICE {test_fqn} candle-cuda");
+    }
+    // An early missing-fixture return or a generation/assertion/persistence failure cannot emit this.
+    eprintln!("MODEL_INFERENCE_BODY_COMPLETED {test_fqn}");
 }

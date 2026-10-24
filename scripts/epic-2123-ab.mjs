@@ -33,6 +33,7 @@
 //   node scripts/epic-2123-ab.mjs --phase report
 //   node scripts/epic-2123-ab.mjs --phase status
 
+import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -465,7 +466,7 @@ function spawnLogged(bin, env, logName) {
   // Own process group: a terminal Ctrl-C reaches only this driver, which then tears the children
   // down in order (cancel the job, SIGTERM the worker and let it finish its command buffer, stop
   // the API) instead of every process receiving SIGINT at once.
-  const child = spawn(bin, [], { env, stdio: ["ignore", fd, fd], detached: true });
+  const child = spawn(bin, [], metalChildOptions({ env, stdio: ["ignore", fd, fd], detached: true }));
   fs.closeSync(fd);
   child.logPath = logPath;
   child.exited = false;
@@ -2150,6 +2151,8 @@ async function main() {
     // A dry run gets its own isolated tree so it never mixes with the real A/B state.
     OPTS.root = path.join(OPTS.root, "dry-run");
   }
+  const executionPhase = OPTS.dryRun ? "dry-run" : OPTS.phase;
+  if (GPU_PHASES.has(executionPhase) && OPTS.confirmGpu && await enterMacMetalExecution(1800)) return;
   fs.mkdirSync(OPTS.root, { recursive: true });
   loadState(OPTS.root);
 

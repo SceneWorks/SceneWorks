@@ -52,6 +52,7 @@
 // scripts/yue2-memory-profile.mjs (config/yue2-memory-profile-plan.json), which runs it through the
 // same job path (`yue2_jobs::resolve_load` / `build_request`); the summary names it under
 // `coveredElsewhere`.
+import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
 import { spawn, execFile as execFileCallback } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -1028,7 +1029,7 @@ class Service {
     // the pipe), so the driver holds it the same way; everything else gets no stdin.
     const stdin = role === "worker" && this.options.platform === "cuda" ? "pipe" : "ignore";
     // NOT detached: the child stays in the driver's process group, which the external guard samples.
-    const child = spawn(this.options.apiBin, [], { cwd: ROOT, env: this.env(role), stdio: [stdin, log.fd, log.fd], windowsHide: true });
+    const child = spawn(this.options.apiBin, [], metalChildOptions({ cwd: ROOT, env: this.env(role), stdio: [stdin, log.fd, log.fd], windowsHide: true }));
     await log.close();
     child.spawnError = null;
     child.once("error", (error) => { child.spawnError = error; });
@@ -2418,5 +2419,11 @@ async function runAcceptance(options, completion) {
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {
-  main().then((code) => { process.exitCode = code; }, (error) => { console.error(error.message); process.exitCode = 1; });
+  const run = async () => {
+    const options = parseArgs(process.argv.slice(2));
+    if (options.platform === "metal" && !options.dryRun && !options.profileInstallOnly
+        && await enterMacMetalExecution(options.jobTimeoutMinutes * 60)) return process.exitCode;
+    return main();
+  };
+  run().then((code) => { process.exitCode = code; }, (error) => { console.error(error.message); process.exitCode = 1; });
 }

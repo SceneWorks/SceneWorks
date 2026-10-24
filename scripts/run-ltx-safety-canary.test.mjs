@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -2457,7 +2458,7 @@ test("the production runner can only launch through the identity-checked watchdo
   );
   assert.match(
     source,
-    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    /withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*return await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
     "the campaign entry host gate must also be the final operation before watchdog launch",
   );
   const boundedController = source.slice(
@@ -2466,9 +2467,14 @@ test("the production runner can only launch through the identity-checked watchdo
   );
   assert.match(
     boundedController,
-    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    /withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*return await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
     "the bounded carrier host gate must be the final operation before its one watchdog launch",
   );
+  assert.equal(source.match(/withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{/g)?.length, 3,
+    "each original physical watchdog acquires/reuses the host-global execution lease before its final preflight");
+  assert.equal(source.match(/spawn\("\/usr\/bin\/python3", watchdogArgs, scopedMetalChildOptions\(/g)?.length, 3,
+    "the actual original watchdogs inherit the verified descriptor, never a new model session");
+  assert.match(source, /const \{ preLaunchHost, status \} = await withMacMetalExecutionLease\(MAX_RUNTIME_SECONDS, async \(\) => \{\n\s*const preLaunchHost = await assertHostPreflight/);
   assert.equal(BOUNDED_CARRIER_PROFILE, "bounded-carrier");
   assert.match(boundedController, /--require-provider-phases/);
   assert.match(boundedController, /"--provider-phase-profile", "bounded-carrier"/);
@@ -2901,6 +2907,69 @@ test("cancellation during clone, build and publication removes owned staging and
     assert.equal(entries.some((entry) => entry.includes(".stage-") || entry.endsWith(".lock")), false);
     await assert.rejects(() => stat(fixture.preparationRoot), { code: "ENOENT" });
   }
+});
+
+// Synthetic process/census dependencies below never signal any PID. The original real owned
+// CPU cancellation and Darwin zombie fixtures remain unchanged immediately below these cases.
+const completeGroupCensus = (stdout) => ({ status: 0, signal: null, error: undefined, stdout });
+const groupRow = (state, pid = 43211, group = 43210) => `${pid} 43210 ${group} ${state}\n`.replaceAll("\\n", "\n");
+function simulatedGroupDenial(observations) {
+  const denial = Object.assign(new Error("kill EPERM CPU fixture"), { code: "EPERM" });
+  let signals = 0, censuses = 0;
+  const invoke = () => killProcessGroup({ pid: 43210 }, "SIGKILL", {
+    sendSignal(pid, signal) { assert.equal(pid, -43210); assert.equal(signal, "SIGKILL"); signals += 1; throw denial; },
+    censusProcess(program, args) {
+      assert.equal(program, "/bin/ps"); assert.deepEqual(args, ["-axo", "pid=,ppid=,pgid=,stat="]);
+      const result = observations[Math.min(censuses, observations.length - 1)]; censuses += 1;
+      if (result instanceof Error) throw result;
+      return result;
+    },
+  });
+  return { denial, invoke, counts: () => ({ signals, censuses }) };
+}
+for (const [label, final] of [["zombie", groupRow("Z")], ["absent", groupRow("S", 54322, 54321)]]) {
+  test(`EPERM fresh owned-group observation accepts only proved ${label}, without another signal`, () => {
+    const fixture = simulatedGroupDenial([completeGroupCensus(groupRow("S")), completeGroupCensus(final)]);
+    assert.doesNotThrow(fixture.invoke);
+    assert.deepEqual(fixture.counts(), { signals: 1, censuses: 2 });
+  });
+}
+for (const [label, observations] of [
+  ["live", [completeGroupCensus(groupRow("S"))]],
+  ["unknown state", [completeGroupCensus(groupRow("?"))]],
+  ["nonzero census", [{ status: 1, signal: null, stdout: "" }]],
+  ["census error", [Object.assign(new Error("ps unavailable"), { code: "EPERM" })]],
+  ["malformed census", [completeGroupCensus("not a process row\n")]],
+  ["hidden live member beyond diagnostic window", [completeGroupCensus(Array.from({ length: 40 }, (_, index) => groupRow("Z", 50000 + index)).join("") + groupRow("S", 60000))]],
+]) {
+  test(`EPERM ${label} remains an actionable ownership failure, never verified cleanup`, () => {
+    const fixture = simulatedGroupDenial(observations);
+    assert.throws(fixture.invoke, (error) => error === fixture.denial && error.code === "EPERM"
+      && error.ownedGroupCleanup.pgid === 43210 && error.ownedGroupCleanup.observations.length === 2);
+    assert.deepEqual(fixture.counts(), { signals: 1, censuses: 2 });
+    assert.match(fixture.denial.message, /owned group cleanup unverified/);
+    assert.ok(fixture.denial.ownedGroupCleanup.observations.every((observation) => observation.members.length <= 32));
+  });
+}
+test("non-EPERM signalling failures are not retried or hidden", () => {
+  const denial = Object.assign(new Error("invalid signal fixture"), { code: "EINVAL" });
+  assert.throws(() => killProcessGroup({ pid: 43210 }, "SIGKILL", {
+    sendSignal() { throw denial; }, censusProcess() { assert.fail("not an EPERM census"); },
+  }), (error) => error === denial);
+});
+test("close-time cleanup failure rejects controllably and cannot masquerade as completed cancellation", async () => {
+  const child = new EventEmitter(); child.pid = 43210; child.stdout = new EventEmitter(); child.stderr = new EventEmitter();
+  const cancellation = new AbortController(), interruption = new CanaryInterrupted("SIGTERM");
+  const failure = Object.assign(new Error("owned cleanup unverified CPU fixture"), { code: "EPERM" });
+  const signals = [];
+  const operation = runOwnedCommand("cpu-fixture-never-executed", [], {
+    signal: cancellation.signal,
+    spawnProcess() { return child; },
+    killOwnedGroup(actual, signal) { assert.equal(actual, child); signals.push(signal); if (signal === "SIGKILL") throw failure; },
+  });
+  cancellation.abort(interruption); child.emit("close", null, "SIGTERM");
+  await assert.rejects(operation, (error) => error === failure && error.cause === interruption && !(error instanceof CanaryInterrupted));
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "no new signals or cleanup-success classification");
 });
 
 test("signalling a group whose only member is an unreaped zombie is not a failure", { skip: process.platform !== "darwin" && "Darwin-specific EPERM" }, async () => {

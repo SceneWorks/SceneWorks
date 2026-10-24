@@ -73,6 +73,12 @@ WALK_STATUS=$?
 set -e
 
 cleanup
+# The walk returned only after its owned capture supervisors finished. Do not put this in an
+# always()/EXIT trap: cancellation must retain source while a surviving child may still read it.
+if ! node scripts/ci/memory-catalog/source-worktree.mjs cleanup "$INFERENCE_REPO"; then
+  echo "::warning title=Source checkout retained::owned source identity/cleanup failed; no force removal attempted"
+  if (( WALK_STATUS == 0 )); then WALK_STATUS=1; fi
+fi
 # Give tail a moment to flush the tail of the log before the step ends.
 sleep 2
 

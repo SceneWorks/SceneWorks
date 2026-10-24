@@ -2,6 +2,10 @@
 // Start the actual current-tree Rust API and worker for the terminal campaign.
 // This is intentionally not an arbitrary service command: its source revision,
 // Cargo inference pin, binaries and health response are all recorded together.
+import { METAL_LOCK_FD, metalExecutionWaitSeconds } from "./lib/apple-metal-execution-lock.mjs";
+import { withMacMetalExecutionLease, scopedMetalChildOptions } from "./lib/apple-metal-lease.mjs";
+import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
+import { bindMetallib, readBoundAppMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
@@ -155,7 +159,7 @@ export async function runProductServiceGpuPreflight(binary, serviceEnv, {
   timeoutMs = 60_000,
 } = {}) {
   try {
-    await execFileImpl(binary, [], { env: { ...serviceEnv, SCENEWORKS_GPU_CHECK: "1" }, timeout: timeoutMs, windowsHide: true });
+    await execFileWithFds(binary, [], scopedMetalChildOptions({ env: { ...serviceEnv, SCENEWORKS_GPU_CHECK: "1" }, timeout: timeoutMs, windowsHide: true }), execFileImpl);
   } catch (error) {
     const reason = String(error.stdout ?? error.stderr ?? error.message ?? error).trim();
     die(`native GPU preflight failed${reason ? `: ${reason}` : ""}`);
@@ -404,6 +408,25 @@ function ownedWorkerEnvironment({ gpuBinding, instanceToken, endpoint, url, stat
   return serviceEnv;
 }
 
+async function buildProductNativeAssets(root, output) {
+  if (process.platform !== "darwin") { await execFile("cargo", productServiceBuildArgs(), { cwd: root }); return null; }
+  // Stream actual Cargo JSON to an owned file; execFile's default output buffer is not a build
+  // artifact channel. Same build/flags, plus metadata output only; no extra Cargo invocation.
+  const logPath = path.join(output, "native-build.jsonl"), log = await open(logPath, "wx", 0o600);
+  try {
+    const build = spawn("cargo", [...productServiceBuildArgs(), "--message-format=json-render-diagnostics"], scopedMetalChildOptions({ cwd: root, stdio: ["ignore", log.fd, log.fd] }));
+    await new Promise((resolve, reject) => {
+      build.once("error", reject);
+      build.once("close", (code, signal) => code === 0 && !signal ? resolve() : reject(new Error(`product native build failed: ${code ?? signal}; see ${logPath}`)));
+    });
+  } finally { await log.close(); }
+  const native = await bindMetallib({ messages: logPath, lockFile: path.join(root, "Cargo.lock"), targetRoot: path.join(root, "target"),
+    temporaryRoot: process.env.RUNNER_TEMP ?? path.dirname(path.resolve(output)), consumer: "app",
+    explicitOverride: process.env.PMETAL_METALLIB_PATH ?? "", explicitNativeDirectory: process.env.PMETAL_MLX_PREBUILT_DIR ?? "" });
+  await copyFile(native.receipt, path.join(output, "native-metallib-binding.json"));
+  return native.path;
+}
+
 export async function startProductService({ root, output, permanentPin, url, weightsRoot, tuple }) {
   if (!root || !output || !weightsRoot || !permanentPin || !url || !url.startsWith("http://127.0.0.1:") || !tuple) die("local current-tree root/output/offline weights/pin/API URL/tuple required");
   const workerContract = terminalProductWorkerContract(tuple);
@@ -415,7 +438,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
   // `cargo build` is source ownership: no prebuilt or /opt sidecar can satisfy
   // this contract.  It never downloads model weights; the controller separately
   // rejects any model acquisition at job time.
-  await execFile("cargo", productServiceBuildArgs(), { cwd: root });
+  const nativeMetallib = await buildProductNativeAssets(root, output);
   const binary = path.join(root, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   const common = { cwd: root, detached: true }, stateRoot = productServiceStateRoot(output);
   if (await lstat(stateRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error))) die("temporary product service state already exists");
@@ -432,18 +455,23 @@ export async function startProductService({ root, output, permanentPin, url, wei
     await mkdir(path.join(stateRoot, "data"), { recursive: true }); await mkdir(path.join(stateRoot, "config"), { recursive: true });
     const weights = await materializeOfflineWeights(weightsRoot, stateRoot), hfHome = path.join(stateRoot, "hf"), binarySha256 = await fileSha256(binary);
     const serviceEnv = ownedWorkerEnvironment({ gpuBinding, instanceToken, endpoint, url, stateRoot, hfHome, workerId });
+    if (nativeMetallib) serviceEnv.PMETAL_METALLIB_PATH = nativeMetallib;
     // The worker's registration is the routing contract, but it is not a substitute
     // for actually opening the accelerator. Run the binary's production GPU probe
     // first and treat every non-zero/timeout as terminal for this one-shot campaign.
+    return await withMacMetalExecutionLease(process.platform === "darwin" ? metalExecutionWaitSeconds(process.env, 180) : 180, async (lease) => {
     await runProductServiceGpuPreflight(binary, serviceEnv);
     // Piped readable streams keep this CLI referenced after child.unref(). Give
     // each service durable files instead; the children retain their inherited
     // descriptors after these parent FileHandles close and after this CLI exits.
     logHandles = await openProductServiceLogs(output);
     try {
-      api = spawn(binary, [], { ...common, env: serviceEnv, stdio: ["ignore", logHandles.api_stdout.fd, logHandles.api_stderr.fd] });
+      // Only the GPU worker inherits the lease. The CPU API must not retain it across unload.
+      const apiEnv = process.platform === "darwin" ? { ...serviceEnv } : serviceEnv;
+      if (process.platform === "darwin") delete apiEnv[METAL_LOCK_FD];
+      api = spawn(binary, [], { ...common, env: apiEnv, stdio: ["ignore", logHandles.api_stdout.fd, logHandles.api_stderr.fd] });
       api.once("error", (error) => spawnErrors.push(`API: ${error.message}`));
-      worker = spawn(binary, [], { ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", logHandles.worker_stdout.fd, logHandles.worker_stderr.fd] });
+      worker = spawn(binary, [], lease.childOptions({ ...common, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", logHandles.worker_stdout.fd, logHandles.worker_stderr.fd] }));
       worker.once("error", (error) => spawnErrors.push(`worker: ${error.message}`));
     } finally {
       await Promise.allSettled(Object.values(logHandles).map((handle) => handle.close()));
@@ -477,6 +505,7 @@ export async function startProductService({ root, output, permanentPin, url, wei
     await writeFile(path.join(output, "product-service-worker-lifecycle.json"), JSON.stringify({ schema_version: 1, instance_token: instanceToken, events: [] }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
     await writeFile(path.join(output, "product-service-provenance.json"), JSON.stringify(record, null, 2) + "\n");
     return record;
+    }); // close only the Node reference; actual worker PID/FD remains the owner after CLI return
   } catch (error) {
     await Promise.allSettled(Object.values(logHandles).map((handle) => handle.close()));
     const knownPids = [worker?.pid, api?.pid].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
@@ -564,6 +593,10 @@ export async function reloadOwnedWorker(root, output, { waitReady = waitForTermi
   if (path.resolve(output, owned.record.offline.hf_home) !== hfHome || owned.record.offline.hf_hub_offline !== "1" || owned.record.offline.transformers_offline !== "1") die("worker reload offline state differs from initial provenance");
   const workerId = terminalProductWorkerId(owned.record.tuple, randomBytes(32).toString("hex"));
   const serviceEnv = ownedWorkerEnvironment({ gpuBinding: owned.record.gpu_binding, instanceToken: owned.record.instance_token, endpoint: { host: owned.record.api_host, port: owned.record.api_port }, url: owned.record.api_url, stateRoot: owned.stateRoot, hfHome, workerId });
+  if (process.platform === "darwin") serviceEnv.PMETAL_METALLIB_PATH = await readBoundAppMetallib({
+    receipt: path.join(output, "native-metallib-binding.json"), lockFile: path.join(root, "Cargo.lock"),
+    executable: binary, executableSha256: owned.record.api_binary_sha256, explicitOverride: process.env.PMETAL_METALLIB_PATH ?? "",
+  });
   const handles = [], logs = productServiceLogPaths(output);
   let worker, spawnError;
   try {
@@ -572,7 +605,8 @@ export async function reloadOwnedWorker(root, output, { waitReady = waitForTermi
       if (logInfo.isSymbolicLink() || !logInfo.isFile()) die("worker reload log is not an owned regular file");
       handles.push(await open(file, "a", 0o600));
     }
-    worker = spawn(binary, [], { cwd: root, detached: true, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", handles[0].fd, handles[1].fd] });
+    return await withMacMetalExecutionLease(process.platform === "darwin" ? metalExecutionWaitSeconds(process.env, 180) : 180, async (lease) => {
+    worker = spawn(binary, [], lease.childOptions({ cwd: root, detached: true, env: { ...serviceEnv, SCENEWORKS_WORKER_ONLY: "1" }, stdio: ["ignore", handles[0].fd, handles[1].fd] }));
     worker.once("error", (error) => { spawnError = error; });
     if (!Number.isSafeInteger(worker.pid) || worker.pid <= 0) die("reloaded worker has no process identity");
     worker.unref();
@@ -586,6 +620,7 @@ export async function reloadOwnedWorker(root, output, { waitReady = waitForTermi
     if (!await pidIsRunning(owned.record.api_pid, process.kill)) die("owned API exited during worker reload");
     const event = await recordWorkerTransition(output, owned, { ...owned.record, worker: selectedWorker }, { operation: "reload", status: "succeeded", worker_id: workerId });
     return { ...event, previous_worker_pid: previousPid, worker_pid: worker.pid, worker: selectedWorker, ready_at: event.observed_at };
+    });
   } catch (error) {
     if (worker?.pid) {
       // Retain the current PID if termination fails: final stop must still be

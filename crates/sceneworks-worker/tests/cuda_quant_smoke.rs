@@ -84,6 +84,15 @@ fn cuda_qmatmul_matches_cpu() {
     let device = match Device::new_cuda(0) {
         Ok(d) => d,
         Err(e) => {
+            assert!(
+                std::env::var("SCENEWORKS_CUDA_KERNEL_REQUIRED")
+                    .ok()
+                    .as_deref()
+                    != Some("1"),
+                "required CUDA kernel validation could not open its declared device: {e}"
+            );
+            // Generic CPU-only users may lack CUDA. This return is not GPU evidence;
+            // the ordinary hardware lane explicitly requires the device above.
             eprintln!("SKIP cuda_qmatmul_matches_cpu: no CUDA device ({e})");
             return;
         }

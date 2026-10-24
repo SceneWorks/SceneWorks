@@ -34,6 +34,9 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/ci/metal_execution_entry.sh
+source "$ROOT/scripts/ci/metal_execution_entry.sh"
+metal_execution_entry "${LLM_TIMEOUT_SECONDS:-1200}" bash "$0" "$@"
 BRIEF="${BRIEF:-$ROOT/config/film-harness/courier-workshop/brief.jsonc}"
 REFERENCES="${REFERENCES:-$ROOT/config/film-harness/courier-workshop/references.jsonc}"
 MAX_REPAIR_ROUNDS="${MAX_REPAIR_ROUNDS:-2}"

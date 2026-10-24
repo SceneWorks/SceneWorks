@@ -73,6 +73,7 @@
 // <work-dir>/captures): the harness refuses complete evidence from a dirty checkout, so the first
 // anchor's ingest would leave every later anchor in the same run uncapturable (sc-22724). Ingest a
 // retained bundle by hand with the harness, or run without the flag to land it.
+import { withMacMetalExecutionLease, metalLeaseChildOptions } from "./lib/apple-metal-lease.mjs";
 import process from "node:process";
 import path from "node:path";
 import os from "node:os";
@@ -3178,7 +3179,7 @@ export function stopProcessTree(child, signal, { detached = false, platform = pr
  */
 function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null, timeoutMs = null } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
+    const child = spawn(command, args, metalLeaseChildOptions({ cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached }));
     if (input !== null) child.stdin.end(input);
     let stdout = "";
     let stderr = "";
@@ -4021,7 +4022,7 @@ export async function measureAnchor(row, context) {
   // parameter at all: the candle campaign runs on Windows and the MLX one on a Mac, so the
   // UNGUARDED branch below is a branch no developer machine and no macOS lane ever takes — which
   // is exactly how it shipped for months with no wall-clock bound on it (sc-22738).
-  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT, platform = process.platform } = context;
+  const { args, inferencePin, campaignDir, campaignPrefix, workDir, state, root = ROOT, platform = process.platform, withMetalExecutionLease = withMacMetalExecutionLease } = context;
   const slug = anchorSlug(row.key);
   const log = new Log(path.join(workDir, "logs", `${slug}.log`));
   const captureOutput = path.join(workDir, "captures", `${slug}.json`);
@@ -4181,6 +4182,7 @@ export async function measureAnchor(row, context) {
   // `probeTimeoutMs` for the run it was written for.
   const timeoutMs = probeTimeoutMs(budgetMinutes, guarded);
   try {
+    await withMetalExecutionLease(budgetMinutes * 60, async () => {
     if (guarded) {
       // sc-22738: every Darwin capture runs inside the footprint hard stop, with ceilings derived
       // from the adapter's own probe for this host and the incident — see `watchdogGuard`.
@@ -4197,6 +4199,7 @@ export async function measureAnchor(row, context) {
       log.write(`$ node ${captureArgs.join(" ")}\n`);
       await exec(process.execPath, captureArgs, { env, log, detached: true, timeoutMs });
     }
+    });
   } catch (error) {
     // A hard stop is recorded in the guard's event log, not on stderr: name it on the row.
     const hardStop = await watchdogHardStop(watchdogEvents);
