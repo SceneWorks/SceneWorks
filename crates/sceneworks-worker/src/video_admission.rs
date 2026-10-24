@@ -762,6 +762,9 @@ enum VideoEncodeProfile {
     /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
     /// working set for the frames it encodes instead.
     UncalibratedConservative(VideoDecodeMemoryProfile),
+    /// The provider's typed native request workspace bound prices this actual encode carrier
+    /// in `native_quant_phase_floor`, rather than fabricating a measured encoder profile.
+    NativeWorkspaceBound,
 }
 
 /// The conditioning a request VAE-encodes before denoise, as the admission identity names it. What
@@ -771,6 +774,7 @@ enum VideoEncodeProfile {
 struct VideoEncodeRequest<'a> {
     mode: &'a str,
     reference_count: u32,
+    native_conditioning_bound: bool,
 }
 
 /// Resolves the request's conditioning VAE-encode cost for one graded candidate: `(lane, provider,
@@ -929,13 +933,17 @@ fn classify_video_encode_profile(
     if !request_encodes_conditioning(request) {
         return Ok(VideoEncodeProfile::Nothing);
     }
-    conservative(uncalibrated_encode_frames(
+    if let Some(profile) = conservative(uncalibrated_encode_frames(
         provider_id,
         request.mode,
         frames,
-    ))
-    .map(VideoEncodeProfile::UncalibratedConservative)
-    .ok_or_else(|| {
+    )) {
+        return Ok(VideoEncodeProfile::UncalibratedConservative(profile));
+    }
+    if request.native_conditioning_bound {
+        return Ok(VideoEncodeProfile::NativeWorkspaceBound);
+    }
+    Err({
         format!(
             "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
                  publishes neither a calibrated encode cost nor a conservative VAE profile; \
@@ -1239,6 +1247,9 @@ pub(crate) struct VideoRequestIdentity<'a> {
 pub(crate) struct LadderVideoSelector<'a> {
     identity: VideoRequestIdentity<'a>,
     contract: &'a MemoryProviderContract,
+    /// Borrowed resolved carrier; row bounds are re-derived at each admitted geometry, never
+    /// inferred from a filename, reference count or another request's cached identity.
+    native_quant_request: Option<NativeQuantRequest<'a>>,
     budget: Option<Budget>,
     /// The activation-headroom allowance the caller already charges this load. Supplied, never
     /// derived here — see the module doc.
@@ -1318,6 +1329,7 @@ impl<'a> LadderVideoSelector<'a> {
         Self {
             identity,
             contract,
+            native_quant_request: None,
             budget,
             headroom_bytes,
             curves,
@@ -1441,6 +1453,89 @@ impl PhasePeaks {
     }
 }
 
+/// Strengthen the raw stage prediction with the provider's task-conditional DiT allocation
+/// envelope. Precompute and denoise are successive instants of the existing Denoise phase:
+/// compare them, never sum them. No host RSS/device sum and no second policy allowance here.
+fn native_quant_phase_floor(
+    contract: &MemoryProviderContract,
+    _selection: &MemorySelection,
+    request: Option<NativeQuantRequest<'_>>,
+    geometry: VideoAdmissionGeometry,
+    mut ordinary: PhasePeaks,
+) -> gen_core::Result<PhasePeaks> {
+    let Some(native) = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
+    else {
+        return Ok(ordinary);
+    };
+    let request = request.ok_or_else(|| {
+        gen_core::Error::Unsupported(
+            "native H3 allocation estimate requires the resolved request carrier".into(),
+        )
+    })?;
+    let shape = gen_core::veda::workspace::Request {
+        width: geometry.width,
+        height: geometry.height,
+        frames: geometry.estimate_frames(),
+        count: geometry.batch,
+        ..request.shape
+    };
+    let rows = native.request_rows(
+        shape,
+        request
+            .evaluations
+            .map(|evaluations| evaluations as usize)
+            .unwrap_or(native.default_evaluations),
+    )?;
+    let facts = contract.asset_facts;
+    // H3's native pipeline unconditionally releases the conditioner and reference VAEs before
+    // loading the DiT, even on Resident (PreserveLoadDefaults). Do not invent TE/VAE co-residency
+    // by reusing another provider's optional-staging schedule. Keep unclassified base bytes.
+    let unclassified = facts
+        .base_bytes
+        .saturating_sub(facts.transformer_bytes)
+        .saturating_sub(facts.conditioning_bytes)
+        .saturating_sub(facts.decoder_bytes);
+    let native_denoise = native
+        .precompute_peak_bytes(rows)
+        .max(native.denoise_peak_bytes(rows))
+        .saturating_add(unclassified)
+        .saturating_add(facts.overlay_bytes);
+    ordinary.denoise_bytes = ordinary.denoise_bytes.max(native_denoise);
+    if let Some(conditioning) = &native.conditioning {
+        let workspace = gen_core::h3_conditioning_memory::workspace(&shape, conditioning)?;
+        if workspace.conditioning_bytes > 0 {
+            // TE/vision have been released before reference VAE/audio encoding. Their existing
+            // prediction remains a separate maximum, never an invented co-resident weight sum.
+            ordinary.conditioning_bytes = ordinary.conditioning_bytes.max(
+                native
+                    .conditioning_resident_bytes
+                    .saturating_add(workspace.conditioning_bytes)
+                    .max(native.conditioning_load_bytes)
+                    .saturating_add(unclassified),
+            );
+        }
+        // Video and audio decode are serial and own different resident subsets. A profile that
+        // already accounts for distinct host output buffers on unified RAM is used once as-is;
+        // CUDA's workspace excludes those host bytes rather than adding them to device demand.
+        ordinary.decode_bytes = ordinary.decode_bytes.max(
+            native
+                .video_decode_resident_bytes
+                .saturating_add(workspace.video_decode_bytes)
+                .max(
+                    native
+                        .audio_decode_resident_bytes
+                        .saturating_add(workspace.audio_decode_bytes)
+                        .max(native.audio_decode_load_bytes),
+                )
+                .saturating_add(unclassified),
+        );
+    }
+    Ok(ordinary)
+}
+
 /// The weights+headroom floor for one engaged composition, expressed per phase.
 ///
 /// The fallback scalar is exactly
@@ -1526,11 +1621,24 @@ fn profiled_floor_phase_peaks(
         VideoEncodeRequest {
             mode: selector.identity.mode,
             reference_count: selector.identity.reference_count,
+            native_conditioning_bound: selector.native_quant_request.is_some()
+                && selector
+                    .contract
+                    .phase_facts
+                    .as_ref()
+                    .and_then(|phase| phase.native_quant.as_ref())
+                    .and_then(|native| native.conditioning.as_ref())
+                    .is_some(),
         },
         geometry,
         selection,
     ) {
         Ok(VideoEncodeProfile::Nothing) => None,
+        Ok(VideoEncodeProfile::NativeWorkspaceBound) => {
+            // The real carrier's positive encode workspace is merged with raw stage peaks
+            // below. This classification is not "encodes nothing" and grants no free encode.
+            None
+        }
         Ok(VideoEncodeProfile::Calibrated(profile)) => {
             Some((profile, ENCODE_PROFILE_EVIDENCE_REVISION))
         }
@@ -1943,6 +2051,19 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // gen-core's evidence type forces one.
             let (phase_peaks, basis, curve_id, profile_revision) =
                 fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
+            let phase_peaks = match native_quant_phase_floor(
+                self.contract,
+                &selection,
+                self.native_quant_request,
+                geometry,
+                phase_peaks,
+            ) {
+                Ok(peaks) => peaks,
+                Err(error) => {
+                    *self.profile_error.borrow_mut() = Some(error.to_string());
+                    return VideoRungSelection::Undecidable;
+                }
+            };
             if self.profile_error.borrow().is_some() {
                 return VideoRungSelection::Undecidable;
             }
@@ -2097,7 +2218,20 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     evidence_revision: selected
                         .4
                         .or(selected.5)
-                        .unwrap_or("video-estimate-floor-v1")
+                        .unwrap_or(
+                            if self.native_quant_request.is_some()
+                                && self
+                                    .contract
+                                    .phase_facts
+                                    .as_ref()
+                                    .and_then(|phase| phase.native_quant.as_ref())
+                                    .is_some()
+                            {
+                                "video-native-allocation-estimate-v1"
+                            } else {
+                                "video-estimate-floor-v1"
+                            },
+                        )
                         .to_owned(),
                 });
                 VideoRungSelection::Selected {
@@ -2226,7 +2360,16 @@ pub(crate) fn packaged_video_evidence_covers_request(
     let Some(contract) = generator.memory_strategy_contract() else {
         return false;
     };
-    curve_evidence_covers_request(
+    // Native allocation facts are an ESTIMATOR, not packaged measured evidence. They still
+    // supply a request-scoped demand basis and must reach the same live-budget/ladder path.
+    // Other providers (None) retain their existing abstention behavior.
+    (request.native_quant_request.is_some()
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+            .is_some())
+        || curve_evidence_covers_request(
         sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
         contract,
         request,
@@ -2561,15 +2704,40 @@ fn admit_video_generation_with_curves_and_profiles(
         decode_profile,
     );
     selector.encode_profile = encode_profile;
-    let verdict = sceneworks_core::video_request::video_admission(
-        request.model_id,
-        request.lane,
-        request.width,
-        request.height,
-        request.frames,
-        request.decode_chunk_size,
-        &mut selector,
-    );
+    selector.native_quant_request = request.native_quant_request;
+    let verdict = if request.native_quant_request.is_some()
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+            .is_some()
+    {
+        // The loaded provider's typed allocation facts establish this route, including imported
+        // ids absent from the built-in catalog. Keep the actual id throughout evidence/refusals;
+        // an unknown decoder cap remains honestly unmodelled at the actual request geometry.
+        sceneworks_core::video_request::video_admission_for_geometries(
+            request.model_id,
+            sceneworks_core::video_request::video_admission_geometries(
+                request.model_id,
+                request.lane,
+                request.width,
+                request.height,
+                request.frames,
+                request.decode_chunk_size,
+            ),
+            &mut selector,
+        )
+    } else {
+        sceneworks_core::video_request::video_admission(
+            request.model_id,
+            request.lane,
+            request.width,
+            request.height,
+            request.frames,
+            request.decode_chunk_size,
+            &mut selector,
+        )
+    };
     if let Some(error) = selector.accounting_error {
         return VideoAdmissionOutcome {
             memory: None,
@@ -3142,8 +3310,17 @@ fn refusal_is_a_margin_artifact(
     needed_gb <= widened_floor_gb && floor_gb <= available_gb
 }
 
+/// Native H3 row sizing borrows the same decoded carrier sent to generation. It is an upper
+/// envelope before tokenization, not measured memory or an executed-tensor receipt.
+#[derive(Clone, Copy)]
+pub(crate) struct NativeQuantRequest<'a> {
+    pub(crate) shape: gen_core::veda::workspace::Request<'a>,
+    pub(crate) evaluations: Option<u32>,
+}
+
 /// Everything `admit_video_generation` needs that is not on the generator.
 pub(crate) struct VideoAdmissionInputs<'a> {
+    pub(crate) native_quant_request: Option<NativeQuantRequest<'a>>,
     pub(crate) model_id: &'a str,
     /// The resolved catalog family, not the engine descriptor family.
     pub(crate) model_family: &'a str,
