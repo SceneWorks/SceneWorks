@@ -246,15 +246,13 @@ async fn execute_fixture_training(
         serde_json::to_value(&plan.config).unwrap(),
         claimed["payload"]["plan"]["config"]
     );
-    let trainer = match sources.probe {
-        Some(probe) => fixture.trainer_with_probe(variant, probe).unwrap(),
-        None => fixture.trainer(variant).unwrap(),
-    };
     let expected_primary = std::fs::canonicalize(sources.primary).unwrap();
     let expected_shared = std::fs::canonicalize(sources.shared).unwrap();
     let expected_base = base.to_owned();
     let observed = Arc::clone(&sources.observed_cancel);
     let admission_fixture = fixture.clone();
+    let loader_fixture = fixture.clone();
+    let loader_probe = sources.probe.clone();
     let execution = sceneworks_worker::test_support::run_training_execution_observing_request(
         worker,
         &snapshot,
@@ -267,7 +265,13 @@ async fn execute_fixture_training(
             assert!(
                 matches!(spec.components.get("moss-shared-snapshot"), Some(WeightsSource::Dir(path)) if std::fs::canonicalize(path).unwrap() == expected_shared)
             );
-            Ok(trainer)
+            // Build the trainer inside the loader, exactly as production does: a
+            // `Box<dyn Trainer>` is not `Send`, so it cannot be captured by the
+            // loader closure the driver moves across threads.
+            Ok(match loader_probe {
+                Some(probe) => loader_fixture.trainer_with_probe(variant, probe).unwrap(),
+                None => loader_fixture.trainer(variant).unwrap(),
+            })
         },
         move |request| {
             assert!(

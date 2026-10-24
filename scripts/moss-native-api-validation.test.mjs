@@ -400,7 +400,9 @@ test("the backend must match the actual runner platform of the real caller", asy
   assert.match(wrongPlatform.receipt.failures[0], /backend candle does not match the actual runner platform linux/);
   const windowsCandle = await pipeline({ backend: "candle", options: { platform: "win32" } });
   assert.equal(windowsCandle.result.ok, true);
-  const missingWorkflowFile = await pipeline({ env: { MOSS_NATIVE_WORKFLOW_FILE: undefined } });
+  // Pin the platform to the backend's own supported host, so the workflow-file
+  // guard is what must fail here regardless of the machine running the suite.
+  const missingWorkflowFile = await pipeline({ backend: "mlx", options: { platform: "darwin" }, env: { MOSS_NATIVE_WORKFLOW_FILE: undefined } });
   assert.equal(missingWorkflowFile.result.ok, false);
   assert.equal(missingWorkflowFile.calls.length, 0);
   assert.match(missingWorkflowFile.receipt.failures[0], /MOSS_NATIVE_WORKFLOW_FILE/);
