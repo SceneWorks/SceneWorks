@@ -105,17 +105,29 @@ export function createMacMetalLeaseFactory({
       // Mark synchronously before the first asynchronous acquisition yield. Even an acquisition
       // failure must not close a foreign FD reopened on the same canonical inode.
       if (owned) { inspectOffset(true); marked = true; }
+      const ownershipRecord = (output) => {
+        const line = output.split(/\r?\n/).find((value) => value.startsWith("METAL_EXECUTION_LEASE "));
+        const body = line?.slice("METAL_EXECUTION_LEASE ".length), record = body ? JSON.parse(body) : null;
+        if (record?.protocol !== METAL_LOCK_PROTOCOL || record.path !== canonicalPath || record.borrowed !== true
+            || rawInteger(body, "device") !== captured.device || rawInteger(body, "inode") !== captured.inode) throw new Error("Metal acquisition has no matching kernel-flock proof");
+        return record;
+      };
       const output = await invoke("acquire", remaining(), fd, offset);
-      const line = output.split(/\r?\n/).find((value) => value.startsWith("METAL_EXECUTION_LEASE "));
-      const body = line?.slice("METAL_EXECUTION_LEASE ".length), record = body ? JSON.parse(body) : null;
-      if (record?.protocol !== METAL_LOCK_PROTOCOL || record.path !== canonicalPath || record.borrowed !== true
-          || rawInteger(body, "device") !== captured.device || rawInteger(body, "inode") !== captured.inode) throw new Error("Metal acquisition has no matching kernel-flock proof");
+      const record = ownershipRecord(output);
       let released = false;
       const assertDescription = () => {
         if (released) throw new Error("Metal lease scope already closed");
         const current = identity(fd, canonicalPath, fstat, lstat);
         if (current.device !== captured.device || current.inode !== captured.inode) throw new Error("Metal descriptor was replaced/reused");
         if (owned) inspectOffset();
+        else {
+          // Borrowers must not alter the owner's offset cookie. A fresh duplicate must
+          // prove the actual kernel lock each time, not merely the same inode/FD number.
+          const options = descriptorOptions(fd, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 5000, maxBuffer: 65536 }, environment);
+          const result = spawnSyncImpl(python, ["-I", bridge, "--mode", "acquire", "--wait-seconds", "1"], options);
+          if (result.error || result.status !== 0 || result.signal) throw new Error(`borrowed Metal kernel ownership was lost: ${String(result.error?.message ?? result.stderr ?? result.signal).slice(0, 512)}`);
+          ownershipRecord(result.stdout);
+        }
       };
       return {
         childOptions(options) { assertDescription(); return descriptorOptions(fd, options, options.env ?? environment); },

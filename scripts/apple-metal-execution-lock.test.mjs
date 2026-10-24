@@ -60,7 +60,7 @@ test("reentry requires actual helper flock proof and preserves exact 64-bit inod
   const child = entry.childOptions({ stdio: ["ignore", 11, 12, "pipe"], env: { MODEL: "same", ORIGINAL_CONTROL: "kept" } });
   assert.deepEqual(child.stdio, ["ignore", 11, 12, "pipe", 7]);
   assert.deepEqual(child.env, { MODEL: "same", ORIGINAL_CONTROL: "kept", [METAL_LOCK_FD]: "4" });
-  assert.equal(calls.length, 1, "verified child launch needs no extra lock owner");
+  assert.equal(calls.length, 2, "each handoff revalidates the same borrowed kernel lease without creating another owner");
   delete environment[METAL_LOCK_FD]; assert.throws(() => entry.childOptions({}), /descriptor was lost/);
 });
 

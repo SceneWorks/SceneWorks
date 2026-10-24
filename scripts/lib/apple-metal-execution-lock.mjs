@@ -100,10 +100,12 @@ export function createMetalExecutionEntry({
         return options;
       }
       const current = descriptor();
-      if (verified === null) validate(current, metalExecutionWaitSeconds(environment));
-      if (current.fd !== verified.fd || current.device !== verified.device || current.inode !== verified.inode) {
+      if (verified !== null && (current.fd !== verified.fd || current.device !== verified.device || current.inode !== verified.inode)) {
         throw new Error("Metal child launch requires a verified inherited lease");
       }
+      // The same descriptor number/inode can have been reopened onto another OFD.
+      // Reprove actual kernel ownership at every handoff; never unlock/close the borrower.
+      validate(current, metalExecutionWaitSeconds(environment));
       return withDescriptor(options, current.fd, options.env ?? environment);
     },
   };

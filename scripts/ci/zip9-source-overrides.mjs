@@ -12,11 +12,45 @@ export const SECURITY_BACKPORT_MANIFEST_SHA256 = sha(readFileSync(manifestFile))
 export const SECURITY_BACKPORT = JSON.parse(readFileSync(manifestFile, 'utf8'));
 const names = ['candle-audio-kokoro', 'candle-core', 'mlx-gen', 'tauri-plugin-updater'];
 
+async function verifyDirectoryClosure(repository, pkg) {
+  const declared = new Set(), directories = new Set([pkg.path]), seen = new Set();
+  for (const file of pkg.files) {
+    assert(file.path.startsWith(`${pkg.path}/`) && path.posix.normalize(file.path) === file.path);
+    assert(!declared.has(file.path), `duplicate vendor input ${file.path}`);
+    declared.add(file.path);
+    for (let parent = path.posix.dirname(file.path); parent !== pkg.path; parent = path.posix.dirname(parent)) {
+      assert(parent.startsWith(`${pkg.path}/`), 'vendor input escaped its audited root');
+      directories.add(parent);
+    }
+  }
+  async function walk(relative) {
+    const stat = await fs.lstat(path.join(repository, relative));
+    assert(stat.isDirectory() && !stat.isSymbolicLink(), `unsafe vendor directory ${relative}`);
+    for (const entry of await fs.readdir(path.join(repository, relative), { withFileTypes: true })) {
+      const name = `${relative}/${entry.name}`;
+      assert(!entry.isSymbolicLink(), `unsafe vendor link ${name}`);
+      if (entry.isDirectory()) {
+        assert(directories.has(name), `unmanifested vendor directory ${name}`);
+        await walk(name);
+      } else {
+        assert(declared.has(name), `unmanifested vendor input ${name}`);
+        assert(entry.isFile(), `unsafe vendor input ${name}`);
+        seen.add(name);
+      }
+    }
+  }
+  await walk(pkg.path);
+  assert.deepEqual([...seen].sort(), [...declared].sort(), `incomplete vendor closure ${pkg.path}`);
+}
+
 export async function verifyVendorBytes(repository = root) {
   assert.equal(sha(await fs.readFile(path.join(repository, 'vendor/zip9-source-overrides.json'))), SECURITY_BACKPORT_MANIFEST_SHA256);
   assert.deepEqual(SECURITY_BACKPORT.packages.map((p) => p.name).sort(), [...names].sort());
   const packages = [];
   for (const pkg of SECURITY_BACKPORT.packages) {
+    // Cargo may autodiscover untracked build.rs/bin targets; known hashes alone
+    // are insufficient. Generated outputs belong outside these audited roots.
+    await verifyDirectoryClosure(repository, pkg);
     const contents = [];
     for (const file of pkg.files) {
       assert(file.path.startsWith(`${pkg.path}/`) && !file.path.split('/').includes('..'));
@@ -44,6 +78,12 @@ export function validateCargoSources(metadata, repository = root) {
     assert.equal(path.resolve(pkg.manifest_path), path.resolve(repository, expected.path, 'Cargo.toml'));
     assert(!metadata.workspace_members.includes(pkg.id), 'security leaves must remain dependency-only');
     assert(!metadata.workspace_default_members.includes(pkg.id), 'security leaves must not widen default tests');
+    assert(Array.isArray(pkg.targets) && pkg.targets.length > 0, `Cargo targets required for ${expected.name}`);
+    const declared = new Set(expected.files.map((file) => path.resolve(repository, file.path)));
+    for (const target of pkg.targets) {
+      assert(path.isAbsolute(target.src_path) && declared.has(path.resolve(target.src_path)),
+        `unaudited Cargo target ${expected.name}: ${target.src_path}`);
+    }
   }
   const source = `git+https://github.com/SceneWorks/inference?rev=${SECURITY_BACKPORT.engine_revision}#${SECURITY_BACKPORT.engine_revision}`;
   for (const anchor of SECURITY_BACKPORT.audited_unchanged_cuda_anchors) {
@@ -53,6 +93,11 @@ export function validateCargoSources(metadata, repository = root) {
   }
   const graph = metadata.packages.map((pkg) => ({ name: pkg.name, version: pkg.version,
     source: pkg.source ?? `path:${path.relative(repository, path.dirname(pkg.manifest_path)).split(path.sep).join('/')}`,
+    targets: (pkg.targets ?? []).map((target) => ({ name: target.name, kind: target.kind,
+      crate_types: target.crate_types, edition: target.edition, doc: target.doc, doctest: target.doctest, test: target.test,
+      required_features: target['required-features'] ?? [],
+      source: path.relative(path.dirname(pkg.manifest_path), target.src_path).split(path.sep).join('/'),
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
   })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
   return sha(JSON.stringify(graph));
 }

@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { SECURITY_BACKPORT_MANIFEST_SHA256, verifySecuritySources } from './zip9-source-overrides.mjs';
+import { SECURITY_BACKPORT_MANIFEST_SHA256, verifyVendorBytes, verifySecuritySources } from './zip9-source-overrides.mjs';
 
 export const CASE = Object.freeze({
   package: 'sceneworks-worker', target_kind: 'lib',
@@ -247,6 +247,8 @@ export async function main() {
     evidence.inference_source = { revision: [...revisions][0], lock_sha256: createHash('sha256').update(lock).digest('hex') };
     assert.equal(evidence.inference_source.revision, DEVICE_PROOF.inference_revision,
       'actual-device provenance must be revalidated for a changed inference producer, before running the model');
+    // Refuse extra/autodiscovered vendor inputs before invoking any Cargo command.
+    await verifyVendorBytes();
     const checkpoint = process.env.SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT?.trim();
     assert(checkpoint, 'SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT is required');
     evidence.fixture_identity = await checkpointIdentity(checkpoint);

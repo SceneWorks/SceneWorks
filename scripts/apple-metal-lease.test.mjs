@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
-import { METAL_LOCK_FD } from "./lib/apple-metal-execution-lock.mjs";
+import { METAL_LOCK_FD, createMetalExecutionEntry } from "./lib/apple-metal-execution-lock.mjs";
 import { createMacMetalLeaseFactory } from "./lib/apple-metal-lease.mjs";
 import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
 import { ownedTupleCommands, runOwnedTuple } from "./starvector-terminal-owned-tuple.mjs";
@@ -38,6 +38,45 @@ async function fileReady(file) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(`owned CPU child did not create ${file}`);
+}
+
+for (const kind of ["entry", "factory"]) {
+  test(`borrowed ${kind} rejects same-FD same-inode unlocked OFD replacement before handoff`, { skip: process.platform === "win32" }, async () => {
+    const f = await fdLeaseFixture(); let owner, borrowed, fd, replacement, done;
+    const ready = path.join(f.directory, "borrowed-ready"), release = path.join(f.directory, "borrowed-release");
+    try {
+      owner = await f.acquire({ marker: () => 42, open: (...args) => { fd = openSync(...args); return fd; } })(2);
+      const environment = { ...process.env, [METAL_LOCK_FD]: String(fd) };
+      if (kind === "entry") {
+        const privateHelper = path.join(f.directory, "private-entry.py");
+        await writeFile(privateHelper, `import importlib.util,sys\nfrom pathlib import Path\ns=importlib.util.spec_from_file_location('actual_entry_protocol',${JSON.stringify(helper)});m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m)\nm.CANONICAL_PATH=Path(${JSON.stringify(f.canonicalPath)})\nraise SystemExit(m.main())\n`);
+        borrowed = createMetalExecutionEntry({ platform: "darwin", environment, python: f.pythonPath, helperPath: privateHelper, canonicalPath: f.canonicalPath });
+        assert.equal(await borrowed.enter(2), false);
+      } else borrowed = await f.acquire({ environment })(2);
+      borrowed.childOptions({ stdio: "ignore", env: process.env });
+      const code = "import pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text('held');\nwhile not pathlib.Path(sys.argv[2]).exists():time.sleep(0.01)";
+      const child = spawn(f.pythonPath, ["-I", "-c", code, ready, release], owner.childOptions({ stdio: "ignore", env: process.env }));
+      done = new Promise((resolve, reject) => { child.once("error", reject); child.once("close", resolve); });
+      await fileReady(ready);
+      const before = fstatSync(fd);
+      closeSync(fd);
+      replacement = openSync(f.canonicalPath, "r+");
+      assert.equal(replacement, fd, "fault reuses the exact descriptor number");
+      assert.equal(fstatSync(replacement).ino, before.ino, "fault retains the canonical inode, not the original locked OFD");
+      assert.equal(f.competitor().status, 17, "original OFD is still leased by the cooperating CPU child");
+      assert.throws(() => borrowed.childOptions({ stdio: "ignore", env: process.env }), /kernel ownership|execution lease rejected/);
+      if (kind === "factory") await assert.rejects(borrowed.close(), /kernel ownership/);
+      assert.equal(fstatSync(replacement).ino, before.ino, "borrower never closes a foreign replacement");
+      await assert.rejects(owner.close(), /lost\/reused/);
+      assert.equal(fstatSync(replacement).ino, before.ino, "owned-cookie refusal also leaves the foreign descriptor open");
+    } finally {
+      if (replacement !== undefined) closeSync(replacement);
+      else if (owner) await owner.close().catch(() => {});
+      await writeFile(release, "CPU child drain").catch(() => {});
+      if (done) await done;
+      await rm(f.directory, { recursive: true, force: true });
+    }
+  });
 }
 
 test("default OFD cookie stays within a portable seek ceiling while real inode/flock proof remains mandatory", { skip: process.platform === "win32" }, async () => {

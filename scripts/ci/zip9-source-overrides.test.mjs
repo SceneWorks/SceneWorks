@@ -8,7 +8,8 @@ import { SECURITY_BACKPORT, SECURITY_BACKPORT_MANIFEST_SHA256, verifyVendorBytes
 const root = fileURLToPath(new URL('../../', import.meta.url));
 function graph() {
   const packages = SECURITY_BACKPORT.packages.map((p) => ({ name: p.name, version: p.version, source: null,
-    id: p.name, manifest_path: path.join(root, p.path, 'Cargo.toml') }));
+    id: p.name, manifest_path: path.join(root, p.path, 'Cargo.toml'),
+    targets: [{ name: p.name, kind: ['lib'], crate_types: ['lib'], src_path: path.join(root, p.path, 'src/lib.rs') }] }));
   for (const name of new Set(SECURITY_BACKPORT.audited_unchanged_cuda_anchors.map((a) => a.package))) {
     packages.push({ name, version: '0.0.0', id: name, manifest_path: `/fixture/${name}/Cargo.toml`,
       source: `git+https://github.com/SceneWorks/inference?rev=${SECURITY_BACKPORT.engine_revision}#${SECURITY_BACKPORT.engine_revision}` });
@@ -36,14 +37,45 @@ for (const [label, mutate] of [
 ]) {
   test(`refuse ${label}`, () => { const value = graph(); mutate(value); assert.throws(() => validateCargoSources(value)); });
 }
+test('Cargo target graph rejects unmanifested auto-build source before any handoff', () => {
+  const value = graph(), core = value.packages.find((p) => p.name === 'candle-core');
+  core.targets.push({ name: 'build-script-build', kind: ['custom-build'], crate_types: ['bin'], src_path: path.join(root, 'vendor/zip9-candle-core/build.rs') });
+  assert.throws(() => validateCargoSources(value), /unaudited Cargo target/);
+});
+test('Cargo target graph binds legitimate discovered targets as well as package identities', () => {
+  const value = graph(), before = validateCargoSources(value);
+  const updater = value.packages.find((p) => p.name === 'tauri-plugin-updater');
+  updater.targets.push({ name: 'build-script-build', kind: ['custom-build'], crate_types: ['bin'], src_path: path.join(root, 'vendor/zip9-tauri-plugin-updater/build.rs') });
+  assert.notEqual(validateCargoSources(value), before, 'authorized custom-build targets must change the source graph digest');
+  updater.targets.at(-1).src_path = path.join(root, 'outside-audited-source.rs');
+  assert.throws(() => validateCargoSources(value), /unaudited Cargo target/);
+});
+
+async function vendorFixture() {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sw-zip9-closure-'));
+  await fs.mkdir(path.join(directory, 'vendor'));
+  for (const pkg of SECURITY_BACKPORT.packages) await fs.cp(path.join(root, pkg.path), path.join(directory, pkg.path), { recursive: true });
+  for (const name of ['zip9-source-overrides.json', 'zip9-security-backport.patch']) await fs.copyFile(path.join(root, 'vendor', name), path.join(directory, 'vendor', name));
+  return directory;
+}
+for (const extra of ['build.rs', 'src/bin/extra.rs', '.cargo/config.toml', 'target/generated.rs']) {
+  test(`complete vendor closure rejects unmanifested ${extra} before execution`, async () => {
+    const directory = await vendorFixture(); let handedOff = false;
+    try {
+      const file = path.join(directory, 'vendor/zip9-candle-core', extra);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, '// inert fixture: never built or executed\n');
+      await assert.rejects(async () => { await verifyVendorBytes(directory); handedOff = true; }, /unmanifested vendor/);
+      assert.equal(handedOff, false, 'an extra autodiscovered build/input cannot reach execution');
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
+}
+
 test('vendor source byte mutation fails rather than hiding behind the declared engine pin', async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sw-zip9-source-'));
+  const directory = await vendorFixture();
   try {
-    await fs.mkdir(path.join(directory, 'vendor'));
-    await fs.copyFile(path.join(root, 'vendor/zip9-source-overrides.json'), path.join(directory, 'vendor/zip9-source-overrides.json'));
     const file = SECURITY_BACKPORT.packages[0].files[0];
-    await fs.mkdir(path.dirname(path.join(directory, file.path)), { recursive: true });
     await fs.writeFile(path.join(directory, file.path), 'mutated source, not an approved security leaf');
-    await assert.rejects(verifyVendorBytes(directory));
+    await assert.rejects(verifyVendorBytes(directory), (error) => error.message.includes(file.path));
   } finally { await fs.rm(directory, { recursive: true, force: true }); }
 });
