@@ -697,6 +697,7 @@ export function ModelManagerScreen() {
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
   // plus a transient "search" tab that only exists while `search` is non-empty.
   const [activeTab, setActiveTab] = useState("image");
+  const [checkpointRepairRequest, setCheckpointRepairRequest] = useState(null);
   const [prevTab, setPrevTab] = useState("image");
   const [search, setSearch] = useState("");
   // Typing into search auto-switches to the transient Search Results tab (remembering the
@@ -1551,16 +1552,15 @@ export function ModelManagerScreen() {
             model={model}
             onRepair={(repair) => {
               if (repair.kind === "download") {
-                // Exactly the footer's own repair path, so the card offers ONE way to fix a torn
-                // install rather than two that could disagree about which bytes to fetch.
-                if (failedDownload) {
-                  onResumeDownloadJob(localDownloadJob, {
-                    payloadChanges: { downloadAction: "resume" },
-                  });
-                } else if (repairVariant) {
-                  onDownloadVariant(model, repairVariant.variant);
-                } else {
-                  onDownloadModel(model);
+                // An imported DiT is not downloadable. The server binds this resident component
+                // to the import's compatible base and tier; never retry an unrelated old job.
+                createModelDownloadJob(model, { componentId: repair.componentId });
+                return;
+              }
+              if (repair.kind === "reimport") {
+                if (model.importedSource?.ownershipMode === "managed") {
+                  setCheckpointRepairRequest({ model });
+                  setActiveTab(model.type === "video" ? "video" : "image");
                 }
                 return;
               }
@@ -2180,6 +2180,7 @@ export function ModelManagerScreen() {
           onRefreshCatalog={refreshLinkedStatuses}
           onRetryJob={(job, payload) => onResumeDownloadJob(job, payload)}
           pendingJobs={pendingModelImportJobs}
+          repairRequest={checkpointRepairRequest}
           token={token}
         />
       </section>

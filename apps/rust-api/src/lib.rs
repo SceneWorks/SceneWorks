@@ -4046,6 +4046,72 @@ async fn create_generation_job(
     .await
 }
 
+/// Compact replay handle projected ONLY from S11's validated immutable plan provenance. The
+/// checkpoint id selects its persisted record; a display/catalog model id alone is not identity.
+fn imported_reference_from_provenance(
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Option<Value> {
+    let checkpoint_id = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)?;
+    let provenance = provenance?;
+    let mut reference = json!({
+        "modelId": provenance.get("modelId")?,
+        "checkpointId": checkpoint_id,
+        "planId": provenance.pointer("/plan/planId")?,
+        "semanticDigest": provenance.pointer("/plan/semanticDigest")?,
+        "sourceBindingIdentity": provenance.pointer("/plan/sourceBindingIdentity")?,
+    });
+    for (key, path) in [
+        ("family", "/family"),
+        ("baseModel", "/baseLineage/baseModel"),
+        ("declaredPartition", "/declaredSemantics/minimaxH3Partition"),
+    ] {
+        if let Some(value) = provenance.pointer(path) {
+            reference[key] = value.clone();
+        }
+    }
+    Some(reference)
+}
+
+fn validate_expected_imported_model_reference(
+    payload: &JsonObject,
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Result<(), ApiError> {
+    let Some(expected) = payload
+        .get("expectedImportedModelRef")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let actual = imported_reference_from_provenance(entry, provenance);
+    sceneworks_core::checkpoint_import::validate_replay_import_reference(expected, actual.as_ref())
+        .map_err(ApiError::bad_request)
+}
+
+/// Called immediately after canonical model resolution as well as at atomic enqueue. Never
+/// resolve a caller's modelManifestEntry or silently replay using today's different checkpoint.
+pub(crate) fn ensure_expected_imported_model_reference(
+    state: &AppState,
+    payload: &JsonObject,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    if payload
+        .get("expectedImportedModelRef")
+        .is_none_or(Value::is_null)
+    {
+        return Ok(());
+    }
+    let empty = JsonObject::new();
+    let entry = entry.as_object().unwrap_or(&empty);
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir, entry,
+    ).map_err(|error| ApiError::bad_request(format!(
+        "Cannot verify imported replay identity: {error}. Reimport or relink the original checkpoint; no replacement weights were queued."
+    )))?;
+    validate_expected_imported_model_reference(payload, entry, provenance.as_ref())
+}
+
 /// Like [`create_generation_job`], but creates the job in an explicit initial status.
 /// `None` is the default `queued` (immediately claimable); `Some(JobStatus::PendingCaption)`
 /// creates the job NON-claimable so an API-side async pre-step can rewrite its payload and
@@ -4106,6 +4172,17 @@ async fn create_generation_job_with_status(
         }
         None => None,
     };
+    let empty = JsonObject::new();
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
+    // Freeze the admitted selection for retry/duplicate too, including requests that were not
+    // themselves replays. A later same-id catalog rebind must not change their weights.
+    if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
+        payload.insert("expectedImportedModelRef".to_owned(), reference);
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_model_provenance(
             CreateJob {
@@ -5550,14 +5627,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     match payload.mode.as_str() {
         "image_to_video"
             if payload.source_asset_id.is_none()
-                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
-                    &payload.model,
-                    &payload.mode,
-                    payload
-                        .last_frame_asset_id
-                        .as_deref()
-                        .is_some_and(|id| !id.trim().is_empty()),
-                ) =>
+                // Shape validation cannot identify an arbitrary imported model id. Defer
+                // last-only compatibility to the resolved-entry validator shared with replay.
+                && !payload
+                    .last_frame_asset_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Err(ApiError::bad_request(
                 "Image to Video requires a source image.",
@@ -6216,6 +6291,36 @@ pub(crate) fn validate_video_reference_asset_ids_payload(
     payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
+    if payload.get("mode").and_then(Value::as_str) == Some("image_to_video")
+        && !payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        use sceneworks_core::minimax_h3_import::{
+            entry_is_imported_minimax_h3, MiniMaxH3Partition,
+        };
+        let imported_partition = model_manifest_entry
+            .as_object()
+            .filter(|entry| entry_is_imported_minimax_h3(entry))
+            .and_then(|entry| MiniMaxH3Partition::from_entry(entry).ok());
+        if !sceneworks_core::h3_keyframes::accepts_last_only_resolved_image_to_video(
+            model_manifest_entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            "image_to_video",
+            payload
+                .get("lastFrameAssetId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty()),
+            imported_partition.map(|partition| partition.as_str()),
+        ) {
+            return Err(ApiError::bad_request(
+                "Image to Video requires a source image.",
+            ));
+        }
+    }
     let reference_asset_ids = match payload.get("referenceAssetIds") {
         None => &[][..],
         Some(Value::Array(values)) => values.as_slice(),

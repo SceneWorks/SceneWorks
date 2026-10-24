@@ -5279,6 +5279,83 @@ async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
 }
 
 #[tokio::test]
+async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() {
+    use sceneworks_core::checkpoint_import::{
+        CheckpointCatalogRecordV1, CheckpointContainerV1, CheckpointInventoryV1, ImportLayerV1,
+        ImportPlanV1, SourceLocatorV1,
+    };
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let current_plan = ImportPlanV1::new(
+        "checkpoint-plan-current",
+        "minimax-h3",
+        vec![ImportLayerV1 {
+            layer_id: "dit".into(),
+            role: "transformer".into(),
+            target_path: "model.safetensors".into(),
+            container: CheckpointContainerV1::Safetensors,
+            source: SourceLocatorV1::linked("root-test", "model.safetensors", "a".repeat(64))
+                .unwrap(),
+        }],
+    )
+    .unwrap();
+    let checkpoint_id = "linked/root-test/model.safetensors";
+    let record = CheckpointCatalogRecordV1::from_plan(checkpoint_id, &current_plan).unwrap();
+    let plans = settings.data_dir.join("checkpoints/plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{}.json", current_plan.plan_id)),
+        current_plan.canonical_json().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        settings.data_dir.join("checkpoints/inventory.json"),
+        CheckpointInventoryV1::new(vec![record.clone()])
+            .unwrap()
+            .canonical_json()
+            .unwrap(),
+    )
+    .unwrap();
+    let config = settings.config_dir.clone();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({"schemaVersion":1,"models":[]}).to_string(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        json!({"schemaVersion":1,"models":[{
+            "id":"same-import-id", "type":"video", "family":"minimax-h3", "baseModel":"minimax_h3",
+            "minimaxH3Partition":"fl2va", "importPlan":{"checkpointId":checkpoint_id,
+            "planId":current_plan.plan_id,"semanticDigest":record.plan.semantic_digest}
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let app = create_app(settings).unwrap();
+    let (status,error) = request(app.clone(),"POST","/api/v1/video/jobs",json!({
+        "projectId":"p", "model":"same-import-id", "mode":"text_to_video", "prompt":"original weights only",
+        "expectedImportedModelRef":{"modelId":"same-import-id","checkpointId":checkpoint_id,"planId":"checkpoint-plan-original"}
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("planId") && detail.contains("Reimport")),
+        "{error}"
+    );
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().map(Vec::len),
+        Some(0),
+        "identity mismatch must not enqueue substituted weights"
+    );
+}
+
+#[tokio::test]
 async fn create_video_job_rejects_over_length_negative_prompt() {
     // sc-8884 (F-082): the negative-prompt cap is shared by the video validator too.
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -16723,16 +16800,64 @@ fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_sou
         ("minimax_h3_ref", true, false),
         ("ltx_2_3", true, false),
     ] {
-        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+        let value = serde_json::json!({
             "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
             "lastFrameAssetId": if has_last { Some("last") } else { None },
-        }))
-        .unwrap();
+        });
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(value.clone()).unwrap();
+        // Shape-only admission defers last-only task compatibility until the catalog resolves.
+        assert_eq!(crate::validate_video_job(&payload).is_ok(), has_last);
         assert_eq!(
-            crate::validate_video_job(&payload).is_ok(),
+            crate::validate_video_reference_asset_ids_payload(
+                value.as_object().unwrap(),
+                &serde_json::json!({"id":model}),
+            )
+            .is_ok(),
             accepted,
             "{model}/{has_last}"
         );
+    }
+}
+
+#[test]
+fn h3_resolved_last_only_import_requires_a_verified_base_partition() {
+    let payload = serde_json::json!({"model":"user-choice", "mode":"image_to_video", "lastFrameAssetId":"last"});
+    for (partition, accepted) in [
+        ("fl2va", true),
+        ("hybrid", true),
+        ("ref2va", false),
+        ("unknown", false),
+    ] {
+        let base = if partition == "ref2va" {
+            "minimax_h3_ref"
+        } else {
+            "minimax_h3"
+        };
+        let entry = serde_json::json!({
+            "id":"user-choice", "family":"minimax-h3", "baseModel":base,
+            "minimaxH3Partition":partition, "importSourceShape":"transformer_directory",
+            "importPlan":{"checkpointId":"checkpoint", "assembly":{"schemaVersion":1, "partition":partition}}
+        });
+        assert_eq!(
+            crate::validate_video_reference_asset_ids_payload(payload.as_object().unwrap(), &entry)
+                .is_ok(),
+            accepted,
+            "{partition}"
+        );
+        let mut unbound = entry.clone();
+        unbound.as_object_mut().unwrap().remove("importPlan");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            payload.as_object().unwrap(),
+            &unbound
+        )
+        .is_err());
+        let mut spoofed = payload.clone();
+        spoofed["model"] = serde_json::json!("minimax_h3");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            spoofed.as_object().unwrap(),
+            &serde_json::json!({"id":"other"})
+        )
+        .is_err());
     }
 }
 

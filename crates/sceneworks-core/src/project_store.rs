@@ -6451,6 +6451,16 @@ fn imported_model_ref(fact: &Value) -> Option<Map<String, Value>> {
     {
         reference.insert("planId".to_owned(), Value::String(plan_id.to_owned()));
     }
+    if let Some(semantic_digest) = plan
+        .and_then(|plan| plan.get("semanticDigest"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        reference.insert(
+            "semanticDigest".to_owned(),
+            Value::String(semantic_digest.to_owned()),
+        );
+    }
     Some(reference)
 }
 
@@ -16359,6 +16369,7 @@ mod tests {
             recipe["importedModelRef"]["planId"],
             json!("checkpoint-plan-7")
         );
+        assert_eq!(recipe["importedModelRef"]["semanticDigest"], json!("abc"));
         assert_eq!(
             recipe["importedModelRef"]["declaredPartition"],
             json!("ref2va")

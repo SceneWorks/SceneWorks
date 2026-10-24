@@ -52,7 +52,7 @@ const STATE_BADGE = {
 // Only a repair the Model Manager can actually perform gets a button. `select-base` is a
 // declaration the user makes in the checkpoint import panel, so it renders as a sentence naming
 // where that happens rather than as a button that would do nothing.
-const ACTIONABLE_REPAIR_KINDS = new Set(["download", "relink", "rescan"]);
+const ACTIONABLE_REPAIR_KINDS = new Set(["download", "reimport", "relink", "rescan"]);
 
 export function hasImportedCheckpointSurface(model) {
   return Boolean(model?.importedSource);

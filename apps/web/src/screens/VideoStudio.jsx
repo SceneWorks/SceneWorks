@@ -359,11 +359,13 @@ export function VideoStudio() {
     videoModels[0]?.id ??
     ltxVideoModelId;
   const [model, setModel] = useState(saved.model ?? defaultVideoModelId);
+  const [expectedImportedModelRef, setExpectedImportedModelRef] = useState(saved.expectedImportedModelRef ?? null);
   // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
   // the raw state setter below and preserve the replay while its target model becomes active.
   const setUserModel = useCallback((nextModel) => {
     setRecipeModelNotice("");
     setRecipeTierRequest(null);
+    setExpectedImportedModelRef(null);
     setModel(nextModel);
   }, []);
   const textEncoderModel =
@@ -394,6 +396,16 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Imported catalog entries carry their explicit task partition; an id prefix/family alone
+  // cannot prove FL2VA support (Ref2VA shares the same architecture).
+  const supportsLastOnly = (entry) => entry?.id === "minimax_h3" || (
+    entry?.family === "minimax-h3" && entry?.baseModel === "minimax_h3" &&
+    entry?.importSourceShape === "transformer_directory" &&
+    Boolean(entry?.importPlan?.checkpointId?.trim?.()) &&
+    ["fl2va", "hybrid"].includes(entry?.minimaxH3Partition) &&
+    entry?.capabilities?.includes("image_to_video")
+  );
+  const acceptsLastOnly = supportsLastOnly(selectedModel);
   const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
   const ltx25AutoDurationEnabled = model === ltx25VideoModelId && autoDuration;
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
@@ -539,7 +551,7 @@ export function VideoStudio() {
   // (sendAssetToVideo) still sets the source directly in an effect below, overriding this seed. A
   // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
   // / person-track catalogs land.
-  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (saved.model === "minimax_h3" && saved.lastFrameAssetId));
+  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (supportsLastOnly(videoModels.find((entry) => entry.id === saved.model)) && saved.lastFrameAssetId));
   const [sourceAssetId, setSourceAssetId] = useState(
     hasRestoredSource
       ? (saved.sourceAssetId ?? "")
@@ -1222,9 +1234,13 @@ export function VideoStudio() {
   useEffect(() => {
     if (launchRequest?.view !== "Video" || !launchRequest.recipe) {
       setRecipeTierRequest(null);
+      // A non-recipe launch is a new request, not a continuation of the last replay: carrying its
+      // original imported identity onto a different selection would be refused as a mismatch.
+      if (launchRequest?.view === "Video") setExpectedImportedModelRef(null);
       return;
     }
     const recipe = launchRequest.recipe;
+    setExpectedImportedModelRef(recipe.importedModelRef ?? null);
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
     const { loraIds, loraWeights: recipeWeights } = recipeLoraSelection(recipe);
@@ -1545,6 +1561,7 @@ export function VideoStudio() {
     // not model defaults, so they persist here and restore across a full restart — kept out of the
     // defaults-reset path. Restore-validation (above) drops any id whose asset/track is gone.
     sourceAssetId,
+    expectedImportedModelRef,
     lastFrameAssetId,
     sourceClipAssetId,
     bridgeRightClipAssetId,
@@ -1707,7 +1724,7 @@ export function VideoStudio() {
     outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
-    (mode === "image_to_video" && (sourceAssetId || (model === "minimax_h3" && lastFrameAssetId))) ||
+    (mode === "image_to_video" && (sourceAssetId || (acceptsLastOnly && lastFrameAssetId))) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
@@ -1891,6 +1908,7 @@ export function VideoStudio() {
         // (and the worker discards anyway) would be a ghost input on the recipe.
         negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
+        expectedImportedModelRef: expectedImportedModelRef ?? undefined,
         // The duration head chooses a legal duration only when the user explicitly opts in. Do not
         // send the visible manual-picker value alongside it: provider precedence is intentionally
         // represented by absence, so an explicit duration always wins by switching this toggle off.
@@ -1917,7 +1935,7 @@ export function VideoStudio() {
         fitMode: ["image_to_video", "first_last_frame"].includes(mode)
           ? effectiveFitMode(fitMode, false)
           : undefined,
-        lastFrameAssetId: mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? lastFrameAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" || (acceptsLastOnly && mode === "image_to_video") ? lastFrameAssetId || null : null,
         sourceClipAssetId: [
           "extend_clip",
           "replace_person",
@@ -2181,7 +2199,7 @@ export function VideoStudio() {
               />
             ) : null}
 
-            {mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? (
+            {mode === "first_last_frame" || (acceptsLastOnly && mode === "image_to_video") ? (
               <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"

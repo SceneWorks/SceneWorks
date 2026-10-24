@@ -1197,6 +1197,45 @@ impl ImportPlanReferenceV1 {
     }
 }
 
+/// Validate a replay's original imported selection against the server-resolved immutable identity.
+/// `actual` must be projected from the validated persisted plan, never client/catalog metadata.
+pub fn validate_replay_import_reference(
+    expected: &serde_json::Value,
+    actual: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    let mismatch = |field: &str| {
+        format!(
+        "Imported replay identity mismatch ({field}). Reimport or relink the original checkpoint, or explicitly select another model to start a new generation. No replacement weights were queued."
+    )
+    };
+    let expected = expected.as_object().ok_or_else(|| mismatch("reference"))?;
+    let actual = actual
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| mismatch("checkpointId"))?;
+    for key in [
+        "modelId",
+        "checkpointId",
+        "planId",
+        "semanticDigest",
+        "sourceBindingIdentity",
+        "family",
+        "baseModel",
+        "declaredPartition",
+    ] {
+        let required = matches!(key, "modelId" | "checkpointId" | "planId");
+        match expected.get(key) {
+            Some(value) if value.as_str().is_some_and(|value| !value.is_empty()) => {
+                if actual.get(key) != Some(value) {
+                    return Err(mismatch(key));
+                }
+            }
+            None if !required => {}
+            _ => return Err(mismatch(key)),
+        }
+    }
+    Ok(())
+}
+
 /// Small catalog-facing projection of a plan; it intentionally contains no layers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportPlanSummaryV1 {

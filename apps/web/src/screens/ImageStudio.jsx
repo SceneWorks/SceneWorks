@@ -1964,10 +1964,10 @@ export function ImageStudio() {
     }
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
-    setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
-    // sc-15952 / sc-26687: the ordered reference images. Guarded on presence rather than assigned
+    setReferenceAssetId(settings.referenceAssetId ?? rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952 / sc-26687: the ordered reference images. Guarded on the KEY rather than assigned
     // unconditionally — a recipe that records neither spelling must not clear a selection the user
-    // had already made.
+    // had already made, while an explicit empty list is authoritative and does clear it.
     //
     // `referenceAssetIds` is a TOP-LEVEL request key, not part of `advanced`, so it never reached
     // `rawAdapterSettings` and this reader could never see it: "Use this recipe" silently rebuilt an
@@ -1975,9 +1975,9 @@ export function ImageStudio() {
     // `normalizedSettings` — the replay record — and that spelling is authoritative. The `advanced`
     // spelling is kept as the fallback for a shared-workflow envelope that carries it there.
     const recordedReferences =
-      Array.isArray(settings.referenceAssetIds) && settings.referenceAssetIds.length
+      Array.isArray(settings.referenceAssetIds)
         ? settings.referenceAssetIds
-        : Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length
+        : Array.isArray(rawSettings.referenceAssetIds)
           ? rawSettings.referenceAssetIds
           : null;
     if (recordedReferences) {
