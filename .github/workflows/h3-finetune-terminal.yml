@@ -1,0 +1,102 @@
+name: H3 fine-tune explicit terminal case
+
+# No pull_request/push/schedule trigger: real models never belong to ordinary CI.
+on:
+  workflow_dispatch:
+    inputs:
+      stationary_pair_authorized:
+        description: Coordinator confirmed final stationary pair after reviews, inference-main merge and permanent pin
+        required: true
+        type: boolean
+        default: false
+      sceneworks_sha:
+        description: Exact clean SceneWorks revision containing this workflow
+        required: true
+        type: string
+      inference_sha:
+        description: Exact permanent inference-main revision pinned by SceneWorks
+        required: true
+        type: string
+      backend:
+        description: Physical backend for this case (no CPU substitution)
+        required: true
+        type: choice
+        options: [mlx, cuda]
+      expected_runner:
+        description: Exact runner name; MLX must be nax-macos-2
+        required: true
+        type: string
+      plan_path:
+        description: Already staged external absolute campaign plan; no automatic model download
+        required: true
+        type: string
+      output_path:
+        description: Plan's external persistent evidence directory (never a checkout/cache)
+        required: true
+        type: string
+      case_id:
+        description: One exact case from scripts/h3-finetune-terminal.mjs list
+        required: true
+        type: string
+permissions:
+  contents: read
+# Do not cancel another pending/running acceptance case or introduce GPU ownership locks.
+concurrency:
+  group: h3-finetune-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  terminal:
+    if: inputs.stationary_pair_authorized
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-chroma"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          path: sceneworks
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Validate explicit inputs before any product execution
+        shell: bash
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          OUTPUT: ${{ inputs.output_path }}
+          CASE_ID: ${{ inputs.case_id }}
+          BACKEND: ${{ inputs.backend }}
+          EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+          SW_SHA: ${{ inputs.sceneworks_sha }}
+          INF_SHA: ${{ inputs.inference_sha }}
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import {readFile} from "node:fs/promises";
+            const e=process.env,p=JSON.parse(await readFile(e.PLAN,"utf8"));
+            assert.equal(e.RUNNER_NAME,e.EXPECTED_RUNNER);
+            assert.equal(p.output,e.OUTPUT);
+            assert.equal(p.sceneworks,e.SW_SHA); assert.equal(p.inference,e.INF_SHA);
+            assert.equal(p.cases.find(c=>c.id===e.CASE_ID)?.backend,e.BACKEND);
+          '
+      - name: Execute or reverify one durable source-bound case
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          CASE_ID: ${{ inputs.case_id }}
+          H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
+        run: node scripts/h3-finetune-terminal.mjs run-case "$PLAN" "$CASE_ID" "$GITHUB_WORKSPACE/sceneworks" "$GITHUB_WORKSPACE/inference"
+      - name: Retain evidence including failure and resume identity
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h3-${{ inputs.case_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.output_path }}/${{ inputs.case_id }}/
+          if-no-files-found: error
+          retention-days: 30

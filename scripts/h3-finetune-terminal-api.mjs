@@ -1,0 +1,98 @@
+#!/usr/bin/env node
+// Drive existing app routes, never an alternate importer/provider. No service startup/download.
+import assert from 'node:assert/strict';
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+export function pointer(value, p) {
+  assert.ok(p === '' || p.startsWith('/'), 'JSON pointer required');
+  return p === '' ? value : p.slice(1).split('/').reduce((v, key) => {
+    key = key.replaceAll('~1', '/').replaceAll('~0', '~');
+    assert.ok(v != null && Object.hasOwn(v, key), `missing JSON pointer ${p}`);
+    return v[key];
+  }, value);
+}
+function expand(value, captures) {
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && Object.hasOwn(value, '$concat')) {
+    assert.ok(Array.isArray(value.$concat));
+    return value.$concat.map(v => { const part = expand(v, captures); assert.ok(typeof part === 'string'); return part; }).join('');
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && Object.hasOwn(value, '$capture')) {
+    const [name, ...keys] = value.$capture.split('/');
+    assert.ok(Object.hasOwn(captures, name), `unknown capture ${name}`);
+    return pointer(captures[name], keys.length ? '/' + keys.join('/') : '');
+  }
+  if (Array.isArray(value)) return value.map(v => expand(v, captures));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expand(v, captures)]));
+  return value;
+}
+export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {} } = {}) {
+  const base = new URL(s.baseUrl);
+  assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
+  assert.ok(s.timeoutSeconds > 0 && s.timeoutSeconds <= 7200);
+  assert.ok(s.caseId && Array.isArray(s.steps) && s.steps.length > 0);
+  const deadline = now() + s.timeoutSeconds * 1000, captures = {}, transcript = [];
+  let activeJob;
+  const record = async r => { transcript.push(r); await onRecord(r); };
+  async function request(method, route, body, expectedStatus) {
+    assert.ok(route.startsWith('/api/v1/') && !route.includes('..'), 'existing app API route required');
+    const url = new URL(route, base); assert.equal(url.origin, base.origin);
+    assert.ok(now() < deadline, 'scenario timeout');
+    const response = await fetchImpl(url, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) });
+    const text = await response.text();
+    const result = text ? JSON.parse(text) : null;
+    await record({ method, route, status: response.status, result });
+    assert.equal(response.status, expectedStatus, `${method} ${route}: ${text.slice(0, 400)}`);
+    return result;
+  }
+  try {
+    for (const step of s.steps) {
+      assert.ok(!Object.hasOwn(captures, step.id), 'duplicate step id');
+      let result;
+      if (step.waitJob) {
+        const jobId = expand(step.waitJob, captures); assert.ok(typeof jobId === 'string' && jobId.length > 0);
+        activeJob = jobId;
+        for (;;) {
+          result = await request('GET', `/api/v1/jobs/${encodeURIComponent(jobId)}`, undefined, 200);
+          if (['completed', 'failed', 'cancelled', 'canceled'].includes(result.status)) break;
+          await sleep(Math.min(1000, Math.max(0, deadline - now())));
+        }
+        assert.equal(result.status, step.expectedJobStatus ?? 'completed', 'job did not complete as expected');
+        activeJob = undefined;
+      } else {
+        result = await request(step.method, expand(step.path, captures), expand(step.body, captures), step.expectedStatus);
+        // Submission identity is durable before waiting, including interruption/failure recovery.
+        if (['/api/v1/models/import', '/api/v1/video/jobs'].includes(step.path) && result?.id) activeJob = result.id;
+      }
+      captures[step.id] = result;
+      for (const check of step.assert ?? []) {
+        const actual = pointer(result, check.pointer), expected = expand(check.equals, captures);
+        assert.deepEqual(actual, expected, `assertion ${step.id}${check.pointer}`);
+        await record({ assertion: `${step.id}${check.pointer}`, actual, expected });
+      }
+    }
+    assert.ok(transcript.some(r => r.assertion), 'no observable assertions executed');
+    return { caseId: s.caseId, captures, transcript };
+  } catch (error) {
+    // Cooperative product cancellation, never process-kill a native GPU buffer.
+    if (activeJob) {
+      try {
+        const r = await fetchImpl(new URL(`/api/v1/jobs/${encodeURIComponent(activeJob)}/cancel`, base), { method: 'POST', signal: AbortSignal.timeout(10000) });
+        await record({ cancellation: activeJob, status: r.status });
+      } catch (cancelError) { await record({ cancellation: activeJob, error: cancelError.message }); }
+    }
+    throw error;
+  }
+}
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    assert.equal(process.env.GITHUB_ACTIONS, 'true', 'actual app execution is explicit Actions only');
+    const [scenarioPath, out] = process.argv.slice(2);
+    const scenario = JSON.parse(await readFile(scenarioPath, 'utf8'));
+    assert.equal(scenario.caseId, process.env.H3_CASE_ID);
+    const records = [];
+    const result = await runScenario(scenario, { onRecord: async r => { records.push(r); await writeFile(out, JSON.stringify({ caseId: scenario.caseId, transcript: records }, null, 2)); } });
+    await writeFile(out, JSON.stringify(result, null, 2) + '\n');
+    console.log(`H3_API_ASSERTIONS_EXECUTED=${result.transcript.filter(r => r.assertion).length}`);
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
+}
