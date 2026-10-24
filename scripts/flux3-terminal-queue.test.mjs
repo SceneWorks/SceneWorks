@@ -587,3 +587,65 @@ test('opaque GPU headroom predicate failures carry one allowlisted reason code a
   let error; try { await exercise({ deps: { processTable: async () => [{ pid: 1, ppid: 0, command: 'node.exe' }, { pid: 77, ppid: 0, command: 'game.exe', executable: 'C:/game.exe', startedAt: 's', sessionId: 2 }] } }); } catch (caught) { error = caught; }
   assert.equal(error?.safeCode, 'GPU_FOREIGN_COUNTER_INVALID');
 });
+
+// Shapes mirror the retained production artifacts of run 40112018586: the holder's LOCAL binding
+// (kind/identity/deadline/members/api, no container) and the executor's PUBLISHED binding.json
+// (same fields plus container and containerAttestation). All keys and values here are synthetic.
+async function holderTerminalFixture() {
+  const f = fixture(), dir = await mkdtemp(path.join(os.tmpdir(), 'flux3-holder-terminal-'));
+  const containerKeys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const executor = f.binding.members[EXECUTOR];
+  const container = { jobName: 'Local\\SceneWorksFlux3-123-1-synthetic', publicKey: containerKeys.publicKey.export({ format: 'jwk' }),
+    helper: { pid: 900, ppid: 101, startedAt: 'helper', executable: 'C:/Windows/powershell.exe', sessionId: 2 },
+    ackFile: path.join(dir, 'container-synthetic.ack.json'), context: { sessionId: 2, ownerSid: 'S-1-5-21-123' } };
+  f.table.push({ pid: 900, ppid: 101, startedAt: 'helper', executable: 'C:/Windows/powershell.exe', command: 'powershell.exe', sessionId: 2 });
+  f.table.find(p => p.pid === 110).ppid = 900;
+  const local = { kind: f.binding.kind, identity: structuredClone(f.binding.identity), deadline: f.binding.deadline, members: structuredClone(f.binding.members), api: structuredClone(f.binding.api) };
+  const published = { ...structuredClone(local), container, containerAttestation: signed({ identity: structuredClone(f.binding.identity), container }, f.keys[EXECUTOR].privateKey), api: structuredClone(f.binding.api) };
+  const ackPayload = JSON.stringify({ exitCode: 0, childPid: 901, jobName: container.jobName, identity: structuredClone(f.binding.identity), cleanupVerified: true, activeProcesses: 0, kind: 'flux3-container-cleanup-ack' });
+  const sign = (await import('node:crypto')).sign;
+  const ack = { payload: ackPayload, signature: sign('sha256', Buffer.from(ackPayload), containerKeys.privateKey).toString('base64') };
+  const cleanup = signed({ identity: structuredClone(f.binding.identity), runner: EXECUTOR, proof: JSON.parse(ackPayload) }, f.keys[EXECUTOR].privateKey);
+  const terminalPulse = signed({ identity: structuredClone(f.binding.identity), runner: EXECUTOR, jobId: executor.jobId, at: NOW, apiValidUntil: NOW + API_FRESH_MS, sequence: 2, status: 'safe_to_release', containerCreated: true, cleanupProofSha256: queueDigest(cleanup) }, f.keys[EXECUTOR].privateKey);
+  const write = async (name, value) => writeFile(path.join(dir, name), JSON.stringify(value) + '\n', { flag: 'w' });
+  const restore = async () => { await write('container-synthetic.ack.json', ack); await write(`${EXECUTOR}.cleanup.json`, cleanup); await write(`${EXECUTOR}.pulse.json`, terminalPulse); await write('binding.json', published); };
+  await restore();
+  return { f, dir, local, published, container, ack, cleanup, terminalPulse, write, restore };
+}
+test('a holder concludes only after the PUBLISHED binding matches its local view and the signed cleanup chain verifies', async () => {
+  const t = await holderTerminalFixture();
+  try {
+    const { f, dir, local, published } = t;
+    const departed = f.table.filter(p => ![100, 101].includes(p.pid));
+    // ACTUAL holder pre-barrier entry: the local binding has no container, so the roster check throws
+    // the typed identity code while the authenticated published terminal proof is already on disk.
+    assert.throws(() => verifyRoster({ ...local, container: undefined }, f.pulses, departed, f.controllerPid, NOW), error => error.safeCode === 'QUEUE_PROCESS_ROW_MISSING');
+    assert.equal(await authenticatedTerminalCleanup(dir, local, f.binding.identity), true, 'local binding + matching published terminal proof');
+    // Loop entry and the already-complete published binding are the same verified chain.
+    assert.equal(await authenticatedTerminalCleanup(dir, local, f.binding.identity), true, 'holder loop entry');
+    assert.equal(await authenticatedTerminalCleanup(dir, published, f.binding.identity), true, 'already-complete binding keeps working');
+    for (const [label, mutate] of [
+      ['published binding missing', async () => rm(path.join(dir, 'binding.json'))],
+      ['published kind differs', async () => t.write('binding.json', { ...published, kind: 'flux3-four-slot-reservation-x' })],
+      ['published nonce differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, nonce: 'e'.repeat(64) } })],
+      ['published run differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, runId: 124 } })],
+      ['published attempt differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, attempt: 2 } })],
+      ['published source differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, sourceSha: 'f'.repeat(40) } })],
+      ['published control differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, controlSha256: 'e'.repeat(64) } })],
+      ['published deadline differs', async () => t.write('binding.json', { ...published, deadline: published.deadline + 1 })],
+      ['substituted executor member', async () => t.write('binding.json', { ...published, members: { ...published.members, [EXECUTOR]: { ...published.members[EXECUTOR], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) } } })],
+      ['substituted other member', async () => t.write('binding.json', { ...published, members: { ...published.members, 'cuda-windows-3': { ...published.members['cuda-windows-3'], jobId: published.members['cuda-windows-3'].jobId + 1 } } })],
+      ['forged container attestation', async () => t.write('binding.json', { ...published, containerAttestation: { ...published.containerAttestation, signature: Buffer.from('forged').toString('base64') } })],
+      ['cleanup digest changed', async () => t.write(`${EXECUTOR}.pulse.json`, { ...t.terminalPulse, value: { ...t.terminalPulse.value, cleanupProofSha256: 'e'.repeat(64) } })],
+      ['cleanup tree not proven zero', async () => t.write('container-synthetic.ack.json', { ...t.ack, payload: t.ack.payload.replace('"activeProcesses":0', '"activeProcesses":1') })],
+      ['cleanup envelope absent', async () => rm(path.join(dir, `${EXECUTOR}.cleanup.json`))],
+      ['container never created', async () => t.write(`${EXECUTOR}.pulse.json`, { ...t.terminalPulse, value: { ...t.terminalPulse.value, containerCreated: false } })],
+    ]) {
+      await t.restore(); await mutate();
+      assert.equal(await authenticatedTerminalCleanup(dir, local, f.binding.identity), false, label);
+    }
+    // The active campaign path is untouched: a live roster still verifies with all four rows.
+    await t.restore();
+    assert.deepEqual(verifyRoster(f.binding, f.pulses, f.table, f.controllerPid, NOW), [200, 300, 400]);
+  } finally { await rm(t.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
