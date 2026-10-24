@@ -14,13 +14,16 @@ export const QUEUE_ROOT = 'D:/tmp/sc26243-run/queue';
 export const CONTROL_FILE = 'D:/tmp/sc26243-run/queue-control.json';
 export const SOURCE_ROOT = 'D:/repos/SceneWorks/.claude/worktrees/agent-aafe2575fa619862f';
 export const EXECUTOR = 'cuda-windows';
-// Repo-scoped runners 3/4 are absent from the organization endpoint. Workflow CVD=1 overrides
-// runner3's default CVD=0, so ALL FOUR slots are required. Holders never open either GPU.
+// All four runners are organization-scoped; the repository endpoint lists none of them. Workflow
+// CVD=1 overrides runner3's default CVD=0, so ALL FOUR slots are required. Holders never open either
+// GPU. IDs are the CURRENT server-assigned REST ids and must match the live job exactly; the local
+// .runner agentId is the same value, but registration ids are server-assigned and are never restored
+// by editing configuration.
 export const SLOTS = Object.freeze({
   'cuda-windows': Object.freeze({ id: 2313, scope: 'organization', worker: 'D:/actions-runner/bin/Runner.Worker.exe' }),
   'cuda-windows-2': Object.freeze({ id: 2619, scope: 'organization', worker: 'D:/actions-runner-2/bin/Runner.Worker.exe' }),
-  'cuda-windows-3': Object.freeze({ id: 25, scope: 'repository', worker: 'D:/actions-runner-3/bin/Runner.Worker.exe' }),
-  'cuda-windows-4': Object.freeze({ id: 26, scope: 'repository', worker: 'D:/actions-runner-4/bin/Runner.Worker.exe' }),
+  'cuda-windows-3': Object.freeze({ id: 21393, scope: 'organization', worker: 'D:/actions-runner-3/bin/Runner.Worker.exe' }),
+  'cuda-windows-4': Object.freeze({ id: 21394, scope: 'organization', worker: 'D:/actions-runner-4/bin/Runner.Worker.exe' }),
 });
 export const HEARTBEAT_MS = 2000, STALE_MS = 20000, API_FRESH_MS = 90000;
 export const WAIT_MS = 60 * 60 * 1000, CAMPAIGN_MS = 8 * 60 * 60 * 1000;

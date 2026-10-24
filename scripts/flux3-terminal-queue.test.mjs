@@ -40,11 +40,13 @@ test('typed manual queue inputs reject empty/default sentinels, wrong source/eve
   for (const value of ['none', '', undefined]) assert.throws(() => queueInputs(env({ FLUX3_QUEUE_CONTROL_SHA256: value })), /sentinel/);
   for (const over of [{ GITHUB_EVENT_NAME: 'push' }, { GITHUB_REPOSITORY: 'SceneWorks/inference' }, { GITHUB_SHA: 'e'.repeat(40) }, { GITHUB_RUN_ATTEMPT: '0' }, { FLUX3_QUEUE_SOURCE: 'main' }]) assert.throws(() => queueInputs(env(over)));
 });
-test('homogeneous matrix elects by actual runner, not matrix slot; exact org + repository scoped roster', () => {
+test('homogeneous matrix elects by actual runner, not matrix slot; exact current org-scoped roster', () => {
   assert.equal(electedRole('cuda-windows'), 'executor');
   for (const runner of ['cuda-windows-2', 'cuda-windows-3', 'cuda-windows-4']) assert.equal(electedRole(runner), 'holder');
   assert.throws(() => electedRole('cuda-windows-5'), /unrecognized/);
-  assert.deepEqual(Object.values(SLOTS).map(s => s.id), [2313, 2619, 25, 26]);
+  // CURRENT server-assigned ids, verified against the live org records; all four are org-scoped.
+  assert.deepEqual(Object.values(SLOTS).map(s => s.id), [2313, 2619, 21393, 21394]);
+  assert.deepEqual(Object.values(SLOTS).map(s => s.scope), ['organization', 'organization', 'organization', 'organization']);
   assert.deepEqual(valid(fixture()), [200, 300, 400], 'only the three validated companions are additional allowed Workers');
 });
 test('API proof requires exact repo/run/attempt/source, four live job identities and actual runner IDs', () => {
@@ -762,4 +764,34 @@ test('scoped queued orchestration reserves ONLY the next replay generation and n
   let reservedBeforeFailure = 0;
   assert.throws(() => executionScope({ operation: 'run', caseIds: ['candle.unknown'] }, plan));
   assert.equal(reservedBeforeFailure, 0);
+});
+
+test('current org-scoped runner IDs are required; stale, swapped, duplicated or name-mismatched records refuse', () => {
+  const f = fixture(), run = f.binding.api.run, identity = f.binding.identity, clone = () => structuredClone(f.binding.api.jobs);
+  assert.equal(Object.keys(validateApi(run, clone(), identity)).length, 4);
+  assert.deepEqual(clone().map(j => j.runner_id), [2313, 2619, 21393, 21394]);
+  // The previous repository-scoped ids are stale and must be refused on their own.
+  for (const [name, stale] of [['cuda-windows-3', 25], ['cuda-windows-4', 26]]) {
+    const bad = clone(); bad.find(j => j.runner_name === name).runner_id = stale;
+    assert.throws(() => validateApi(run, bad, identity), /runner ID mismatch/, `stale ${stale}`);
+  }
+  // Swapping the two current ids between their names is a mismatch, not an accepted set.
+  const swapped = clone(), three = swapped.find(j => j.runner_name === 'cuda-windows-3'), four = swapped.find(j => j.runner_name === 'cuda-windows-4');
+  [three.runner_id, four.runner_id] = [four.runner_id, three.runner_id];
+  assert.throws(() => validateApi(run, swapped, identity), /runner ID mismatch/, 'swapped ids');
+  // The same actual id twice is refused even though it is a current id.
+  const duplicated = clone(); duplicated.find(j => j.runner_name === 'cuda-windows-4').runner_id = 21393;
+  assert.throws(() => validateApi(run, duplicated, identity), /runner ID mismatch/, 'duplicate id');
+  // A current id carried by the wrong runner name is refused.
+  const misnamed = clone(); misnamed.find(j => j.runner_name === 'cuda-windows-3').runner_name = 'cuda-windows-2';
+  assert.throws(() => validateApi(run, misnamed, identity), /runner ID mismatch|runner identity|queue runner/, 'name/id mismatch');
+  // A missing member is refused, and the four documented worker directories/accounts are unchanged.
+  const missing = clone(); missing.splice(missing.findIndex(j => j.runner_name === 'cuda-windows-4'), 1);
+  assert.throws(() => validateApi(run, missing, identity), undefined, 'missing member');
+  assert.deepEqual(Object.fromEntries(Object.entries(SLOTS).map(([name, slot]) => [name, slot.worker])), {
+    'cuda-windows': 'D:/actions-runner/bin/Runner.Worker.exe',
+    'cuda-windows-2': 'D:/actions-runner-2/bin/Runner.Worker.exe',
+    'cuda-windows-3': 'D:/actions-runner-3/bin/Runner.Worker.exe',
+    'cuda-windows-4': 'D:/actions-runner-4/bin/Runner.Worker.exe',
+  });
 });
