@@ -588,7 +588,7 @@ fn write_moss_tensor_companion(
             .cloned()
             .unwrap_or_else(|| json!([])),
     );
-    let share = sceneworks_core::workflow_share::build_workflow_share_from(
+    let share = sceneworks_core::workflow_share::embeddable_workflow_share(
         &WorkflowAssetFacts {
             mode: "edit_image".into(),
             model: plan.request.model.clone(),
@@ -599,13 +599,9 @@ fn write_moss_tensor_companion(
             height: Some(plan.request.height),
         },
         &payload,
-    );
+    )
+    .ok_or_else(|| WorkerError::Engine("MOSS workflow companion exceeds bounded envelope size".into()))?;
     let bytes = serde_json::to_vec(&share).map_err(|e| WorkerError::Engine(e.to_string()))?;
-    if bytes.len() > sceneworks_core::workflow_share::WORKFLOW_SHARE_MAX_BYTES {
-        return Err(WorkerError::Engine(
-            "MOSS workflow companion exceeds bounded envelope size".into(),
-        ));
-    }
     let relative = format!(
         "assets/tensors/moss-edit/{}/{index:04}.sceneworks-workflow.json",
         plan.genset_id

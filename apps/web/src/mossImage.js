@@ -89,7 +89,7 @@ export function buildMossEditJobAdvanced(state) {
     mossImage: { acceleration: "off", max_sequence_length: state.mossImage?.max_sequence_length ?? 4096, training_shift: state.mossImage?.training_shift ?? 1, uncond_skip_layers: [] },
     mossImageEdit: mossEditWireOptions(state.mossImageEdit),
     ...(state.mossImageAdvanced ? { mossImageAdvanced: mossAdvancedWire(state.mossImageAdvanced) } : {}),
-    ...(state.mossPromptBatch?.length ? { promptBatch: [...state.mossPromptBatch] } : {}),
+    ...(state.mossPromptBatch?.length ? { promptBatch: state.mossPromptBatch.slice() } : {}),
     steps: state.stepsOverride === "" || state.stepsOverride == null ? 30 : Number(state.stepsOverride),
     guidanceScale: state.guidanceOverride === "" || state.guidanceOverride == null ? 4 : Number(state.guidanceOverride),
     schedulerShift: state.schedulerShift == null || state.schedulerShift === "" ? 5 : Number(state.schedulerShift),
