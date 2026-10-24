@@ -3384,6 +3384,9 @@ impl ProjectStore {
         acknowledge: impl FnOnce(&[Value]) -> ProjectStoreResult<T>,
     ) -> ProjectStoreResult<T> {
         let (project_path, _guard) = self.lock_project(project_id)?;
+        // Confinement returns canonical paths; use the same root for indexed sidecar lookup so
+        // project aliases (including macOS /var -> /private/var) remain idempotent on retry.
+        let project_path = fs::canonicalize(project_path)?;
         let id = generation_set
             .get("id")
             .and_then(Value::as_str)
@@ -8783,6 +8786,63 @@ mod tests {
             std::fs::read(media.join("0.sceneworks.json")).unwrap(),
             before
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn moss_batch_replays_through_project_alias_and_keeps_conflict_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let physical = temp.path().join("physical");
+        std::fs::create_dir(&physical).unwrap();
+        let alias = temp.path().join("alias");
+        create_dir_symlink(&physical, &alias).unwrap();
+        let store = ProjectStore::new(alias.join("data"), "test");
+        let project = store.create_project("Aliased MOSS recovery").unwrap();
+        let root = Path::new(&project.path);
+        assert_ne!(root, std::fs::canonicalize(root).unwrap());
+        let media = root.join("assets/images/genset_alias");
+        std::fs::create_dir_all(&media).unwrap();
+        std::fs::write(media.join("0.png"), b"staged").unwrap();
+        let fact = json!({"assetId":"asset_alias","displayName":"MOSS alias recovery","mediaPath":"assets/images/genset_alias/0.png","mode":"edit_image","model":"moss_image_sft","seed":5,"createdAt":"2026-10-23T00:00:00Z"});
+        let set =
+            json!({"id":"genset_alias","mode":"edit_image","model":"moss_image_sft","count":1});
+        let publish = |facts: &[Value]| {
+            store.publish_moss_edit_batch(&project.id, "job_alias", &set, facts, |assets| {
+                Ok(assets.to_vec())
+            })
+        };
+        let assets = publish(std::slice::from_ref(&fact)).unwrap();
+        assert_eq!(publish(std::slice::from_ref(&fact)).unwrap(), assets);
+        let sidecar = media.join("0.sceneworks.json");
+        let before = std::fs::read(&sidecar).unwrap();
+
+        // Root aliases must not admit different metadata or a different sidecar for the same id.
+        let mut changed = fact.clone();
+        changed["seed"] = json!(6);
+        assert!(matches!(
+            publish(&[changed]),
+            Err(ProjectStoreError::BadRequest(message))
+                if message == "MOSS output conflicts with an existing asset"
+        ));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        let foreign = media.join("foreign.sceneworks.json");
+        std::fs::write(&foreign, &before).unwrap();
+        let connection = connect_project_db(root).unwrap();
+        connection
+            .execute(
+                "update assets set sidecar_path=?1 where id='asset_alias'",
+                params!["assets/images/genset_alias/foreign.sceneworks.json"],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            publish(&[fact]),
+            Err(ProjectStoreError::BadRequest(message))
+                if message == "MOSS output conflicts with an existing asset"
+        ));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+        assert_eq!(std::fs::read(&foreign).unwrap(), before);
+        assert_eq!(std::fs::read(media.join("0.png")).unwrap(), b"staged");
     }
 
     #[test]
