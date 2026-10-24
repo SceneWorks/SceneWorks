@@ -33,8 +33,15 @@ const log = value => console.log(JSON.stringify(value));
 export const QUEUE_PHASES = Object.freeze(['startup', 'queue_ownership', 'control', 'metadata', 'license', 'disk_metadata', 'disk_budget', 'source_pins', 'api_receipt', 'resource_receipt', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom', 'gpu_capacity', 'admission_write', 'ledger_boundary', 'ledger_transition', 'ledger_init', 'execution', 'ledger_finalize']);
 const SAFE_FS_CODES = ['ENOENT', 'EACCES', 'EPERM', 'ENOSPC', 'EIO', 'EBUSY', 'ETIMEDOUT'];
 const FAILURE_CODES = ['QUEUE_PRE_ADMISSION_FAILED', ...SAFE_FS_CODES.map(c => `QUEUE_FS_${c}`)];
+// Fixed observability only: the inner predicate name, never a raw path, command line or message.
+export const SAFE_REASON_CODES = Object.freeze([
+  'QUEUE_PROCESS_ROW_MISSING', 'QUEUE_PROCESS_START_MISSING', 'QUEUE_PROCESS_EXECUTABLE_MISSING', 'QUEUE_PROCESS_EXECUTABLE_NOT_ABSOLUTE',
+  'GPU_HEADROOM_COUNTERS_UNAVAILABLE', 'GPU_HEADROOM_INVALID', 'GPU_FOREIGN_IDENTITY_UNAVAILABLE', 'GPU_FOREIGN_COUNTER_INVALID',
+  'GPU_FOREIGN_IDENTITY_CHANGED', 'GPU_FOREIGN_CAP_EXCEEDED',
+]);
 export function queueFailureReport(error, phase, metrics = {}) {
   const report = { phase: QUEUE_PHASES.includes(phase) ? phase : 'startup', code: SAFE_FS_CODES.includes(error?.code) ? `QUEUE_FS_${error.code}` : 'QUEUE_PRE_ADMISSION_FAILED', exceptionClass: ['Error', 'AssertionError', 'TypeError', 'RangeError', 'SyntaxError'].includes(error?.name) ? error.name : 'Error' };
+  if (SAFE_REASON_CODES.includes(error?.safeCode)) report.reason = error.safeCode;
   const numeric = {};
   for (const key of ['diskFreeBytes', 'diskRequiredBytes', 'physicalCapacityBytes', 'freeVramBytes', 'foreignDedicatedBytes']) if (Number.isSafeInteger(metrics[key]) && metrics[key] >= 0) numeric[key] = metrics[key];
   return { ...report, metrics: numeric };
@@ -44,7 +51,7 @@ export class QueuePhaseFailure extends Error {
 }
 export function safeQueueFailure(error) {
   const report = error instanceof QueuePhaseFailure ? error.report : {};
-  return { phase: QUEUE_PHASES.includes(report.phase) ? report.phase : 'startup', code: FAILURE_CODES.includes(report.code) ? report.code : 'QUEUE_PRE_ADMISSION_FAILED' };
+  return { phase: QUEUE_PHASES.includes(report.phase) ? report.phase : 'startup', code: FAILURE_CODES.includes(report.code) ? report.code : 'QUEUE_PRE_ADMISSION_FAILED', ...(SAFE_REASON_CODES.includes(report.reason) ? { reason: report.reason } : {}) };
 }
 export function queueInputs(env) {
   assert(revision.test(env.FLUX3_QUEUE_SOURCE ?? '') && revision.test(env.FLUX3_QUEUE_INFERENCE ?? ''), 'queue requires exact source/inference SHAs');
@@ -107,7 +114,13 @@ export function validateApi(run, jobs, identity, { complete = true } = {}) {
 }
 export function ancestors(table, pid) { const seen = new Set(); while (pid > 0 && !seen.has(pid)) { seen.add(pid); pid = table.find(p => p.pid === pid)?.ppid ?? 0; } return seen; }
 export function processIdentity(table, pid) {
-  const p = table.find(p => p.pid === pid); assert(p?.startedAt && p.executable && path.win32.isAbsolute(p.executable), 'queue process identity unavailable');
+  const p = table.find(p => p.pid === pid);
+  // Fixed codes name the exact missing field; the raw values are never reported.
+  const fail = safeCode => { const error = new Error('queue process identity unavailable'); error.safeCode = safeCode; throw error; };
+  if (!p) fail('QUEUE_PROCESS_ROW_MISSING');
+  if (!p.startedAt) fail('QUEUE_PROCESS_START_MISSING');
+  if (!p.executable) fail('QUEUE_PROCESS_EXECUTABLE_MISSING');
+  if (!path.win32.isAbsolute(p.executable)) fail('QUEUE_PROCESS_EXECUTABLE_NOT_ABSOLUTE');
   return { pid: p.pid, ppid: p.ppid, startedAt: p.startedAt, executable: p.executable, ...(Number.isInteger(p.sessionId) ? { sessionId: p.sessionId } : {}) };
 }
 export function workerIdentity(table, controllerPid, runner) {
@@ -168,6 +181,30 @@ export function verifyAccessProofs(binding, proofs) {
     assert.equal(p.containerSha256, digest(binding.container)); assert.equal(p.jobName, binding.container.jobName);
     assert.deepEqual(p.context, binding.container.context); assert.equal(p.queryAccess, true); assert.equal(p.zeroBeforeStart, true);
   }
+}
+/** A holder may conclude WITHOUT requiring continued liveness only when the reservation has already
+ * ended with an AUTHENTICATED terminal: the executor's signed safe_to_release pulse must bind the
+ * executor's signed cleanup envelope, which itself must carry the helper-signed container ACK that
+ * proves zero owned processes. Any missing, forged or partial proof returns false, so a peer that
+ * disappeared WITHOUT verified cleanup is still NOTPASS (and is refused by the ordinary path). */
+export async function authenticatedTerminalCleanup(dir, binding, identity) {
+  try {
+    if (!binding?.container || !binding?.containerAttestation) return false;
+    const member = binding.members?.[EXECUTOR]; if (!member?.publicKey) return false;
+    const attested = authenticated(binding.containerAttestation, member.publicKey); sameIdentity(attested.identity, identity);
+    assert.deepEqual(attested.container, binding.container);
+    const pulse = authenticated(await json(path.join(dir, `${EXECUTOR}.pulse.json`)), member.publicKey);
+    sameIdentity(pulse.identity, identity); assert.equal(pulse.runner, EXECUTOR);
+    assert.equal(pulse.status, 'safe_to_release'); assert.equal(pulse.containerCreated, true);
+    const envelope = await json(path.join(dir, `${EXECUTOR}.cleanup.json`));
+    assert.equal(pulse.cleanupProofSha256, digest(envelope));
+    const value = authenticated(envelope, member.publicKey); sameIdentity(value.identity, identity);
+    const ack = await json(binding.container.ackFile);
+    assert.equal(ack.payload, JSON.stringify(value.proof));
+    const { verifyCleanupAck } = await import('./flux3-queue-container.mjs');
+    verifyCleanupAck(ack, binding.container, identity);
+    return true;
+  } catch { return false; }
 }
 export const ATOMIC_RENAME_BUDGET_MS = 800, ATOMIC_RENAME_BACKOFF_MS = 50;
 // Windows readers/scanners can briefly deny replacement. Never remove the old target or
@@ -437,7 +474,14 @@ async function supervisor(env) {
     const binding = { kind: 'flux3-four-slot-reservation', identity, deadline: campaignDeadline, members, api };
     const readPulses = async () => { const p = {}; for (const n of Object.keys(SLOTS)) p[n] = await optional(path.join(dir, `${n}.pulse.json`)); return p; };
     let pulses; while (!(pulses = await readPulses()) || !Object.values(pulses).every(Boolean)) { await check(); await sleep(HEARTBEAT_MS); }
-    verifyRoster(binding, pulses, await census(), members[EXECUTOR].supervisor.pid);
+    // A holder that arrives AFTER the executor already published authenticated terminal cleanup must
+    // not demand the departed executor's live rows; nothing else may skip the live barrier.
+    if (role !== EXECUTOR && await authenticatedTerminalCleanup(dir, binding, identity)) { await release(); return; }
+    try { verifyRoster(binding, pulses, await census(), members[EXECUTOR].supervisor.pid); }
+    catch (error) {
+      if (!error?.safeCode || !(await authenticatedTerminalCleanup(dir, binding, identity))) throw error;
+      await release(); return;
+    }
     if (role === 'executor') {
       const { prepareContainer } = await import('./flux3-queue-container.mjs');
       container = await prepareContainer({ dir, identity, deadline: campaignDeadline, env: driverEnvironment(env, null) });
@@ -478,7 +522,12 @@ async function supervisor(env) {
         const p = authenticated(await json(path.join(dir, `${EXECUTOR}.pulse.json`)), members[EXECUTOR].publicKey); sameIdentity(p.identity, identity);
         if (p.status === 'safe_to_release') { await safeHolderRelease(); break; }
         await check(); validateApi(api.run, api.jobs, identity); binding.api = api;
-        verifyRoster(binding, await readPulses(), await census(), members[EXECUTOR].supervisor.pid);
+        if (await authenticatedTerminalCleanup(dir, binding, identity)) { await safeHolderRelease(); await release(); break; }
+        try { verifyRoster(binding, await readPulses(), await census(), members[EXECUTOR].supervisor.pid); }
+        catch (error) {
+          if (!error?.safeCode || !(await authenticatedTerminalCleanup(dir, binding, identity))) throw error;
+          await safeHolderRelease(); await release(); break;
+        }
         await sleep(HEARTBEAT_MS);
       }
     }

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES, processIdentity, authenticatedTerminalCleanup, SAFE_REASON_CODES } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed, validateQueueOperation, executeAdmittedQueueOperation } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -495,4 +495,95 @@ test('fixed guard phase observation does not change any checks, command environm
   assert.deepEqual(observed, await exercise(undefined));
   assert.deepEqual(phases, ['queue_ownership', 'physical_gpu_uuid', 'masked_cuda_uuid', 'gpu_process_identity', 'gpu_headroom']);
   assert.equal(observed.calls.find(c => c.command === 'powershell.exe').options.env.CUDA_VISIBLE_DEVICES, '1');
+});
+
+test('process identity failure names the exact missing field through a fixed safe code', () => {
+  const row = { pid: 7, ppid: 1, startedAt: 'start', executable: 'C:/node/node.exe', command: 'node.exe', sessionId: 2 };
+  assert.deepEqual(processIdentity([row], 7), { pid: 7, ppid: 1, startedAt: 'start', executable: 'C:/node/node.exe', sessionId: 2 });
+  for (const [code, rows] of [
+    ['QUEUE_PROCESS_ROW_MISSING', []],
+    ['QUEUE_PROCESS_START_MISSING', [{ ...row, startedAt: undefined }]],
+    ['QUEUE_PROCESS_EXECUTABLE_MISSING', [{ ...row, executable: undefined }]],
+    ['QUEUE_PROCESS_EXECUTABLE_NOT_ABSOLUTE', [{ ...row, executable: 'node.exe' }]],
+  ]) {
+    let error; try { processIdentity(rows, 7); } catch (caught) { error = caught; } assert(error, code);
+    assert.equal(error.safeCode, code, code);
+    assert.equal(error.message, 'queue process identity unavailable', 'only the fixed message is retained');
+    assert(SAFE_REASON_CODES.includes(error.safeCode));
+    const report = queueFailureReport(error, 'queue_ownership');
+    assert.equal(report.reason, code); assert.equal(report.code, 'QUEUE_PRE_ADMISSION_FAILED');
+    assert.doesNotMatch(JSON.stringify(report), /node\.exe|C:\/|start/);
+  }
+  const plain = new Error('failure'); plain.safeCode = 'PRIVATE_SENTINEL';
+  assert.equal(queueFailureReport(plain, 'gpu_headroom').reason, undefined, 'unknown codes never reach the report');
+  assert.equal(safeQueueFailure(new QueuePhaseFailure(plain, 'gpu_headroom')).reason, undefined);
+});
+
+test('a holder concludes only on authenticated terminal cleanup; disappearance without it stays NOTPASS', async () => {
+  const f = fixture(), dir = await mkdtemp(path.join(os.tmpdir(), 'flux3-queue-terminal-'));
+  const sign = (await import('node:crypto')).sign;
+  try {
+    const containerKeys = generateKeyPairSync('rsa', { modulusLength: 2048 }), executor = f.binding.members[EXECUTOR];
+    const container = { jobName: 'Local\\SceneWorksFlux3-123-1-synthetic', publicKey: containerKeys.publicKey.export({ format: 'jwk' }),
+      helper: { pid: 900, ppid: 101, startedAt: 'helper', executable: 'C:/Windows/powershell.exe', sessionId: 2 },
+      ackFile: path.join(dir, 'container-synthetic.ack.json'), context: { sessionId: 2, ownerSid: 'S-1-5-21-123' } };
+    f.binding.container = container;
+    f.table.push({ pid: 900, ppid: 101, startedAt: 'helper', executable: 'C:/Windows/powershell.exe', command: 'powershell.exe', sessionId: 2 });
+    f.table.find(p => p.pid === 110).ppid = 900;
+    f.binding.containerAttestation = signed({ identity: structuredClone(f.binding.identity), container }, f.keys[EXECUTOR].privateKey);
+    const ackPayload = JSON.stringify({ exitCode: 0, childPid: 901, jobName: container.jobName, identity: structuredClone(f.binding.identity), cleanupVerified: true, activeProcesses: 0, kind: 'flux3-container-cleanup-ack' });
+    const ack = { payload: ackPayload, signature: sign('sha256', Buffer.from(ackPayload), containerKeys.privateKey).toString('base64') };
+    const cleanup = signed({ identity: structuredClone(f.binding.identity), runner: EXECUTOR, proof: JSON.parse(ackPayload) }, f.keys[EXECUTOR].privateKey);
+    const terminalPulse = signed({ identity: structuredClone(f.binding.identity), runner: EXECUTOR, jobId: executor.jobId, at: NOW, apiValidUntil: NOW + API_FRESH_MS, sequence: 2, status: 'safe_to_release', containerCreated: true, cleanupProofSha256: queueDigest(cleanup) }, f.keys[EXECUTOR].privateKey);
+    const write = async (name, value) => writeFile(path.join(dir, name), JSON.stringify(value) + '\n', { flag: 'w' });
+    const restore = async () => { await write('container-synthetic.ack.json', ack); await write(`${EXECUTOR}.cleanup.json`, cleanup); await write(`${EXECUTOR}.pulse.json`, terminalPulse); };
+    await restore();
+    // Healthy ACTIVE roster is still verified exactly as before.
+    assert.deepEqual(verifyRoster(f.binding, f.pulses, f.table, f.controllerPid, NOW), [200, 300, 400]);
+    // The executor's rows are gone after it published authenticated terminal cleanup. That is a safe
+    // terminal conclusion, and it is available ONLY while the authenticated proof is intact.
+    const departed = f.table.filter(p => ![100, 101].includes(p.pid));
+    assert.equal(await authenticatedTerminalCleanup(dir, f.binding, f.binding.identity), true);
+    assert.throws(() => verifyRoster(f.binding, f.pulses, departed, f.controllerPid, NOW), error => error.safeCode === 'QUEUE_PROCESS_ROW_MISSING');
+    for (const [label, mutate] of [
+      ['peer disappeared with no cleanup envelope', async () => { await rm(path.join(dir, `${EXECUTOR}.cleanup.json`)); }],
+      ['cleanup has not proven a zero process tree', async () => { await write('container-synthetic.ack.json', { ...ack, payload: ack.payload.replace('"activeProcesses":0', '"activeProcesses":1') }); }],
+      ['pulse is not bound to the cleanup envelope', async () => { await write(`${EXECUTOR}.pulse.json`, { ...terminalPulse, value: { ...terminalPulse.value, cleanupProofSha256: 'e'.repeat(64) } }); }],
+      ['executor never created the owned container', async () => { await write(`${EXECUTOR}.pulse.json`, { ...terminalPulse, value: { ...terminalPulse.value, containerCreated: false } }); }],
+      ['forged terminal pulse', async () => { await write(`${EXECUTOR}.pulse.json`, { ...terminalPulse, signature: Buffer.from('forged').toString('base64') }); }],
+    ]) {
+      await restore(); await mutate();
+      assert.equal(await authenticatedTerminalCleanup(dir, f.binding, f.binding.identity), false, label);
+      assert.throws(() => verifyRoster(f.binding, f.pulses, departed, f.controllerPid, NOW), error => error.safeCode === 'QUEUE_PROCESS_ROW_MISSING', label);
+    }
+  } finally { await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+test('opaque GPU headroom predicate failures carry one allowlisted reason code and keep their checks', async () => {
+  const gpu = 'GPU-' + '1'.repeat(8) + '-' + '1'.repeat(4) + '-' + '1'.repeat(4) + '-' + '1'.repeat(4) + '-' + '1'.repeat(12);
+  const exercise = overrides => guardHardware({ backend: 'candle', gpuUuid: gpu }, [], {
+    platform: 'win32', env: {}, controllerPid: 1, processTable: async () => [{ pid: 1, ppid: 0, command: 'node.exe' }],
+    exec: async (command, args) => {
+      if (command === 'powershell.exe') return { stdout: gpu + ' luid=0x00000001_0x00000002' };
+      if (args.includes('--query-gpu=index,uuid,pci.bus_id')) return { stdout: '1, ' + gpu + ', 00000000:C1:00.0' };
+      if (args.includes('--query-gpu=memory.total,memory.free')) return { stdout: overrides.counter ?? '97887, 96835' };
+      if (args.includes('-x')) return { stdout: '<uuid>' + gpu + '</uuid><processes><process_info><pid>77</pid><type>C</type></process_info></processes>' };
+      if (args.includes('--query-compute-apps=pid,gpu_uuid')) return { stdout: '77, ' + gpu };
+      return { stdout: '' };
+    },
+    ...overrides.deps,
+  });
+  for (const [reason, overrides] of [
+    ['GPU_HEADROOM_COUNTERS_UNAVAILABLE', { counter: 'n/a' }],
+    ['GPU_HEADROOM_INVALID', { counter: '97887, 999999' }],
+  ]) {
+    let error; try { await exercise(overrides); } catch (caught) { error = caught; }
+    assert.equal(error?.safeCode, reason);
+    assert(SAFE_REASON_CODES.includes(error.safeCode));
+    assert.equal(queueFailureReport(error, 'gpu_headroom').reason, reason);
+    assert.equal(error.message, overrides.counter === 'n/a' ? 'GPU headroom counters unavailable' : 'valid positive GPU headroom required', 'the original predicate text is preserved');
+  }
+  // A foreign process with unmeasurable counters keeps its original refusal, now named precisely.
+  let error; try { await exercise({ deps: { processTable: async () => [{ pid: 1, ppid: 0, command: 'node.exe' }, { pid: 77, ppid: 0, command: 'game.exe', executable: 'C:/game.exe', startedAt: 's', sessionId: 2 }] } }); } catch (caught) { error = caught; }
+  assert.equal(error?.safeCode, 'GPU_FOREIGN_COUNTER_INVALID');
 });

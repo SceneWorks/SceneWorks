@@ -184,6 +184,15 @@ export async function readMacWorkloadLease(a) {
   const file = await contained(a.macWorkloadLease.path, a.macWorkloadLease.root), bytes = await readFile(file); assert(bytes.length <= 1024 * 1024 && createHash('sha256').update(bytes).digest('hex') === a.macWorkloadLease.sha256, 'coordinator lease bytes changed'); return JSON.parse(bytes);
 }
 const ownedGpuIdentities = new WeakMap();
+/** Fixed safe observability for the opaque GPU-headroom family: an assertion keeps its exact
+ * text and predicate, and additionally carries one allowlisted reason code for the safe report. */
+async function gpuStage(code, predicate) {
+  try { return await predicate(); }
+  catch (error) {
+    if (['AssertionError', 'SyntaxError'].includes(error?.name) && !error.safeCode) { const tagged = new Error(error.message); tagged.name = 'AssertionError'; tagged.safeCode = code; throw tagged; }
+    throw error;
+  }
+}
 export async function guardHardware(a, ownPids = [], { exec = execFile, platform = process.platform, arch = process.arch, env = process.env, processTable, leaseReader = readMacWorkloadLease, controllerPid = process.pid, now = Date.now, onPhase = () => {} } = {}) {
   onPhase('queue_ownership');
   const checked = (command, args, options = {}) => exec(command, args, { ...options, env: { ...safeEnvironment(env), ...options.env } });
@@ -256,20 +265,26 @@ export async function guardHardware(a, ownPids = [], { exec = execFile, platform
   }
   for (const [pid, type] of types) if (['C','C+G'].includes(type)) assert(seenApps.has(`${pid}:${uuid.toLowerCase()}`), 'GPU process compute-app identity missing');
   onPhase('gpu_headroom');
-  const headroom = (await smi(['-i', device.physicalGpuId, '--query-gpu=memory.total,memory.free', '--format=csv,noheader,nounits'])).split(',');
-  assert(headroom.length === 2 && headroom.every(x => /^\d+(?:\.\d+)?$/.test(x.trim())), 'GPU headroom counters unavailable');
-  const [totalBytes, freeBytes] = headroom.map(x => Number(x.trim()) * 1024 ** 2);
-  assert([totalBytes,freeBytes].every(Number.isSafeInteger) && totalBytes > 0 && freeBytes > 0 && freeBytes <= totalBytes, 'valid positive GPU headroom required');
+  const [totalBytes, freeBytes] = await gpuStage('GPU_HEADROOM_COUNTERS_UNAVAILABLE', async () => {
+    const headroom = (await smi(['-i', device.physicalGpuId, '--query-gpu=memory.total,memory.free', '--format=csv,noheader,nounits'])).split(',');
+    assert(headroom.length === 2 && headroom.every(x => /^\d+(?:\.\d+)?$/.test(x.trim())), 'GPU headroom counters unavailable');
+    return headroom.map(x => Number(x.trim()) * 1024 ** 2);
+  });
+  await gpuStage('GPU_HEADROOM_INVALID', async () => assert([totalBytes,freeBytes].every(Number.isSafeInteger) && totalBytes > 0 && freeBytes > 0 && freeBytes <= totalBytes, 'valid positive GPU headroom required'));
   let memory = new Map(), counterProof;
   if (foreign.length) {
-    const requiredProcesses = foreign.map(pid => { const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'foreign GPU process identity missing/ambiguous'); const p = matches[0]; assert(Number.isSafeInteger(p.sessionId) && p.sessionId >= 0, 'foreign GPU process session identity missing'); return { pid, startedAt: p.startedAt, sessionId: p.sessionId }; });
-    const observation = JSON.parse((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid, requiredProcesses)], { timeout: 30_000 })).stdout);
-    memory = validateGpuProcessMemory(observation, luid, requiredProcesses); counterProof = { requiredProcesses, ...observation };
+    const requiredProcesses = await gpuStage('GPU_FOREIGN_IDENTITY_UNAVAILABLE', async () => foreign.map(pid => { const matches = table.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'foreign GPU process identity missing/ambiguous'); const p = matches[0]; assert(Number.isSafeInteger(p.sessionId) && p.sessionId >= 0, 'foreign GPU process session identity missing'); return { pid, startedAt: p.startedAt, sessionId: p.sessionId }; }));
+    await gpuStage('GPU_FOREIGN_COUNTER_INVALID', async () => {
+      const observation = JSON.parse((await checked('powershell.exe', ['-NoProfile', '-Command', gpuProcessMemoryScript(luid, requiredProcesses)], { timeout: 30_000 })).stdout);
+      memory = validateGpuProcessMemory(observation, luid, requiredProcesses); counterProof = { requiredProcesses, ...observation };
+    });
   }
   const after = await (processTable ? processTable() : observeProcessTable(checked, platform));
-  for (const pid of new Set([...owned, ...foreign])) { const before = table.find(p => p.pid === pid), matches = after.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'GPU process exited/reused during observation'); assert.deepEqual(matches[0], before, 'GPU process identity changed/reused during observation'); }
+  await gpuStage('GPU_FOREIGN_IDENTITY_CHANGED', async () => {
+    for (const pid of new Set([...owned, ...foreign])) { const before = table.find(p => p.pid === pid), matches = after.filter(p => p.pid === pid); assert.equal(matches.length, 1, 'GPU process exited/reused during observation'); assert.deepEqual(matches[0], before, 'GPU process identity changed/reused during observation'); }
+  });
   // Historical wire name retained: this is the combined C AND C+G allocation, not graphics-only.
-  const foreignGraphics = { luid, ...assessForeignGraphics(foreign, memory) };
+  const foreignGraphics = { luid, ...await gpuStage('GPU_FOREIGN_CAP_EXCEEDED', async () => assessForeignGraphics(foreign, memory)) };
   if (counterProof) Object.defineProperty(foreignGraphics, 'counterProof', { value: counterProof, enumerable: false });
   return { physicalGpuId: device.physicalGpuId, gpuUuid: uuid, logicalCudaOrdinal: 0, ownComputePids: [...owned].filter(pid => seenApps.has(`${pid}:${uuid.toLowerCase()}`)), foreignGraphics, pciBusId, gpuHeadroom: {totalBytes,freeBytes}, sharedPolicy: { sharingMode: 'bounded-shared', foreignProcessTypes: ['C','C+G'], exclusiveThroughputClaim: false, deviceTotalAttributionClaim: false, computeActivityAssessment: 'unsupported-dedicated-memory-only' } };
 }
