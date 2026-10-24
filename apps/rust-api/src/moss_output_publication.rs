@@ -67,8 +67,8 @@ pub(crate) fn canonical_batch(job: &JobSnapshot) -> Option<&Vec<Value>> {
         if candidate != set {
             return None;
         }
-        if recognized || asset.pointer("/extra/mossPublication").is_some() {
-            if asset
+        if (recognized || asset.pointer("/extra/mossPublication").is_some())
+            && (asset
                 .pointer("/extra/mossPublication/jobId")
                 .and_then(Value::as_str)
                 != Some(job.id.as_str())
@@ -79,10 +79,9 @@ pub(crate) fn canonical_batch(job: &JobSnapshot) -> Option<&Vec<Value>> {
                 || asset
                     .pointer("/extra/mossPublication/generationSetId")
                     .and_then(Value::as_str)
-                    != Some(set)
-            {
-                return None;
-            }
+                    != Some(set))
+        {
+            return None;
         }
     }
     Some(assets)
