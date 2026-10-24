@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./main.jsx";
 import { FakeEventSource, response, settle } from "./main.testSupport.jsx";
-import { click } from "./testUtils/dom.js";
+import { click, setInput } from "./testUtils/dom.js";
 import { resetStartupTimingForTests } from "./startupTiming.js";
 
 // Simple UI ⇄ full workspace switching at the App level (design handoff).
@@ -151,6 +151,109 @@ describe("App — Simple/Advanced shell switching", () => {
     expect(container.querySelector(".su-root")).toBeTruthy();
     // …and the durable value is mirrored into the instant-paint cache for the next launch.
     expect(window.localStorage.getItem("sceneworks-simple-ui-default")).toBe("true");
+  });
+
+  it.each([1440, 390])("switches and creates workspaces in Simple mode at %i px", async (width) => {
+    window.innerWidth = width;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback) { this.callback = callback; }
+      observe() { this.callback([{ contentRect: { width } }]); }
+      disconnect() {}
+    });
+    const existingFetch = global.fetch;
+    global.fetch = vi.fn((url, options) => {
+      if (width === 390 && new URL(url).pathname.endsWith("/ui-preferences") &&
+          (options?.method ?? "GET") === "GET") {
+        return Promise.resolve(response({ sidebarCollapsed: true }));
+      }
+      if (new URL(url).pathname.endsWith("/projects")) {
+        return Promise.resolve(response(options?.method === "POST"
+          ? { id: "project-new", name: JSON.parse(options.body).name }
+          : [
+            { id: "project-default", name: "Default Project" },
+            { id: "project-other", name: "Other Workspace" },
+          ]));
+      }
+      return existingFetch(url, options);
+    });
+    await renderApp();
+    if (width === 1440) await click(sidebarSwitchButtons()[0]);
+    else await click(container.querySelector('[aria-label="Open menu"]'));
+
+    const switcher = () => container.querySelector(".su-nav .project-switcher");
+    expect(switcher().compareDocumentPosition(container.querySelector(".su-nav-group")) &
+      Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await click(switcher().querySelector(".project-pill"));
+    await click([...switcher().querySelectorAll('[role="option"]')].find(
+      (node) => node.textContent === "Other Workspace",
+    ));
+    await settle();
+    if (width === 390) await click(container.querySelector('[aria-label="Open menu"]'));
+    expect(switcher().querySelector(".project-pill strong").textContent).toBe("Other Workspace");
+    expect(container.querySelector(".su-root")).toBeTruthy();
+    expect(global.fetch.mock.calls.some(([url]) =>
+      new URL(url).pathname === "/api/v1/projects/project-other/assets",
+    )).toBe(true);
+
+    await click(switcher().querySelector(".project-pill"));
+    await click(switcher().querySelector(".project-menu-item-new"));
+    await act(async () => setInput(switcher().querySelector("input"), "New Workspace"));
+    await act(async () => switcher().querySelector("form").dispatchEvent(
+      new window.Event("submit", { bubbles: true, cancelable: true }),
+    ));
+    await settle();
+    if (width === 390) await click(container.querySelector('[aria-label="Open menu"]'));
+    expect(switcher().querySelector(".project-pill strong").textContent).toBe("New Workspace");
+    expect(container.querySelector(".su-root")).toBeTruthy();
+    if (width === 390) {
+      expect(container.querySelector(".sidebar-toggle")).toBeNull();
+      expect(global.fetch.mock.calls.some(([url, options]) =>
+        new URL(url).pathname.endsWith("/ui-preferences") && options?.method === "PUT" &&
+        Object.hasOwn(JSON.parse(options.body), "sidebarCollapsed"),
+      )).toBe(false);
+    }
+  });
+
+  it("keeps workspace drafts separate when switching within Simple mode", async () => {
+    const existingFetch = global.fetch;
+    global.fetch = vi.fn((url, options) => new URL(url).pathname.endsWith("/projects")
+      ? Promise.resolve(response([
+        { id: "project-default", name: "Default Project" },
+        { id: "project-other", name: "Other Workspace" },
+      ]))
+      : existingFetch(url, options));
+    await renderApp();
+    await click(sidebarSwitchButtons()[0]);
+    const prompt = () => container.querySelector("#su-image-prompt");
+    async function typePrompt(value) {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")
+          .set.call(prompt(), value);
+        prompt().dispatchEvent(new window.Event("input", { bubbles: true }));
+      });
+    }
+    async function selectWorkspace(name) {
+      await click(container.querySelector(".su-nav .project-pill"));
+      await click([...container.querySelectorAll('.su-nav [role="option"]')].find(
+        (node) => node.textContent === name,
+      ));
+      await settle();
+    }
+
+    await typePrompt("Default workspace draft");
+    await selectWorkspace("Other Workspace");
+    expect(prompt().value).toBe("");
+    await typePrompt("Other workspace draft");
+    await selectWorkspace("Default Project");
+    expect(prompt().value).toBe("Default workspace draft");
+    await selectWorkspace("Other Workspace");
+    expect(prompt().value).toBe("Other workspace draft");
+
+    await click([...container.querySelectorAll(".su-nav-item")].find(
+      (node) => node.textContent === "Assets",
+    ));
+    await selectWorkspace("Default Project");
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Assets");
   });
 
   it("forces the Simple shell on a phone viewport and locks the switch", async () => {

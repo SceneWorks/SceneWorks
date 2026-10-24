@@ -133,6 +133,22 @@ describe("App — durable UI preference writes carry the access token (sc-15136)
     expect(container.querySelector('.project-menu[role="listbox"]')).toBeTruthy();
   });
 
+  it("opens the new Simple workspace picker from the icon rail", async () => {
+    const fetchApi = fakeApi();
+    global.fetch = vi.fn((url, init) => {
+      if (new URL(url).pathname.endsWith("/ui-preferences") && (init?.method ?? "GET") === "GET") {
+        return Promise.resolve(response({ simpleUi: true, sidebarCollapsed: true }));
+      }
+      return fetchApi(url, init);
+    });
+    await renderApp();
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeTruthy();
+    await click(container.querySelector(".su-nav .project-pill"));
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeNull();
+    expect(container.querySelector(".su-nav .project-menu")).toBeTruthy();
+    expect(preferenceWrites().at(-1)).toEqual({ body: { sidebarCollapsed: false }, token: TOKEN });
+  });
+
   it("keeps the collapse preference when switching between Advanced and Simple UI", async () => {
     await renderApp();
     await click(container.querySelector('[aria-label="Collapse sidebar"]'));

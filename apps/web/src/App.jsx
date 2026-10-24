@@ -3898,11 +3898,25 @@ export function App() {
   // below. It mounts INSIDE the same two providers, so its screens read the identical
   // catalogs, job feed and actions — there is no second data layer, and switching back
   // to Advanced lands on the same live state.
+  const workspaceSwitcher = (
+    <ProjectSwitcher
+      activeProject={activeProject}
+      collapsed={sidebarCollapsed && !uiModeLocked}
+      disabled={!authenticated}
+      onCreate={createProject}
+      onOpen={() => { if (sidebarCollapsed && !uiModeLocked) changeSidebarCollapsed(false); }}
+      onSelect={selectProject}
+      projects={projects}
+    />
+  );
+
   if (showSimpleShell) {
     return (
       <AppStaticContext.Provider value={appStaticValue}>
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
+            // Flush the old workspace's draft and reset transient selections/overlays.
+            key={activeProject?.id}
             appVersion={<AppVersion update={appUpdate} />}
             accent={accent}
             embedWorkflow={embedWorkflow}
@@ -3921,6 +3935,7 @@ export function App() {
             sidebarCollapsed={sidebarCollapsed}
             onSidebarCollapsedChange={changeSidebarCollapsed}
             simpleDefault={simpleUiDefault}
+            workspaceSwitcher={workspaceSwitcher}
           />
           {workflowEmbedNoticeOpen ? (
             <WorkflowEmbedDecisionModal
@@ -3967,15 +3982,7 @@ export function App() {
             </div>
           </div>
 
-          <ProjectSwitcher
-            activeProject={activeProject}
-            collapsed={sidebarCollapsed}
-            disabled={!authenticated}
-            onCreate={createProject}
-            onOpen={() => { if (sidebarCollapsed) changeSidebarCollapsed(false); }}
-            onSelect={selectProject}
-            projects={projects}
-          />
+          {workspaceSwitcher}
 
           {navSections.map((section) => (
             <div className="sidebar-section" key={section.label}>

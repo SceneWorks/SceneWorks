@@ -19980,9 +19980,12 @@ pre.yue2-abc,
 .sidebar-collapsed .nav-label,
 .sidebar-collapsed .project-pill-meta,
 .sidebar-collapsed .project-pill .chev,
-.sidebar-collapsed .sidebar-footer-details { display: none; }
+.sidebar-collapsed .sidebar-footer-details,
+.su-sidebar-collapsed .project-pill-meta,
+.su-sidebar-collapsed .project-pill .chev { display: none; }
 .sidebar-collapsed .nav-item { justify-content: center; padding: 0; height: 40px; }
 .sidebar-collapsed .nav-item.active::before { left: -8px; }
 .sidebar-collapsed .nav-pulse { position: absolute; right: 3px; top: 4px; width: 5px; height: 5px; }
-.sidebar-collapsed .project-pill { justify-content: center; padding: 8px 0; }
+.sidebar-collapsed .project-pill,
+.su-sidebar-collapsed .project-pill { justify-content: center; padding: 8px 0; }
 .sidebar-collapsed .sidebar-footer { display: flex; justify-content: center; padding: 8px 0 0; }

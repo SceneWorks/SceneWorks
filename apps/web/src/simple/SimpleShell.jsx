@@ -97,6 +97,7 @@ export function SimpleShell({
   preferencesHydrated = true,
   sidebarCollapsed = false,
   onSidebarCollapsedChange,
+  workspaceSwitcher,
 }) {
   const {
     jobs = [],
@@ -114,7 +115,7 @@ export function SimpleShell({
   const phone = breakpoint === "phone";
   const compactSidebar = sidebarCollapsed && !phone && !lockedToSimple;
 
-  const [screen, setScreen] = useState("image");
+  const [screen, setScreen] = useState(() => SCREEN_BY_ID.has(requestedScreen) ? requestedScreen : "image");
   const [drawer, setDrawer] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -331,6 +332,7 @@ export function SimpleShell({
                   <div className="su-brand-sub">Simple</div>
                 </div>
               </div>
+              {workspaceSwitcher}
               {SIMPLE_SCREENS.map((group) => (
                 <React.Fragment key={group.group}>
                   <div className="su-nav-group-title">{group.group}</div>
