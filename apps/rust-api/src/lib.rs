@@ -4077,10 +4077,18 @@ async fn create_generation_job_with_status(
             // checkpoint's assembly must be acknowledged before the job they feed is admitted, at
             // the same boundary the fine-tune's own terms are and independently of them.
             //
-            // `entry` is the SERVER-resolved one `ensure_runtime_model_sources` just re-derived, so
-            // this checks the terms the catalog actually binds rather than any caller claim. It
-            // covers every generation route, and it is idempotent with the component-download gate
-            // in `queue_model_import_job`.
+            // `entry` is the SERVER-resolved one the route's own canonical resolver minted and
+            // `ensure_runtime_model_sources` re-derived, so this checks the terms the catalog
+            // actually binds rather than any caller claim. Idempotent with the component-download
+            // gate in `queue_model_import_job`.
+            //
+            // COVERAGE, stated precisely: every TYPED generation route (its handler attaches
+            // `modelManifestEntry`) and every generated-component download. It does NOT claim raw
+            // POST /jobs carriers — `ensure_runtime_model_sources` only fills gaps and trusts a
+            // present primary, so a raw carrier can arrive with no primary at all and this would
+            // no-op. sc-26690 owns the raw `jobs.rs::create_job` gate for those, called on the
+            // trusted canonical selection after the same canonicalization calls and before the
+            // atomic enqueue.
             crate::models::ensure_inherited_component_licenses_acknowledged(
                 &state,
                 entry,
