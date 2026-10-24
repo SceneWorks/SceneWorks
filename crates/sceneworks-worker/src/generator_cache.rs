@@ -148,6 +148,13 @@ const fn provider_resident_delta(
     post_load_committed_bytes.saturating_sub(pre_load_committed_bytes)
 }
 
+/// Constructed only after imported plan authority and the actual prepared source seals agree.
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedH3CacheContext {
+    pub(crate) identity: String,
+    pub(crate) receipt: sceneworks_core::minimax_h3_load::PreparedH3Load,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoadIdentity {
     engine_id: String,
@@ -177,6 +184,8 @@ pub(crate) struct LoadIdentity {
     /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
     /// beneath any `WeightsSource` slot.
     prepared_files: Vec<PinnedWeightsFile>,
+    /// Plan-bound imported H3 closure, including native sibling files outside configured Dir slots.
+    imported_h3: Option<(String, Vec<PinnedWeightsFile>)>,
     /// sc-24806: an MLX load released from its declared Sequential policy to eager Resident
     /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
     /// still needs the declared Sequential load (or the reverse); the two reload instead.
@@ -281,6 +290,24 @@ impl LoadIdentity {
             .expect("unprepared LoadSpec cache identity remains infallible")
     }
 
+    fn try_from_load_spec_with_h3(
+        engine_id: &str,
+        spec: &LoadSpec,
+        context: Option<&PreparedH3CacheContext>,
+    ) -> WorkerResult<Self> {
+        let mut key = Self::try_from_load_spec(engine_id, spec).map_err(|error| {
+            crate::classify_engine_error("Generator cache source validation failed", error)
+        })?;
+        if let Some(context) = context {
+            context
+                .receipt
+                .validate(spec)
+                .map_err(crate::WorkerError::InvalidPayload)?;
+            key.imported_h3 = Some((context.identity.clone(), context.receipt.files().to_vec()));
+        }
+        Ok(key)
+    }
+
     pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
         spec.validate_load_shape_declaration()?;
         spec.validate_prepared_file_pins()?;
@@ -361,6 +388,7 @@ impl LoadIdentity {
                 .iter()
                 .map(|(_, pin)| pin.clone())
                 .collect(),
+            imported_h3: None,
             released_resident: cfg!(target_os = "macos")
                 && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
                 && spec.offload_policy == OffloadPolicy::Resident,
@@ -1286,6 +1314,43 @@ where
     .await
 }
 
+pub(crate) async fn with_cached_generator_for_request_using_prepared_h3<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+        generator_worker(),
+        crate::transform_cache::evict_resident_transform(),
+        engine_id,
+        spec,
+        prepared_h3,
+        load_error_context,
+        0,
+        |_| Ok(()),
+        load_generator,
+        run,
+    )
+    .await
+}
+
 #[cfg(test)]
 async fn with_cached_generator_for_request_using_on<R>(
     worker: &mpsc::Sender<GeneratorJob>,
@@ -1350,15 +1415,55 @@ async fn with_cached_generator_for_request_after_cold_admission_using_on<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_after_cold_admission_using_on_with_h3(
+        worker,
+        evict_transform,
+        engine_id,
+        spec,
+        None,
+        load_error_context,
+        incoming_reclaimable_weight_bytes,
+        cold_admission,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn with_cached_generator_for_request_after_cold_admission_using_on_with_h3<R>(
+    worker: &mpsc::Sender<GeneratorJob>,
+    evict_transform: impl std::future::Future<Output = WorkerResult<bool>> + Send,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    prepared_h3: Option<PreparedH3CacheContext>,
+    load_error_context: impl Into<String>,
+    incoming_reclaimable_weight_bytes: u64,
+    cold_admission: impl FnOnce(u64) -> WorkerResult<()> + Send + 'static,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     // One resident engine across the generator and transform caches (sc-25683): a resident
     // restoration transform is dropped before a generator can load on top of it. A no-op when no
     // transform was ever loaded. Injected (production passes the process-global
     // `transform_cache::evict_resident_transform`) so a test on a local cache worker never evicts the
     // global transform another test is asserting on.
     evict_transform.await?;
-    let key = LoadIdentity::try_from_load_spec(engine_id, &spec).map_err(|error| {
-        crate::classify_engine_error("Generator cache source validation failed", error)
-    })?;
+    let key = LoadIdentity::try_from_load_spec_with_h3(engine_id, &spec, prepared_h3.as_ref())?;
     let requested_policy = ExecutionPolicy::from_load_spec(&spec);
     let load_error_context = load_error_context.into();
     let admission_spec = spec.clone();
@@ -1839,6 +1944,93 @@ mod tests {
         assert_eq!(resolve_gpu_memory_limit(0, Some(gib)), 0);
         // A configured ceiling is still honored on an unprobeable machine.
         assert_eq!(resolve_gpu_memory_limit(4 * gib, None), 4 * gib);
+    }
+
+    #[test]
+    fn imported_h3_cache_key_includes_sealed_component_contents_and_membership() {
+        let root = tempfile::tempdir().unwrap();
+        for component in [
+            "transformer",
+            "transformer_ref",
+            "text_encoder",
+            "vae",
+            "audio_vae",
+            "tokenizer",
+        ] {
+            std::fs::create_dir_all(root.path().join(component)).unwrap();
+            std::fs::write(
+                root.path().join(component).join("model.safetensors"),
+                component,
+            )
+            .unwrap();
+        }
+        let fresh = || LoadSpec::new(WeightsSource::Dir(root.path().to_owned()));
+        let mut spec = fresh();
+        let receipt = sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+        let key = LoadIdentity::try_from_load_spec("minimax_h3", &spec).unwrap();
+        let mut same = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut same).unwrap();
+        assert_eq!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &same).unwrap()
+        );
+        std::fs::write(
+            root.path().join("audio_vae/model.safetensors"),
+            b"different decoder",
+        )
+        .unwrap();
+        assert!(receipt.validate(&spec).is_err());
+        let mut changed = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut changed).unwrap();
+        assert_ne!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &changed).unwrap()
+        );
+        let key = LoadIdentity::try_from_load_spec("minimax_h3", &changed).unwrap();
+        std::fs::write(
+            root.path().join("transformer/adaln-table.safetensors"),
+            b"new table",
+        )
+        .unwrap();
+        let mut table = fresh();
+        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut table).unwrap();
+        assert_ne!(
+            key,
+            LoadIdentity::try_from_load_spec("minimax_h3", &table).unwrap()
+        );
+    }
+
+    #[test]
+    fn imported_h3_supplemental_key_covers_semantic_plan_and_external_reference() {
+        let root = tempfile::tempdir().unwrap();
+        let backbone = tempfile::tempdir().unwrap();
+        for name in ["transformer", "transformer_ref"] {
+            std::fs::create_dir_all(backbone.path().join(name)).unwrap();
+            std::fs::write(backbone.path().join(name).join("model.safetensors"), name).unwrap();
+        }
+        let prepare = |identity: &str| {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(root.path().to_owned()));
+            spec.components.insert(
+                "transformer".into(),
+                WeightsSource::Dir(backbone.path().join("transformer")),
+            );
+            let receipt =
+                sceneworks_core::minimax_h3_load::PreparedH3Load::prepare(&mut spec).unwrap();
+            let context = PreparedH3CacheContext {
+                identity: identity.to_owned(),
+                receipt,
+            };
+            LoadIdentity::try_from_load_spec_with_h3("minimax_h3", &spec, Some(&context)).unwrap()
+        };
+        let before = prepare("source-bound-plan:schedule-a");
+        assert_eq!(before, prepare("source-bound-plan:schedule-a"));
+        assert_ne!(before, prepare("source-bound-plan:schedule-b"));
+        std::fs::write(
+            backbone.path().join("transformer_ref/model.safetensors"),
+            b"different reference table",
+        )
+        .unwrap();
+        assert_ne!(before, prepare("source-bound-plan:schedule-a"));
     }
 
     #[test]

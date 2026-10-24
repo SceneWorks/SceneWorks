@@ -1147,7 +1147,23 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
         );
         assert!(imported.install_dir.is_dir());
         assert!(store.resolve(&imported.checkpoint_id).is_ok());
+        // An uncancellable blocking preparation retains its authority after the async owner
+        // drops. Both the managed source and normalized derivative must remain leased.
+        let blocking_authority = provider.load_authority.clone();
         drop(provider);
+        blocking_authority.validate().unwrap();
+        assert!(
+            store.remove_managed("leased_h3").is_err(),
+            "{layout}: reader still holds the source lease"
+        );
+        let derivatives =
+            sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
+                .unwrap();
+        assert!(
+            derivatives.remove_managed_install("leased_h3").is_err(),
+            "{layout}: active preparation cannot lose its normalized source"
+        );
+        drop(blocking_authority);
         sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
             .unwrap()
             .remove_managed_install("leased_h3")
