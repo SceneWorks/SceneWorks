@@ -75,9 +75,10 @@ describe("insertNewest (sc-8860)", () => {
 
 describe("capTerminalJobs (sc-8860)", () => {
   it("caps retained terminal jobs at MAX_TERMINAL_JOBS, newest kept", () => {
-    // 250 terminal jobs, newest-first.
-    const terminal = Array.from({ length: 250 }, (_, i) =>
-      job(`t${i}`, new Date(Date.UTC(2026, 6, 1, 0, 0, 250 - i)).toISOString(), "completed"),
+    // More terminal jobs than the cap, newest-first.
+    const total = MAX_TERMINAL_JOBS + 50;
+    const terminal = Array.from({ length: total }, (_, i) =>
+      job(`t${i}`, new Date(Date.UTC(2026, 6, 1) + (total - i) * 1000).toISOString(), "completed"),
     ).sort(sortNewest);
     const capped = capTerminalJobs(terminal);
     expect(capped).toHaveLength(MAX_TERMINAL_JOBS);
@@ -89,8 +90,9 @@ describe("capTerminalJobs (sc-8860)", () => {
     const active = Array.from({ length: 10 }, (_, i) =>
       job(`a${i}`, new Date(Date.UTC(2026, 6, 2, 0, i)).toISOString(), "running"),
     );
-    const terminal = Array.from({ length: 300 }, (_, i) =>
-      job(`t${i}`, new Date(Date.UTC(2026, 6, 1, 0, 0, i)).toISOString(), "failed"),
+    // More terminal jobs than the cap, so the tail really is pruned.
+    const terminal = Array.from({ length: MAX_TERMINAL_JOBS + 50 }, (_, i) =>
+      job(`t${i}`, new Date(Date.UTC(2026, 6, 1) + i * 1000).toISOString(), "failed"),
     );
     const capped = capTerminalJobs([...active, ...terminal].sort(sortNewest));
     const activeIds = new Set(active.map((j) => j.id));

@@ -2858,6 +2858,7 @@ export function App() {
     replaySeed = null,
     assetId = null,
     sourceAssetId = null,
+    autoGenerate = false,
   }) {
     if (!recipe) {
       return { ok: false, reason: "no-recipe" };
@@ -2891,6 +2892,7 @@ export function App() {
       sourceAssetId,
       recipe,
       replaySeed,
+      autoGenerate,
     });
     return { ok: true };
   }
@@ -2957,6 +2959,31 @@ export function App() {
       return;
     }
     sendAssetRecipeToImage(asset, options);
+  }
+
+  // The viewer's "Re-Generate" (image only): the same recipe as "Use this recipe" but enqueued
+  // straight to the image queue with a FRESH random seed, skipping the studio. `replaySeed` stays
+  // null so the studio's recipe replay leaves seed random (a close variation) — the whole point of
+  // the button. `autoGenerate` tells the studio to fire its own submit once the replayed recipe has
+  // fully hydrated, then hand the user off to the Queue. Non-image assets are never routed here (the
+  // button is image-only), and the studio falls back to its normal prefilled form if the recipe
+  // cannot be queued cleanly (e.g. its model is no longer installed).
+  function sendAssetRecipeToQueue(asset) {
+    if (asset?.type !== "image") {
+      return;
+    }
+    const recipe = recipeForAsset(asset);
+    if (!recipe) {
+      return;
+    }
+    setSelectedAssetId(asset.id);
+    closePreview();
+    void launchImageRecipe({
+      ...mossSeededRecipeReplay(asset, recipe, null),
+      assetId: asset.id,
+      sourceAssetId: asset.lineage?.sourceAssetId ?? null,
+      autoGenerate: true,
+    });
   }
 
   // sc-10516: launch a saved preset straight into the studio that can run it.
@@ -4201,6 +4228,7 @@ export function App() {
           onEditImage={sendAssetToImageEditor}
           onEditInStudio={sendAssetToImageEdit}
           onPreviewAsset={previewAssetInDirection}
+          onRegenerate={sendAssetRecipeToQueue}
           onUseImportedRecipe={useImportedAssetRecipe}
           onUseRecipe={sendAssetRecipeToStudio}
           previousAsset={previewNavigation.previous}
