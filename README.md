@@ -148,6 +148,23 @@ landed (Z-Image, Qwen-Image, Wan video, FLUX.2); other families are detected and
 listed but marked not-yet-runnable, with a reason, until their loader ships. This
 is an operator opt-in (off by default) on the Windows/Linux/server builds.
 
+MiniMax-H3 DiT imports support dense F16/BF16/F32 and descriptor-validated ConvRot
+INT8 on native MLX and CUDA backends. Select a compatible resident base and declare
+the checkpoint's `fl2va`, `ref2va`, or `hybrid` partition explicitly; tensor shapes
+and filenames do not establish that compatibility. Native and canonical layouts
+retain signed INT8 codes, F32 per-output scales and each layer's rotation-group
+descriptor (64 or 256); this is not affine Q8 or W4A8. Normalization streams byte
+ranges through the shared derivative cache instead of expanding the model to float.
+The source's full configuration is authoritative. A weight-only file requires an
+explicitly bound compatible base configuration; its configuration is fetched without
+downloading stock DiT weights. Missing, contradictory or unsupported quantization
+operands refuse before the imported model becomes ready.
+Configuration reads are capped on one open handle, including growth after its size
+was inspected. A rescan can reconstruct a missing or edited plan only when fresh
+source inspection reproduces its catalog-committed semantic digest. If the plan's
+external configuration authority cannot be recovered, explicitly reimport with the
+original bound context; repair never silently drops it or adopts changed source bytes.
+
 ## Native inference engines
 
 SceneWorks runs a **single native worker** binary behind one HTTP job contract,
@@ -624,6 +641,26 @@ Rust-only change can make those stale:
 ```powershell
 npm run rust:check
 ```
+
+Cache-resolving tests must never use an installed model library. The resolver
+checks `HF_HUB_CACHE`, then `HUGGINGFACE_HUB_CACHE`, then `HF_HOME/hub` before a
+fixture's `data_dir`; a temporary data directory alone does not isolate a test.
+Keep all three protections independent: use the existing per-test
+`isolate_hf_cache()` guard, pass all three HF variables to an owned disposable
+cache in the test subprocess, and deny that process filesystem access to real
+model/HF cache roots. Do not merely unset an inherited variable or assume a
+missing fixture is absent from the developer's cache. Each independent fixture
+scenario needs its own cache root. Metadata-only tests need no network;
+networked unit fixtures should reach only owned loopback mocks, not running
+SceneWorks services or external hosts. Native synthetic projection smokes still
+require a separately reserved accelerator token; they are not ordinary unit tests.
+Stub-loader metadata tests supply an explicit admission budget and still exercise
+the real rejection gate; they must not depend on a live hardware probe. Production
+continues to resolve a fresh live budget at admission, and native projection
+fixtures still create the actual backend device rather than using that test budget.
+The CUDA ConvRot projection fixture uses the same validated native INT8 reader as
+the production H3 DiT loader, preserving signed-byte codes and F32 row scales;
+Candle's generic safetensors reader does not support the checkpoint's I8 dtype.
 
 Optionally install local Git hooks that run `npm run rust:fmt` before commits
 touching Rust files:

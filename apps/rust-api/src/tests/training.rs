@@ -4772,6 +4772,7 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
 
 #[tokio::test]
 async fn real_training_job_rejected_when_base_model_missing() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (_, project) = request(

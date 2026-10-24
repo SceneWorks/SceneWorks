@@ -108,8 +108,9 @@ cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Raw 
 interleaved; each canonical projection gathers its head rows separately. Native gate-first
 `mlp.fc1` row halves become canonical value-first SwiGLU. Reference-runtime state-dict exports
 whose QKV is already reordered explicitly declare `h3_qkv_layout=contiguous`; raw files default
-to `interleaved`. Native variants supply full architecture JSON in bound `config.json` or string
-metadata `h3_config`; without it, every tensor must match the pinned published H3 architecture.
+to `interleaved`. Source-owned `config.json` or string metadata `h3_config` is authoritative;
+multiple source claims must agree. Weight-only files instead bind the explicitly selected compatible
+base's exact primary configuration, never a published architecture default.
 The task-neutral codec never derives the explicit partition declaration from names or shapes.
 
 ### Reusable managed and linked assembly (sc-26686)
@@ -128,11 +129,31 @@ DiT's task partition is never downloaded over or replaced. Hybrid imports do not
 task companion. Shared component jobs remain independently retryable and shared caches are not
 owned by the imported model. An imported entry is not installed/ready until its source plan and
 assembly resolve and every bound component row is present in its declared revision.
+The selected base's **dense architecture** primary contributes a **config-only** co-requisite
+(one literal `config.json`, no stock DiT weight glob), independently of the shared q4/q8/bf16 tier.
+Packed resident-weight policy is not architecture authority. The import worker awaits that exact
+pinned document when the source has
+no config, validates it against the complete tensor inventory, and embeds its full JSON, SHA-256,
+base/repository/revision/path and shared-tier provenance into the immutable `ImportPlanV1.context`.
+Source-owned configuration wins even when its rope/schedule/provider fields differ from the base.
+This context participates in plan semantic identity and derivative-cache identity, is replayed on
+rescan/restart, and supplies normalization and generation without a foreign loose-file locator.
+Once sealed, config-only provisioning is removed from resident component downloads; its presence
+alone never marks the stock DiT installed. Unknown provider fields and precision provenance survive.
+Native ConvRot precision is derived from the validated complete descriptor/tensor inventory as
+`context.sourceEncoding = "convrot_int8"`, then stamped as `importQuantFormat` only after plan
+validation. The approximate header hint `int8_tensorwise_per_row` is not a generic decoder claim;
+source encoding is recomputed on every inspection and unknown context encoding tokens refuse.
 The selected shared precision is persisted as `importComponentTier`, independently of imported
 DiT precision. Both native providers consume that tier and each persisted repository/revision
 binding directly, never `refs/main`, operator directory overrides, or a stock tier search. Explicit
 precision controls may confirm the selected shared tier but cannot silently substitute another
 closure. Assets retain the exact selected tier and component download bindings.
+Readiness and generation compare the bound DiT's `text_dim`, `in_channels` and
+`audio_in_channels` with the actual pinned text encoder hidden size and video/audio VAE latent
+channels. Already-resident complete components are checked before import publication too; missing
+or partial asynchronous component downloads remain unready. These interface checks do not impose
+whole-config equality, published trunk geometry, or stock rope/sampling schedules on a fine-tune.
 
 Interrupted managed transfers discard staging and can retry. A process interrupted after the
 managed commit can replay H3 publication only when the committed install marker belongs to that

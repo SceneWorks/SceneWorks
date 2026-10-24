@@ -897,6 +897,28 @@ fn resolve_refuses_tampered_or_missing_plan_documents() {
         other => panic!("an edited plan must refuse as tampered, got {other:?}"),
     }
 
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::NeedsRescan
+    );
+    assert!(
+        plan_path.is_file(),
+        "repair must handle the still-present edited document"
+    );
+    let repaired = fx.store.rescan_checkpoint(&compiled.checkpoint_id).unwrap();
+    assert_eq!(repaired, compiled);
+    assert_eq!(fs::read_to_string(&plan_path).unwrap(), original);
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::Ready
+    );
+
     // A plan document that is not valid v1 JSON is corrupt, not silently re-derived.
     fs::write(&plan_path, "{not json").unwrap();
     assert!(matches!(
@@ -917,6 +939,141 @@ fn resolve_refuses_tampered_or_missing_plan_documents() {
         .unwrap();
     assert_eq!(recompiled, compiled);
     assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
+}
+
+#[test]
+fn missing_plan_context_cannot_be_discarded_by_source_only_recompilation() {
+    let fx = fixture("missing-bound-context");
+    write_krea_native_file(&fx.library_dir.join("checkpoint.safetensors"), 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let context = std::collections::BTreeMap::from([(
+        "configurationAuthority".into(),
+        json!({"revision":"1111111111111111111111111111111111111111","settings":{"precision":"preserve"}}),
+    )]);
+    let compiled = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context.clone())
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    fs::remove_file(&plan_path).unwrap();
+    assert!(matches!(
+        fx.store
+            .compile_linked(&root.root_id, "checkpoint.safetensors"),
+        Err(CheckpointPlanError::MissingPlan { .. })
+    ));
+    assert!(
+        !plan_path.exists(),
+        "a missing authority cannot publish a different context-free plan"
+    );
+    assert_eq!(
+        fx.store.record(&compiled.checkpoint_id).unwrap(),
+        compiled.record
+    );
+    let restored = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context)
+        .unwrap();
+    assert_eq!(restored, compiled);
+    assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
+}
+
+#[test]
+fn tampered_plan_context_requires_explicit_reassertion_without_publishing_defaults() {
+    let fx = fixture("tampered-bound-context");
+    write_krea_native_file(&fx.library_dir.join("checkpoint.safetensors"), 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let context = BTreeMap::from([(
+        "configurationAuthority".into(),
+        json!({"revision":"1111111111111111111111111111111111111111","settings":{"precision":"preserve"}}),
+    )]);
+    let compiled = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context.clone())
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    let mut edited = serde_json::to_value(&compiled.plan).unwrap();
+    edited["layers"][0]["role"] = json!("vae");
+    edited["context"]["configurationAuthority"] = json!({
+        "revision":"2222222222222222222222222222222222222222",
+        "foreignFile":"/untrusted-context-must-not-be-opened/config.json"
+    });
+    fs::write(&plan_path, serde_json::to_vec(&edited).unwrap()).unwrap();
+    let store_before = tree_snapshot(&fx.data_dir);
+    let source_before = tree_snapshot(&fx.library_dir);
+
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::NeedsRescan
+    );
+    let error = fx
+        .store
+        .rescan_checkpoint(&compiled.checkpoint_id)
+        .unwrap_err();
+    assert!(matches!(error, CheckpointPlanError::PlanTampered { .. }));
+    assert!(error
+        .to_string()
+        .contains("explicitly reimport with the original bound context"));
+    assert_eq!(
+        tree_snapshot(&fx.data_dir),
+        store_before,
+        "unrecoverable context must not publish a replacement plan, binding or record"
+    );
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+
+    let restored = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context)
+        .unwrap();
+    assert_eq!(restored, compiled);
+    assert_eq!(
+        fx.store.resolve(&compiled.checkpoint_id).unwrap().plan,
+        compiled.plan
+    );
+}
+
+#[test]
+fn tampered_plan_with_changed_source_cannot_replace_the_old_semantic_commitment() {
+    let fx = fixture("tampered-source-drift");
+    let source = fx.library_dir.join("checkpoint.safetensors");
+    write_krea_native_file(&source, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&root.root_id, "checkpoint.safetensors")
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    let original = fs::read_to_string(&plan_path).unwrap();
+    let edited = original.replace("\"role\":\"transformer\"", "\"role\":\"vae\"");
+    assert_ne!(edited, original);
+    fs::write(&plan_path, edited).unwrap();
+    write_krea_native_file(&source, 0x6b);
+    let store_before = tree_snapshot(&fx.data_dir);
+    let source_before = tree_snapshot(&fx.library_dir);
+    assert!(matches!(
+        fx.store.rescan_checkpoint(&compiled.checkpoint_id),
+        Err(CheckpointPlanError::PlanTampered { .. })
+    ));
+    assert_eq!(tree_snapshot(&fx.data_dir), store_before);
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+    assert_eq!(
+        fx.store.record(&compiled.checkpoint_id).unwrap(),
+        compiled.record
+    );
 }
 
 #[test]

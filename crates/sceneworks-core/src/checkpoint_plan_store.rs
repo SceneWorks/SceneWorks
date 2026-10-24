@@ -1913,12 +1913,36 @@ impl CheckpointPlanStore {
     /// Inspect `<root>/<relative_path>` as a linked checkpoint and persist its plan, catalog record,
     /// and source bindings. Identity is `rootId + relativePath`; an unrunnable inspection refuses
     /// with the inspector's typed diagnostics and persists nothing.
+    /// A missing saved document can be reconstructed only when source reinspection reproduces its
+    /// semantic identity. Lost external authority must be supplied through
+    /// [`Self::compile_linked_with_context`], never silently replaced with an empty context.
     pub fn compile_linked(
         &self,
         root_id: &str,
         relative_path: &str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         self.compile_linked_with_hook(root_id, relative_path, |_| {})
+    }
+
+    pub fn compile_linked_with_context(
+        &self,
+        root_id: &str,
+        relative_path: &str,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let root_path = self.resolve_root(root_id)?;
+        let mut request = CheckpointInspectionRequestV1::linked(
+            linked_checkpoint_id(root_id, relative_path),
+            &root_path,
+            relative_path,
+            root_id,
+        )
+        .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
+            relative_path: relative_path.into(),
+            reason,
+        })?;
+        request.context = context;
+        self.compile(&request, &root_path, "linked")
     }
 
     /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
@@ -1966,6 +1990,16 @@ impl CheckpointPlanStore {
         relative_path: &str,
         provenance: ManagedProvenanceV1,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        self.compile_managed_with_context(install_id, relative_path, provenance, Default::default())
+    }
+
+    pub fn compile_managed_with_context(
+        &self,
+        install_id: &str,
+        relative_path: &str,
+        provenance: ManagedProvenanceV1,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let install_path = self.resolve_install(install_id)?;
         validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
@@ -1980,6 +2014,7 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
+        request.context = context;
         // H3 providers open the whole component directory, not just the digest's primary file.
         // Bind its architecture and shard index/closure too. The primary remains the transfer-
         // digest target; changing the inspection target never changes its integrity check.
@@ -2022,7 +2057,35 @@ impl CheckpointPlanStore {
         hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
-        let inspection = inspect_checkpoint(request);
+        // Retain context only from a validated plan. Missing or tampered documents may be
+        // rebuilt from source only when inspection reproduces the catalog's old commitment.
+        let mut request = request.clone();
+        let mut unavailable_plan = None;
+        if request.context.is_empty() {
+            if let Ok(record) = self.record(&checkpoint_id) {
+                match self.plan(&checkpoint_id, &record.plan.plan_id) {
+                    Ok(plan) => match record.validate_loaded_plan(&plan) {
+                        Ok(()) => request.context = plan.context,
+                        Err(error) => {
+                            unavailable_plan = Some((
+                                record.plan.semantic_digest,
+                                CheckpointPlanError::PlanTampered {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    reason: format!(
+                                        "{error}; source-only repair must reproduce the committed semantic digest; otherwise explicitly reimport with the original bound context"
+                                    ),
+                                },
+                            ));
+                        }
+                    },
+                    Err(error @ CheckpointPlanError::MissingPlan { .. }) => {
+                        unavailable_plan = Some((record.plan.semantic_digest, error));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let inspection = inspect_checkpoint(&request);
         let errors: Vec<CheckpointDiagnosticV1> = inspection
             .diagnostics
             .iter()
@@ -2062,6 +2125,13 @@ impl CheckpointPlanStore {
                 ),
             })?;
         record.validate_loaded_plan(&plan)?;
+        if let Some((expected_digest, error)) = unavailable_plan {
+            if record.plan.semantic_digest != expected_digest {
+                // Neither lost external authority nor changed source bytes may be silently
+                // adopted while reconstructing an unavailable or untrusted plan document.
+                return Err(error);
+            }
+        }
 
         // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
         // the plan names. Sampling a stamp and trusting the inspector's earlier hash would let a

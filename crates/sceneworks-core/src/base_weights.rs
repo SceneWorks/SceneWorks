@@ -286,8 +286,8 @@ pub const IMPORT_SUPPORTED_FAMILIES: &[&str] = &["flux2", "krea_2", "mage-flow",
 /// key on it — while a video import is claimed by its own entry-keyed lane
 /// (`jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible`).
 ///
-/// `minimax-h3` is a dense MiniMax-H3 DiT fine-tune: a native single file or canonical Diffusers
-/// component inventory. The source codec normalizes native layout while preserving precision;
+/// `minimax-h3` is a dense or descriptor-validated ConvRot INT8 DiT fine-tune: a native single
+/// file or canonical Diffusers inventory. Normalization preserves the original encoding;
 /// shared encoders/tokenizer/VAEs stay explicitly bound to the resident MiniMax-H3 install
 /// ([`crate::minimax_h3_import`]), never silently substituted for tensors carried by the import.
 pub const VIDEO_IMPORT_SUPPORTED_FAMILIES: &[&str] = &["minimax-h3"];
@@ -369,9 +369,9 @@ pub fn is_minimax_h3_transformer_dir(dir: &Path) -> bool {
     })
 }
 
-/// Whether `source` is one dense native/ComfyUI or canonical MiniMax-H3 single-file artifact.
-/// Header family/precision recognition is followed by exhaustive source-inventory validation when
-/// the shared inspector compiles the runnable plan; no filename or publisher is consulted.
+/// Whether a source is a native/ComfyUI or canonical MiniMax-H3 single-file artifact.
+/// Header recognition is only a scheduling hint; exhaustive descriptor/operand validation in
+/// the source inventory compiles the runnable plan, without filename or publisher authority.
 pub fn is_minimax_h3_single_file(source: &Path) -> bool {
     let Ok(header) = read_safetensors_header(source) else {
         return false;
@@ -381,7 +381,7 @@ pub fn is_minimax_h3_single_file(source: &Path) -> bool {
         BaseWeightDetection::Recognized(BaseWeightVerdict {
             family: Some(family),
             component: ComponentRole::Transformer,
-            quant: QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
+            quant: QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow,
         }) if family == "minimax-h3"
     )
 }
@@ -457,8 +457,8 @@ pub fn is_minimax_h3_sharded_transformer_dir(dir: &Path) -> bool {
     })
 }
 
-/// Any source shape the H3 import codec can canonicalize: S1 dense diffusers directory, S2 sharded
-/// diffusers directory, or a dense native single-file. Shared by API, import job and load seam.
+/// Any source shape the H3 import codec can canonicalize: dense or descriptor-validated ConvRot
+/// native single-file / canonical Diffusers inventory. Shared by API, import job and load seam.
 pub fn is_minimax_h3_import_source(source: &Path) -> bool {
     declares_h3_component(source) || is_minimax_h3_single_file(source)
 }
@@ -669,14 +669,13 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         // the caller must additionally pass the directory shape through
         // [`is_mage_flow_transformer_dir`]; this triple gate cannot see the config sibling.
         (Some("mage-flow"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
-        // sc-26680: a dense MiniMax-H3 DiT fine-tune. Loadable only as a transformer component
-        // DIRECTORY — the caller must additionally pass [`is_minimax_h3_transformer_dir`]; this
-        // triple gate cannot see the config sibling. Dense only: the packed q4/q8 tiers and the
-        // community quantized dialects have no import loader yet and are refused below.
+        // Dense or native ConvRot INT8 H3 DiT. The header-only INT8 classification is not codec
+        // authority: H3SourceInventory validates every ConvRot descriptor and operand before the
+        // plan can become runnable. Plain int8-per-row, affine Q8, and W4A8 fail that boundary.
         (
             Some("minimax-h3"),
             ComponentRole::Transformer,
-            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32,
+            QuantFormat::F16 | QuantFormat::Bf16 | QuantFormat::F32 | QuantFormat::Int8TensorwisePerRow,
         ) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
@@ -744,8 +743,8 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
              not imported."
         )),
         (Some("minimax-h3"), _, quant) => Err(format!(
-            "Model import for the 'minimax-h3' family supports a dense f16, bf16, or f32 \
-             transformer component directory, not {quant}."
+            "Model import for the 'minimax-h3' family supports dense f16, bf16, f32 or \
+             descriptor-validated ConvRot INT8 transformer components, not {quant}."
         )),
         (Some(family), _, _) => Err(format!(
             "Model import has no compatible loader arm for the '{family}' family."
@@ -2790,11 +2789,16 @@ mod tests {
                 &[QuantFormat::Bf16],
             ),
             ("flux2", ComponentRole::Transformer, &[QuantFormat::Nvfp4]),
-            // sc-26680: the dense H3 DiT component directory, every dense precision.
+            // H3 dense precisions plus descriptor-validated native ConvRot INT8.
             (
                 "minimax-h3",
                 ComponentRole::Transformer,
-                &[QuantFormat::Bf16, QuantFormat::F16, QuantFormat::F32],
+                &[
+                    QuantFormat::Bf16,
+                    QuantFormat::F16,
+                    QuantFormat::F32,
+                    QuantFormat::Int8TensorwisePerRow,
+                ],
             ),
         ];
         let mut rows = expected

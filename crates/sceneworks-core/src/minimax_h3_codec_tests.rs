@@ -55,7 +55,11 @@ fn native_key(name: &str) -> String {
 type Entries = BTreeMap<String, (Vec<usize>, String, Vec<u8>)>;
 
 fn canonical(dtype: &str) -> Entries {
-    config()
+    canonical_for(&config(), dtype)
+}
+
+fn canonical_for(config: &H3Config, dtype: &str) -> Entries {
+    config
         .shapes()
         .unwrap()
         .into_iter()
@@ -432,7 +436,10 @@ fn config_conflicts_future_formats_and_wrong_shapes_fail_closed() {
         .contains("conflicting"));
     let mut future = config();
     future.0["quantization"] = json!({"format":"w4a8"});
-    assert!(future.shapes().unwrap_err().contains("W4A8"));
+    assert!(future
+        .shapes()
+        .unwrap_err()
+        .contains("stock packed-tier quantization policy"));
     let mut missing = config();
     missing.0.as_object_mut().unwrap().remove("rope_theta");
     assert!(missing.shapes().unwrap_err().contains("rope_theta"));
@@ -564,6 +571,95 @@ fn oversized_descriptors_refuse_before_json_allocation_in_admission_and_codec() 
 }
 
 #[test]
+fn descriptor_reader_caps_growth_after_the_initial_metadata_observation() {
+    use std::cell::Cell;
+    struct Counted<'a, R> {
+        reader: R,
+        consumed: &'a Cell<usize>,
+    }
+    impl<R: Read> Read for Counted<'_, R> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.reader.read(bytes)?;
+            self.consumed.set(self.consumed.get() + count);
+            Ok(count)
+        }
+    }
+    const LIMIT: u64 = 32;
+    let consumed = Cell::new(0);
+    let growing = std::io::Cursor::new(b"{}".as_slice()).chain(std::io::repeat(b' '));
+    let error = read_h3_descriptor_from_reader(
+        Counted {
+            reader: growing,
+            consumed: &consumed,
+        },
+        2,
+        LIMIT,
+        Path::new("growing-config.json"),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("exceeds 32 byte descriptor limit"),
+        "{error}"
+    );
+    assert_eq!(
+        consumed.get(),
+        LIMIT as usize + 1,
+        "a small stat followed by an unbounded growing reader must consume only cap+1"
+    );
+
+    consumed.set(0);
+    let error = read_h3_descriptor_from_reader(
+        Counted {
+            reader: std::io::repeat(b' '),
+            consumed: &consumed,
+        },
+        LIMIT + 1,
+        LIMIT,
+        Path::new("already-oversized.json"),
+    )
+    .unwrap_err();
+    assert!(error.contains("descriptor limit"));
+    assert_eq!(
+        consumed.get(),
+        0,
+        "oversized metadata must refuse before reading"
+    );
+}
+
+#[test]
+fn descriptor_file_growth_uses_the_open_handle_and_checks_the_exact_cap_boundary() {
+    const LIMIT: u64 = 32;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    std::fs::write(&path, b"{}").unwrap();
+    let file = File::open(&path).unwrap();
+    let observed_len = file.metadata().unwrap().len();
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    append.write_all(&[b' '; LIMIT as usize - 2]).unwrap();
+    assert_eq!(
+        read_h3_descriptor_from_reader(file, observed_len, LIMIT, &path).unwrap(),
+        json!({})
+    );
+
+    let file = File::open(&path).unwrap();
+    let observed_len = file.metadata().unwrap().len();
+    append.write_all(b" ").unwrap();
+    let error = read_h3_descriptor_from_reader(file, observed_len, LIMIT, &path).unwrap_err();
+    assert!(
+        error.contains("exceeds 32 byte descriptor limit"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        [b"{}".as_slice(), &[b' '; 31]].concat(),
+        "the bounded reader must not modify the cached configuration"
+    );
+}
+
+#[test]
 fn uppercase_shards_normalize_to_provider_enumerable_names_with_exact_values() {
     let data = tempfile::tempdir().unwrap();
     let library = tempfile::tempdir().unwrap();
@@ -609,4 +705,284 @@ fn uppercase_shards_normalize_to_provider_enumerable_names_with_exact_values() {
         actual.extend(read_file(&output.join(name)));
     }
     assert_eq!(actual, canonical("F32"));
+}
+
+fn convrot_fixture(layout: H3QkvLayout) -> (H3Config, Entries, Entries) {
+    let mut cfg = config();
+    cfg.0["hidden_size"] = json!(256);
+    cfg.0["attention_head_dim"] = json!(128);
+    cfg.0["ffn_dim"] = json!(256);
+    cfg.0["time_embed_dim"] = json!(64);
+    let mut expected = canonical_for(&cfg, "F16");
+    let mut scales = Entries::new();
+    for (index, (name, (shape, dtype, bytes))) in expected.iter_mut().enumerate() {
+        if name.starts_with("transformer_blocks.")
+            && name.ends_with(".weight")
+            && (name.contains(".attn.to_")
+                || name.contains(".ff.")
+                || name.contains(".adaln_proj.linear."))
+        {
+            *dtype = "I8".into();
+            // Break byte-period/input-width alignment so a row or half swap changes the codes.
+            *bytes = (0..shape.iter().product())
+                .map(|i| {
+                    let row = i / shape[1];
+                    ((i * 17 + row * 29 + row / 251 * 37 + index) % 256) as u8
+                })
+                .collect();
+            scales.insert(
+                name.clone(),
+                (
+                    vec![shape[0], 1],
+                    "F32".into(),
+                    (0..shape[0])
+                        .flat_map(|row| ((index * 100 + row + 1) as f32 / 4096.0).to_le_bytes())
+                        .collect(),
+                ),
+            );
+        }
+    }
+    let mut raw = native(&expected, layout);
+    // Independently build raw scales through the same source exporter QKV/gate layout as the
+    // original float checkpoint, then retain canonical byte arrays as the expected consumer data.
+    let mut all_scales = canonical_for(&cfg, "F32");
+    for (key, value) in &scales {
+        all_scales.insert(key.clone(), value.clone());
+    }
+    let raw_scales = native(&all_scales, layout);
+    let quantized: Vec<_> = raw
+        .iter()
+        .filter(|(_, (_, dtype, _))| dtype == "I8")
+        .map(|(name, (shape, _, _))| (name.clone(), shape.clone()))
+        .collect();
+    for (name, shape) in quantized {
+        let base = name.strip_suffix(".weight").unwrap();
+        raw.insert(format!("{base}.weight_scale"), raw_scales[&name].clone());
+        let group = if shape[1] == 64 { 64 } else { 256 };
+        let payload = json!({"format":"int8_tensorwise","convrot":true,"convrot_groupsize":group})
+            .to_string()
+            .into_bytes();
+        raw.insert(
+            format!("{base}.comfy_quant"),
+            (vec![payload.len()], "U8".into(), payload),
+        );
+    }
+    for (name, value) in scales {
+        let base = name.strip_suffix(".weight").unwrap();
+        let input = expected[&name].0[1];
+        let group = if input == 64 { 64 } else { 256 };
+        let payload = json!({"format":"int8_tensorwise","convrot":true,"convrot_groupsize":group})
+            .to_string()
+            .into_bytes();
+        expected.insert(format!("{base}.weight_scale"), value);
+        expected.insert(
+            format!("{base}.comfy_quant"),
+            (vec![payload.len()], "U8".into(), payload),
+        );
+    }
+    (cfg, raw, expected)
+}
+
+#[test]
+fn convrot_groups64_and256_preserve_codes_scales_and_descriptors_through_real_cache() {
+    for layout in [H3QkvLayout::Interleaved, H3QkvLayout::Contiguous] {
+        let (cfg, raw, expected) = convrot_fixture(layout);
+        let data = tempfile::tempdir().unwrap();
+        let library = tempfile::tempdir().unwrap();
+        let file = library.path().join("user-checkpoint.safetensors");
+        write_file(
+            &file,
+            &raw,
+            Some(
+                json!({"h3_config":cfg.0.to_string(),"h3_qkv_layout":if layout == H3QkvLayout::Interleaved { "interleaved" } else { "contiguous" }}),
+            ),
+        );
+        let plans = CheckpointPlanStore::open(data.path());
+        let root = plans.approve_root(library.path()).unwrap();
+        let compiled = plans
+            .compile_linked(&root.root_id, "user-checkpoint.safetensors")
+            .unwrap();
+        let resolved = plans.resolve(&compiled.checkpoint_id).unwrap();
+        let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+        assert!(inventory.convrot_int8);
+        assert_eq!(
+            inventory.derivative_request().codec_id,
+            "convrot-int8-native"
+        );
+        let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+        let request = inventory.derivative_request();
+        cache
+            .ensure(&compiled.checkpoint_id, &request, |out| {
+                inventory.produce(out)
+            })
+            .unwrap();
+        let output = cache
+            .cache()
+            .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
+            .unwrap();
+        assert_eq!(read_file(&output.join(inventory.shard_name(0))), expected);
+        // Canonical output is itself accepted with the exact descriptor/scale geometry.
+        H3SourceInventory::from_files(&[
+            (H3_CONFIG_FILE.into(), output.join(H3_CONFIG_FILE)),
+            (
+                inventory.shard_name(0),
+                output.join(inventory.shard_name(0)),
+            ),
+        ])
+        .unwrap();
+    }
+}
+
+#[test]
+fn convrot_malformed_descriptors_scales_and_signed_storage_refuse_before_copy() {
+    let (cfg, original, _) = convrot_fixture(H3QkvLayout::Interleaved);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("arbitrary.safetensors");
+    let descriptor = "model.diffusion_model.blocks.0.attn.qkv_proj.comfy_quant";
+    let scale = "model.diffusion_model.blocks.0.attn.qkv_proj.weight_scale";
+    for fault in [
+        "unknown-field",
+        "group",
+        "zero-scale",
+        "nan-scale",
+        "missing-scale",
+        "unsigned",
+        "orphan",
+    ] {
+        let mut raw = original.clone();
+        match fault {
+            "unknown-field" | "group" => {
+                let mut value: Value = serde_json::from_slice(&raw[descriptor].2).unwrap();
+                if fault == "group" {
+                    value["convrot_groupsize"] = json!(32);
+                } else {
+                    value["per_row"] = json!(true);
+                }
+                let bytes = value.to_string().into_bytes();
+                raw.insert(descriptor.into(), (vec![bytes.len()], "U8".into(), bytes));
+            }
+            "zero-scale" | "nan-scale" => raw.get_mut(scale).unwrap().2[..4].copy_from_slice(
+                &if fault == "zero-scale" {
+                    0f32
+                } else {
+                    f32::NAN
+                }
+                .to_le_bytes(),
+            ),
+            "missing-scale" => {
+                raw.remove(scale);
+            }
+            "unsigned" => {
+                raw.get_mut("model.diffusion_model.blocks.0.attn.qkv_proj.weight")
+                    .unwrap()
+                    .1 = "U8".into()
+            }
+            "orphan" => {
+                raw.remove(descriptor);
+            }
+            _ => unreachable!(),
+        }
+        write_file(&file, &raw, Some(json!({"h3_config":cfg.0.to_string()})));
+        assert!(
+            H3SourceInventory::from_files(&[("arbitrary.safetensors".into(), file.clone())])
+                .is_err(),
+            "{fault}"
+        );
+    }
+}
+
+#[test]
+fn weight_only_requires_explicit_config_and_owned_source_configuration_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, expected) = native_source(dir.path(), "BF16", H3QkvLayout::Interleaved);
+    let files = vec![("user.safetensors".into(), file.clone())];
+    let mut fallback = config();
+    fallback.0["rope_theta"] = json!(20000.0);
+    let owned = H3SourceInventory::from_files_with_config(&files, Some(fallback)).unwrap();
+    assert_eq!(owned.config.0, config().0);
+    write_file(&file, &native(&expected, H3QkvLayout::Interleaved), None);
+    assert!(H3SourceInventory::from_files(&files)
+        .unwrap_err()
+        .contains("no config.json or embedded h3_config"));
+    let mut explicit = config();
+    explicit.0["provider_specific_schedule"] =
+        json!({"knots":[0.0,0.125,1.0],"precision":"preserve-me"});
+    let inventory =
+        H3SourceInventory::from_files_with_config(&files, Some(explicit.clone())).unwrap();
+    assert_eq!(inventory.config.0, explicit.0);
+}
+
+#[test]
+fn convrot_codes_scales_and_descriptors_can_live_in_separate_sealed_shards() {
+    let (cfg, _, expected) = convrot_fixture(H3QkvLayout::Interleaved);
+    let data = tempfile::tempdir().unwrap();
+    let library = tempfile::tempdir().unwrap();
+    let source = library.path().join("user-shards");
+    std::fs::create_dir_all(&source).unwrap();
+    let names = [
+        "codes.safetensors",
+        "scales.safetensors",
+        "descriptors.safetensors",
+    ];
+    let mut parts: [Entries; 3] = std::array::from_fn(|_| Entries::new());
+    let mut index = Map::new();
+    for (key, tensor) in &expected {
+        let part = if key.ends_with(".comfy_quant") {
+            2
+        } else if key.ends_with(".weight_scale") {
+            1
+        } else {
+            0
+        };
+        parts[part].insert(key.clone(), tensor.clone());
+        index.insert(key.clone(), json!(names[part]));
+    }
+    for (name, part) in names.iter().zip(&parts) {
+        write_file(&source.join(name), part, None);
+    }
+    std::fs::write(source.join(H3_CONFIG_FILE), cfg.0.to_string()).unwrap();
+    std::fs::write(
+        source.join(H3_INDEX_FILE),
+        json!({"weight_map":index}).to_string(),
+    )
+    .unwrap();
+    let plans = CheckpointPlanStore::open(data.path());
+    let root = plans.approve_root(library.path()).unwrap();
+    let compiled = plans.compile_linked(&root.root_id, "user-shards").unwrap();
+    let resolved = plans.resolve(&compiled.checkpoint_id).unwrap();
+    assert_eq!(resolved.plan.context["sourceEncoding"], "convrot_int8");
+    let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+    assert!(!inventory.native);
+    assert!(inventory.convrot_int8);
+    let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+    let request = inventory.derivative_request();
+    cache
+        .ensure(&compiled.checkpoint_id, &request, |out| {
+            inventory.produce(out)
+        })
+        .unwrap();
+    let _lease = cache.acquire(&resolved, &request).unwrap().unwrap();
+    let output = cache
+        .cache()
+        .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
+        .unwrap();
+    let mut actual = Entries::new();
+    for i in 0..3 {
+        actual.extend(read_file(&output.join(inventory.shard_name(i))));
+    }
+    assert_eq!(actual, expected);
+    parts[1].values_mut().next().unwrap().2[..4].copy_from_slice(&0f32.to_le_bytes());
+    write_file(&source.join(names[1]), &parts[1], None);
+    assert!(
+        plans.resolve(&compiled.checkpoint_id).is_err(),
+        "cross-shard scale drift invalidates the source identity"
+    );
+    let files: Vec<_> = names
+        .into_iter()
+        .chain([H3_CONFIG_FILE, H3_INDEX_FILE])
+        .map(|name| (name.to_owned(), source.join(name)))
+        .collect();
+    assert!(H3SourceInventory::from_files(&files)
+        .unwrap_err()
+        .contains("finite positive F32 scales"));
 }

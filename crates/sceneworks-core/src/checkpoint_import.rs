@@ -962,16 +962,22 @@ pub struct ImportPlanV1 {
     pub plan_id: String,
     pub family: String,
     pub layers: Vec<ImportLayerV1>,
+    /// Immutable loader configuration and its provenance, independent of physical ownership.
+    pub context: BTreeMap<String, serde_json::Value>,
 }
 
 impl Serialize for ImportPlanV1 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("ImportPlanV1", 4)?;
+        let mut state = serializer
+            .serialize_struct("ImportPlanV1", 4 + usize::from(!self.context.is_empty()))?;
         state.serialize_field("schemaVersion", &self.schema_version)?;
         state.serialize_field("planId", &self.plan_id)?;
         state.serialize_field("family", &self.family)?;
         state.serialize_field("layers", &self.layers)?;
+        if !self.context.is_empty() {
+            state.serialize_field("context", &self.context)?;
+        }
         state.end()
     }
 }
@@ -984,6 +990,8 @@ struct ImportPlanV1Wire {
     plan_id: String,
     family: String,
     layers: Vec<ImportLayerV1>,
+    #[serde(default)]
+    context: BTreeMap<String, serde_json::Value>,
 }
 
 impl From<ImportPlanV1Wire> for ImportPlanV1 {
@@ -993,6 +1001,7 @@ impl From<ImportPlanV1Wire> for ImportPlanV1 {
             plan_id: value.plan_id,
             family: value.family,
             layers: value.layers,
+            context: value.context,
         }
     }
 }
@@ -1022,6 +1031,8 @@ struct SemanticPlanV1<'a> {
     schema_version: u32,
     family: &'a str,
     layers: Vec<SemanticLayerV1<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    context: &'a BTreeMap<String, serde_json::Value>,
 }
 
 impl ImportPlanV1 {
@@ -1036,6 +1047,7 @@ impl ImportPlanV1 {
             plan_id: plan_id.into(),
             family: family.into(),
             layers,
+            context: BTreeMap::new(),
         };
         plan.validate()?;
         Ok(plan)
@@ -1122,6 +1134,7 @@ impl ImportPlanV1 {
             schema_version: self.schema_version,
             family: &self.family,
             layers,
+            context: &self.context,
         })
     }
 

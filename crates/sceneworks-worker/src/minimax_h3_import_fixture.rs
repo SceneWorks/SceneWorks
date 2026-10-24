@@ -74,9 +74,9 @@ pub(crate) fn h3_fixture_config() -> Value {
         ("attention_head_dim", 6),
         ("hidden_size", 8),
         ("ffn_dim", 8),
-        ("in_channels", 2),
-        ("audio_in_channels", 2),
-        ("text_dim", 8),
+        ("in_channels", 24),
+        ("audio_in_channels", 32),
+        ("text_dim", 5120),
         ("freq_dim", 4),
         ("time_embed_hidden_dim", 8),
         ("time_embed_dim", 4),
@@ -140,8 +140,14 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
         "diffusion_pytorch_model.safetensors".to_owned(),
         "config.json".to_owned(),
     ];
-    if layout == "native" {
-        let config = h3_fixture_config();
+    if layout == "native" || layout == "convrot" {
+        let mut config = h3_fixture_config();
+        if layout == "convrot" {
+            config["hidden_size"] = json!(256);
+            config["attention_head_dim"] = json!(128);
+            config["ffn_dim"] = json!(256);
+            config["time_embed_dim"] = json!(64);
+        }
         let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
             .shapes()
             .unwrap();
@@ -150,7 +156,7 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
             "__metadata__".into(),
             json!({"h3_config":config.to_string(),"h3_qkv_layout":"interleaved"}),
         );
-        let mut offset = 0u64;
+        let mut payload = Vec::new();
         for (canonical, mut shape) in shapes {
             if canonical.ends_with(".attn.to_k.weight") || canonical.ends_with(".attn.to_v.weight")
             {
@@ -184,17 +190,39 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
                     break;
                 }
             }
-            let size = shape.iter().product::<usize>() as u64 * 4;
-            header.insert(
-                key,
-                json!({"dtype":"F32","shape":shape,"data_offsets":[offset,offset+size]}),
-            );
-            offset += size;
+            let quantized = layout == "convrot"
+                && key.starts_with("blocks.")
+                && shape.len() == 2
+                && key.ends_with(".weight")
+                && (key.contains(".attn.")
+                    || key.contains(".mlp.")
+                    || key.contains(".adaln_proj.linear."));
+            let offset = payload.len();
+            let size = shape.iter().product::<usize>() * if quantized { 1 } else { 4 };
+            payload.resize(offset + size, if quantized { 0 } else { 0x3a });
+            if quantized {
+                for row in 0..shape[0] {
+                    payload[offset + row * shape[1]] = 58;
+                }
+            }
+            header.insert(key.clone(), json!({"dtype":if quantized {"I8"} else {"F32"},"shape":shape,"data_offsets":[offset,payload.len()]}));
+            if quantized {
+                let base = key.strip_suffix(".weight").unwrap();
+                let offset = payload.len();
+                for _ in 0..shape[0] {
+                    payload.extend(0.125f32.to_le_bytes());
+                }
+                header.insert(format!("{base}.weight_scale"), json!({"dtype":"F32","shape":[shape[0],1],"data_offsets":[offset,payload.len()]}));
+                let descriptor = json!({"format":"int8_tensorwise","convrot":true,"convrot_groupsize":if shape[1] == 64 {64} else {256}}).to_string().into_bytes();
+                let offset = payload.len();
+                payload.extend_from_slice(&descriptor);
+                header.insert(format!("{base}.comfy_quant"), json!({"dtype":"U8","shape":[descriptor.len()],"data_offsets":[offset,payload.len()]}));
+            }
         }
         let encoded = serde_json::to_vec(&header).unwrap();
         let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
         bytes.extend(encoded);
-        bytes.resize(bytes.len() + offset as usize, 0x3a);
+        bytes.extend(payload);
         std::fs::write(source.join("renamed-user-checkpoint.safetensors"), bytes).unwrap();
         files = vec!["renamed-user-checkpoint.safetensors".into()];
     } else if layout == "sharded" {
@@ -256,7 +284,7 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
     }
     let install = ingest
         .finalize(
-            if layout == "native" {
+            if layout == "native" || layout == "convrot" {
                 "renamed-user-checkpoint.safetensors"
             } else if layout == "sharded" {
                 "renamed-part-0.safetensors"
@@ -265,7 +293,7 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
             },
             None,
         )
-        .expect("a dense H3 DiT commits");
+        .expect("a supported H3 DiT commits");
     let semantic_digest = install.compiled.record.plan.semantic_digest.clone();
     let mut entry = json!({
         "id": model_id,
@@ -463,4 +491,186 @@ pub(crate) fn write_shared_configs(root: &Path, encoder: &Path) {
         root.join("tokenizer/tokenizer_config.json"),
         json!({"additional_special_tokens":platform_runtime::providers::minimax_h3::text_encoder::MINIMAX_ADDED_SPECIALS}),
     );
+}
+
+#[test]
+fn convrot_managed_import_binds_declared_assembly_and_canonical_native_operands() {
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+    use sceneworks_core::checkpoint_weight_facts::{
+        CheckpointWeightFactsV1, MaterializationUnavailable, NativeExecutionCapabilityFact,
+        SourceBindingFact, CONVROT_INT8_CODEC_ID,
+    };
+    use sceneworks_core::minimax_h3_codec::H3SourceInventory;
+    let data = tempfile::tempdir().unwrap();
+    let imported =
+        stage_managed_minimax_h3_import_source(data.path(), "user-int8", "convrot", "ref2va");
+    let plans = CheckpointPlanStore::open(data.path());
+    let resolved = plans.resolve(&imported.checkpoint_id).unwrap();
+    let assembly =
+        sceneworks_core::minimax_h3_import::verify_entry_assembly(&imported.entry, &resolved.plan)
+            .unwrap();
+    assert_eq!(assembly.partition.as_str(), "ref2va");
+    let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+    assert!(inventory.convrot_int8);
+    assert_eq!(imported.entry["importQuantFormat"], "convrot_int8");
+    let codec = sceneworks_core::jobs_store::imported_entry_source_codec(&imported.entry).unwrap();
+    assert_eq!(codec, CONVROT_INT8_CODEC_ID);
+    let source = &resolved.layers[0].path;
+    let facts = CheckpointWeightFactsV1::declared_source(
+        Some(SourceBindingFact::new(
+            source.file_name().and_then(|name| name.to_str()),
+            std::fs::metadata(source).unwrap().len(),
+        )),
+        NativeExecutionCapabilityFact::dense_only(),
+        codec,
+        MaterializationUnavailable::NoRuntimeReceipt,
+    )
+    .unwrap();
+    let persisted = serde_json::to_string(&facts).unwrap();
+    let replayed: CheckpointWeightFactsV1 = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(replayed, facts);
+    assert_eq!(
+        replayed.executes_natively(codec),
+        None,
+        "CPU source proof never fabricates execution evidence"
+    );
+    let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+    let request = inventory.derivative_request();
+    cache
+        .ensure(&imported.checkpoint_id, &request, |out| {
+            inventory.produce(out)
+        })
+        .unwrap();
+    let _lease = cache.acquire(&resolved, &request).unwrap().unwrap();
+    assert_eq!(request.codec_id, "convrot-int8-native");
+}
+
+/// Synthetic managed import -> sealed derivative -> H3 native projection. Executing Kitchen
+/// f8b7e97's regular H4/Kronecker `_rotate_activation` on CPU with x=e3, codes=58*e0 and
+/// scale=.125 yields BF16 -0.453125 (group256), -0.90625 (group64); no rotation yields zero
+/// and a Sylvester first column has the wrong sign. No model checkpoint is downloaded.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires coordinator-reserved local Metal token; tiny synthetic projections only"]
+fn convrot_import_native_mlx_projection_smoke() {
+    use platform_runtime::providers::minimax_h3 as h3;
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+    use sceneworks_core::minimax_h3_codec::H3SourceInventory;
+    let data = tempfile::tempdir().unwrap();
+    let imported =
+        stage_managed_minimax_h3_import_source(data.path(), "native-int8", "convrot", "ref2va");
+    let resolved = CheckpointPlanStore::open(data.path())
+        .resolve(&imported.checkpoint_id)
+        .unwrap();
+    let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+    let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+    let request = inventory.derivative_request();
+    cache
+        .ensure(&imported.checkpoint_id, &request, |out| {
+            inventory.produce(out)
+        })
+        .unwrap();
+    let _lease = cache.acquire(&resolved, &request).unwrap().unwrap();
+    let output = cache
+        .cache()
+        .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
+        .unwrap();
+    let weights = platform_runtime::media::weights::Weights::from_file(
+        output.join("diffusion_pytorch_model-00001-of-00001.safetensors"),
+    )
+    .unwrap();
+    for (prefix, input, rows, want) in [
+        ("transformer_blocks.0.attn.to_q", 256, 256, -0.453125),
+        ("transformer_blocks.0.adaln_proj.linear", 64, 4608, -0.90625),
+    ] {
+        let projection = h3::quant::lin(&weights, prefix, false).unwrap();
+        let native = projection.convrot_base().unwrap();
+        assert_eq!(native.descriptor().rotation_group, input);
+        assert_eq!(native.descriptor().out_features, rows);
+        assert!(projection.dense_weight().is_none());
+        let mut activation = vec![0f32; input];
+        activation[3] = 1.0;
+        let x = mlx_rs::Array::from_slice(&activation, &[1, input as i32])
+            .as_dtype(mlx_rs::Dtype::Bfloat16)
+            .unwrap();
+        let output = projection
+            .forward(&x)
+            .unwrap()
+            .as_dtype(mlx_rs::Dtype::Float32)
+            .unwrap();
+        output.eval().unwrap();
+        assert_eq!(output.shape(), &[1, rows as i32]);
+        assert!(output.as_slice::<f32>().iter().all(|&value| value == want));
+        println!("{prefix}: native ConvRot group{input}, all outputs={want}, no dense base");
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+#[ignore = "requires coordinator-reserved CUDA runner; tiny synthetic projections only"]
+fn convrot_import_native_cuda_projection_smoke() {
+    use candle_gen::candle_core::{DType, Device, Tensor};
+    use platform_runtime::providers::minimax_h3 as h3;
+    use sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore;
+    use sceneworks_core::checkpoint_plan_store::CheckpointPlanStore;
+    use sceneworks_core::minimax_h3_codec::H3SourceInventory;
+    let data = tempfile::tempdir().unwrap();
+    let imported =
+        stage_managed_minimax_h3_import_source(data.path(), "native-int8", "convrot", "ref2va");
+    let resolved = CheckpointPlanStore::open(data.path())
+        .resolve(&imported.checkpoint_id)
+        .unwrap();
+    let inventory = H3SourceInventory::from_resolved(&resolved).unwrap();
+    let cache = CheckpointDerivativeStore::open(data.path()).unwrap();
+    let request = inventory.derivative_request();
+    cache
+        .ensure(&imported.checkpoint_id, &request, |out| {
+            inventory.produce(out)
+        })
+        .unwrap();
+    let _lease = cache.acquire(&resolved, &request).unwrap().unwrap();
+    let output = cache
+        .cache()
+        .bundle_path(&cache.cache_key(&resolved, &request).unwrap())
+        .unwrap();
+    let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
+    // Match MiniMaxH3Dit::load_from_dir: preserve I8 codes and F32 row scales through
+    // the validated native reader, not Candle's generic safetensors dtype loader.
+    let weights = candle_gen::Weights::from_files_native_int8(
+        &[output.join("diffusion_pytorch_model-00001-of-00001.safetensors")],
+        &device,
+        DType::BF16,
+    )
+    .unwrap();
+    for (prefix, input, rows, want) in [
+        ("transformer_blocks.0.attn.to_q", 256, 256, -0.453125),
+        ("transformer_blocks.0.adaln_proj.linear", 64, 4608, -0.90625),
+    ] {
+        let loaded = h3::quant::lin(&weights, h3::quant::DIT, prefix, false, DType::BF16).unwrap();
+        assert_eq!(loaded.base_bytes, rows * (input + 4));
+        let mut activation = vec![0f32; input];
+        activation[3] = 1.0;
+        let x = Tensor::from_vec(activation, (1, input), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let values = loaded
+            .linear
+            .forward_upcast(&x)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert_eq!(values.len(), rows);
+        assert!(values.iter().all(|&value| value == want));
+        println!(
+            "{prefix}: native ConvRot group{input}, all outputs={want}, {} base bytes",
+            loaded.base_bytes
+        );
+    }
 }

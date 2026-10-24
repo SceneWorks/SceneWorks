@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 81cff07c (epic sc-24212 final pin, inference main): 786 provenance candidates and 117 production-Rust crate prefixes. The Supra2-IMG MLX and Candle provider crates are classified as native architecture reimplementations of the frozen SupraLabs/Supra2-IMG SupraDiT, with the Supra2-IMG/Flan-T5-Base Apache-2.0 and SD VAE ft-MSE MIT terms disclosed in About. The FLUX.3 crates that arrived with the main sync are left to their own epic and remain reported as open advisory items under sc-19751. Earlier MOSS-Image and body/perceptual dispositions are unchanged; other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "81cff07c13137fea520cec0b1dc9b8f083514601",
-  "auditDigest": "9e24e4733f98109403bce7d8c9c4c4d7a1fd0af2e35539e3ffdf113c7c0fb416",
+  "_comment": "Audit inventory reviewed at inference revision 26f850a6 (epic sc-26679 native ConvRot INT8 and authoritative format-identity pin): 786 provenance candidates and 117 production-Rust crate prefixes. Native ConvRot arithmetic follows pinned Comfy Kitchen and comfy-model-tools executable references; the quantized kernels and descriptor contract do not add embedded third-party source or a runtime Python dependency. The identity-only correction adds no arithmetic, dependency or licensing changes. Existing Supra2-IMG, MOSS-Image and body/perceptual dispositions are unchanged. The FLUX.3 crates and other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
+  "auditDigest": "e38f6769810687f01c916e564826bd4bb09a1d966611618e3e94381669f220e4",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "81cff07c13137fea520cec0b1dc9b8f083514601",
+    "revision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "79854ddd07fa0f8d66a8c38924698afbe236e5852b24c465f710a30e3c8e75f4"
+    "populationSha256": "0602ae13c09677f9598617692b3acb402ebb76f34e5b26680d85025de86209a3"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "81cff07c13137fea520cec0b1dc9b8f083514601",
+    "revision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"

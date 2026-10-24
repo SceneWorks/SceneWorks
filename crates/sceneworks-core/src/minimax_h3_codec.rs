@@ -8,7 +8,7 @@
 //! never materializes a dense tensor/model, and publishes through the shared derivative cache.
 //!
 //! Executable raw-to-Diffusers reference pinned at
-//! https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py
+//! <https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py>
 //! Runtime state_dict exports must explicitly declare `__metadata__.h3_qkv_layout=contiguous`;
 //! raw checkpoints default to the reference's interleaved source layout.
 
@@ -18,6 +18,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use gen_core::checkpoint_codec::{CheckpointCodecRegistry, WeightEncoding, DENSE_CODECS};
+use gen_core::convrot_int8::{ConvRotInt8, MAX_DESCRIPTOR_BYTES};
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_derivative::{
@@ -31,13 +32,22 @@ pub const H3_CONFIG_FILE: &str = "config.json";
 pub const H3_INDEX_FILE: &str = "diffusion_pytorch_model.safetensors.index.json";
 
 /// Apply the inspector's descriptor policy before allocating or deserializing untrusted JSON.
-pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
+pub fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     let limit = crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES;
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let len = file
         .metadata()
         .map_err(|e| format!("{}: {e}", path.display()))?
         .len();
+    read_h3_descriptor_from_reader(file, len, limit, path)
+}
+
+fn read_h3_descriptor_from_reader(
+    reader: impl Read,
+    len: u64,
+    limit: u64,
+    path: &Path,
+) -> Result<Value, String> {
     let oversized = || {
         format!(
             "H3 descriptor {} exceeds {limit} byte descriptor limit",
@@ -49,7 +59,8 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     }
     let mut bytes = Vec::with_capacity(len as usize);
     // Also reject growth between metadata and read without consuming the whole file.
-    file.take(limit + 1)
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() as u64 > limit {
@@ -63,9 +74,9 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
 pub struct H3Config(pub Value);
 
 impl H3Config {
-    /// Native exports without a config use the **pinned published architecture**, not dimensions
-    /// inferred from a filename. All tensor shapes must match it. Variant exports must provide
-    /// `config.json` or JSON `__metadata__.h3_config`; this preserves non-shape knobs such as RoPE.
+    /// The pinned published architecture for fixtures and explicit catalog declarations.
+    /// Production sources require their own sidecar/embedded config or an explicitly selected
+    /// base configuration; tensor shapes and filenames never select this value implicitly.
     pub fn published() -> Self {
         Self(json!({
             "_class_name": "MiniMaxH3Transformer3DModel",
@@ -87,13 +98,14 @@ impl H3Config {
             .ok_or_else(|| format!("MiniMax-H3 config requires positive integer {name:?}"))
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// Validate the complete architecture document without allocating its tensor inventory.
+    pub fn validate(&self) -> Result<(), String> {
         if self.0.get("_class_name").and_then(Value::as_str) != Some("MiniMaxH3Transformer3DModel")
         {
             return Err("config.json must declare MiniMaxH3Transformer3DModel".into());
         }
         if self.0.get("quantization").is_some() || self.0.get("quantization_config").is_some() {
-            return Err("MiniMax-H3 dense import does not decode quantized/pruned/ConvRot/W4A8 configs; re-export F16/BF16/F32".into());
+            return Err("MiniMax-H3 import requires an architecture config, not a stock packed-tier quantization policy; INT8 execution is declared by per-layer ConvRot operands".into());
         }
         for field in [
             "num_attention_heads",
@@ -268,6 +280,8 @@ pub struct H3SourceInventory {
     /// Files and namespace-wrapped exports need a canonical component directory too, even when
     /// their tensor leaves already use Diffusers spelling.
     pub requires_normalization: bool,
+    /// Descriptor-validated native symmetric INT8, never the affine MLX Q8 dialect.
+    pub convrot_int8: bool,
     sources: Vec<PathBuf>,
     tensors: BTreeMap<String, Tensor>,
 }
@@ -275,16 +289,35 @@ pub struct H3SourceInventory {
 /// Resolve only the plan's declared files; callers must first re-verify/pin source identities.
 impl H3SourceInventory {
     pub fn from_resolved(resolved: &ResolvedCheckpointV1) -> Result<Self, String> {
-        Self::from_files(
+        Self::from_resolved_with_config(resolved, None)
+    }
+
+    /// Consume a plan with an explicitly bound fallback architecture document, when needed.
+    /// Source-owned configuration wins; callers seal the fallback's persisted provenance.
+    pub fn from_resolved_with_config(
+        resolved: &ResolvedCheckpointV1,
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
+        Self::from_files_with_config(
             &resolved
                 .layers
                 .iter()
                 .map(|l| (l.layer.target_path.clone(), l.path.clone()))
                 .collect::<Vec<_>>(),
+            bound_config,
         )
     }
 
     pub fn from_files(files: &[(String, PathBuf)]) -> Result<Self, String> {
+        Self::from_files_with_config(files, None)
+    }
+
+    /// Source-owned sidecar/embedded documents are authoritative; the bound configuration is
+    /// only a fallback. Complete JSON is preserved, including provider-relevant non-shape fields.
+    pub fn from_files_with_config(
+        files: &[(String, PathBuf)],
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
         let mut weights = Vec::new();
         let mut config = None;
         let mut index = None;
@@ -360,9 +393,6 @@ impl H3SourceInventory {
                 }
             }
         }
-        if !native && weights.len() > 1 && config.is_none() {
-            return Err("sharded Diffusers H3 requires its explicit config.json".into());
-        }
         if native && weights.len() != 1 {
             return Err("native H3 import expects one safetensors file; export sharded sources in canonical Diffusers layout".into());
         }
@@ -371,13 +401,36 @@ impl H3SourceInventory {
                 "sharded H3 source requires diffusion_pytorch_model.safetensors.index.json".into(),
             );
         }
-        let config = config.unwrap_or_else(H3Config::published);
-        let expected = config.shapes()?;
+        let config = config.or(bound_config).ok_or("MiniMax-H3 source has no config.json or embedded h3_config; explicitly select a compatible base to bind its exact configuration before import")?;
+        let mut expected = config.shapes()?;
         let codecs = CheckpointCodecRegistry::new(DENSE_CODECS.iter().copied())
             .map_err(|e| e.to_string())?;
         let mut tensors = BTreeMap::<String, Tensor>::new();
-        let mut physical = BTreeMap::<String, String>::new();
-        for (source, ((name, path), header)) in weights.iter().zip(&headers).enumerate() {
+        let mut physical = H3Physical::new();
+        for (source, header) in headers.iter().enumerate() {
+            for (key, entry) in header.as_object().ok_or("invalid H3 header")? {
+                if key == "__metadata__" {
+                    continue;
+                }
+                if let Some((previous, _)) = physical.insert(key, (source, entry)) {
+                    return Err(format!(
+                        "duplicate H3 tensor {key:?} in {:?} and {:?}",
+                        weights[previous].0, weights[source].0
+                    ));
+                }
+            }
+        }
+        let quantized = convrot_outputs(
+            &headers, &weights, &physical, native, &config, qkv_layout, &expected,
+        )?;
+        for outputs in quantized.values() {
+            for (logical, shape, _) in outputs {
+                if !logical.ends_with(".weight") {
+                    expected.insert(logical.clone(), shape.clone());
+                }
+            }
+        }
+        for (source, ((_, path), header)) in weights.iter().zip(&headers).enumerate() {
             let mut file = File::open(path).map_err(|e| e.to_string())?;
             let mut len = [0u8; 8];
             file.read_exact(&mut len).map_err(|e| e.to_string())?;
@@ -391,12 +444,13 @@ impl H3SourceInventory {
                     .and_then(Value::as_str)
                     .ok_or_else(|| format!("tensor {key:?} lacks dtype"))?;
                 let (encoding,width) = match dtype {
-                    "BF16" => (WeightEncoding::DenseBf16,2u64),
-                    "F16" => (WeightEncoding::DenseF16,2u64),
-                    "F32" => (WeightEncoding::DenseF32,4u64),
-                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; dense F16/BF16/F32 only, not ConvRot/pruned/W4A8")),
+                    "BF16" => (Some(WeightEncoding::DenseBf16),2u64),
+                    "F16" => (Some(WeightEncoding::DenseF16),2u64),
+                    "F32" => (Some(WeightEncoding::DenseF32),4u64),
+                    "I8" | "U8" if quantized.contains_key(key) => (None,1u64),
+                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8, not pruned/W4A8")),
                 };
-                if codecs.for_encoding(encoding).is_none() {
+                if encoding.is_some_and(|encoding| codecs.for_encoding(encoding).is_none()) {
                     return Err(format!("unregistered H3 dense codec for {key:?}"));
                 }
                 let shape: Vec<usize> = entry
@@ -416,11 +470,6 @@ impl H3SourceInventory {
                 let end = entry["data_offsets"][1]
                     .as_u64()
                     .ok_or("tensor lacks offset")?;
-                if let Some(previous) = physical.insert(key.clone(), (*name).clone()) {
-                    return Err(format!(
-                        "duplicate H3 tensor {key:?} in {previous:?} and {name:?}"
-                    ));
-                }
                 if native && strip_prefix(key) == "rope.inv_freq" {
                     // The pinned converter consumes this known non-parameter buffer: the provider
                     // regenerates it from config. Verify values, not just its familiar name.
@@ -447,7 +496,9 @@ impl H3SourceInventory {
                     }
                     continue;
                 }
-                let mapped = if native {
+                let mapped = if let Some(outputs) = quantized.get(key) {
+                    outputs.clone()
+                } else if native {
                     native_outputs(strip_prefix(key), &config, qkv_layout, &shape, width)?
                 } else {
                     vec![(
@@ -493,10 +544,10 @@ impl H3SourceInventory {
                 let shard = shard
                     .as_str()
                     .ok_or("H3 index shard names must be strings")?;
-                let actual = physical.get(key).ok_or_else(|| {
+                let (source, _) = physical.get(key.as_str()).ok_or_else(|| {
                     format!("H3 index tensor {key:?} missing from shard {shard:?}")
                 })?;
-                let actual = Path::new(actual)
+                let actual = Path::new(weights[*source].0)
                     .file_name()
                     .and_then(|s| s.to_str())
                     .ok_or("invalid shard path")?;
@@ -506,10 +557,11 @@ impl H3SourceInventory {
                     ));
                 }
             }
-            for (key, shard) in &physical {
-                if !map.contains_key(key) {
+            for (key, (source, _)) in &physical {
+                if !map.contains_key(*key) {
                     return Err(format!(
-                        "unconsumed H3 shard tensor {key:?} in {shard:?}: absent from weight_map"
+                        "unconsumed H3 shard tensor {key:?} in {:?}: absent from weight_map",
+                        weights[*source].0
                     ));
                 }
             }
@@ -530,6 +582,7 @@ impl H3SourceInventory {
             config,
             native,
             requires_normalization,
+            convrot_int8: tensors.keys().any(|key| key.ends_with(".comfy_quant")),
             sources: weights.into_iter().map(|(_, p)| p.clone()).collect(),
             tensors,
         })
@@ -542,8 +595,13 @@ impl H3SourceInventory {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
             adapter_version: "1".into(),
-            codec_id: "dense-f16-bf16-f32".into(),
-            codec_version: "1".into(),
+            codec_id: if self.convrot_int8 {
+                crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
+            } else {
+                "dense-f16-bf16-f32"
+            }
+            .into(),
+            codec_version: "2".into(),
             backend: "portable".into(),
             outputs,
         }
@@ -620,6 +678,176 @@ fn strip_prefix(key: &str) -> &str {
 }
 
 type Output = (String, Vec<usize>, Vec<(u64, u64)>);
+
+type H3Physical<'a> = BTreeMap<&'a str, (usize, &'a Value)>;
+
+/// Validate executable operands before scheduling copies. Codes are never decoded or allocated;
+/// descriptor reads are bounded and row scales are scanned one value at a time.
+fn convrot_outputs(
+    headers: &[Value],
+    files: &[(&String, &PathBuf)],
+    physical: &H3Physical<'_>,
+    native: bool,
+    config: &H3Config,
+    layout: H3QkvLayout,
+    expected: &BTreeMap<String, Vec<usize>>,
+) -> Result<BTreeMap<String, Vec<Output>>, String> {
+    let mut outputs = BTreeMap::new();
+    for (source, header) in headers.iter().enumerate() {
+        if header
+            .get("__metadata__")
+            .and_then(Value::as_object)
+            .is_some_and(|metadata| {
+                [
+                    "_quantization_metadata",
+                    "quant_format",
+                    "quantization_config",
+                ]
+                .iter()
+                .any(|key| metadata.contains_key(*key))
+            })
+        {
+            return Err("H3 requires authoritative per-layer ConvRot descriptors; competing file-level quantization declarations are unsupported".into());
+        }
+        if !header
+            .as_object()
+            .ok_or("invalid H3 header")?
+            .keys()
+            .any(|key| key.ends_with(".comfy_quant"))
+        {
+            continue;
+        }
+        let mut file = File::open(files[source].1).map_err(|e| e.to_string())?;
+        let mut len = [0; 8];
+        file.read_exact(&mut len).map_err(|e| e.to_string())?;
+        let body = 8 + u64::from_le_bytes(len);
+        let shape = |entry: &Value| -> Result<Vec<usize>, String> {
+            entry["shape"]
+                .as_array()
+                .ok_or("ConvRot operand lacks shape")?
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or_else(|| "invalid ConvRot shape".into())
+                })
+                .collect()
+        };
+        let offset = |entry: &Value| -> Result<u64, String> {
+            entry["data_offsets"][0]
+                .as_u64()
+                .ok_or_else(|| "ConvRot operand lacks offset".into())
+        };
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        let mut descriptor_bytes = [0u8; MAX_DESCRIPTOR_BYTES];
+        for (key, entry) in header.as_object().ok_or("invalid H3 header")? {
+            let Some(base) = key.strip_suffix(".comfy_quant") else {
+                continue;
+            };
+            let descriptor_shape = shape(entry)?;
+            if entry["dtype"] != "U8"
+                || descriptor_shape.len() != 1
+                || descriptor_shape[0] == 0
+                || descriptor_shape[0] > MAX_DESCRIPTOR_BYTES
+            {
+                return Err(format!("H3 {key}: requires bounded U8 ConvRot descriptor"));
+            }
+            let weight_key = format!("{base}.weight");
+            let scale_key = format!("{base}.weight_scale");
+            let (_, weight) = physical
+                .get(weight_key.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing weight"))?;
+            let (scale_source, scale) = physical
+                .get(scale_key.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing weight_scale"))?;
+            if weight["dtype"] != "I8" || scale["dtype"] != "F32" {
+                return Err(format!(
+                    "H3 {key}: ConvRot requires signed I8 weight and F32 row scales"
+                ));
+            }
+            let weight_shape = shape(weight)?;
+            let scale_shape = shape(scale)?;
+            reader
+                .seek(SeekFrom::Start(body + offset(entry)?))
+                .map_err(|e| e.to_string())?;
+            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
+            reader.read_exact(payload).map_err(|e| e.to_string())?;
+            let descriptor = ConvRotInt8::parse(payload, &weight_shape, &scale_shape)
+                .map_err(|e| format!("H3 {key}: {e}"))?;
+            let mut foreign_reader;
+            let (scale_reader, scale_body) = if *scale_source == source {
+                (&mut reader, body)
+            } else {
+                let mut file = File::open(files[*scale_source].1).map_err(|e| e.to_string())?;
+                let mut len = [0; 8];
+                file.read_exact(&mut len).map_err(|e| e.to_string())?;
+                foreign_reader = std::io::BufReader::with_capacity(64 * 1024, file);
+                (&mut foreign_reader, 8 + u64::from_le_bytes(len))
+            };
+            scale_reader
+                .seek(SeekFrom::Start(scale_body + offset(scale)?))
+                .map_err(|e| e.to_string())?;
+            for _ in 0..descriptor.out_features {
+                let mut bytes = [0; 4];
+                scale_reader
+                    .read_exact(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                let value = f32::from_le_bytes(bytes);
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(format!(
+                        "H3 {scale_key}: requires finite positive F32 scales"
+                    ));
+                }
+            }
+            let mapped = if native {
+                native_outputs(strip_prefix(&weight_key), config, layout, &weight_shape, 1)?
+            } else {
+                vec![(
+                    strip_prefix(&weight_key).into(),
+                    weight_shape.clone(),
+                    vec![(0, (descriptor.out_features * descriptor.in_features) as u64)],
+                )]
+            };
+            let mut mapped_scales = Vec::new();
+            let mut mapped_descriptors = Vec::new();
+            for (logical, dimensions, ranges) in &mapped {
+                let supported = (logical.starts_with("transformer_blocks.")
+                    || logical.starts_with("token_refiner.refiner_blocks."))
+                    && (logical.contains(".attn.")
+                        || logical.contains(".ff.")
+                        || logical.ends_with(".adaln_proj.linear.weight"));
+                if !supported || expected.get(logical) != Some(dimensions) {
+                    return Err(format!(
+                        "H3 {key}: quantized projection {logical:?} is not a native INT8 consumer"
+                    ));
+                }
+                let logical_base = logical
+                    .strip_suffix(".weight")
+                    .ok_or("invalid ConvRot logical weight")?;
+                let input = descriptor.in_features as u64;
+                // Only output rows move: input rotation groups and descriptor bytes remain unchanged.
+                let scale_ranges = ranges
+                    .iter()
+                    .map(|&(start, len)| (start / input * 4, len / input * 4))
+                    .collect();
+                mapped_scales.push((
+                    format!("{logical_base}.weight_scale"),
+                    vec![dimensions[0], 1],
+                    scale_ranges,
+                ));
+                mapped_descriptors.push((
+                    format!("{logical_base}.comfy_quant"),
+                    descriptor_shape.clone(),
+                    vec![(0, payload.len() as u64)],
+                ));
+            }
+            outputs.insert(weight_key, mapped);
+            outputs.insert(scale_key, mapped_scales);
+            outputs.insert(key.clone(), mapped_descriptors);
+        }
+    }
+    Ok(outputs)
+}
 
 fn native_outputs(
     key: &str,
