@@ -232,8 +232,13 @@ async function pipeline(overrides = {}) {
   const root = fixtureRoot();
   const output = mkdtempSync(path.join(os.tmpdir(), "moss-native-output-"));
   const driver = overrides.driver ?? mockDriver(overrides.driverOptions ?? {});
+  const backend = overrides.backend ?? "mlx";
   const result = await runValidation({
-    root, output, backend: overrides.backend ?? "mlx",
+    root, output, backend,
+    // Default the injected platform to the backend's own supported host, so the
+    // mocked suite proves the same contracts on every host it runs on; the
+    // mismatch case below overrides it explicitly.
+    platform: backend === "candle" ? "win32" : "darwin",
     env: { GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: SHA, GITHUB_TOKEN: "secret-token", AZURE_SIGNING_SECRET: "secret", MOSS_NATIVE_RSS_CAP_GB: "2", MOSS_NATIVE_WORKFLOW_FILE: ".github/workflows/macos-mlx.yml", ...overrides.env },
     inspect: () => ({ head: SHA, clean: true }),
     statExecutable: () => true,
