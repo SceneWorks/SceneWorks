@@ -80,8 +80,15 @@ semantics, and inherited component terms) in the existing immutable import plan 
 revisions where known, plus the bound configuration's hash and provenance without duplicating
 its JSON payload. Generated image, video, audio, document, vector and depth sidecars and their
 recipes use the same server-derived projection; worker or upload metadata cannot replace it.
-The job store freezes the projection independently of mutable payload/result JSON. Edits and
-multi-input derivatives retain parent model commitments in `lineage.modelProvenance`.
+The job store freezes the projection in the original enqueue transaction, independently of mutable
+payload/result JSON. Typed handlers supply their server-resolved primary; raw image utility jobs
+rebuild their execution carrier through the existing source-selection tables, and raw Batch Detail
+uses its existing catalog canonicalizer. Replay re-canonicalizes before its own atomic enqueue.
+Completion reads only the frozen database authority: a historical NULL is unknown, never a reason
+to reconstruct identity from an old payload carrier or retry terminal persistence forever. Edits,
+multi-input derivatives, and native worker frame/tracking/timeline sidecars retain parent model
+commitments in `lineage.modelProvenance`; the native writer returns that same persisted envelope
+so the worker's job result agrees with disk and the index.
 
 Actual checkpoint conversions add source/semantic-plan/codec/backend-bound receipts beside the
 existing shared-cache receipt, while the exact derivative is leased. The asset handoff validates
@@ -92,12 +99,15 @@ and missing conversion receipts remain unknown, rather than being filled from to
 
 The sc-26690 CPU proof exercises the real inspector with a tiny synthetic Krea checkpoint, then
 the durable job store, shared derivative cache/lease, six generated-asset sidecar/recipe/index
-paths, restart read-back, and an edited upload's inherited ancestry. A separate H3 component
-fixture exercises inherited-term union and acknowledgment acceptance/withdrawal. API regressions
-also cover the refusal and recovery boundaries. These are persistence and licensing proofs, not
-model-inference executions or numerical-fidelity claims; real MLX/CUDA generation remains the
-epic's terminal evidence. Schema/migration regressions retain unknown historical provenance and
-reject malformed declarations, changed source commitments, and forged conversion history.
+paths, restart read-back, an edited upload's inherited ancestry, native frame/film sidecar
+registration, and an unfrozen legacy job with untrusted metadata. A separate H3 component fixture
+exercises inherited-term union and acknowledgment acceptance/withdrawal. In-process HTTP
+regressions also cover poisoned raw carriers on all five raw image routes, duplicate admission,
+typed route freezing before dispatch, returned/stored revision agreement, and legacy completion.
+These are persistence and licensing proofs, not model-inference, video-transcoding, or
+numerical-fidelity claims; real MLX/CUDA generation remains the epic's terminal evidence.
+Schema/migration regressions retain unknown historical provenance and reject malformed
+declarations, changed source commitments, and forged conversion history.
 
 `model_convert` is on the list for a reason that is not obvious from its payload: it names no `repo`
 at all. Its LTX arm hands the payload's **`baseRepo`** to `ensure_ltx_upscaler_cached` →

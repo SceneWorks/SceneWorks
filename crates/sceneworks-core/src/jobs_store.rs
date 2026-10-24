@@ -1128,17 +1128,7 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut job = self.create_job_on_connection(&transaction, request, None)?;
-        if let Some(provenance) = provenance {
-            transaction.execute(
-                "update jobs set model_provenance_json = ?1 where id = ?2",
-                params![dumps(provenance)?, job.id],
-            )?;
-            job.extra.insert(
-                crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
-                provenance.clone(),
-            );
-        }
+        let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -1155,46 +1145,9 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, Some(id))?;
+        let job = self.create_job_on_connection(&transaction, request, Some(id), None)?;
         transaction.commit()?;
         Ok(job)
-    }
-
-    /// Persist the validated plan projection exactly once. Worker progress, payload replacement,
-    /// retries, and startup migrations never write this column. A later disagreement refuses rather
-    /// than relabeling assets already produced by this job. `provenance` is server-derived only.
-    pub fn freeze_model_provenance(
-        &self,
-        job_id: &str,
-        provenance: &Value,
-    ) -> JobsStoreResult<Value> {
-        let mut guard = self.lock.lock();
-        let connection = self.write_connection(&mut guard)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let stored: Option<String> = transaction
-            .query_row(
-                "select model_provenance_json from jobs where id = ?1",
-                params![job_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
-        if let Some(stored) = stored {
-            let stored: Value = serde_json::from_str(&stored)?;
-            if &stored != provenance {
-                return Err(JobsStoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "job model provenance is immutable",
-                )));
-            }
-            return Ok(stored);
-        }
-        transaction.execute(
-            "update jobs set model_provenance_json = ?1 where id = ?2",
-            params![dumps(provenance)?, job_id],
-        )?;
-        transaction.commit()?;
-        Ok(provenance.clone())
     }
 
     /// Read the immutable handoff after a restart without guessing from mutable model metadata.
@@ -2046,6 +1999,16 @@ impl JobsStore {
     }
 
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_model_provenance(job_id, request, None)
+    }
+
+    /// Replay with a freshly server-canonical source binding in the same enqueue transaction.
+    pub fn retry_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2057,16 +2020,18 @@ impl JobsStore {
         }
         let same_source = !request.payload_changes.contains_key("model")
             && !request.payload_changes.contains_key("modelManifestEntry");
-        let source_provenance = if same_source {
-            job.extra
-                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
-                .cloned()
-        } else {
-            None
-        };
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
-        let mut job = self.create_job_on_connection(
+        let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
                 job_type: job.job_type,
@@ -2083,16 +2048,8 @@ impl JobsStore {
                 initial_status: None,
             },
             None,
+            source_provenance.as_ref(),
         )?;
-        if same_source {
-            transaction.execute("update jobs set model_provenance_json = (select source.model_provenance_json from jobs source where source.id = ?1) where id = ?2", params![job_id, job.id])?;
-            if let Some(provenance) = source_provenance {
-                job.extra.insert(
-                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
-                    provenance,
-                );
-            }
-        }
         transaction.commit()?;
         Ok(job)
     }
@@ -2102,24 +2059,36 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_model_provenance(job_id, request, None)
+    }
+
+    /// Duplicate with source authority from canonical admission, never from payload metadata.
+    pub fn duplicate_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
         let same_source = !request.payload_changes.contains_key("model")
             && !request.payload_changes.contains_key("modelManifestEntry");
-        let source_provenance = if same_source {
-            job.extra
-                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
-                .cloned()
-        } else {
-            None
-        };
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
         crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
-        let mut job = self.create_job_on_connection(
+        let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
                 job_type: job.job_type,
@@ -2135,16 +2104,8 @@ impl JobsStore {
                 initial_status: None,
             },
             None,
+            source_provenance.as_ref(),
         )?;
-        if same_source {
-            transaction.execute("update jobs set model_provenance_json = (select source.model_provenance_json from jobs source where source.id = ?1) where id = ?2", params![job_id, job.id])?;
-            if let Some(provenance) = source_provenance {
-                job.extra.insert(
-                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
-                    provenance,
-                );
-            }
-        }
         transaction.commit()?;
         Ok(job)
     }
@@ -3617,6 +3578,7 @@ impl JobsStore {
         connection: &Connection,
         request: CreateJob,
         job_id: Option<String>,
+        provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
         let requested_gpu = normalize_requested_gpu(&request.requested_gpu);
         if job_requires_gpu(&request.job_type) && requested_gpu == "cpu" {
@@ -3659,7 +3621,7 @@ impl JobsStore {
               claim_required_capability, claim_real_training, claim_model_key_1,
               claim_model_key_2, claim_model_key_3, claim_model_key_4,
               progress, stage, message, attempts, source_job_id, duplicate_of_job_id,
-              created_at, updated_at
+              created_at, updated_at, model_provenance_json
             ) values (
               ?1, ?2, ?12,
               case when ?13 != 0
@@ -3667,7 +3629,7 @@ impl JobsStore {
                    else 0 end,
               ?3, ?4, ?5, '{}', ?6,
               ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
-              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
+              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11, ?26
             )
             ",
             params![
@@ -3696,6 +3658,7 @@ impl JobsStore {
                 claim_facts.model_key(1),
                 claim_facts.model_key(2),
                 claim_facts.model_key(3),
+                optional_dumps(provenance)?,
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)

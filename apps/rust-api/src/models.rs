@@ -875,6 +875,20 @@ pub(crate) async fn ensure_inherited_component_licenses_acknowledged(
     license_acknowledged: bool,
 ) -> Result<(), ApiError> {
     use sceneworks_core::license_acknowledgments as acknowledgments;
+    // This gate owns inherited IMPORT obligations, not the existing stock-model license policy.
+    // Shipped rows need no import-only partition/base declaration. Never exempt a plan binding,
+    // even if an invalid catalog row tries to put one under a shipped id.
+    if !entry.contains_key("importPlan")
+        && !entry.contains_key("baseModel")
+        && !entry.contains_key("minimaxH3Partition")
+        && entry
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(sceneworks_core::builtin_manifests::builtin_model_entry)
+            .is_some()
+    {
+        return Ok(());
+    }
     let declaration =
         sceneworks_core::model_artifacts::provenance::import_declaration_context(entry)
             .map_err(ApiError::bad_request)?;
@@ -16245,7 +16259,8 @@ mod minimax_h3_import_declaration_tests {
                 json!({
                     "name": format!("Custom H3 {partition}"),
                     "source": { "kind": "huggingFace", "repo": "owner/h3-finetune" },
-                    "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition
+                    "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition,
+                    "licenseAcknowledged": true
                 }),
             )
             .await;
@@ -16434,6 +16449,7 @@ mod minimax_h3_import_declaration_tests {
                 "linkedRootId": root["rootId"],
                 "linkedRelativePath": "custom/transformer",
                 "family": "minimax-h3",
+                "licenseAcknowledged": true,
             });
             body.as_object_mut()
                 .unwrap()
@@ -16483,6 +16499,7 @@ mod minimax_h3_import_declaration_tests {
             let mut body = source;
             body["baseModel"] = json!("minimax_h3");
             body["minimaxH3Partition"] = json!("fl2va");
+            body["licenseAcknowledged"] = json!(true);
             let (status, response) =
                 request(app.clone(), "POST", "/api/v1/models/import", body).await;
             assert_eq!(status, StatusCode::CREATED, "{response}");
@@ -16788,7 +16805,7 @@ mod minimax_h3_import_declaration_tests {
         )
         .unwrap();
         let app = create_app(settings).unwrap();
-        let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})).await;
+        let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va","licenseAcknowledged":true})).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
         assert_eq!(
             job["payload"]["manifestEntry"]["importComponentTier"],

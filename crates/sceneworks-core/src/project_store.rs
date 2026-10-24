@@ -3364,6 +3364,14 @@ impl ProjectStore {
             .cloned()
             .unwrap_or_default();
         let mut inherited = std::collections::BTreeMap::new();
+        for provenance in asset
+            .pointer("/lineage/modelProvenance")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            inherited.insert(serde_json::to_string(provenance)?, provenance.clone());
+        }
         for parent in parents.iter().filter_map(Value::as_str) {
             let path = match self.find_asset_sidecar(project_path, parent) {
                 Ok(path) => path,
@@ -4467,8 +4475,8 @@ impl ProjectStore {
         &self,
         project_id: &str,
         sidecar_path: &Path,
-        asset: &Value,
-    ) -> ProjectStoreResult<()> {
+        mut asset: Value,
+    ) -> ProjectStoreResult<Value> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         let sidecar_rel = relative_string(&project_path, sidecar_path)?;
         if !is_safe_relative_path(&sidecar_rel) {
@@ -4476,7 +4484,8 @@ impl ProjectStore {
                 "Asset sidecar path must be project-relative".to_owned(),
             ));
         }
-        let asset_id = required_str(asset, "id")?;
+        self.inherit_model_provenance(&project_path, &mut asset)?;
+        let asset_id = required_str(&asset, "id")?;
         if !is_safe_id(asset_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid native asset id".to_owned(),
@@ -4486,16 +4495,16 @@ impl ProjectStore {
             ProjectStoreError::BadRequest("Native asset recipe is required".to_owned())
         })?;
         let index_mutation = AssetIndexMutation::begin(&project_path)?;
-        write_json(sidecar_path, asset)?;
+        write_json(sidecar_path, &asset)?;
         write_json(
             &project_path
                 .join("recipes")
                 .join(format!("{asset_id}.recipe.json")),
             recipe,
         )?;
-        index_asset(project_id, &project_path, asset, Some(sidecar_path))?;
+        index_asset(project_id, &project_path, &asset, Some(sidecar_path))?;
         index_mutation.commit();
-        Ok(())
+        Ok(asset)
     }
 
     pub fn delete_asset(
@@ -10271,7 +10280,7 @@ mod tests {
 
         fail_next_asset_index_db_mutation();
         assert!(store
-            .persist_native_asset_sidecar(&project.id, &sidecar_path, &asset)
+            .persist_native_asset_sidecar(&project.id, &sidecar_path, asset)
             .is_err());
         assert!(sidecar_path.exists());
         assert!(project_path

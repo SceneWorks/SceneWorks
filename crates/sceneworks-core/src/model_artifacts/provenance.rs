@@ -233,13 +233,15 @@ pub fn verify_asset_derivative_provenance(
         let Some(claim) = claim else {
             continue;
         };
+        // An unfrozen historical job cannot authenticate conversion claims either. Discard the
+        // claim instead of inventing ancestry or making terminal persistence retry forever.
+        let Some(provenance) = fact.get_mut(MODEL_PROVENANCE_KEY) else {
+            continue;
+        };
         let cache_key = claim
             .get("cacheKey")
             .and_then(Value::as_str)
             .ok_or("invalid checkpoint derivative identity")?;
-        let provenance = fact
-            .get_mut(MODEL_PROVENANCE_KEY)
-            .ok_or("checkpoint derivative has no immutable source binding")?;
         let receipt = if let Some(receipt) = receipts.get(cache_key) {
             receipt.clone()
         } else {
@@ -434,10 +436,77 @@ mod tests {
         store.initialize().unwrap();
         assert_eq!(store.model_provenance(&job.id).unwrap(), None);
         let provenance = checkpoint_model_provenance(&plan(), "custom").unwrap();
-        store.freeze_model_provenance(&job.id, &provenance).unwrap();
+        let legacy_id = job.id;
+        let job = store
+            .create_job_with_model_provenance(
+                CreateJob {
+                    job_type: crate::contracts::JobType::ModelDownload,
+                    project_id: None,
+                    project_name: None,
+                    payload: json!({"modelProvenance":{"caller_forged":true}})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    requested_gpu: "cpu".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                Some(&provenance),
+            )
+            .unwrap();
+        assert_eq!(job.extra[MODEL_PROVENANCE_KEY], provenance);
+        assert_eq!(
+            job.extra["revision"],
+            store.get_job(&job.id).unwrap().extra["revision"]
+        );
         let mut forged = provenance.clone();
         forged["sources"][0]["sha256"] = json!("b".repeat(64));
-        assert!(store.freeze_model_provenance(&job.id, &forged).is_err());
+        store
+            .register_worker(crate::jobs_store::RegisterWorker {
+                worker_id: "provenance-cpu-worker".into(),
+                gpu_id: "cpu".into(),
+                gpu_name: None,
+                capabilities: vec![crate::contracts::WorkerCapability::ModelDownload],
+                loaded_models: Vec::new(),
+                utilization: None,
+            })
+            .unwrap();
+        let claimed = store
+            .claim_next_job("provenance-cpu-worker")
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, job.id);
+        let updated = store
+            .update_job_progress(
+                &job.id,
+                crate::jobs_store::ProgressUpdate {
+                    status: crate::contracts::JobStatus::Saving,
+                    stage: crate::contracts::ProgressStage::Saving,
+                    progress: 0.75,
+                    message: "CPU provenance boundary".into(),
+                    error: None,
+                    result: Some(
+                        json!({"modelProvenance":forged})
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                    eta_seconds: None,
+                    peak_gpu_memory_pct: None,
+                    peak_gpu_load_pct: None,
+                    backend: Some("cpu".into()),
+                    worker_id: Some("provenance-cpu-worker".into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(updated.result[MODEL_PROVENANCE_KEY], provenance);
+        assert_eq!(
+            store.model_provenance(&job.id).unwrap(),
+            Some(provenance.clone())
+        );
+        assert_eq!(store.model_provenance(&legacy_id).unwrap(), None);
         let retry = store
             .retry_job(
                 &job.id,
