@@ -59,41 +59,6 @@ pub struct Settings {
     pub gpu_memory_limit_bytes: u64,
 }
 
-#[cfg(test)]
-mod memory_limit_tests {
-    use super::*;
-    use sceneworks_core::app_paths::GpuMemoryLimitRequest::{Bytes, Fraction};
-
-    #[test]
-    fn one_immutable_settings_value_observes_user_on_change_off_and_corruption() {
-        let root = tempfile::tempdir().unwrap();
-        let mut settings = Settings::for_test(root.path().join("data"));
-        settings.config_dir = root.path().join("config");
-        settings.gpu_memory_limit_bytes = 999;
-        std::fs::create_dir_all(&settings.config_dir).unwrap();
-        let settings = settings;
-        let path = sceneworks_core::app_paths::gpu_memory_limit_file(&settings.config_dir);
-        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
-        for (raw, expected) in [
-            ("100", Bytes(100)),
-            ("200", Bytes(200)),
-            ("0", Bytes(0)),
-            (r#"{"fraction":0.5}"#, Fraction(0.5)),
-            (r#"{"fraction":0.75}"#, Fraction(0.75)),
-            ("0", Bytes(0)),
-        ] {
-            std::fs::write(&path, raw).unwrap();
-            assert_eq!(settings.requested_gpu_memory_limit().unwrap(), expected);
-        }
-        for invalid in ["", "-1", "1.5", "18446744073709551616", "unknown"] {
-            std::fs::write(&path, invalid).unwrap();
-            assert!(settings.requested_gpu_memory_limit().is_err(), "{invalid}");
-        }
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
-    }
-}
-
 impl fmt::Debug for Settings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut debug = formatter.debug_struct("Settings");
@@ -310,5 +275,40 @@ pub(crate) fn env_bool(key: &str, default: bool) -> bool {
             _ => default,
         },
         Err(_) => default,
+    }
+}
+
+#[cfg(test)]
+mod memory_limit_tests {
+    use super::*;
+    use sceneworks_core::app_paths::GpuMemoryLimitRequest::{Bytes, Fraction};
+
+    #[test]
+    fn one_immutable_settings_value_observes_user_on_change_off_and_corruption() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(root.path().join("data"));
+        settings.config_dir = root.path().join("config");
+        settings.gpu_memory_limit_bytes = 999;
+        std::fs::create_dir_all(&settings.config_dir).unwrap();
+        let settings = settings;
+        let path = sceneworks_core::app_paths::gpu_memory_limit_file(&settings.config_dir);
+        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
+        for (raw, expected) in [
+            ("100", Bytes(100)),
+            ("200", Bytes(200)),
+            ("0", Bytes(0)),
+            (r#"{"fraction":0.5}"#, Fraction(0.5)),
+            (r#"{"fraction":0.75}"#, Fraction(0.75)),
+            ("0", Bytes(0)),
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert_eq!(settings.requested_gpu_memory_limit().unwrap(), expected);
+        }
+        for invalid in ["", "-1", "1.5", "18446744073709551616", "unknown"] {
+            std::fs::write(&path, invalid).unwrap();
+            assert!(settings.requested_gpu_memory_limit().is_err(), "{invalid}");
+        }
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(settings.requested_gpu_memory_limit().unwrap(), Bytes(999));
     }
 }

@@ -102,52 +102,6 @@ pub fn parse_gpu_memory_limit_request(raw: &str) -> Result<GpuMemoryLimitRequest
     Ok(GpuMemoryLimitRequest::Fraction(native))
 }
 
-#[cfg(test)]
-mod gpu_memory_limit_request_tests {
-    use super::*;
-
-    #[test]
-    fn explicit_byte_and_fraction_requests_preserve_off_and_checked_boundaries() {
-        assert_eq!(
-            parse_gpu_memory_limit_request("0\n").unwrap(),
-            GpuMemoryLimitRequest::Bytes(0)
-        );
-        assert_eq!(
-            parse_gpu_memory_limit_request(&u64::MAX.to_string()).unwrap(),
-            GpuMemoryLimitRequest::Bytes(u64::MAX)
-        );
-        assert_eq!(
-            parse_gpu_memory_limit_request(r#"{"fraction":0.5}"#).unwrap(),
-            GpuMemoryLimitRequest::Fraction(0.5)
-        );
-        assert_eq!(
-            parse_gpu_memory_limit_request(r#"{"fraction":1}"#).unwrap(),
-            GpuMemoryLimitRequest::Fraction(1.0)
-        );
-        for invalid in [
-            "",
-            "-1",
-            "1.5",
-            "18446744073709551616",
-            "null",
-            "false",
-            "[]",
-            r#"{"fraction":0}"#,
-            r#"{"fraction":-0.5}"#,
-            r#"{"fraction":1.00000001}"#,
-            r#"{"fraction":1e-100}"#,
-            r#"{"fraction":"0.5"}"#,
-            r#"{"fraction":0.5,"bytes":100}"#,
-            r#"{"fraction":null}"#,
-        ] {
-            assert!(
-                parse_gpu_memory_limit_request(invalid).is_err(),
-                "{invalid}"
-            );
-        }
-    }
-}
-
 /// Filename (under [`AppPaths::config_dir`]) where the MLX worker publishes live GPU-memory
 /// telemetry for the Settings readout (epic 7819, sc-7825). JSON-encoded [`GpuMemoryTelemetry`],
 /// rewritten on a short interval. macOS/MLX only — candle/CPU workers never write it, so the
@@ -398,5 +352,51 @@ mod tests {
         )
         .expect("writes");
         assert!(embed_workflow_in_images(config));
+    }
+}
+
+#[cfg(test)]
+mod gpu_memory_limit_request_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_byte_and_fraction_requests_preserve_off_and_checked_boundaries() {
+        assert_eq!(
+            parse_gpu_memory_limit_request("0\n").unwrap(),
+            GpuMemoryLimitRequest::Bytes(0)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(&u64::MAX.to_string()).unwrap(),
+            GpuMemoryLimitRequest::Bytes(u64::MAX)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(r#"{"fraction":0.5}"#).unwrap(),
+            GpuMemoryLimitRequest::Fraction(0.5)
+        );
+        assert_eq!(
+            parse_gpu_memory_limit_request(r#"{"fraction":1}"#).unwrap(),
+            GpuMemoryLimitRequest::Fraction(1.0)
+        );
+        for invalid in [
+            "",
+            "-1",
+            "1.5",
+            "18446744073709551616",
+            "null",
+            "false",
+            "[]",
+            r#"{"fraction":0}"#,
+            r#"{"fraction":-0.5}"#,
+            r#"{"fraction":1.00000001}"#,
+            r#"{"fraction":1e-100}"#,
+            r#"{"fraction":"0.5"}"#,
+            r#"{"fraction":0.5,"bytes":100}"#,
+            r#"{"fraction":null}"#,
+        ] {
+            assert!(
+                parse_gpu_memory_limit_request(invalid).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }
