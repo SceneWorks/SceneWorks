@@ -1,0 +1,103 @@
+mlx-gen
+Copyright 2026 Michael Trefry and the mlx-gen contributors
+
+This product is licensed under the Apache License, Version 2.0. A copy of the
+license is provided in the LICENSE file.
+
+mlx-gen is an independent, from-scratch Rust reimplementation of on-device MLX
+inference for generative image and video models. No source code from the
+projects listed below is copied into the shipped Rust crates; they are
+gratefully acknowledged as the architectural lineage, references, and parity
+baselines it was developed against:
+
+(The one exception — a numerical routine deliberately ported rather than
+reimplemented — is recorded under "Ported third-party source" below.)
+
+  * Apple MLX               https://github.com/ml-explore/mlx           (MIT)
+  * mlx-rs                  https://crates.io/crates/mlx-rs             (Apache-2.0 OR MIT)
+  * mflux (Filip Strand)    https://github.com/filipstrand/mflux        (MIT)
+  * Apple mlx-examples      https://github.com/ml-explore/mlx-examples  (MIT)
+  * Hugging Face Diffusers  https://github.com/huggingface/diffusers    (Apache-2.0)
+
+Ported third-party source (IN the shipped Rust crates)
+-----------------------------------------------------
+
+  * LTX-2.5 Gemma 4 system prompts             (LTX-2.x Community License Agreement)
+    Copyright Lightricks Ltd.
+    `mlx-gen-ltx/src/prompts/gemma4_{t2v,i2v}_system_prompt.txt` are copied verbatim from
+    Lightricks/LTX-2 v1.2.0 at commit
+    d151147788a9284cca791edc6ce898007e727fe6. Provenance and the applicable license pointer are
+    recorded beside the assets in `mlx-gen-ltx/src/prompts/README.md`; the containing crate's
+    Apache-2.0 declaration does not relicense them.
+
+  * Cephes Math Library Release 2.8          (BSD 3-Clause)
+    Copyright 1984, 1987, 1988, 1992, 2000 by Stephen L. Moshier.
+    Grant text states: Copyright (c) 2018, Steven Moshier. All rights reserved.
+    Full licence: `LICENSE-CEPHES` (beside this file).
+
+    `mlx-gen-mage/src/latent.rs` (module `latent::cephes`) contains a Rust port
+    of the Cephes double-precision `ndtri` (inverse normal CDF) and `erf`/`erfc`
+    routines, including their coefficient tables verbatim. This is production
+    code and DOES ship in binary bundles.
+
+    Grant relied upon: PyTorch redistributes these routines under the
+    "3-Clause BSD License for the Cephes Math Library" (see
+    `aten/src/ATen/native/Math.h`, note `[3-Clause BSD License for the Cephes
+    Math Library]`); this port follows `calc_ndtri` from that file and the
+    matching Cephes `ndtr.c` for `erf`/`erfc`.
+
+    Why ported and not reimplemented: `mage_latent.encode_noise` derives every
+    latent entry through `torch.special.ndtri`, so the watermark's *values*
+    depend on this exact approximation. An independent implementation would be
+    bit-different and the ported result would not match the parity golden.
+
+    BSD 3-Clause clauses 1 and 2 require the copyright notice, the list of
+    conditions AND the disclaimer to accompany source and binary
+    redistributions alike. This entry is the attribution record only — it does
+    not itself reproduce the conditions or the disclaimer. Those are reproduced
+    verbatim in `LICENSE-CEPHES` beside this file, which is the artifact that
+    must travel with any redistribution; `mlx-gen-mage/src/latent.rs` carries
+    the same pointer in source.
+
+Vendored third-party source (NOT shipped)
+-----------------------------------------
+
+One frozen third-party reference implementation IS redistributed with this
+crate, under `_vendor/`. It is a dev-only parity oracle: it is Python, it is
+never imported by any Rust crate, and it is not part of any shipped bundle.
+
+  * Mage-Flow reference     https://github.com/microsoft/Mage           (MIT)
+    `_vendor/mage_flow/` — verbatim copy of the `mage_flow/` package at commit
+    df7f84d9f8fc991d189d929f03cff623b430a4a2, redistributed under the MIT
+    license reproduced at `_vendor/mage_flow/LICENSE`.
+    Copyright (c) 2026 Microsoft. See `_vendor/VENDORED.md` for provenance,
+    the pinned reference environment, and what was excluded.
+
+Derived third-party goldens (test fixtures, NOT shipped)
+-------------------------------------------------------
+
+Some parity tests are gated by a committed "golden" fixture: numbers produced by
+running a third-party reference implementation once and freezing the result. No
+third-party *source* is copied for these — the generator scripts fetch the
+reference at a pinned revision at run time — but the fixtures ARE numerical
+output of that reference, so they are recorded here. They are dev-only: they
+live under `tests/fixtures/`, are read only by `#[test]` code, and are not part
+of any shipped bundle.
+
+  * Krea Realtime Video     https://huggingface.co/krea/krea-realtime-video
+                                                                (Apache-2.0)
+    `mlx-gen-krea-realtime/tests/fixtures/causal_ar_golden.safetensors` — the
+    reference block-causal attention mask plus the velocities of a 3-chunk
+    autoregressive forward through `transformer/causal_model.py`'s
+    `CausalWanModel`, at a small random-weight configuration (dim 64, 2 layers;
+    NOT the released checkpoint — no model weights are involved). Generated by
+    `mlx-gen-krea-realtime/tools/dump_causal_ar_golden.py` against revision
+    6b5d204f9d14c3c3a59608e49d1da7fad90daf8d, which that script pins and
+    records; it also documents every substitution it makes to the reference
+    source before executing it. Copyright the Krea AI authors and — for the
+    Wan 2.1 lineage `causal_model.py` derives from — the Alibaba Wan Team; used
+    under Apache-2.0. Consumed by
+    `mlx-gen-krea-realtime/tests/causal_ar_torch_golden.rs` (sc-15064).
+
+Model weights are not distributed with mlx-gen and remain subject to the
+licenses of their respective providers.

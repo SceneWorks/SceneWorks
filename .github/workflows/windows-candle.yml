@@ -159,6 +159,11 @@ on:
   # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
+      run_imported_nvfp4_proof:
+        description: "Run only the fixed imported NVFP4 model proof at this selected ref (manual only)"
+        required: false
+        type: boolean
+        default: false
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -339,7 +344,7 @@ on:
 # per-listener Cargo cache across jobs -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
 concurrency:
-  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && !(inputs.provision_snapshot && !inputs.run_five_rung_reference) && format('guarded-cuda-{0}-{1}', github.run_id, github.run_attempt) || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -347,12 +352,12 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) }}
-    # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
-    # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
-    # runs retain a unique group and therefore the full four-listener pool.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof) }}
+    # Actions keys retain each guarded execution request; they are not GPU mutexes.
+    # Actual GPU execution takes the shared host-global UUID lease and owned Windows Job.
+    # Pure file provisioning retains its existing compatibility group.
     concurrency:
-      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}
+      group: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt) }}
       cancel-in-progress: false
     # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
@@ -369,6 +374,7 @@ jobs:
     # job simply queues for a box that has the weights.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
+      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
       # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
@@ -820,10 +826,15 @@ jobs:
       - name: Test the candle GPU worker (backend-candle)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
+        env:
+          SCENEWORKS_CUDA_KERNEL_REQUIRED: "1"
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle
+          cargo test -p sceneworks-worker --features backend-candle --no-run
+          if errorlevel 1 exit /b 1
+          python -I scripts/ci/windows_cuda_execution.py --actor ordinary-worker-tests --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- cargo test -p sceneworks-worker --features backend-candle
+          if errorlevel 1 exit /b 1
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
       # compile) and typechecks the full graph, so a candle sidecar build break is
@@ -891,7 +902,8 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           echo .calibration/>>.git\info\exclude
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          node scripts\memory-calibration-harness.mjs capture --plan config\memory-calibration-plan.json --anchor krea_2_turbo:q4:candle --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-21714-candle-anchor.json"
+          python -I scripts/ci/windows_cuda_execution.py --actor krea-anchor --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- node scripts\memory-calibration-harness.mjs capture --plan config\memory-calibration-plan.json --anchor krea_2_turbo:q4:candle --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-21714-candle-anchor.json"
+          if errorlevel 1 exit /b 1
           node scripts\memory-calibration-harness.mjs check --input "%RUNNER_TEMP%\sc-21714-candle-anchor.json"
       - name: Upload the raw schema-checked Candle Krea anchor
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
@@ -960,6 +972,14 @@ jobs:
       # since a platform-branched string there would make the two lanes flip one line back and forth
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
+      - name: Upload physical CUDA execution receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-execution-candle-worker-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
+          if-no-files-found: warn
+
       - name: Verify capabilities.candle.json content against a fresh dump
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         id: verify_candle_capabilities
@@ -1105,7 +1125,8 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           nvidia-smi
-          cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor ltx-eros --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1
+          if errorlevel 1 exit /b 1
       - name: Encode and verify the LTX Eros evidence bundle
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
         shell: powershell
@@ -1397,7 +1418,8 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           echo .terminal/>>.git\info\exclude
-          node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
+          python -I scripts/ci/windows_cuda_execution.py --actor epic-20738-terminal --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
+          if errorlevel 1 exit /b 1
       - name: Upload every epic-20738 terminal receipt
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1425,14 +1447,20 @@ jobs:
             throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
           }
 
+
+      - name: Upload manual physical CUDA execution receipts
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-execution-candle-worker-manual-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
+          if-no-files-found: warn
+
   imported-nvfp4-worker-smoke:
-    # Real weights are required for this one executable acceptance (sc-21716). Keep it separate
-    # from candle-worker so ordinary compile/test traffic retains the full four-runner CUDA pool;
-    # the dependency orders this run, and the fixed group excludes other runs that use real weights.
-    needs: candle-worker
-    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof }}
+    # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
-      group: windows-candle-gpu-real-weights
+      group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 120
@@ -1444,9 +1472,25 @@ jobs:
       HF_HUB_CACHE: 'E:\huggingface\hub'
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+      MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+      MODEL_PROOF_RESOURCE_DIR: '${{ runner.temp }}\imported-nvfp4-resource-${{ github.run_id }}-${{ github.run_attempt }}'
       SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse combined imported NVFP4 proof profiles
+        shell: powershell
+        env:
+          FIVE_RUNG: ${{ inputs.run_five_rung_reference }}
+          PROVISION: ${{ inputs.provision_snapshot }}
+          LTX_EROS: ${{ inputs.run_ltx_eros_acceptance }}
+          EPIC_20738: ${{ inputs.run_epic_20738_terminal_cuda }}
+          YUE2: ${{ inputs.run_yue2_terminal_cuda }}
+          YUE2_ACCEPTANCE: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8: ${{ inputs.yue2_fp8_profile_only }}
+          IRIS: ${{ inputs.run_iris_worker_smoke }}
+        run: |
+          $otherProfiles = @($env:FIVE_RUNG, $env:PROVISION, $env:LTX_EROS, $env:EPIC_20738, $env:YUE2, $env:YUE2_ACCEPTANCE, $env:YUE2_FP8, $env:IRIS)
+          if ($otherProfiles -contains 'true') { throw 'run_imported_nvfp4_proof cannot be combined with another manual measurement profile' }
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
         shell: powershell
@@ -1462,6 +1506,8 @@ jobs:
         run: |
           node scripts/select-windows-cargo-cache.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Test the fixed proof parser without running a model
+        run: node --test scripts/ci/imported-nvfp4-proof.test.mjs
       - name: Fetch the pinned inference release for the imported NVFP4 smoke
         env:
           CARGO_NET_OFFLINE: "false"
@@ -1471,7 +1517,14 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+          python -I scripts/ci/imported-nvfp4-cuda-guard.py
+      - name: Upload only bounded owned model-validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: imported-nvfp4-worker-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MODEL_PROOF_OUTPUT_DIR }}/artifact
+          if-no-files-found: error
 
   # SC-23002 (epic 22988) terminal evidence for YuE2 on CUDA: the acceptance matrix through the real
   # app (the release API built with backend-candle, a worker from the same binary, the registered
@@ -1487,15 +1540,16 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.run_imported_nvfp4_proof }}
     concurrency:
-      group: windows-candle-gpu-real-weights
+      group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-yue2-terminal-cuda
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     # One release build and the acceptance matrix (a cold install with q8/q4 derivation and a few
     # dozen short renders); the default full dispatch adds six serial profile captures.
     timeout-minutes: 720
     env:
+      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: "720"
       CUDA_COMPUTE_CAP: "120"
       CARGO_NET_OFFLINE: "true"
       YUE2_TERMINAL_STATE: 'E:\sceneworks-terminal\sc-23002-yue2\${{ github.run_id }}-${{ github.run_attempt }}'
@@ -1581,7 +1635,8 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
+          python -I scripts/ci/windows_cuda_execution.py --actor yue2-acceptance --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 --probe-visible 0 -- node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
+          if errorlevel 1 exit /b 1
       - name: Install YuE2 for the single FP8 profile case (not acceptance)
         if: ${{ inputs.yue2_fp8_profile_only }}
         id: yue2_fp8_install
@@ -1590,7 +1645,8 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --profile-install-only --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
+          python -I scripts/ci/windows_cuda_execution.py --actor yue2-install --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 --probe-visible 0 -- node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --profile-install-only --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
+          if errorlevel 1 exit /b 1
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)
@@ -1604,7 +1660,8 @@ jobs:
           set HF_HUB_CACHE=
           set HUGGINGFACE_HUB_CACHE=
           set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
-          node scripts\yue2-memory-profile.mjs run --backend cuda --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+          python -I scripts/ci/windows_cuda_execution.py --actor yue2-profile --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 --probe-visible 0 -- node scripts\yue2-memory-profile.mjs run --backend cuda --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+          if errorlevel 1 exit /b 1
       - name: Capture only the experimental FP8 CUDA profile case
         if: ${{ inputs.yue2_fp8_profile_only && steps.yue2_fp8_install.outcome == 'success' }}
         id: yue2_fp8_profile
@@ -1616,7 +1673,8 @@ jobs:
           set HF_HUB_CACHE=
           set HUGGINGFACE_HUB_CACHE=
           set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
-          node scripts\yue2-memory-profile.mjs capture --case yue2:bf16:cuda:experimental-fp8-ar --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+          python -I scripts/ci/windows_cuda_execution.py --actor yue2-fp8-profile --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 --probe-visible 0 -- node scripts\yue2-memory-profile.mjs capture --case yue2:bf16:cuda:experimental-fp8-ar --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+          if errorlevel 1 exit /b 1
       - name: Verify the single FP8 profile record
         if: ${{ inputs.yue2_fp8_profile_only && steps.yue2_fp8_profile.outcome == 'success' }}
         id: yue2_fp8_verify
@@ -1689,15 +1747,24 @@ jobs:
   # two `image_upscale` jobs with `engine: "iris"` (a 6-tile 4x and a 1x restore) from the task's own
   # `upscaler/` export of the same snapshot, run sequentially (`--test-threads=1`).
   #   gh workflow run windows-candle.yml --ref <branch> -f run_iris_worker_smoke=true
+      - name: Upload physical CUDA execution receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-execution-yue2-terminal-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
+          if-no-files-found: warn
+
   iris-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.run_imported_nvfp4_proof }}
     concurrency:
-      group: windows-candle-gpu-real-weights
+      group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-iris-worker-smoke
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 120
     env:
+      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: "120"
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       CUDA_VISIBLE_DEVICES: ${{ inputs.iris_smoke_cards || '1' }}
       CUDA_COMPUTE_CAP: "120"
@@ -1742,7 +1809,8 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor iris-worker --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals all -- cargo test -p sceneworks-worker --features backend-candle --release %IRIS_SMOKE_FILTER% -- --ignored --nocapture --test-threads=1
+          if errorlevel 1 exit /b 1
       # SC-25686: one bounded Iris LoRA `lora_train` job through the production executor (8 steps,
       # 256²), then the trained adapter applied by an `image_generate` job (same snapshots, offline).
       # SC-25687 / SC-25688: the same filter selects `iris_training_gpu_smoke_depth` (a 4-step depth
@@ -1766,7 +1834,8 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1 --skip iris_two_card_distributed_smoke
+          python -I scripts/ci/windows_cuda_execution.py --actor iris-training --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals all -- cargo test -p sceneworks-worker --features backend-candle --release %IRIS_TRAINING_FILTER% -- --ignored --nocapture --test-threads=1 --skip iris_two_card_distributed_smoke
+          if errorlevel 1 exit /b 1
       # SC-25690 (epic 25678 acceptance 5): REAL two-GPU distributed training through the job path —
       # DDP on two cards canceled after a durable checkpoint and resumed, a killed rank failing the
       # job typed, and FSDP on two cards. Each rank's card is read from the run (its own pid's
@@ -1782,4 +1851,12 @@ jobs:
           echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1
+          python -I scripts/ci/windows_cuda_execution.py --actor iris-two-card --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals all -- cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1
+          if errorlevel 1 exit /b 1
+      - name: Upload physical CUDA execution receipts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-execution-iris-worker-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
+          if-no-files-found: warn

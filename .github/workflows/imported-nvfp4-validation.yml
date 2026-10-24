@@ -1,0 +1,64 @@
+name: Imported NVFP4 worker validation
+
+# Real model inference is opt-in, never ordinary PR/main CI.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  imported-nvfp4-worker-smoke:
+    # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
+    concurrency:
+      group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+      MODEL_PROOF_RESOURCE_DIR: '${{ runner.temp }}\imported-nvfp4-resource-${{ github.run_id }}-${{ github.run_attempt }}'
+      SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the imported NVFP4 smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Test the fixed proof parser without running a model
+        run: node --test scripts/ci/imported-nvfp4-proof.test.mjs
+      - name: Fetch the pinned inference release for the imported NVFP4 smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the imported NVFP4 worker smoke
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          python -I scripts/ci/imported-nvfp4-cuda-guard.py
+      - name: Upload only bounded owned model-validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: imported-nvfp4-worker-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MODEL_PROOF_OUTPUT_DIR }}/artifact
+          if-no-files-found: error

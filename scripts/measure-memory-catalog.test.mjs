@@ -5309,6 +5309,9 @@ async function stubCheckout() {
 function stubContext({ root, workDir }, overrides = {}) {
   return {
     root, workDir, inferencePin: REVISION, campaignDir: "docs/calibration/sc-stub",
+    // These children are scripted JSON/telemetry fixtures, never model execution. Actual kernel
+    // ownership is independently tested in apple-metal-execution-lock.test.mjs on private files.
+    withMetalExecutionLease: async (_budget, work) => work(),
     campaignPrefix: "docs/calibration/sc-stub", state: { commits: [], halt: null },
     args: { adapter: JSON.stringify([process.execPath, "stub-adapter.mjs"]), inferenceRepo: root, commit: true, campaign: "sc-stub" },
     ...overrides,
@@ -7505,26 +7508,25 @@ test("a contaminated GPU is named by process and aborts the walk after a streak,
   assert.match(halt, /contaminated HOST/);
 });
 
-test("the campaign's GPU preflight step runs before the walk and only ever reaps our own binaries", async () => {
-  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
-  // Scoped to the CANDLE job: the mlx job above it walks with `run.sh` too, and there is no
-  // nvidia-smi on a Mac to census with.
+function assertOwnedCudaWalk(workflow) {
   const candle = workflow.slice(workflow.indexOf("\n  candle:"));
-  assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "the candle job was located");
-  const preflight = candle.indexOf("scripts/ci/memory-catalog/gpu-preflight.sh");
-  const walk = candle.indexOf("scripts/ci/memory-catalog/run.sh");
-  assert.ok(preflight > -1, "the candle job censuses the GPU before it spends an hour on a dirty one");
-  assert.ok(preflight < walk, "and it does so BEFORE the walk");
-  assert.ok(!workflow.slice(0, workflow.indexOf("\n  candle:")).includes("gpu-preflight.sh"));
-
-  const script = await readFile(path.join(ROOT, "scripts/ci/memory-catalog/gpu-preflight.sh"), "utf8");
-  assert.match(script, /--query-compute-apps=pid,process_name,used_memory/);
-  assert.match(script, /-i "\$CUDA_VISIBLE_DEVICES"/, "the census stays on the profiled device");
-  // Ours BY NAME. Never an arbitrary pid: this box serves other self-hosted lanes.
-  assert.match(script, /\*memory-candle-adapter\* \| \*memory-mlx-adapter\*/);
-  assert.match(script, /::error title=Profiled GPU is not idle/);
-  // The classification the engine makes: type C is contamination, C+G and G are desktop contexts.
-  assert.match(script, /nvidia-smi pmon "\$\{device_args\[@\]\}" -c 1 -s um/);
+  assert.ok(candle.includes("self-hosted, Windows, X64, cuda"), "actual shared Windows job required");
+  assert.doesNotMatch(candle, /gpu-preflight\.sh/, "no name-based reap or CVD-as-NVML-index census before/inside owned walk");
+  assert.match(candle, /windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- bash scripts\/ci\/memory-catalog\/run\.sh/,
+    "actual inherited CUDA ordinal UUID guard must own the WHOLE unchanged walk");
+  assert.match(candle, /CUDA_VISIBLE_DEVICES: "1"/, "original device choice is not retargeted");
+  assert.doesNotMatch(candle, /--physical-indices 1/, "legacy CUDA ordinal is not guessed as NVML index");
+}
+test("catalog walk uses exact-UUID owned lifetime instead of destructive name-based preflight", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  assertOwnedCudaWalk(workflow);
+  const beforeWalk = workflow.indexOf("      - name: Walk the catalog\n", workflow.indexOf("\n  candle:"));
+  const broadKill = workflow.slice(0, beforeWalk) + "      - name: unsafe reap\n        run: bash scripts/ci/memory-catalog/gpu-preflight.sh\n" + workflow.slice(beforeWalk);
+  assert.throws(() => assertOwnedCudaWalk(broadKill), /name-based reap/);
+  const unguarded = workflow.replace(/python -I scripts\/ci\/windows_cuda_execution\.py --actor memory-catalog-candle --budget-minutes [0-9]+ --cuda-ordinals 0 -- /, "");
+  assert.throws(() => assertOwnedCudaWalk(unguarded), /WHOLE unchanged walk/);
+  const wrongBinding = workflow.replace("--cuda-ordinals 0 -- bash", "--physical-indices 1 -- bash");
+  assert.throws(() => assertOwnedCudaWalk(wrongBinding), /WHOLE unchanged walk/);
 });
 
 // A fake `nvidia-smi` on PATH, plus the two externals the reap path shells out to. `sleep` and
