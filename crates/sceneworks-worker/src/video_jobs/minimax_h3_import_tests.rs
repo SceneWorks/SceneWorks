@@ -1124,7 +1124,7 @@ fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
 
 #[test]
 fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
-    for layout in ["dense", "native", "sharded", "convrot"] {
+    for layout in ["dense", "native", "sharded", "convrot", "pruned"] {
         let data = tempfile::tempdir().unwrap();
         let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
             data.path(),
@@ -1378,5 +1378,82 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
             "a complete mutable main cannot rescue a torn bound snapshot"
         );
         assert!(probe.spec.lock().unwrap().is_none());
+    }
+}
+
+#[test]
+fn pruned_source_reaches_provider_with_source_bound_identity_for_every_partition() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_imported_minimax_h3_dit, verify_imported_h3_pruning_directory,
+    };
+    for partition in ["fl2va", "ref2va", "hybrid"] {
+        let data = tempfile::tempdir().unwrap();
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            "source_owned_pruned",
+            "pruned",
+            partition,
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let request = imported_minimax_h3_request("source_owned_pruned", &imported.entry);
+        let provider = resolve_imported_minimax_h3_dit(&request, &settings).unwrap();
+        let pruning = provider.pruning.as_ref().expect("complete pruning binding");
+        assert_eq!((pruning.grid, pruning.rank), (1025, 8));
+        assert_eq!(provider.partition.as_str(), partition);
+        assert_eq!(provider.assembly["adalnPruning"], pruning.to_json());
+        assert_ne!(
+            canonical(&provider.transformer_dir),
+            canonical(&imported.install_dir),
+            "even canonical pruning sources use a content-addressed provider path"
+        );
+        verify_imported_h3_pruning_directory(&provider.transformer_dir, Some(pruning)).unwrap();
+
+        let foreign = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            "foreign_source_owned_pruned",
+            "pruned-other",
+            partition,
+        );
+        let foreign_provider = resolve_imported_minimax_h3_dit(
+            &imported_minimax_h3_request("foreign_source_owned_pruned", &foreign.entry),
+            &settings,
+        )
+        .unwrap();
+        assert_ne!(
+            pruning.identity,
+            foreign_provider.pruning.as_ref().unwrap().identity
+        );
+        assert_ne!(provider.transformer_dir, foreign_provider.transformer_dir);
+        assert!(verify_imported_h3_pruning_directory(
+            &foreign_provider.transformer_dir,
+            Some(pruning)
+        )
+        .is_err());
+
+        for binding in [
+            Value::Null,
+            foreign.entry["importPlan"]["assembly"]["adalnPruning"].clone(),
+        ] {
+            let mut forged = imported.entry.clone();
+            if binding.is_null() {
+                forged["importPlan"]["assembly"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("adalnPruning");
+            } else {
+                forged["importPlan"]["assembly"]["adalnPruning"] = binding;
+            }
+            assert!(
+                resolve_imported_minimax_h3_dit(
+                    &imported_minimax_h3_request("source_owned_pruned", &forged),
+                    &settings,
+                )
+                .is_err(),
+                "missing or same-shaped foreign pruning data refuses before provider loading"
+            );
+        }
     }
 }
