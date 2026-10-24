@@ -195,6 +195,8 @@ pub struct MiniMaxH3ImportAssembly {
     pub descriptor_layer_ids: Vec<String>,
     /// Native encoding proven by the complete inventory, never by an approximate header hint.
     pub source_encoding: Option<String>,
+    /// Complete source table/basis identity and source/compute precision geometry, when pruned.
+    pub pruning: Option<crate::minimax_h3_codec::H3PruningBinding>,
 }
 
 impl MiniMaxH3ImportAssembly {
@@ -271,6 +273,11 @@ impl MiniMaxH3ImportAssembly {
             Some(Value::String(value)) if value == "convrot_int8" => Some(value.clone()),
             Some(_) => return Err("unknown MiniMax-H3 source encoding in plan context".into()),
         };
+        let pruning = plan
+            .context
+            .get("adalnPruning")
+            .map(crate::minimax_h3_codec::H3PruningBinding::from_value)
+            .transpose()?;
         Ok(Self {
             partition: MiniMaxH3Partition::from_entry(entry)?,
             transformer_layer_id: transformer.layer_id.clone(),
@@ -278,6 +285,7 @@ impl MiniMaxH3ImportAssembly {
             transformer_dir,
             descriptor_layer_ids,
             source_encoding,
+            pruning,
         })
     }
 
@@ -320,6 +328,9 @@ impl MiniMaxH3ImportAssembly {
         });
         if let Some(encoding) = &self.source_encoding {
             binding["sourceEncoding"] = json!(encoding);
+        }
+        if let Some(pruning) = &self.pruning {
+            binding["adalnPruning"] = pruning.to_json();
         }
         binding
     }
@@ -415,6 +426,18 @@ pub fn verify_entry_assembly(
         ));
     }
     Ok(assembly)
+}
+
+/// Bind the plan's pruning declaration to the complete source inventory actually pinned for load.
+/// Same-shaped foreign tables, reduced weights, folded biases or precision metadata cannot reuse it.
+pub fn verify_imported_pruning(
+    assembly: &MiniMaxH3ImportAssembly,
+    inventory: &crate::minimax_h3_codec::H3SourceInventory,
+) -> Result<(), String> {
+    if assembly.pruning != inventory.pruning {
+        return Err("MiniMax-H3 source pruning identity/topology no longer matches its import plan; rescan or re-import the checkpoint".into());
+    }
+    Ok(())
 }
 
 /// Stamp a compiled dense H3 DiT import onto its catalog entry: the video type, the source shape,

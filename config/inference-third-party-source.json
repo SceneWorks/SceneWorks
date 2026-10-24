@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 20347e87 (epic sc-26679 direct pruned AdaLN): 786 provenance candidates and 117 production-Rust crate prefixes. The source-preserving native MLX/CUDA implementation and deterministic synthetic numerical fixtures add no embedded model/table payload or runtime Python dependency. Existing source/license classifications and advisory compliance items remain unchanged. Historical measurement and provenance receipts retain their recorded revisions; this generated source inventory is not a measurement-currency assertion.",
-  "inferenceRevision": "20347e873d4d4f35b6b20f5aac665027a771559a",
-  "auditDigest": "e72d48cca73e2814b7ecaf30a3b23627bb42f95a7befad6423696f50e2b834d0",
+  "_comment": "Audit inventory reviewed at inference revision f28f257a (epic sc-26679 direct pruned AdaLN and source-memory correction): 786 provenance candidates and 117 production-Rust crate prefixes. Header-only source sizing and deterministic synthetic numerical/memory fixtures add no embedded model/table payload or runtime Python dependency; native arithmetic is unchanged by the memory correction. Existing source/license classifications and advisory compliance items remain unchanged. Historical measurement and provenance receipts retain their recorded revisions; this generated source inventory is not a measurement-currency assertion.",
+  "inferenceRevision": "f28f257ac4e00b9817cc486d75e24ee541e26a13",
+  "auditDigest": "d2d4dfa381032e29d1ea08606197f904ac7f58631c44ea929759d9d1b3c7113b",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "20347e873d4d4f35b6b20f5aac665027a771559a",
+    "revision": "f28f257ac4e00b9817cc486d75e24ee541e26a13",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "a8743b4db0cb0108cf0c068c4d18574a9740b2e525e8ce8d9cc21baae617b892"
+    "populationSha256": "75196b74139423fe338b4dbe227bd8c5d23d45fc0e0ba01c89931db0f16adc59"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "20347e873d4d4f35b6b20f5aac665027a771559a",
+    "revision": "f28f257ac4e00b9817cc486d75e24ee541e26a13",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"

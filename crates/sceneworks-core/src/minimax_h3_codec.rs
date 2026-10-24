@@ -394,7 +394,7 @@ impl H3PruningBinding {
                 self.compute_bytes
             ));
         }
-        if self.compute_bytes % 4 != 0 {
+        if !self.compute_bytes.is_multiple_of(4) {
             return Err(format!(
                 "H3 AdaLN pruning binding: computeBytes {} is not whole F32 elements",
                 self.compute_bytes
@@ -407,7 +407,7 @@ impl H3PruningBinding {
                 self.compute_bytes, self.source_bytes
             ));
         }
-        if self.source_bytes % 2 != 0 {
+        if !self.source_bytes.is_multiple_of(2) {
             return Err(format!(
                 "H3 AdaLN pruning binding: sourceBytes {} is not a whole operand byte count",
                 self.source_bytes
@@ -424,11 +424,13 @@ impl H3PruningBinding {
 
 /// The complete engine identity hex string, lowercase, one byte at a time.
 fn pruning_identity_hex(identity: PruningIdentity) -> String {
-    identity
-        .0
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(64);
+    for byte in identity.0 {
+        hex.push(DIGITS[(byte >> 4) as usize] as char);
+        hex.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    hex
 }
 
 /// An iterable F32 view over one stored canonical operand. Reads stay inside one fixed chunk; the
@@ -558,7 +560,7 @@ struct Tensor {
     ranges: Vec<(u64, u64)>,
 }
 
-/// Verified source inventory and exact copy schedule. Header-only memory; no tensor payloads.
+/// Verified copy schedule; pruning values are streamed through bounded buffers, never retained.
 #[derive(Debug, Clone)]
 pub struct H3SourceInventory {
     pub config: H3Config,
@@ -883,7 +885,7 @@ impl H3SourceInventory {
         Ok(Self {
             config,
             native,
-            requires_normalization,
+            requires_normalization: requires_normalization || pruning.is_some(),
             convrot_int8: tensors.keys().any(|key| key.ends_with(".comfy_quant")),
             pruning,
             sources,
@@ -1004,7 +1006,7 @@ const TIME_MLP_NAMES: [(&str, &str); 4] = [
 fn pruning_geometry(physical: &H3Physical<'_>) -> Result<Option<(usize, usize)>, String> {
     let mut geometry = None;
     for (key, (_, entry)) in physical {
-        if strip_prefix(*key) != TABLE_KEY {
+        if strip_prefix(key) != TABLE_KEY {
             continue;
         }
         if entry.get("dtype").and_then(Value::as_str) != Some("F32") {
@@ -1035,7 +1037,7 @@ fn pruning_geometry(physical: &H3Physical<'_>) -> Result<Option<(usize, usize)>,
     if geometry.is_some() {
         for (canonical, native_spelling) in TIME_MLP_NAMES {
             if physical.keys().any(|key| {
-                let key = strip_prefix(*key);
+                let key = strip_prefix(key);
                 key == canonical || key == native_spelling
             }) {
                 return Err(format!(

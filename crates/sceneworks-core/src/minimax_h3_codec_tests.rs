@@ -1229,6 +1229,10 @@ fn pruned_identity_equals_shared_engine_builder_across_layouts_and_stored_precis
         let shard_dir = tempfile::tempdir().unwrap();
         let files = write_pruned_shards(shard_dir.path(), "pruned-shards", &entries);
         let sharded = H3SourceInventory::from_files(&files).unwrap();
+        assert!(
+            sharded.requires_normalization,
+            "canonical pruned sources still need source-identity-addressed provider paths"
+        );
         identities.push(sharded.pruning.clone().expect("reduced topology").identity);
         assert!(
             identities
@@ -1341,8 +1345,11 @@ fn malformed_pruned_topologies_refuse_before_publication() {
     );
 
     let mut entries = base.clone();
-    entries.get_mut(TABLE_KEY).unwrap().1 = "BF16".into();
-    assert!(canonical_pruned_error(&entries).contains("must be stored F32"));
+    let table = entries.get_mut(TABLE_KEY).unwrap();
+    table.1 = "BF16".into();
+    table.2 = stored_bytes("BF16", 1, table.0.iter().product());
+    let error = canonical_pruned_error(&entries);
+    assert!(error.contains("must be stored F32"), "{error}");
 
     let mut entries = base.clone();
     entries.remove("transformer_blocks.0.adaln_proj.linear.bias");
@@ -1353,10 +1360,11 @@ fn malformed_pruned_topologies_refuse_before_publication() {
     );
 
     let mut entries = base.clone();
-    entries
+    let weight = entries
         .get_mut("transformer_blocks.0.adaln_proj.linear.weight")
-        .unwrap()
-        .0[1] = PRUNED_RANK + 1;
+        .unwrap();
+    weight.0[1] = PRUNED_RANK + 1;
+    weight.2 = stored_bytes("BF16", 2, weight.0.iter().product());
     let error = canonical_pruned_error(&entries);
     assert!(
         error.contains("transformer_blocks.0.adaln_proj.linear.weight")
