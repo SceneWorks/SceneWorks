@@ -326,6 +326,7 @@ mod krea_control_fit;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod conditioning_fit;
 use supervisor::*;
+mod converted_install;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
 // The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert

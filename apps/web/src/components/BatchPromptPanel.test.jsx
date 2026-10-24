@@ -64,6 +64,14 @@ describe("BatchPromptPanel (sc-9955)", () => {
   const mount = (props) => act(() => root.render(<Harness {...props} />));
   const varKeys = () => [...document.body.querySelectorAll(".batch-var-key")].map((el) => el.textContent);
 
+  it("updates the ratio preview when model or device resolution options change", async () => {
+    await mount({ initialPrompts: "[16:9] a landscape", extra: { resolutionOptions: ["1280x720", "1920x1080"] } });
+    expect(container.querySelector(".batch-preview-res").textContent).toBe("1920×1080");
+    await mount({ initialPrompts: "[16:9] a landscape", extra: { resolutionOptions: ["1024x1024"] } });
+    expect(container.querySelector(".batch-preview-res").textContent).toBe("1024×1024");
+    expect(container.querySelector(".batch-preview-text").textContent).toBe("a landscape");
+  });
+
   it("renders a chip editor per unique {{key}} referenced in the prompts", () => {
     mount({ initialPrompts: "{{name}} with {{hair}} hair\n{{name}} smiling" });
     expect(varKeys()).toEqual(["{{name}}", "{{hair}}"]);

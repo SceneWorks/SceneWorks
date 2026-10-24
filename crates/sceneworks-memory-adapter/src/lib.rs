@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "a0ddfd180909f1581016f4b8b521d50238a8e1a0";
+pub const INFERENCE_PIN: &str = "81cff07c13137fea520cec0b1dc9b8f083514601";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
@@ -353,6 +353,596 @@ pub fn iris_weights_root_at(
     }
     Ok((repository, revision, root))
 }
+// ---------------------------------------------------------------------------------------------
+// Supra2-IMG (sc-24217, epic 24212): the shared half of the `mlx_supra2` / `candle_supra2` arms.
+// ---------------------------------------------------------------------------------------------
+
+/// The pinned upstream repository the install converts (`gen_core::supra2::SUPRA2_SOURCE.repo`).
+pub const SUPRA2_IMG_REPOSITORY: &str = "SupraLabs/Supra2-IMG";
+/// The registry id both engines register, which is also the catalog model id.
+pub const SUPRA2_IMG_PROVIDER: &str = gen_core::supra2::PROVIDER_ID;
+/// The one tier both loaders accept: `LoadSpec::precision` `Bf16` (the f32 checkpoint's default
+/// precision; every override and every quantization is refused), which is what the worker's
+/// `plan_tier_key` and both engines' contract surfaces call `bf16`.
+pub const SUPRA2_IMG_TIER: &str = "bf16";
+/// The published request every capture renders: seed 0, 50 Euler steps, the default CFG 3.0 (the
+/// request leaves guidance unset so the engine's own default applies), at the native 256x256.
+pub const SUPRA2_IMG_SEED: u64 = gen_core::supra2::DEFAULT_SEED;
+pub const SUPRA2_IMG_STEPS: u32 = gen_core::supra2::DEFAULT_STEPS;
+/// The largest image count a SceneWorks Supra2 job renders in one call (`image_request::MAX_COUNT`;
+/// `sceneworks_core::supra2::validate_request` refuses more). The anchor is measured at count 1, the
+/// plan's single-image cell; this product maximum is rendered once more after it on the same loaded
+/// model so the record also carries the total pipeline peak and latency of the largest real job.
+pub const SUPRA2_IMG_PRODUCT_MAX_COUNT: u32 = 8;
+/// The adapter action a capture runs in a CHILD process to convert the pinned checkpoint into the
+/// native bundle, so the conversion is never inside the measured process's windows.
+pub const SUPRA2_IMG_CONVERT_ACTION: &str = "supra2_img_convert";
+/// Optional operator override for where the converted bundle lives (and is reused from). Unset, it
+/// is `<temp>/sceneworks-memory-adapter/supra2_img/<source revision>`.
+pub const SUPRA2_IMG_BUNDLE_ROOT_ENV: &str = "SCENEWORKS_SUPRA2_IMG_BUNDLE_ROOT";
+/// The prompt every Supra2 capture renders.
+pub const SUPRA2_IMG_PROMPT: &str =
+    "a portrait of a person in a sunlit studio, editorial photograph";
+
+/// The env family one lane's Supra2 arm reads. The SHAPE is shared; each arm spells its own names
+/// out, because the catalog runner's env-name binding test reads them off each lane's own sources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Supra2Envs {
+    pub repository_env: &'static str,
+    pub revision_env: &'static str,
+    pub root_env: &'static str,
+    pub text_encoder_env: &'static str,
+    pub vae_env: &'static str,
+}
+
+/// The fixture a lane's Supra2 plan row must name.
+pub fn supra2_fixture(lane: &str) -> String {
+    format!(
+        "supra2-img-{lane}-{SUPRA2_IMG_TIER}-{}-seed{SUPRA2_IMG_SEED}-step{SUPRA2_IMG_STEPS}",
+        gen_core::supra2::IMAGE_SIZE
+    )
+}
+
+/// The identity a lane's Supra2 plan row names. The pinned engines publish NO calibration identity
+/// (`compatibility_default`: "the terminal campaign measures"), so this adapter-owned string is the
+/// record's label; should a later pin publish one, the arm requires it to equal this.
+pub fn supra2_calibration_fingerprint(lane: &str) -> String {
+    format!("supra2-img-{lane}-resident-v1")
+}
+
+/// What a Supra2 capture must agree with BEFORE any environment variable or weight is read: the
+/// provider, text-to-image, the one dense tier, the single native 256x256 still, no overlay, the
+/// eager materialization shape (the loaders refuse a deferred one), the lane's own fixture and
+/// identity, and the resident rung (the only rung either contract implements).
+pub fn validate_supra2_plan(request: &Value, lane: &str) -> Result<(u32, u32), String> {
+    let label = format!("{SUPRA2_IMG_PROVIDER} calibration");
+    validate_still_geometry(request, &label)?;
+    validate_plain_overlay_target(request, "the supra2_img resident path")?;
+    let planned = planned(request)?;
+    let text = |pointer: &str| {
+        planned
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("planned{} must be a string", pointer.replace('/', ".")))
+    };
+    let provider = text("/target/provider")?;
+    if provider != SUPRA2_IMG_PROVIDER {
+        return Err(format!(
+            "the Supra2 arm measures {SUPRA2_IMG_PROVIDER}, not {provider:?}"
+        ));
+    }
+    let mode = text("/target/mode")?;
+    if mode != "text_to_image" {
+        return Err(format!(
+            "{SUPRA2_IMG_PROVIDER} is text-to-image only; no {mode:?} route exists to measure"
+        ));
+    }
+    let tier = text("/target/tier")?;
+    if tier != SUPRA2_IMG_TIER {
+        return Err(format!(
+            "{SUPRA2_IMG_PROVIDER} loads one dense checkpoint ({SUPRA2_IMG_TIER}); no {tier:?} \
+             tier exists to measure"
+        ));
+    }
+    match planned.get("loadShape").and_then(Value::as_str) {
+        Some(LOAD_SHAPE_EAGER) => {}
+        other => {
+            return Err(format!(
+                "{SUPRA2_IMG_PROVIDER} loads eagerly only (planned.loadShape {other:?}); both \
+                 loaders refuse a deferred materialization shape"
+            ))
+        }
+    }
+    match planned.pointer("/strategy/rung").and_then(Value::as_str) {
+        Some("resident") => {}
+        other => {
+            return Err(format!(
+                "{SUPRA2_IMG_PROVIDER} implements the resident rung alone; planned rung {other:?} \
+                 is refused before the load"
+            ))
+        }
+    }
+    let (width, height) = target_geometry(request)?;
+    let native = gen_core::supra2::IMAGE_SIZE;
+    if (width, height) != (native, native) {
+        return Err(format!(
+            "{SUPRA2_IMG_PROVIDER} renders its native {native}x{native} only, not {width}x{height}"
+        ));
+    }
+    let fixture = text("/fixture")?;
+    if fixture != supra2_fixture(lane) {
+        return Err(format!(
+            "planned.fixture {fixture:?} is not the {lane} Supra2 capture: expected {:?}",
+            supra2_fixture(lane)
+        ));
+    }
+    let fingerprint = text("/calibrationFingerprint")?;
+    if fingerprint != supra2_calibration_fingerprint(lane) {
+        return Err(format!(
+            "planned.calibrationFingerprint {fingerprint:?} is not the {lane} Supra2 identity {:?}",
+            supra2_calibration_fingerprint(lane)
+        ));
+    }
+    Ok((width, height))
+}
+
+/// The three validated inputs of one Supra2 capture: the pinned upstream snapshot (the convert's
+/// source) and the two pinned co-requisite snapshots the engine loads as components.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Supra2Inputs {
+    pub repository: String,
+    pub revision: String,
+    /// The canonical upstream snapshot root holding `model_final_ema.pt`.
+    pub source_root: PathBuf,
+    /// The canonical `google/flan-t5-base` snapshot (`LoadSpec::components["text_encoder"]`).
+    pub text_encoder: PathBuf,
+    /// The canonical `stabilityai/sd-vae-ft-mse` snapshot (`LoadSpec::components["vae"]`).
+    pub vae: PathBuf,
+}
+
+impl Supra2Inputs {
+    /// The one upstream file the convert reads.
+    pub fn source_file(&self) -> PathBuf {
+        self.source_root
+            .join(gen_core::supra2::SUPRA2_SOURCE.files[0].path)
+    }
+
+    /// The record's artifact block: the upstream snapshot the bundle was converted from.
+    pub fn artifact_json(&self) -> Value {
+        json!({
+            "repository": self.repository,
+            "resolvedRevision": self.revision,
+            "variant": SUPRA2_IMG_TIER,
+        })
+    }
+
+    pub fn loadability_fingerprint(&self) -> String {
+        format!("{}@{}:{SUPRA2_IMG_TIER}", self.repository, self.revision)
+    }
+}
+
+/// Resolve and validate a lane's Supra2 inputs from its env family.
+pub fn supra2_inputs(envs: Supra2Envs) -> Result<Supra2Inputs, String> {
+    supra2_inputs_at(
+        required_env(envs.repository_env)?,
+        required_env(envs.revision_env)?,
+        PathBuf::from(required_env(envs.root_env)?),
+        PathBuf::from(required_env(envs.text_encoder_env)?),
+        PathBuf::from(required_env(envs.vae_env)?),
+    )
+}
+
+/// The env-free half of [`supra2_inputs`]: the fixed upstream repository at exactly the pinned
+/// revision, its snapshot ROOT (no tier folder), and each component at exactly ITS pinned revision
+/// — so a capture can never convert or load anything but the weights production installs.
+pub fn supra2_inputs_at(
+    repository: String,
+    revision: String,
+    source_root: PathBuf,
+    text_encoder: PathBuf,
+    vae: PathBuf,
+) -> Result<Supra2Inputs, String> {
+    use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+    validate_artifact_identity(&repository, &revision, SUPRA2_IMG_REPOSITORY)?;
+    if revision != SUPRA2_SOURCE.revision {
+        return Err(format!(
+            "{SUPRA2_IMG_REPOSITORY}@{revision} is not the pinned revision {} the converter \
+             accepts",
+            SUPRA2_SOURCE.revision
+        ));
+    }
+    let canonical = |path: &Path, label: &str| {
+        std::fs::canonicalize(path).map_err(|error| {
+            format!(
+                "canonicalize the Supra2 {label} {}: {error}",
+                path.display()
+            )
+        })
+    };
+    let source_root = canonical(&source_root, "source snapshot")?;
+    validate_huggingface_revision_root(
+        &source_root,
+        &repository,
+        &revision,
+        SUPRA2_IMG_REPOSITORY,
+    )?;
+    let mut components = Vec::with_capacity(2);
+    for (path, pin, label) in [
+        (&text_encoder, &FLAN_T5_BASE, "text encoder"),
+        (&vae, &SD_VAE, "VAE"),
+    ] {
+        let root = canonical(path, label)?;
+        validate_huggingface_revision_root(&root, pin.repo, pin.revision, pin.repo).map_err(
+            |error| {
+                format!(
+                    "the Supra2 {label} is not {}@{}: {error}",
+                    pin.repo, pin.revision
+                )
+            },
+        )?;
+        components.push(root);
+    }
+    let vae = components.pop().expect("two components");
+    let text_encoder = components.pop().expect("two components");
+    Ok(Supra2Inputs {
+        repository,
+        revision,
+        source_root,
+        text_encoder,
+        vae,
+    })
+}
+
+/// Where the converted bundle for `inputs` lives: the operator override, or a per-revision folder
+/// under the system temp directory (outside every checkout).
+pub fn supra2_bundle_dir(inputs: &Supra2Inputs) -> PathBuf {
+    match std::env::var_os(SUPRA2_IMG_BUNDLE_ROOT_ENV) {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => std::env::temp_dir()
+            .join("sceneworks-memory-adapter")
+            .join(SUPRA2_IMG_PROVIDER)
+            .join(&inputs.revision),
+    }
+}
+
+/// A bundle the measured process may load: present, and passing the provider's own pin contract
+/// with every digest re-verified.
+fn supra2_bundle_is_pinned(dir: &Path) -> bool {
+    gen_core::supra2::read_pinned_bundle(dir, gen_core::supra2::BundleCheck::Digests).is_ok()
+}
+
+/// How the bundle a capture loads came to exist — recorded in the record's diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Supra2Bundle {
+    pub dir: PathBuf,
+    /// `true` when this capture's child process converted it; `false` when an already-pinned bundle
+    /// was reused.
+    pub converted: bool,
+    /// The child conversion's wall time (0 when reused).
+    pub convert_millis: u64,
+}
+
+/// The converted bundle for `inputs`, converted in a CHILD adapter process when absent or not
+/// pinned. The measured process never runs the conversion: it only verifies the result.
+pub fn ensure_supra2_bundle(inputs: &Supra2Inputs) -> Result<Supra2Bundle, String> {
+    let dir = supra2_bundle_dir(inputs);
+    if supra2_bundle_is_pinned(&dir) {
+        return Ok(Supra2Bundle {
+            dir,
+            converted: false,
+            convert_millis: 0,
+        });
+    }
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("locate this adapter binary to convert Supra2: {error}"))?;
+    let request = json!({
+        "action": SUPRA2_IMG_CONVERT_ACTION,
+        "source": inputs.source_file(),
+        "textEncoder": inputs.text_encoder,
+        "vae": inputs.vae,
+        "out": dir,
+    });
+    let started = std::time::Instant::now();
+    let mut child = std::process::Command::new(&exe)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("spawn the Supra2 conversion process: {error}"))?;
+    {
+        use std::io::Write as _;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "the Supra2 conversion process has no stdin".to_owned())?;
+        stdin
+            .write_all(request.to_string().as_bytes())
+            .map_err(|error| format!("send the Supra2 conversion request: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for the Supra2 conversion process: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "the Supra2 conversion process failed ({}); see its stderr above",
+            output.status
+        ));
+    }
+    let convert_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if !supra2_bundle_is_pinned(&dir) {
+        return Err(format!(
+            "the Supra2 conversion process exited 0 but {} does not pass the provider's pin contract",
+            dir.display()
+        ));
+    }
+    Ok(Supra2Bundle {
+        dir,
+        converted: true,
+        convert_millis,
+    })
+}
+
+/// The [`SUPRA2_IMG_CONVERT_ACTION`] body, run in the child: re-verify both pinned components,
+/// convert the pinned checkpoint into a temp sibling of `out` (gen-core's own converter, which
+/// verifies the source digest and writes the manifest last), hold the result to the provider's pin
+/// contract, then move it into place — the worker's install-time convert, step for step.
+pub fn supra2_convert(request: &Value) -> Result<Value, String> {
+    use gen_core::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
+    let path = |key: &str| {
+        request
+            .get(key)
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| format!("{SUPRA2_IMG_CONVERT_ACTION} request.{key} must be a path"))
+    };
+    let (source, text_encoder, vae, out) = (
+        path("source")?,
+        path("textEncoder")?,
+        path("vae")?,
+        path("out")?,
+    );
+    FLAN_T5_BASE
+        .verify(&text_encoder)
+        .map_err(|error| format!("Flan-T5-Base text encoder failed verification: {error}"))?;
+    SD_VAE
+        .verify(&vae)
+        .map_err(|error| format!("SD VAE ft-MSE failed verification: {error}"))?;
+    let parent = out
+        .parent()
+        .ok_or_else(|| format!("bundle dir {} has no parent", out.display()))?;
+    std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let partial = parent.join(format!(
+        ".{}.partial-{}",
+        out.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("bundle"),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&partial);
+    std::fs::create_dir_all(&partial).map_err(|error| error.to_string())?;
+    let converted = convert_pinned_checkpoint(&source, &partial)
+        .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))
+        .and_then(|_| {
+            gen_core::supra2::read_pinned_bundle(&partial, gen_core::supra2::BundleCheck::Digests)
+                .map(|_| ())
+                .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))
+        });
+    if let Err(error) = converted {
+        let _ = std::fs::remove_dir_all(&partial);
+        return Err(error);
+    }
+    if out.exists() {
+        std::fs::remove_dir_all(&out)
+            .map_err(|error| format!("replace the unpinned bundle {}: {error}", out.display()))?;
+    }
+    std::fs::rename(&partial, &out)
+        .map_err(|error| format!("move the converted bundle into {}: {error}", out.display()))?;
+    Ok(json!({ "bundle": out }))
+}
+
+#[cfg(test)]
+mod supra2_tests {
+    use super::*;
+
+    fn planned(lane: &str) -> Value {
+        json!({
+            "planned": {
+                "backend": lane,
+                "loadShape": LOAD_SHAPE_EAGER,
+                "calibrationFingerprint": supra2_calibration_fingerprint(lane),
+                "fixture": supra2_fixture(lane),
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "target": {
+                    "provider": "supra2_img",
+                    "mode": "text_to_image",
+                    "tier": "bf16",
+                    "overlay": "none",
+                    "geometry": { "width": 256, "height": 256, "batch": 1, "frames": 1 },
+                },
+            },
+        })
+    }
+
+    /// The constants the arms render with are the engine's published defaults.
+    #[test]
+    fn the_capture_request_is_the_published_default_request() {
+        assert_eq!(SUPRA2_IMG_PROVIDER, "supra2_img");
+        assert_eq!((SUPRA2_IMG_SEED, SUPRA2_IMG_STEPS), (0, 50));
+        assert_eq!(
+            SUPRA2_IMG_REPOSITORY,
+            gen_core::supra2::SUPRA2_SOURCE.repo,
+            "the record names the repository the converter pins"
+        );
+        assert_eq!(
+            supra2_fixture("mlx"),
+            "supra2-img-mlx-bf16-256-seed0-step50"
+        );
+        assert_eq!(
+            supra2_calibration_fingerprint("candle"),
+            "supra2-img-candle-resident-v1"
+        );
+        const { assert!(SUPRA2_IMG_PRODUCT_MAX_COUNT <= gen_core::supra2::MAX_IMAGES) };
+    }
+
+    /// Every row outside the one measurable cell is refused before an env var or a weight is read.
+    ///
+    /// *Mutation that reds this:* drop any one check from `validate_supra2_plan`.
+    #[test]
+    fn a_plan_row_outside_the_supra2_envelope_is_refused_before_any_weight_work() {
+        for lane in ["mlx", "candle"] {
+            assert_eq!(validate_supra2_plan(&planned(lane), lane), Ok((256, 256)));
+            for (pointer, value, needle) in [
+                (
+                    "/planned/target/provider",
+                    json!("iris_3b"),
+                    "measures supra2_img",
+                ),
+                (
+                    "/planned/target/mode",
+                    json!("edit_image"),
+                    "text-to-image only",
+                ),
+                ("/planned/target/tier", json!("q4"), "one dense checkpoint"),
+                (
+                    "/planned/target/geometry/width",
+                    json!(512),
+                    "native 256x256",
+                ),
+                (
+                    "/planned/target/geometry/batch",
+                    json!(8),
+                    "geometry.batch == 1",
+                ),
+                (
+                    "/planned/target/geometry/frames",
+                    json!(2),
+                    "geometry.frames == 1",
+                ),
+                ("/planned/target/overlay", json!("lora"), "overlay"),
+                (
+                    "/planned/loadShape",
+                    json!(LOAD_SHAPE_DEFERRED),
+                    "eagerly only",
+                ),
+                (
+                    "/planned/strategy/rung",
+                    json!("staged_residency"),
+                    "resident rung alone",
+                ),
+                ("/planned/fixture", json!("supra2-img-x"), "planned.fixture"),
+                (
+                    "/planned/calibrationFingerprint",
+                    json!("x"),
+                    "calibrationFingerprint",
+                ),
+            ] {
+                let mut bad = planned(lane);
+                *bad.pointer_mut(pointer).unwrap() = value;
+                let error = validate_supra2_plan(&bad, lane).expect_err(pointer);
+                assert!(error.contains(needle), "{lane} {pointer}: {error}");
+            }
+            // One lane's row is never the other lane's capture.
+            let other = if lane == "mlx" { "candle" } else { "mlx" };
+            validate_supra2_plan(&planned(other), lane).expect_err("the other lane's row");
+        }
+    }
+
+    fn snapshot(scratch: &Path, repo: &str, revision: &str) -> PathBuf {
+        let root = scratch
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// The source and both components bind at exactly their pinned repositories and revisions; a
+    /// swapped component, a foreign repository, another revision or a tier folder is refused.
+    ///
+    /// *Mutation that reds this:* drop the pinned-revision check, or validate a component against
+    /// the other component's pin.
+    #[test]
+    fn the_inputs_bind_only_the_pinned_snapshots() {
+        use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+        let scratch =
+            std::env::temp_dir().join(format!("sceneworks-supra2-inputs-{}", std::process::id()));
+        let source = snapshot(&scratch, SUPRA2_SOURCE.repo, SUPRA2_SOURCE.revision);
+        let te = snapshot(&scratch, FLAN_T5_BASE.repo, FLAN_T5_BASE.revision);
+        let vae = snapshot(&scratch, SD_VAE.repo, SD_VAE.revision);
+        let bind = |repository: &str, revision: &str, root: &Path, te: &Path, vae: &Path| {
+            supra2_inputs_at(
+                repository.to_owned(),
+                revision.to_owned(),
+                root.to_owned(),
+                te.to_owned(),
+                vae.to_owned(),
+            )
+        };
+        let inputs = bind(
+            SUPRA2_SOURCE.repo,
+            SUPRA2_SOURCE.revision,
+            &source,
+            &te,
+            &vae,
+        )
+        .unwrap();
+        assert_eq!(
+            inputs.source_file().file_name().unwrap(),
+            "model_final_ema.pt"
+        );
+        assert_eq!(
+            inputs.loadability_fingerprint(),
+            format!("{}@{}:bf16", SUPRA2_SOURCE.repo, SUPRA2_SOURCE.revision)
+        );
+        bind(
+            SUPRA2_SOURCE.repo,
+            SUPRA2_SOURCE.revision,
+            &source,
+            &vae,
+            &te,
+        )
+        .expect_err("swapped components");
+        bind(
+            "SceneWorks/supra2-img",
+            SUPRA2_SOURCE.revision,
+            &source,
+            &te,
+            &vae,
+        )
+        .expect_err("a foreign repository");
+        let other = "a".repeat(40);
+        let elsewhere = snapshot(&scratch, SUPRA2_SOURCE.repo, &other);
+        let error = bind(SUPRA2_SOURCE.repo, &other, &elsewhere, &te, &vae)
+            .expect_err("an unpinned revision");
+        assert!(error.contains("pinned revision"), "{error}");
+        let tiered = source.join("bf16");
+        std::fs::create_dir_all(&tiered).unwrap();
+        bind(
+            SUPRA2_SOURCE.repo,
+            SUPRA2_SOURCE.revision,
+            &tiered,
+            &te,
+            &vae,
+        )
+        .expect_err("the source is the snapshot root, never a tier folder");
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// An absent or unpinned bundle is never loadable, so the arm converts (in a child) instead.
+    #[test]
+    fn an_empty_bundle_dir_is_not_a_pinned_bundle() {
+        let scratch =
+            std::env::temp_dir().join(format!("sceneworks-supra2-bundle-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).unwrap();
+        assert!(!supra2_bundle_is_pinned(&scratch));
+        assert!(!supra2_bundle_is_pinned(&scratch.join("absent")));
+        std::fs::remove_dir_all(&scratch).unwrap();
+        let error = supra2_convert(&json!({ "action": SUPRA2_IMG_CONVERT_ACTION }))
+            .expect_err("a convert request names its four paths");
+        assert!(error.contains("request.source"), "{error}");
+    }
+}
+
 /// The six Mage-Flow variant rehosts (sc-22733). Unlike every other image family in this file, a
 /// Mage variant repository ships the DiT ALONE: `<snapshot>/<tier>/transformer/`. The text encoder
 /// and the VAE are bit-identical across all six variants and are hosted ONCE in

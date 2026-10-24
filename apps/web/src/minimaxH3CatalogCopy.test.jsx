@@ -165,7 +165,7 @@ describe("MiniMax-H3 catalog copy discloses the withheld upstream components (sc
   it("carries the same disclosure into the offline catalog mirror", async () => {
     // `fallbackModels` is what the Models screen and the studios render before /api/v1/models
     // answers, and on a desktop cold start that window is the user's first look at the card.
-    const { fallbackModels } = await import("./constants.js");
+    const { fallbackModels } = await import("./modelCatalog.js");
     for (const entry of familyEntries) {
       const mirrored = fallbackModels.find((model) => model.id === entry.id);
       expect(mirrored, `${entry.id} must be mirrored in fallbackModels`).toBeTruthy();

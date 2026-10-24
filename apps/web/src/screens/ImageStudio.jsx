@@ -179,6 +179,7 @@ import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
+  MAX_LISTED_JOBS,
   PROMPT_REFINE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
@@ -222,6 +223,8 @@ import {
   negativePromptInertAtGuidance,
   guidanceIsOff,
   patchGridHint,
+  nativeResolutionHint,
+  promptTokenLimitHint,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -255,11 +258,18 @@ const REFERENCE_TUNING_PRESET_KEYS = [
 
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+// This is a CONFIRMATION threshold only: it never caps how many images a run may
+// resolve — an over-cap run just gets one "N images?" gate before it starts.
 const BATCH_RENDER_CAP = 100;
-// Keep high-cardinality batch state bounded without changing the eager behavior of
-// ordinary (at-or-under-cap) runs. The worker remains serial; this is client-side
-// backpressure for confirmed large runs only.
-const BATCH_ACTIVE_JOB_LIMIT = BATCH_RENDER_CAP;
+// How many of a confirmed run's jobs may be in flight at once — the submit window
+// `waitForBatchSlot` holds the fan-out behind. Distinct from BATCH_RENDER_CAP: when the
+// two were one constant, confirming a 250-image run queued 100 jobs and then held the
+// remaining 150 until the first 100 finished, because the window could only refill as
+// jobs settled. The window only bounds the client's in-flight id set (the worker stays
+// serial either way), so it is the queue depth the app can hold and show — a run at or
+// under it queues in full the moment it is confirmed, and a larger run feeds in windows
+// of that size.
+const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // A styled Cartesian batch can be enormous even though its queue state remains bounded.
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.
@@ -697,6 +707,11 @@ export function ImageStudio() {
   const [hiresFixUpscaleBy, setHiresFixUpscaleBy] = useState(saved.hiresFixUpscaleBy ?? 2);
   const [hiresFixCfgScale, setHiresFixCfgScale] = useState(saved.hiresFixCfgScale ?? "");
   const [submitting, setSubmitting] = useState(false);
+  // The launch id whose recipe replay has finished hydrating studio state. Set at the END of the
+  // recipe-launch effect so the "Re-Generate" auto-submit can distinguish "recipe applied" from the
+  // pre-replay render that carries the same launch id but stale state (the effect's setState batch
+  // commits one render later).
+  const [recipeHydratedLaunchId, setRecipeHydratedLaunchId] = useState(null);
   // Auto-expand state (sc-6501): when a structured model is in plain-text mode, Generate first
   // expands the idea into a JSON caption via magic-prompt. `expanding` drives the button label;
   // `submitError` surfaces an expansion failure (e.g. the utility model isn't installed) without
@@ -2054,6 +2069,7 @@ export function ImageStudio() {
     setHiresFixDenoisingStrength(hiresFix?.denoisingStrength ?? 0.7);
     setHiresFixUpscaleBy(hiresFix?.upscaleBy ?? 2);
     setHiresFixCfgScale(hiresFix?.cfgScale ?? "");
+    setRecipeHydratedLaunchId(launchRequest.id);
   // The launch id owns this one-shot hydration. Including the local values this
   // effect sets would replay a launch while applying that launch.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2079,6 +2095,10 @@ export function ImageStudio() {
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
+  // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
+  // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -2405,27 +2425,30 @@ export function ImageStudio() {
     [assets, localJobs],
   );
 
-  async function submit(event) {
-    if (!mossComponents.ready) { event.preventDefault(); setSubmitError("Install the selected MOSS 8-step components before generating."); return; }
-    event.preventDefault();
+  // The single Generate core, extracted from `submit` so the viewer's "Re-Generate"
+  // (autoGenerate launch) can queue a replayed recipe programmatically with no form event.
+  // Returns the created job, or null when a guard aborted before enqueue. The guards live
+  // here — not just on the Generate button — because an auto-generated replay skips the
+  // button and must hit the same authorization checks.
+  async function submitNow() {
     // Batch mode runs through its own "Run batch" action (sc-9956), never the single
     // Generate submit — guard so a stray Enter in a batch field can't queue one image.
     if (batchMode) {
-      return;
+      return null;
     }
     if (submitting) {
-      return;
+      return null;
     }
     // Defense in depth for Enter/programmatic submits and restored stale state.
     // The disabled button is only an affordance; capability eligibility is the
     // actual authorization to create a job.
     if (!selectedModelServesMode) {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
-      return;
+      return null;
     }
     if (decoderCapabilitiesPending) {
       setSubmitError("Waiting for engine capabilities before using the restored decoder.");
-      return;
+      return null;
     }
     if (dimensionsInvalid || hiresFixTargetInvalid) {
       setSubmitError(
@@ -2433,11 +2456,11 @@ export function ImageStudio() {
           dimensionError ||
           "Width and height must each be between 256 and 4096.",
       );
-      return;
+      return null;
     }
     if (cfgIntervalError) {
       setSubmitError(cfgIntervalError);
-      return;
+      return null;
     }
     setSubmitting(true);
     try {
@@ -2462,13 +2485,13 @@ export function ImageStudio() {
           // (silent auto-expand, surfaced in the Builder) before generating.
           const idea = prompt.trim();
           if (!idea) {
-            return;
+            return null;
           }
           if (typeof magicPrompt !== "function" || magicModelMissing) {
             setSubmitError(
               "Plain text can't be sent to this model. Download the prompt-refiner model to auto-expand your idea into a caption, or build one in the Builder.",
             );
-            return;
+            return null;
           }
           let expanded;
           setExpanding(true);
@@ -2476,7 +2499,7 @@ export function ImageStudio() {
             expanded = await onMagicExpand(idea);
           } catch (e) {
             setSubmitError(e?.message || "Couldn't expand the prompt into a caption. Try the Builder.");
-            return;
+            return null;
           } finally {
             setExpanding(false);
           }
@@ -2485,7 +2508,7 @@ export function ImageStudio() {
           setPromptMode("form");
           if (!validateCaption(expanded).ok) {
             setSubmitError("The auto-generated caption needs a tweak — review it in the Builder and generate again.");
-            return;
+            return null;
           }
           sendStructured = true;
           submitCaption = expanded;
@@ -2508,9 +2531,16 @@ export function ImageStudio() {
         }),
       );
       onLocalJobCreated?.(job);
+      return job;
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function submit(event) {
+    if (!mossComponents.ready) { event.preventDefault(); setSubmitError("Install the selected MOSS 8-step components before generating."); return; }
+    event.preventDefault();
+    await submitNow();
   }
 
   // sc-11219 (F-031): the single shared image-job-request builder used by BOTH single Generate
@@ -2758,7 +2788,7 @@ export function ImageStudio() {
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
       }
     })();
@@ -2798,7 +2828,7 @@ export function ImageStudio() {
           if (current) replaceBatchRun({ ...current, submitting: false });
           return;
         }
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         const promptBudgetOverages = batchPromptBudgetOverages(
           [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
           1,
@@ -2825,7 +2855,7 @@ export function ImageStudio() {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        const item = parsePromptResolution(entry.prompt);
+        const item = parsePromptResolution(entry.prompt, resolutionOptions);
         if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
           yield chunk;
           chunk = [];
@@ -2941,9 +2971,9 @@ export function ImageStudio() {
       restorePlanBodyForRenders({
         width,
         height,
-        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions).resolution) : [],
       }),
-    [batchMode, batchPrompts, height, width],
+    [batchMode, batchPrompts, height, width, resolutionOptions],
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
@@ -2953,7 +2983,7 @@ export function ImageStudio() {
   // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
   // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line).resolution)
+    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
     .filter(
       (res) =>
         res &&
@@ -3105,6 +3135,36 @@ export function ImageStudio() {
     (structuredActive && !captionValidation?.ok) ||
     Boolean(macActiveModeBlock);
 
+  // Viewer "Re-Generate" (an `autoGenerate` launch): once the replayed recipe has fully hydrated —
+  // `recipeHydratedLaunchId` is set at the END of the recipe-launch effect, and `generateDisabled`
+  // only flips false once the same readiness the Generate button enforces is met (model serves the
+  // mode, no pending decoder capabilities, valid dimensions, ready validity) — fire the submit
+  // programmatically and hand off to the Queue. This is the same recipe the "Use this recipe" button
+  // would open, minus the click, with a fresh random seed (replaySeed null). A recipe that can't queue
+  // cleanly (its model gone, a batch it reopens) keeps the user on the prefilled studio — the screen
+  // "Use this recipe" would have opened anyway — so no attempt is silently lost. One-shot per launch.
+  const autoGenerateFiredRef = useRef(null);
+  const submitNowRef = useRef(submitNow);
+  submitNowRef.current = submitNow;
+  useEffect(() => {
+    const launchId = launchRequest?.id ?? null;
+    if (!launchRequest?.autoGenerate) {
+      if (autoGenerateFiredRef.current !== launchId) autoGenerateFiredRef.current = null;
+      return;
+    }
+    // Fire at most once per launch, and only after the recipe is committed AND generateable.
+    if (autoGenerateFiredRef.current === launchId || recipeHydratedLaunchId !== launchId || generateDisabled) {
+      return;
+    }
+    autoGenerateFiredRef.current = launchId;
+    void (async () => {
+      const job = await submitNowRef.current();
+      // Land on the Queue when the replay enqueued, else on the prefilled studio so the reason is visible.
+      setActiveView(job ? "Queue" : "Image");
+    })();
+    // `submitNow` is read through a ref so its identity doesn't churn this effect every render.
+  }, [launchRequest?.id, launchRequest?.autoGenerate, recipeHydratedLaunchId, generateDisabled, setActiveView]);
+
   return (
     <ModelAvailabilityGate
       ready={modelReady}
@@ -3159,6 +3219,7 @@ export function ImageStudio() {
             <div className="prompt-input-row batch">
               <BatchPromptPanel
                 promptsText={batchPromptsText}
+                resolutionOptions={resolutionOptions}
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}
@@ -3301,6 +3362,11 @@ export function ImageStudio() {
               `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
               was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
               Free-text models only. */}
+          {!structuredPromptModel && promptTokenNotice ? (
+            <p className="prompt-hint" role="note">
+              {promptTokenNotice}
+            </p>
+          ) : null}
           {!structuredPromptModel && promptHint ? (
             <p className="prompt-hint">
               {promptHint}{" "}
@@ -3917,6 +3983,11 @@ export function ImageStudio() {
                 {patchGridNotice ? (
                   <span className="field-hint" role="note">
                     {patchGridNotice}
+                  </span>
+                ) : null}
+                {nativeResolutionNotice ? (
+                  <span className="field-hint" role="note">
+                    {nativeResolutionNotice}
                   </span>
                 ) : null}
               </label>

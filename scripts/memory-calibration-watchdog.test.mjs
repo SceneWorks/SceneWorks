@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -41,14 +41,19 @@ function withVirtualClock(environment = process.env) {
   return { ...environment, [VIRTUAL_CLOCK]: "quantized" };
 }
 
+const fixtureRoots = new Set();
+
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), "sc19642-watchdog-"));
+  fixtureRoots.add(root);
   const program = path.join(root, "tree.py");
   await writeFile(program, String.raw`import os, signal, subprocess, sys, time
 mode, pid_file, telemetry_file, event_file = sys.argv[1:]
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child_code = "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_DFL); time.sleep(60)" if mode == "complete" else "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
 child = None if mode == "delayed-child" else subprocess.Popen([sys.executable, "-c", child_code])
+if mode == "delayed-hold":
+    time.sleep(3)
 with open(pid_file, "w") as output:
     output.write(f"{os.getpid()}\n")
     if child:
@@ -80,6 +85,7 @@ elif mode == "event-failure":
 time.sleep(60)
 `);
   return {
+    root,
     program,
     pids: path.join(root, "pids"),
     telemetry: path.join(root, "telemetry"),
@@ -87,40 +93,94 @@ time.sleep(60)
   };
 }
 
+async function teardownFixtures() {
+  const roots = [...fixtureRoots];
+  fixtureRoots.clear();
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+}
+
+test.after(teardownFixtures);
+
 async function run(
   mode, ceiling, telemetry = 1, maxRuntimeSeconds = null, sampleInterval = "0.02",
+  { recordingSleep = false } = {},
 ) {
   const files = await fixture();
   await writeFile(files.telemetry, `${telemetry}\n`);
+  const args = [
+    WATCHDOG,
+    "--max-footprint-bytes", `${ceiling}`,
+    "--sample-interval", sampleInterval,
+    "--telemetry-timeout", "0.2",
+    "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
+    "--term-grace", "0.1",
+    "--event-file", files.events,
+    "--telemetry-file", files.telemetry,
+    "--allow-synthetic-telemetry",
+    "--", "python3", files.program, mode, files.pids, files.telemetry, files.events,
+  ];
+  if (maxRuntimeSeconds !== null) {
+    args.splice(3, 0, "--max-runtime-seconds", `${maxRuntimeSeconds}`);
+  }
   let status = 0;
-  try {
-    const args = [
-      WATCHDOG,
-      "--max-footprint-bytes", `${ceiling}`,
-      "--sample-interval", sampleInterval,
-      "--telemetry-timeout", "0.2",
-      "--telemetry-fault-window", TEST_TELEMETRY_FAULT_WINDOW,
-      "--term-grace", "0.1",
-      "--event-file", files.events,
-      "--telemetry-file", files.telemetry,
-      "--allow-synthetic-telemetry",
-      "--", "python3", files.program, mode, files.pids, files.telemetry, files.events,
-    ];
-    if (maxRuntimeSeconds !== null) {
-      args.splice(3, 0, "--max-runtime-seconds", `${maxRuntimeSeconds}`);
+  let recorded = null;
+  if (recordingSleep) {
+    ({ status, recorded } = await runRecordingSleep(files, args));
+  } else {
+    try {
+      await execFileAsync("python3", args, { timeout: 60_000, env: withVirtualClock() });
+    } catch (error) {
+      status = error.code;
     }
-    // Harness backstop only, sized for a cold runner rather than for this laptop: see the floor
-    // note in runWithMockedProductionTelemetry. Every assertion below is on exit status and
-    // receipt content, never on how long this took.
-    await execFileAsync("python3", args, { timeout: 60_000, env: withVirtualClock() });
-  } catch (error) {
-    status = error.code;
   }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   // No elapsed figure is returned on purpose: nothing in this suite may assert on how long a
   // run took. Every timing claim is read out of the guard's own event log instead.
-  return { status, events, pids };
+  return { status, events, pids, recorded };
+}
+
+// Drive the guard through a recording launcher: it wraps CLOCK.sleep to record every requested
+// policy sleep AND synchronize on the guarded child's PID file before the FIRST sleep without
+// advancing the virtual clock. The wait is fixture synchronization, not timeout inflation — the
+// runtime deadline is still charged to CLOCK alone, so a host that takes a beat to start the real
+// child cannot turn "correct guard, missing pids file" into an ENOENT residue assertion. Used only
+// by the short-runtime wall-clock tests (--max-runtime-seconds well below a cold interpreter's
+// startup), never by the ceiling/telemetry tests.
+async function runRecordingSleep(files, args) {
+  const launcher = `${files.program}.recording-sleep.py`;
+  await writeFile(launcher, String.raw`import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+recorded = []
+original_sleep = module.CLOCK.sleep
+sync = {"ready": False}
+def recording_sleep(seconds):
+    recorded.append(seconds)
+    if not sync["ready"]:
+        sync["ready"] = True
+        deadline = time.monotonic() + 60
+        while not os.path.exists(${JSON.stringify(files.pids)}):
+            if time.monotonic() >= deadline:
+                raise RuntimeError("fixture PID readiness exceeded harness backstop")
+            time.sleep(0.02)
+    return original_sleep(seconds)
+module.CLOCK.sleep = recording_sleep
+sys.argv = ${JSON.stringify(args)}
+status = module.guard(module.parse_args())
+print(json.dumps(recorded))
+raise SystemExit(status)
+`);
+  let status = 0;
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync("python3", [launcher],
+      { timeout: 60_000, env: withVirtualClock() }));
+  } catch (error) {
+    status = error.code;
+    stdout = error.stdout ?? "";
+  }
+  return { status, recorded: JSON.parse(stdout) };
 }
 
 async function waitForJsonEvent(file, predicate) {
@@ -142,10 +202,97 @@ async function waitForFile(file) {
   throw new Error(`file never appeared: ${file}`);
 }
 
-async function controlled(mode, action) {
+const HARNESS_BACKSTOP_MS = 60_000;
+
+function withBackstop(promise, label) {
+  let timer;
+  const backstop = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(
+        `watchdog ${label} overran the ${HARNESS_BACKSTOP_MS}ms harness backstop`)),
+      HARNESS_BACKSTOP_MS,
+    );
+  });
+  return Promise.race([promise, backstop]).finally(() => clearTimeout(timer));
+}
+
+async function awaitReadiness(check, label, closed) {
+  const deadline = Date.now() + HARNESS_BACKSTOP_MS;
+  for (;;) {
+    const found = await check();
+    if (found) return found;
+    if (Date.now() >= deadline) {
+      throw new Error(`watchdog ${label} overran the ${HARNESS_BACKSTOP_MS}ms harness backstop`);
+    }
+    let timer;
+    const tick = new Promise((resolve) => { timer = setTimeout(resolve, 20); });
+    const outcome = await Promise.race([closed.then(() => "exited"), tick])
+      .finally(() => clearTimeout(timer));
+    if (outcome === "exited") {
+      throw new Error(`watchdog exited before ${label}`);
+    }
+  }
+}
+
+async function killOwnedFixtureGroup(child, files) {
+  // The sentinel waits for its root after release; monitor death alone does NOT reap the group.
+  // Reuse the production exact-identity checks before signalling any numeric process group.
+  await execFileAsync("python3", ["-c", String.raw`import importlib.util, json, os, signal, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+module = importlib.util.module_from_spec(spec); sys.modules[spec.name] = module; spec.loader.exec_module(module)
+event_file = Path(${JSON.stringify(files.events)})
+events = [json.loads(line) for line in event_file.read_text().splitlines()] if event_file.is_file() else []
+started = next((event for event in events if event.get("event") == "started"), None)
+anchors = [module.Identity(item["pid"], item["pgid"], "", item["started"])
+           for item in started["processIdentities"]] if started else []
+if not anchors:
+    # A launch can fail before emitting started. Its unreaped, direct session-leader child is
+    # still owned by this live guard, not inferred from a stale fixture PID file.
+    for pid, parent in module.parent_pids().items():
+        if parent == ${JSON.stringify(child.pid ?? null)}:
+            identity = module.process_identity(pid)
+            if identity and identity.pgid == identity.pid:
+                anchors.append(identity)
+for pgid in {anchor.pgid for anchor in anchors}:
+    if not any(module.identity_is_live(anchor) for anchor in anchors if anchor.pgid == pgid):
+        continue
+    members = module.group_identities(pgid)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 60
+    while any(module.identity_is_live(member) for member in members):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("owned fixture group survived cleanup")
+        time.sleep(0.02)
+`], { timeout: HARNESS_BACKSTOP_MS, env: withVirtualClock() });
+}
+
+async function stopWatchdog(child, closed, files, force = false) {
+  if (!child.pid) return await closed;
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM"); // graceful: the guard's own group.terminate reaps the exact owned group
+  }
+  try {
+    if (force) throw new Error("injected unresponsive guard");
+    return await withBackstop(closed, `${child.pid} close`);
+  } catch {
+    let status;
+    try { await killOwnedFixtureGroup(child, files); }
+    finally {
+      child.kill("SIGKILL");
+      status = await withBackstop(closed, `${child.pid} close after SIGKILL`);
+    }
+    return status;
+  }
+}
+
+async function controlled(mode, action, { python = "python3" } = {}) {
   const files = await fixture();
   await writeFile(files.telemetry, "1\n");
-  const child = spawn("python3", [
+  const child = spawn(python, [
     WATCHDOG,
     "--max-footprint-bytes", "100",
     "--sample-interval", "0.02",
@@ -157,15 +304,42 @@ async function controlled(mode, action) {
     "--allow-synthetic-telemetry",
     "--", "python3", files.program, mode, files.pids, files.telemetry, files.events,
   ], { stdio: "ignore", env: withVirtualClock() });
-  const started = await waitForJsonEvent(files.events, (event) => event.event === "started");
-  await waitForJsonEvent(files.events, (event) => event.event === "sample");
-  await waitForFile(files.pids);
-  await new Promise((resolve) => setTimeout(resolve, 60));
-  await action(child, started);
-  const status = await new Promise((resolve) => child.once("close", resolve));
-  const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
-  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  return { status, pids, events };
+  // Install the error/close observers before any await: a spawn failure rejects, a normal exit
+  // resolves, and once-listeners self-remove so nothing lingers on the child.
+  const closed = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  // Readiness starts with asynchronous file IO. Handle spawn rejection now, not after that IO.
+  // The original promise still rejects for every caller that awaits it.
+  closed.catch(() => {});
+  try {
+    const started = await awaitReadiness(async () => {
+      const bytes = await readFile(files.events, "utf8").catch(() => "");
+      const events = bytes.trim() ? bytes.trim().split("\n").map(JSON.parse) : [];
+      return events.find((event) => event.event === "started");
+    }, "started", closed);
+    await awaitReadiness(async () => {
+      const bytes = await readFile(files.events, "utf8").catch(() => "");
+      const events = bytes.trim() ? bytes.trim().split("\n").map(JSON.parse) : [];
+      return events.find((event) => event.event === "sample");
+    }, "sample", closed);
+    await awaitReadiness(
+      async () => (await readFile(files.pids, "utf8").catch(() => "")), "pids", closed);
+    await withBackstop(action(child, started, files), "action");
+    // Happy path: the action delivered its own signal, so the guard closes itself; do not SIGTERM
+    // it here. Kept inside the try so a close that never arrives still routes through stopWatchdog
+    // instead of leaking the live watchdog.
+    const status = await withBackstop(closed, `${child.pid} close`);
+    const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+    const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+    return { status, pids, events };
+  } catch (error) {
+    // Every failure path (including a missed "started" or a close that never arrives) shuts the
+    // owned group down, then surfaces the original error.
+    await stopWatchdog(child, closed, files);
+    throw error;
+  }
 }
 
 function assertGone(pid) {
@@ -279,16 +453,32 @@ test("the ceiling comparison is mutation-sensitive at the exact boundary", async
   at.pids.forEach(assertGone);
 });
 
-test("a wall-time ceiling fails closed and removes the owned group", async () => {
-  const result = await run("hold", 100, 1, 0.2, "2");
+test("a wall-time ceiling caps the requested policy sleep and removes the owned group", async () => {
+  // The property is the policy sleep the guard ASKS for, never how many real seconds a loaded
+  // runner spent: event timestamps are time.time() wall clock, so a "< 2" bound on them measured
+  // the scheduler, not the cap. run() with `recordingSleep` records every requested CLOCK.sleep
+  // (while also synchronizing on the guarded child's PID file, so a slow host cannot ENOENT), and
+  // asserts the 2 s sample interval is capped at the 0.2 s runtime deadline by the same virtual
+  // clock the other timing assertions read.
+  const result = await run("hold", 100, 1, 0.2, "2", { recordingSleep: true });
   assert.equal(result.status, 97);
-  const started = result.events.find((event) => event.event === "started");
   const stopped = result.events.find((event) =>
     event.event === "hard_stop" && event.reason.includes("runtime_at_or_above_0.2s"));
   assert.ok(stopped);
-  // The uncapped sleep cannot return in under its two real seconds, so "< 2" is the exact
-  // discriminator. A tighter bound measured the runner's scheduler, not the cap.
-  assert.ok(stopped.at - started.at < 2, "the uncapped two-second sample sleep won");
+  assert.ok(result.recorded.length >= 1, "the guard never requested a runtime sleep");
+  assert.ok(result.recorded.every((seconds) => seconds <= 0.2),
+    `a requested policy sleep overran the runtime ceiling: ${JSON.stringify(result.recorded)}`);
+  result.pids.forEach(assertGone);
+});
+
+test("a slow guarded child that writes its PID file after the virtual deadline is still observed", async () => {
+  // The guarded child deliberately delays its PID write (0.3 s) past the 0.2 s virtual runtime
+  // deadline. Without run()'s fixture-synchronization wait — real and clock-free, so the policy
+  // sleep is still capped at exactly 0.2 s — the residue assertion below would ENOENT on any host.
+  const result = await run("delayed-hold", 100, 1, 0.2, "2", { recordingSleep: true });
+  assert.equal(result.status, 97);
+  assert.ok(result.recorded.every((seconds) => seconds <= 0.2),
+    `a requested policy sleep overran the runtime ceiling: ${JSON.stringify(result.recorded)}`);
   result.pids.forEach(assertGone);
 });
 
@@ -305,7 +495,7 @@ test("a probe stopped by its wall-clock budget takes the ceiling stop's exact pa
   //      hard stop is emitted, the group takes the same SIGTERM→SIGKILL escalation, the same
   //      `terminated` event closes the log, and the same 97 leaves the shell. A wedged probe is
   //      being killed through a live Metal command buffer, and there is exactly one way to do that.
-  const budget = await run("hold", 100, 1, 0.2, "2");
+  const budget = await run("hold", 100, 1, 0.2, "2", { recordingSleep: true });
   const ceilingStop = await run("high", 99, 98);
   assert.equal(budget.status, 97);
   assert.equal(budget.status, ceilingStop.status, "both stops leave the same status");
@@ -1136,6 +1326,66 @@ test("SIGINT and SIGTERM preserve shell status while cleaning the exact owned gr
     assert.equal(result.status, expected, signalName);
     result.pids.forEach(assertGone);
   }
+});
+
+test("a guard that exits inside the action is still observed", async () => {
+  // The close observer is installed before the action runs; a guard that fully reaps during the
+  // action cannot strand the awaited status (the pre-fix shape attached once("close") after the
+  // action and hung here).
+  const result = await controlled("hold", async (watchdog) => {
+    watchdog.kill("SIGTERM");
+    await new Promise((resolve) => watchdog.once("close", resolve));
+  });
+  assert.equal(result.status, 143);
+  result.pids.forEach(assertGone);
+});
+
+test("an action that throws still removes the owned group", async () => {
+  let fixtureFiles;
+  await assert.rejects(
+    () => controlled("hold", (_watchdog, _started, files) => {
+      fixtureFiles = files;
+      throw new Error("action blew up");
+    }),
+    /action blew up/,
+  );
+  const pids = (await readFile(fixtureFiles.pids, "utf8")).trim().split("\n").map(Number);
+  assert.ok(pids.length > 0, "no owned pids were recorded");
+  pids.forEach(assertGone);
+});
+
+test("a spawn failure is handled before asynchronous readiness IO", async () => {
+  const files = await fixture();
+  await assert.rejects(() => controlled("hold", () => {}, {
+    python: path.join(files.root, "missing-python"),
+  }), { code: "ENOENT" });
+});
+
+test("forced cleanup reaps the owned group even when the guard and root are stopped", async () => {
+  let pids;
+  await assert.rejects(() => controlled("hold", async (watchdog, started, files) => {
+    pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
+    pids.push(...started.processIdentities.map((identity) => identity.pid));
+    process.kill(pids[0], "SIGSTOP");
+    watchdog.kill("SIGSTOP");
+    const closed = new Promise((resolve) => watchdog.once("close", resolve));
+    await stopWatchdog(watchdog, closed, files, true);
+    assert.equal(watchdog.signalCode, "SIGKILL");
+    throw new Error("injected stopped-guard failure");
+  }), /injected stopped-guard failure/);
+  // Killed descendants are reparented for reaping; await the resource condition, not a settle sleep.
+  await awaitReadiness(async () => pids.every((pid) => {
+    try { process.kill(pid, 0); return false; }
+    catch (error) { if (error.code === "ESRCH") return true; throw error; }
+  }), "owned group reaped", new Promise(() => {}));
+  pids.forEach(assertGone);
+});
+
+test("fixture directories are removed by teardown", async () => {
+  const files = await fixture();
+  assert.ok((await stat(files.root)).isDirectory());
+  await teardownFixtures();
+  await assert.rejects(() => stat(files.root), (error) => error.code === "ENOENT");
 });
 
 test("a signal delivered in the blocked spawn window is cleaned after the sentinel is anchored", async () => {

@@ -1333,6 +1333,33 @@
       ]
     },
     {
+      "id": "supra2-img",
+      "models": [
+        "supra2_img"
+      ],
+      "name": "Supra2-IMG (SupraLabs/Supra2-IMG) + Flan-T5-Base text encoder + SD VAE ft-MSE",
+      "version": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+      "publisher": "SupraLabs; Google; Stability AI",
+      "license": "Apache-2.0 AND MIT",
+      "homepage": "https://huggingface.co/SupraLabs/Supra2-IMG",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Native MLX (Apple Silicon) and Candle (Windows/Linux, NVIDIA CUDA) 256x256 text-to-image. Three components are downloaded on install from their upstream repositories at pinned revisions (NOT re-hosted by SceneWorks): the Supra2-IMG denoiser checkpoint (SupraLabs/Supra2-IMG @ 10dec6e4, Apache-2.0), which is converted locally into a native bundle and never redistributed; the Flan-T5-Base text encoder and tokenizer (google/flan-t5-base @ 7bcac572, Apache-2.0); and the SD VAE ft-MSE decoder (stabilityai/sd-vae-ft-mse @ 31f26fde, MIT). Each licence is declared in the component's model card; none of the repositories ships a separate LICENSE file.",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (Supra2-IMG denoiser, Flan-T5-Base)",
+          "key": "supra2-img-apache"
+        },
+        {
+          "label": "MIT License declaration (SD VAE ft-MSE)",
+          "key": "supra2-img-sd-vae-mit"
+        }
+      ]
+    },
+    {
       "id": "iris-repa-teacher",
       "models": [
         "iris_repa_teacher_dinov2_base"

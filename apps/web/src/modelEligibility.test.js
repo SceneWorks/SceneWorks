@@ -28,7 +28,8 @@ import {
   vectorModelServesMode,
   vectorModelUsable,
 } from "./modelEligibility.js";
-import { VISION_CAPTION_MODEL_ID, fallbackModels } from "./constants.js";
+import { VISION_CAPTION_MODEL_ID } from "./constants.js";
+import { fallbackModels } from "./modelCatalog.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 

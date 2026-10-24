@@ -528,6 +528,42 @@ test("a declaration pointing at a crate that never names the provider is refused
   );
 });
 
+// sc-24217: `mlx-gen-supra2` names its provider only through gen-core's family constant. That
+// spelling is accepted ONLY when gen-core's `src/<family>.rs` declares the constant as exactly this
+// provider id; any other family, value or absent file still refuses the pointer.
+test("a provider named through gen_core::<family>::PROVIDER_ID is still checked, not trusted", () => {
+  const sources = {
+    "crates/m/src/lib.rs": "provider_id: mlx_gen::gen_core::fam::PROVIDER_ID,",
+    "crates/contracts/gen-core/src/fam.rs": 'pub const PROVIDER_ID: &str = "fam_img";\n',
+  };
+  const runGit = (_repo, args) => {
+    if (args[0] === "grep" && args.includes("-F")) {
+      const err = new Error("no match");
+      err.status = 1;
+      throw err;
+    }
+    if (args[0] === "grep") {
+      const dir = args.at(-1);
+      return Object.entries(sources)
+        .filter(([file]) => file.startsWith(dir))
+        .flatMap(([, body]) => body.match(/gen_core::[a-z0-9_]+::PROVIDER_ID/g) ?? [])
+        .join("\n");
+    }
+    if (args[0] === "show") {
+      const file = args[1].split(":")[1];
+      if (!(file in sources)) throw new Error(`no ${file}`);
+      return sources[file];
+    }
+    throw new Error(`unexpected git ${args.join(" ")}`);
+  };
+  const assertFor = (provider, crateDir = "crates/m/") =>
+    assertProviderIsDeclaredInCrate({ repo: "/fake", revision: "r1", provider, crateDir: crateDir.replace(/\/$/, ""), runGit });
+  assert.doesNotThrow(() => assertFor("fam_img"));
+  assert.throws(() => assertFor("other_img"), /never names it/);
+  sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core::absent::PROVIDER_ID,";
+  assert.throws(() => assertFor("fam_img"), /never names it/);
+});
+
 test("two providers in the SAME crate get distinct digests", () => {
   // `flux1_dev` and `flux1_schnell` share `candle-gen-flux`. The provider is part of the digest
   // identity so a digest can never be compared across providers by accident.

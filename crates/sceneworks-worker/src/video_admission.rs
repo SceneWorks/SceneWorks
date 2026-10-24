@@ -2638,6 +2638,7 @@ fn admit_video_generation_with_curves_and_profiles(
                     frames: request.frames,
                     reference_count: request.reference_count,
                 },
+                reference_resources: None,
                 overlay: request.overlay.map(str::to_owned),
                 budget: runtime.budget,
                 predicted_peak_bytes: selected.predicted_peak_bytes,

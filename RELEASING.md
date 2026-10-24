@@ -289,10 +289,22 @@ larger feature on `main` is ready for release, promote it into `release/next`
 through a reviewed PR and resolve any release-line differences deliberately.
 Do not bypass `release/next` by tagging the feature branch or `main`.
 
-After every release, confirm that all release-line fixes are accounted for on
-`main`. The version-only release commit does not need to be merged back merely
-to record that a tag exists; reconcile version metadata deliberately when the
-next feature train is promoted.
+## Merge the release back into `main`
+
+After publication, open a PR from `release/next` into `main`, including the version
+bump and every release-line fix. Resolve conflicts without reverting newer work
+on `main`, wait for current-head CI, and merge using a merge commit. Do not delete
+`release/next` or modify the immutable release refs.
+
+Fetch the remote refs and verify that the published release commit is an ancestor
+of `origin/main`:
+
+```bash
+git merge-base --is-ancestor <published-release-commit> origin/main
+```
+
+If that ancestry already holds, no redundant PR is needed. Otherwise, publication
+alone is not completion: the merge-back must land and ancestry must be verified.
 
 ## Success criteria
 
@@ -301,5 +313,7 @@ A release is complete only when:
 - the versioned branch and peeled tag share one commit;
 - the desktop and RunPod workflows succeeded from that commit;
 - every expected desktop and updater artifact is present;
-- the GitHub Release is published; and
-- the versioned release refs are treated as immutable from that point forward.
+- the GitHub Release is published;
+- the versioned release refs are treated as immutable from that point forward; and
+- the release has been merged back into `main`, with published-commit ancestry
+  verified against the fetched remote ref.
