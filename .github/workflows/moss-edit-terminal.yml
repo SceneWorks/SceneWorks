@@ -218,6 +218,10 @@ jobs:
           fi
       - name: Build exact embedded API, worker, web and native inventories (MLX)
         if: matrix.backend == 'mlx'
+        # Keep host proc-macro Mach-O string tables loadable on the macOS runner.
+        env:
+          CARGO_PROFILE_DEV_STRIP: none
+          CARGO_PROFILE_TEST_STRIP: none
         shell: bash
         run: node source/scripts/moss-edit-terminal-actions.mjs build "$MOSS_ROOT/runtime.json"
       - name: Build exact embedded API, worker, web and native inventories (CUDA)
