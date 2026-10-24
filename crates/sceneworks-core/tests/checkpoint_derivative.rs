@@ -939,3 +939,61 @@ fn a_pinned_derivative_holds_a_managed_teardown_instead_of_being_orphaned_by_it(
         "a completed managed teardown removes the SceneWorks-owned install tree"
     );
 }
+
+#[test]
+fn conversion_provenance_receipt_binds_actual_source_codec_and_complete_artifact() {
+    let fx = fixture("provenance-receipt");
+    let source_before = tree_snapshot(&fx.library_dir);
+    let request = request();
+    fx.store
+        .ensure(&fx.checkpoint_id, &request, write_index)
+        .unwrap();
+    let resolved = resolve(&fx);
+    let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+        &resolved.plan,
+        "my-krea-import",
+    )
+    .unwrap();
+    let key = fx.store.cache_key(&resolved, &request).unwrap();
+    // A complete older cache entry does not invent historical codec provenance. The producer's
+    // real acquisition supplies the exact request/plan binding before a receipt is redeemable.
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    let lease = fx.store.acquire(&resolved, &request).unwrap().unwrap();
+    let receipt = fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .unwrap();
+    assert_eq!(receipt["request"]["codecId"], "dense-bf16");
+    assert_eq!(receipt["cacheKey"], key);
+    let mut wrong_source = provenance.clone();
+    wrong_source["sources"][0]["sha256"] = json!("f".repeat(64));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_source)
+        .is_err());
+    let mut wrong_plan = provenance.clone();
+    wrong_plan["plan"]["semanticDigest"] = json!(format!("sha256:{}", "f".repeat(64)));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_plan)
+        .is_err());
+    drop(lease);
+    let path = fx
+        .store
+        .cache()
+        .entry_path(&key)
+        .unwrap()
+        .join("checkpoint-conversion.receipt.json");
+    let mut tampered: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    tampered["request"]["codecVersion"] = json!("another-codec");
+    fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+    println!("SC26690_CPU_DERIVATIVE_PROVENANCE_SMOKE: compiled Krea fixture -> produced+leased index -> verified source/plan/codec-bound receipt; source tree unchanged");
+}

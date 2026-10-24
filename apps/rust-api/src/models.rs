@@ -866,6 +866,122 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     })
 }
 
+/// Fine-tune license text never replaces obligations of the components it actually reuses.
+/// The caller supplies a server-resolved entry; new imports use their immutable declaration and
+/// older H3 entries derive obligations from the trusted builtin component catalog.
+pub(crate) async fn ensure_inherited_component_licenses_acknowledged(
+    state: &AppState,
+    entry: &JsonObject,
+    license_acknowledged: bool,
+) -> Result<(), ApiError> {
+    use sceneworks_core::license_acknowledgments as acknowledgments;
+    // Architecture is not an import claim. Ordinary stock/custom HF or local catalog rows keep
+    // their own license guards; only positive plan, declaration, or import-origin evidence owes
+    // inherited-component authority. Never let a false author license/stock flag erase evidence.
+    let import_path = |path: &str| {
+        path.starts_with("models/imports/")
+            || path.contains("/models/imports/")
+            || path.starts_with("linked/")
+    };
+    let source = entry.get("source").and_then(Value::as_object);
+    let import_origin = sceneworks_core::jobs_store::imported_entry_installed_path(entry)
+        .is_some_and(import_path)
+        || source.is_some_and(|source| {
+            source.contains_key("rootId")
+                || source
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(import_path)
+        });
+    let has_import_evidence = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+        .is_some()
+        || [
+            "importPlan",
+            "baseModel",
+            "minimaxH3Partition",
+            "importSourceShape",
+            "importComponentTier",
+            "importQuantFormat",
+            "modelDeclaration",
+            "modelProvenance",
+        ]
+        .iter()
+        .any(|key| entry.contains_key(*key))
+        || entry
+            .get("inheritedLicenseAcknowledgments")
+            .is_some_and(|value| value.as_array().is_none_or(|rows| !rows.is_empty()))
+        || import_origin;
+    if !has_import_evidence {
+        return Ok(());
+    }
+    let declaration =
+        sceneworks_core::model_artifacts::provenance::import_declaration_context(entry)
+            .map_err(ApiError::bad_request)?;
+    let bound = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry,
+    )
+    .map_err(ApiError::bad_request)?;
+    let inherited = bound
+        .as_ref()
+        .and_then(|value| value.get("baseLineage"))
+        .and_then(|_| {
+            bound
+                .as_ref()
+                .and_then(|value| value.get("inheritedLicenseAcknowledgments"))
+        })
+        .or_else(|| {
+            declaration
+                .get("modelDeclaration")
+                .and_then(|value| value.get("inheritedLicenseAcknowledgments"))
+        });
+    let path = acknowledgments::acknowledgments_file(&state.settings.config_dir);
+    for component in inherited.and_then(Value::as_array).into_iter().flatten() {
+        if component
+            .get("requiresLicenseAcknowledgment")
+            .and_then(Value::as_bool)
+            != Some(true)
+        {
+            continue;
+        }
+        let id = component
+            .get("modelId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad_request("Inherited component license has no model identity")
+            })?;
+        let terms = json!({"id":id,"license":component.get("license"),
+            "licenseUrl":component.get("licenseUrl"),"licenseNotice":component.get("licenseNotice")});
+        if component.get("termsSha256").and_then(Value::as_str)
+            != Some(acknowledgments::terms_sha256(&terms).as_str())
+        {
+            return Err(ApiError::bad_request(
+                "Inherited component license commitment is invalid",
+            ));
+        }
+        if license_acknowledged {
+            acknowledgments::record_acknowledgment(
+                &path,
+                &terms,
+                "api-import-components",
+                &sceneworks_core::time::utc_now(),
+            )
+            .map_err(|error| ApiError::internal(error.to_string()))?;
+        } else if acknowledgments::current_acknowledgment(&path, &terms)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .is_none()
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: format!("Component '{id}' requires accepting its inherited license. Accept the component terms on the Models screen or send licenseAcknowledged: true."),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE), context: None,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Every payload key that can name a Hugging Face repo the WORKER will fetch (sc-17227). Keep this
 /// aligned with the worker's own readers: `run_model_download_job` / `run_model_import_job` /
 /// `run_lora_*_job` take `repo` (`crates/sceneworks-worker/src/model_jobs.rs`), and
@@ -4131,6 +4247,14 @@ pub(crate) async fn queue_model_import_job(
                 }
             }
         }
+        rows.push(
+            sceneworks_core::minimax_h3_import::import_config_download(
+                &base,
+                &selected_tier,
+                std::env::consts::OS,
+            )
+            .map_err(ApiError::bad_request)?,
+        );
         let repos: Vec<_> = rows
             .iter()
             .map(|row| row.get("repo").and_then(Value::as_str))
@@ -4209,6 +4333,14 @@ pub(crate) async fn queue_model_import_job(
         }
         apply_model_manifest_defaults(object, &model_type, payload.family.as_deref());
     }
+    if let Some(entry) = manifest_entry.as_object() {
+        ensure_inherited_component_licenses_acknowledged(
+            &state,
+            entry,
+            payload.license_acknowledged,
+        )
+        .await?;
+    }
     let ownership_mode = payload.ownership_mode;
     let mut payload = to_json_object(&payload)?;
     // The ingest contract the worker executes: managed ownership, plus the provenance the install's
@@ -4255,6 +4387,11 @@ pub(crate) async fn queue_model_import_job(
             .await?;
         }
         for row in rows {
+            // The import worker fetches this literal config through the shared installer only if
+            // inspection finds no source-owned claim. It writes no primary download receipt.
+            if row.get("componentId").and_then(Value::as_str) == Some("import_transformer_config") {
+                continue;
+            }
             if imported_component_presence(&state.settings.data_dir, &row)
                 == sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
                 continue;
@@ -8016,6 +8153,7 @@ fn install_state_for(
         let resolved = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
             .resolve(checkpoint_id);
         let mut missing = Vec::new();
+        let mut bound_config = None;
         match resolved {
             Ok(resolved) => {
                 if let Err(reason) =
@@ -8023,6 +8161,11 @@ fn install_state_for(
                 {
                     missing.push(reason);
                 }
+                bound_config =
+                    sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
+                        .ok()
+                        .flatten()
+                        .map(|config| config.0);
             }
             Err(error) => missing.push(error.to_string()),
         }
@@ -8039,11 +8182,28 @@ fn install_state_for(
                     .to_owned(),
             );
         }
+        let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+            sceneworks_core::hf_home::model_source_library(data_dir),
+        );
         for row in rows {
             if imported_component_presence(data_dir, &row)
                 != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
                 missing.push(format!("{}: {}", row.get("repo").and_then(Value::as_str).unwrap_or("component"),
                     string_array_field(&row, "files").join(", ")));
+            }
+            if let Some(config) = &bound_config {
+                if let (Some(repo), Some(revision)) = (
+                    row.get("repo").and_then(Value::as_str),
+                    row.get("revision").and_then(Value::as_str),
+                ) {
+                    if let Ok((_, snapshot)) =
+                        resolver.discover_source_snapshot(repo, Some(revision))
+                    {
+                        if let Err(reason) = sceneworks_core::minimax_h3_import::import_component_configuration_compatible(&snapshot, &row, config) {
+                            missing.push(reason);
+                        }
+                    }
+                }
             }
         }
         return ModelCatalogEntryState {
@@ -14727,6 +14887,7 @@ mod mlx_tier_probe_tests {
 #[cfg(all(test, unix))]
 mod variant_delete_tests {
     use super::*;
+    use crate::tests::support::isolate_hf_cache;
     use std::os::unix::fs::symlink;
 
     /// Write (once) a `blobs/<etag>` file of `bytes.len()` bytes and return its path.
@@ -15234,6 +15395,7 @@ mod variant_delete_tests {
     /// sibling entry's scopes retained.
     #[tokio::test]
     async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "SceneWorks/minimax-h3-mlx";
@@ -15298,6 +15460,7 @@ mod variant_delete_tests {
     /// catalog entries.
     #[tokio::test]
     async fn deleting_one_iris_task_keeps_the_other_tasks_files() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -15374,6 +15537,7 @@ mod variant_delete_tests {
     /// the generation task's Qwen3-VL text encoder when a depth or restoration task is deleted.
     #[tokio::test]
     async fn deleting_any_iris_task_keeps_every_other_tasks_files_and_shared_blobs() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -15455,6 +15619,7 @@ mod variant_delete_tests {
     /// both entries the same `files` or drop one entry's `files` ⇒ the sibling's blob is removed ⇒ red.
     #[tokio::test]
     async fn deleting_one_training_adapter_keeps_the_other_versions_file() {
+        let _env = isolate_hf_cache();
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -15512,6 +15677,7 @@ mod variant_delete_tests {
     /// the universal path and quietly stop reclaiming the ~80 entries that own their repo outright.
     #[tokio::test]
     async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "Org/solo-model";
@@ -15554,6 +15720,7 @@ mod variant_delete_tests {
     /// than quietly reclaiming nothing.
     #[tokio::test]
     async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
+        let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
         let repo_name = "SceneWorks/whole-repo-pair";
@@ -16521,11 +16688,13 @@ mod minimax_h3_import_declaration_tests {
                 { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] },
                   "downloads":[
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer_ref/*"]},
                     {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
                 { "id":"minimax_h3_ref", "type":"video", "family":"minimax-h3", "downloads":[
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer_ref/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer/*"]},
                     {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
@@ -16551,7 +16720,8 @@ mod minimax_h3_import_declaration_tests {
                 json!({
                     "name": format!("Custom H3 {partition}"),
                     "source": { "kind": "huggingFace", "repo": "owner/h3-finetune" },
-                    "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition
+                    "family": "minimax-h3", "baseModel": base, "minimaxH3Partition": partition,
+                    "licenseAcknowledged": true
                 }),
             )
             .await;
@@ -16563,7 +16733,23 @@ mod minimax_h3_import_declaration_tests {
             assert_eq!(entry["minimaxH3Partition"], partition);
             assert_eq!(entry["type"], "video");
             let rows = entry["downloads"].as_array().unwrap();
-            assert_eq!(rows.len(), if partition == "hybrid" { 1 } else { 2 });
+            assert_eq!(rows.len(), if partition == "hybrid" { 2 } else { 3 });
+            let config = rows
+                .iter()
+                .find(|row| row["componentId"] == "import_transformer_config")
+                .unwrap();
+            assert_eq!(
+                config["revision"],
+                "1111111111111111111111111111111111111111"
+            );
+            assert_eq!(
+                config["files"],
+                json!([if partition == "ref2va" {
+                    "bf16/transformer_ref/config.json"
+                } else {
+                    "bf16/transformer/config.json"
+                }])
+            );
             assert!(rows.iter().all(super::is_co_requisite_download));
             let imported_slot = if partition == "ref2va" {
                 "q4/transformer_ref/*"
@@ -16724,6 +16910,7 @@ mod minimax_h3_import_declaration_tests {
                 "linkedRootId": root["rootId"],
                 "linkedRelativePath": "custom/transformer",
                 "family": "minimax-h3",
+                "licenseAcknowledged": true,
             });
             body.as_object_mut()
                 .unwrap()
@@ -16773,6 +16960,7 @@ mod minimax_h3_import_declaration_tests {
             let mut body = source;
             body["baseModel"] = json!("minimax_h3");
             body["minimaxH3Partition"] = json!("fl2va");
+            body["licenseAcknowledged"] = json!(true);
             let (status, response) =
                 request(app.clone(), "POST", "/api/v1/models/import", body).await;
             assert_eq!(status, StatusCode::CREATED, "{response}");
@@ -17192,7 +17380,7 @@ mod minimax_h3_import_declaration_tests {
         let revision = "1111111111111111111111111111111111111111";
         let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
             {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
-            {"provider":"huggingface","repo":"fixture/tiers","variant":"bf16","files":["bf16/transformer/*"]},
+            {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"bf16","files":["bf16/transformer/*"]},
             {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"q4","files":["q4/encoder.bin"]},
             {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"variant":"bf16","files":["bf16/encoder.bin"]}
         ]});
@@ -17212,7 +17400,7 @@ mod minimax_h3_import_declaration_tests {
         )
         .unwrap();
         let app = create_app(settings).unwrap();
-        let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})).await;
+        let (status, job) = request(app,"POST","/api/v1/models/import",json!({"modelId":"bf16_only_import","source":{"kind":"huggingFace","repo":"community/custom"},"baseModel":"minimax_h3","minimaxH3Partition":"fl2va","licenseAcknowledged":true})).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
         assert_eq!(
             job["payload"]["manifestEntry"]["importComponentTier"],
@@ -17232,6 +17420,38 @@ mod minimax_h3_import_declaration_tests {
             surface["runtimeQuantTiers"],
             json!(["bf16"]),
             "normal picker defaults can only select the bound closure"
+        );
+    }
+
+    #[test]
+    fn config_only_provisioning_never_marks_the_stock_dit_installed() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let revision = "1111111111111111111111111111111111111111";
+        let base = json!({"id":"minimax_h3","type":"video","family":"minimax-h3","downloads":[
+            {"provider":"huggingface","repo":"fixture/base","revision":revision,"variant":"bf16","default":true,"files":["bf16/transformer/*"]}
+        ]});
+        let row = sceneworks_core::minimax_h3_import::import_config_download(
+            &base,
+            "q4",
+            std::env::consts::OS,
+        )
+        .unwrap();
+        assert_eq!(row["files"], json!(["bf16/transformer/config.json"]));
+        assert_eq!(row["coRequisite"], true);
+        let snapshot = super::huggingface_repo_cache_path(temp.path(), "fixture/base")
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(snapshot.join("bf16/transformer")).unwrap();
+        std::fs::write(snapshot.join("bf16/transformer/config.json"), b"{}").unwrap();
+        assert!(
+            !super::install_state_for(
+                super::model_download_context(&base).unwrap(),
+                &base,
+                temp.path()
+            )
+            .installed
         );
     }
 }

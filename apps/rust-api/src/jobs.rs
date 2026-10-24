@@ -97,26 +97,50 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
+    if matches!(payload.job_type, JobType::ImageDetail) {
+        // Raw callers never mint the private carrier, including resolved text-encoder paths.
+        for key in [
+            "modelManifestEntry",
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            payload.payload.remove(key);
+        }
+    }
     validate_raw_job_payload(&state, &payload.job_type, &mut payload.payload).await?;
-    canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    let canonical_entry =
+        canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
         &payload.job_type,
         &mut payload.payload,
     )
     .await?;
+    let selected_entry = canonical_entry.as_ref().or_else(|| {
+        if crate::model_sources::canonical_utility_model_carrier(&payload.job_type) {
+            payload.payload.get("modelManifestEntry")
+        } else {
+            None
+        }
+    });
+    let model_provenance =
+        canonical_model_provenance(&state, selected_entry, &payload.payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type: payload.job_type,
-            project_id: payload.project_id,
-            project_name: payload.project_name,
-            payload: payload.payload,
-            requested_gpu: payload.requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status: None,
-        })
+        store.create_job_with_model_provenance(
+            CreateJob {
+                job_type: payload.job_type,
+                project_id: payload.project_id,
+                project_name: payload.project_name,
+                payload: payload.payload,
+                requested_gpu: payload.requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            },
+            model_provenance.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -425,19 +449,22 @@ pub(crate) async fn retry_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
-        &state,
-        &job_id,
-        &payload.payload_changes,
-        true,
-    )
-    .await?;
+    let (canonical_payload, model_provenance) =
+        validate_and_canonicalize_merged_generation_payload(
+            &state,
+            &job_id,
+            &payload.payload_changes,
+            true,
+        )
+        .await?;
+    payload.payload_changes = canonical_payload;
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.retry_job(
+        store.retry_job_with_model_provenance(
             &job_id,
             RetryJob {
                 payload_changes: payload.payload_changes,
             },
+            model_provenance.as_ref(),
         )
     })
     .await?;
@@ -645,24 +672,27 @@ pub(crate) async fn duplicate_job(
     {
         return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
     }
-    payload.payload_changes = validate_and_canonicalize_merged_generation_payload(
-        &state,
-        &job_id,
-        &payload.payload_changes,
-        false,
-    )
-    .await?;
+    let (canonical_payload, model_provenance) =
+        validate_and_canonicalize_merged_generation_payload(
+            &state,
+            &job_id,
+            &payload.payload_changes,
+            false,
+        )
+        .await?;
+    payload.payload_changes = canonical_payload;
     // An Iris training duplicate trains under its own output id (merged last: never overridable).
     if let Some(fresh_output) = fresh_output {
         payload.payload_changes.extend(fresh_output);
     }
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.duplicate_job(
+        store.duplicate_job_with_model_provenance(
             &job_id,
             DuplicateJob {
                 payload_changes: payload.payload_changes,
                 requested_gpu: payload.requested_gpu,
             },
+            model_provenance.as_ref(),
         )
     })
     .await?;
@@ -837,7 +867,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     job_id: &str,
     payload_changes: &JsonObject,
     retry: bool,
-) -> Result<JsonObject, ApiError> {
+) -> Result<(JsonObject, Option<Value>), ApiError> {
     let job_id = job_id.to_owned();
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
     let job_type = job.job_type.clone();
@@ -863,6 +893,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // Deliberately choosing another model is a new selection. Null clears the old key through
         // the store's shallow merge, rather than leaving an invisible stale replay constraint.
         merged.insert("expectedImportedModelRef".to_owned(), Value::Null);
+    }
+    let canonical_raw_image = matches!(job_type, JobType::ImageDetail)
+        || crate::model_sources::canonical_utility_model_carrier(&job_type);
+    if canonical_raw_image {
+        for key in [
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            merged.remove(key);
+        }
     }
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
@@ -911,6 +952,8 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    // Local control-flow evidence, never a serialized/caller-supplied trust marker.
+    let mut canonical_selection = canonical_model_entry.is_some();
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
     // alias the canonicalizer dropped (the replay picked another model) must be cleared explicitly
     // or the persisted value would survive the merge.
@@ -948,6 +991,9 @@ async fn validate_and_canonicalize_merged_generation_payload(
             crate::generation::video_job_platform(state),
         )?;
         if let Some(entry) = model_manifest_entry.as_object() {
+            // Re-freeze the identity that will actually be enqueued: the entry above was resolved
+            // from the CURRENT catalog, so it is authority for what runs, not for what the original
+            // replay named (checked above, before this point).
             let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
                 &state.settings.data_dir, entry,
             ).map_err(|error| ApiError::bad_request(format!("Cannot verify imported replay identity: {error}. Reimport the original checkpoint.")))?;
@@ -956,6 +1002,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 merged.insert("expectedImportedModelRef".to_owned(), reference);
             }
         }
+        canonical_selection = true;
         merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
@@ -1079,7 +1126,55 @@ async fn validate_and_canonicalize_merged_generation_payload(
         )
         .await?;
     }
-    Ok(merged)
+    if canonical_raw_image {
+        crate::model_sources::ensure_runtime_model_sources(state, &job_type, &mut merged).await?;
+        if crate::model_sources::canonical_utility_model_carrier(&job_type) {
+            canonical_selection = true;
+        }
+        // The store shallow-merges replay payloads: explicitly clear discarded historical claims.
+        for key in [
+            "baseModelManifestEntry",
+            "modelManifestEntries",
+            "modelProvenance",
+        ] {
+            if persisted.contains_key(key) && !merged.contains_key(key) {
+                merged.insert(key.to_owned(), Value::Null);
+            }
+        }
+    }
+    let selected_entry = if canonical_selection {
+        merged.get("modelManifestEntry")
+    } else {
+        None
+    };
+    let provenance = canonical_model_provenance(state, selected_entry, &merged).await?;
+    Ok((merged, provenance))
+}
+
+/// Accept only the entry returned by an actual server canonicalizer. Presence in an incoming or
+/// persisted payload is not evidence of its origin and is never a fallback for this argument.
+async fn canonical_model_provenance(
+    state: &AppState,
+    entry: Option<&Value>,
+    payload: &JsonObject,
+) -> Result<Option<Value>, ApiError> {
+    let Some(entry) = entry.and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    crate::models::ensure_inherited_component_licenses_acknowledged(
+        state,
+        entry,
+        payload
+            .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await?;
+    sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry,
+    )
+    .map_err(ApiError::bad_request)
 }
 
 /// Resolve and stamp the authoritative catalog entry at every image-job creation boundary.
@@ -2124,21 +2219,33 @@ pub(crate) async fn persist_reported_assets(
         .unwrap_or_default()
         .to_owned();
     let generation_set = result.get("generationSet").cloned();
-    // The job row is authoritative for the project id (never the worker payload).
-    let job = store_call(state.clone(), {
+    // Only a server-canonical admission can freeze source authority. Historical payload carriers
+    // may be client-authored, malformed, or belong to another real import; NULL remains unknown.
+    // In particular, finishing an old job must not reconstruct provenance or retry forever.
+    let (job, model_provenance) = store_call(state.clone(), {
         let job_id = job_id.to_owned();
-        move |store, _timeout| store.get_job(&job_id)
+        move |store, _timeout| Ok((store.get_job(&job_id)?, store.model_provenance(&job_id)?))
     })
     .await?;
+    sceneworks_core::model_artifacts::provenance::stamp_asset_provenance(
+        &mut asset_writes,
+        model_provenance.as_ref(),
+    );
     stamp_vector_workflow_asset_writes(&job.job_type, &job.payload, &job.id, &mut asset_writes);
     crate::yue2_jobs::stamp_export_usage_policies(&job.job_type, &job.payload, &mut asset_writes);
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
     let job_id_owned = job_id.to_owned();
+    let provenance_data_dir = state.settings.data_dir.clone();
     let built = project_call(state.clone(), move |store| {
         // An asset derived from a policy-bearing input inherits its usage policy (sc-22999).
         crate::yue2_jobs::inherit_usage_policies(&store, &project_id, &mut asset_writes)?;
+        sceneworks_core::model_artifacts::provenance::verify_asset_derivative_provenance(
+            &provenance_data_dir,
+            &mut asset_writes,
+        )
+        .map_err(ProjectStoreError::BadRequest)?;
         if let Some(generation_set) = generation_set.as_ref() {
             store.write_generation_set(
                 &project_id,

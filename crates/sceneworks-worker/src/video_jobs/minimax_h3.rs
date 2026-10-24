@@ -14,6 +14,8 @@ use runtime_macos as platform_runtime;
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::video_request::{classify_reference_set, ReferenceSetVerdict};
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+use std::future::Future;
 
 /// Catalog-only optional component staging shared by both native H3 routes. Never fetches.
 #[cfg(any(
@@ -1707,14 +1709,15 @@ pub(super) async fn generate_candle_minimax_h3(
         project_path,
         engine_id,
         backend,
+        super::candle::candle_video_vram_budget(settings),
         crate::inference_runtime::load,
     )
     .await
 }
 
-/// [`generate_candle_minimax_h3`] with the engine loader supplied by the caller — the MLX arm's
-/// `generate_minimax_h3_using` seam, so a test can assert on the `LoadSpec` and `GenerationRequest`
-/// that actually reach the Candle provider with no weights or GPU (sc-26680).
+/// [`generate_candle_minimax_h3`] with the loader and lazy admission budget supplied by the caller.
+/// Production passes the live probe future; it is polled only at the same pre-load gate below.
+/// Tests can inspect the provider request with explicit budgets, without hardware-dependent probes.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_candle_minimax_h3_using(
@@ -1725,6 +1728,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
     project_path: &Path,
     engine_id: &'static str,
     backend: &str,
+    vram_budget: impl Future<Output = Option<crate::vram_gate::VramBudget>> + Send,
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
@@ -1802,7 +1806,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
         priced_tier,
         adapter_bytes,
         &settings.gpu_id,
-        super::candle::candle_video_vram_budget(settings).await,
+        vram_budget.await,
         sparse_bound.as_ref(),
     ) {
         return Err(error);
@@ -1907,6 +1911,8 @@ pub(super) struct ImportedMiniMaxH3Dit {
     /// The validated binding, recorded verbatim on the asset.
     pub(super) assembly: Value,
     pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
+    /// Complete source table/basis binding; never inferred from filenames or mutable settings.
+    pub(super) pruning: Option<sceneworks_core::minimax_h3_codec::H3PruningBinding>,
     component_bindings: Value,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
@@ -2014,10 +2020,17 @@ pub(super) fn resolve_imported_minimax_h3_dit(
             Ok(pin)
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    let bound_config = sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
+        .map_err(|reason| refuse("invalid-bound-config", reason))?;
     let inventory = with_imported_h3_source_seals(&pins, || {
-        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved(&resolved)
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config(
+            &resolved,
+            bound_config,
+        )
     })
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
+    sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
+        .map_err(|reason| refuse("pruning-incompatible", reason))?;
     let (directory, derivative) =
         if inventory.requires_normalization {
             use sceneworks_core::checkpoint_derivative::{
@@ -2082,6 +2095,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
                 None,
             )
         };
+    with_imported_h3_source_seals(&pins, || {
+        verify_imported_h3_pruning_directory(&directory, assembly.pruning.as_ref())
+    })
+    .map_err(|reason| refuse("pruning-incompatible", reason))?;
     // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
     // directory, so a verified shard set alone cannot authorize a foreign file beside it.
     let planned: std::collections::BTreeSet<_> = if inventory.requires_normalization {
@@ -2115,12 +2132,51 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         checkpoint_id,
         transformer_dir: directory,
         partition: assembly.partition,
+        pruning: assembly.pruning.clone(),
         assembly: assembly.to_json(),
         component_bindings: json!({"tier":entry.get("importComponentTier"),"downloads":entry.get("downloads")}),
         _pins: pins,
         _derivative: derivative,
         _source_lease: source_lease,
     })
+}
+
+/// Verify the leased canonical component against the source-bound table and complete reduced basis.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(super) fn verify_imported_h3_pruning_directory(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "H3 canonical component filename is not UTF-8")?;
+        if path.is_file()
+            && (path.extension().is_some_and(|ext| ext == "safetensors")
+                || matches!(
+                    name.as_str(),
+                    "config.json" | "diffusion_pytorch_model.safetensors.index.json"
+                ))
+        {
+            files.push((name, path));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical = sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)?;
+    if canonical.pruning.as_ref() != Some(expected) {
+        return Err(
+            "sealed H3 component has a different pruning table/basis identity or source precision"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// The request as its declared task partition sees it — for SEMANTICS only (shape validation, the
@@ -2154,6 +2210,19 @@ fn record_imported_minimax_h3_identity(
     shared_tier: &str,
 ) {
     if let Value::Object(raw) = raw_settings {
+        // Advanced settings cannot claim a conversion. Only the lease retained through this
+        // render names an actual shared-cache derivative; the API redeems its bound receipt.
+        raw.remove("checkpointDerivative");
+        if let Some(derivative) = &dit._derivative {
+            let cache_key = derivative
+                .artifact()
+                .cache_key()
+                .expect("leased artifact identity is validated");
+            raw.insert(
+                "checkpointDerivative".to_owned(),
+                json!({"cacheKey":cache_key}),
+            );
+        }
         raw.insert(
             "importPlan".to_owned(),
             json!({
@@ -2342,6 +2411,9 @@ fn resolve_imported_h3_components(
         &request.model_manifest_entry,
     )
     .map_err(refuse)?;
+    let dit_config: Value =
+        serde_json::from_slice(&std::fs::read(dit.transformer_dir.join("config.json"))?)
+            .map_err(|error| refuse(format!("bound transformer config: {error}")))?;
     if let Some(value) = request.advanced.get("mlxQuantize") {
         let bits = value
             .as_i64()
@@ -2401,6 +2473,16 @@ fn resolve_imported_h3_components(
                 "{repo}@{revision}: bound component is incomplete"
             )));
         }
+        sceneworks_core::minimax_h3_import::import_component_configuration_compatible(
+            &snapshot,
+            row,
+            &dit_config,
+        )
+        .map_err(|reason| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:incompatible-component] {reason}"
+            ))
+        })?;
         let files = row
             .get("files")
             .and_then(Value::as_array)
@@ -2551,6 +2633,12 @@ fn stage_imported_minimax_h3_assembly(
         reference.as_os_str().as_encoded_bytes(),
     ] {
         hasher.update(part);
+        hasher.update([0]);
+    }
+    if let Some(pruning) = &dit.pruning {
+        hasher.update(pruning.topology_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(pruning.identity.as_bytes());
         hasher.update([0]);
     }
     let key = format!("{:x}", hasher.finalize());

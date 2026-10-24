@@ -5829,10 +5829,209 @@ fn minimax_h3_source_family_error(payload: &JsonObject, detected: Option<&str>) 
     None
 }
 
-/// Compile a linked checkpoint under an approved root and register it as a selectable model.
-///
-/// Nothing is downloaded, copied, moved or deleted: the only writes are the plan store's own
-/// documents under `<data>/checkpoints/` and the manifest entry (E6).
+fn validate_resident_h3_interfaces(
+    settings: &Settings,
+    entry: &JsonObject,
+    plan: &sceneworks_core::checkpoint_import::ImportPlanV1,
+) -> Result<(), String> {
+    let config = sceneworks_core::minimax_h3_import::bound_config(&plan.context)?
+        .ok_or("missing bound transformer configuration")?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(&settings.data_dir),
+    );
+    for row in entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let (Some(repo), Some(revision)) = (
+            row.get("repo").and_then(Value::as_str),
+            row.get("revision").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+            continue;
+        };
+        // Independently queued missing/partial components remain unready, not a false architectural
+        // contradiction. Complete resident components must already agree before publication.
+        if sceneworks_core::minimax_h3_import::import_component_files_complete(&snapshot, row) {
+            sceneworks_core::minimax_h3_import::import_component_configuration_compatible(
+                &snapshot, row, &config.0,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn import_plan_context(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source: &Path,
+) -> WorkerResult<std::collections::BTreeMap<String, Value>> {
+    let entry = job.payload.get("manifestEntry").and_then(Value::as_object);
+    let mut context = entry
+        .map(sceneworks_core::model_artifacts::provenance::import_declaration_context)
+        .transpose()
+        .map_err(WorkerError::InvalidPayload)?
+        .unwrap_or_default();
+    if !entry.is_some_and(sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family) {
+        return Ok(context);
+    }
+    // A source-owned sidecar/embedded claim is authoritative, including invalid claims: inspection
+    // must refuse those rather than substitute a base. Never download a fallback in that case.
+    let directory = if source.is_dir() {
+        source
+    } else {
+        source.parent().unwrap_or(source)
+    };
+    let has_embedded = |path: &Path| {
+        sceneworks_core::lora_family::read_safetensors_header(path)
+            .ok()
+            .is_some_and(|h| {
+                h.get("__metadata__")
+                    .and_then(|m| m.get("h3_config"))
+                    .is_some()
+            })
+    };
+    let embedded = if source.is_dir() {
+        std::fs::read_dir(source)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
+                    && has_embedded(&entry.path())
+            })
+    } else {
+        has_embedded(source)
+    };
+    if directory.join("config.json").exists() || embedded {
+        return Ok(context);
+    }
+    let is_h3 = |path: &Path| matches!(detect_base_weight_file(path), Ok(BaseWeightDetection::Recognized(v)) if v.family.as_deref() == Some(MINIMAX_H3_IMPORT_FAMILY));
+    let detected_h3 = if source.is_dir() {
+        std::fs::read_dir(source)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .any(|e| is_h3(&e.path()))
+    } else {
+        is_h3(source)
+    };
+    if !detected_h3 {
+        return Ok(context);
+    } // Full inspection reports the actual family incompatibility.
+    let entry = entry.expect("checked");
+    sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(entry)
+        .map_err(WorkerError::InvalidPayload)?;
+    let checkpoint_id = match (
+        optional_payload_string(&job.payload, "linkedRootId"),
+        optional_payload_string(&job.payload, "linkedRelativePath"),
+    ) {
+        (Some(root), Some(path)) => {
+            Some(sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(root, path))
+        }
+        _ => optional_payload_string(&job.payload, "modelId")
+            .map(sceneworks_core::checkpoint_plan_store::managed_checkpoint_id),
+    };
+    let plans = CheckpointPlanStore::open(&settings.data_dir);
+    if let Some(id) = checkpoint_id {
+        if let Ok(record) = plans.record(&id) {
+            let plan = plans
+                .plan(&id, &record.plan.plan_id)
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            record
+                .validate_loaded_plan(&plan)
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            if plan
+                .context
+                .get("transformerConfig")
+                .is_some_and(|b| b["provenance"]["kind"] == "selected-base")
+                && sceneworks_core::minimax_h3_import::bound_config(&plan.context)
+                    .map_err(WorkerError::InvalidPayload)?
+                    .is_some()
+            {
+                return Ok(plan.context);
+            }
+        }
+    }
+    let rows: Vec<_> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row.get("componentId").and_then(Value::as_str) == Some("import_transformer_config")
+        })
+        .collect();
+    if rows.len() != 1 {
+        return Err(WorkerError::InvalidPayload(
+            "Weight-only H3 requires the selected base's exact configuration download".into(),
+        ));
+    }
+    let row = rows[0];
+    let repo = row
+        .get("repo")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload("Configuration repository missing".into()))?;
+    let revision = row
+        .get("revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| WorkerError::InvalidPayload("Configuration revision missing".into()))?;
+    let files = row
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| WorkerError::InvalidPayload("Configuration file missing".into()))?;
+    let path = files
+        .first()
+        .and_then(Value::as_str)
+        .filter(|p| files.len() == 1 && (*p == "config.json" || p.ends_with("/config.json")))
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "Configuration download must contain only config.json".into(),
+            )
+        })?;
+    let parts = sceneworks_core::checkpoint_plan_store::portable_relative_path_parts(path)
+        .map_err(|e| WorkerError::InvalidPayload(e.into()))?;
+    let provenance = json!({"kind":"selected-base","baseModel":entry["baseModel"],"repo":repo,"revision":revision,"path":path,"componentTier":entry.get("importComponentTier")});
+    // Validate immutable provenance before issuing any request; mutable main/branch is not a pin.
+    context.insert(
+        "transformerConfig".into(),
+        sceneworks_core::minimax_h3_import::config_binding(json!({}), provenance.clone()),
+    );
+    sceneworks_core::minimax_h3_import::bound_config(&context)
+        .map_err(WorkerError::InvalidPayload)?;
+    let mut config_file = huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+        .map(|root| root.join(&parts));
+    if !config_file.as_ref().is_some_and(|p| p.is_file()) {
+        ensure_hf_files_cached(api, settings, job, repo, revision, &[path.to_owned()]).await?;
+        config_file = huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)
+            .map(|root| root.join(&parts));
+    }
+    let file = config_file.filter(|p| p.is_file()).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Selected base configuration is unavailable at the exact revision".into(),
+        )
+    })?;
+    let config = sceneworks_core::minimax_h3_codec::read_h3_descriptor(&file)
+        .map_err(|e| WorkerError::InvalidPayload(format!("Invalid selected-base config: {e}")))?;
+    context.insert(
+        "transformerConfig".into(),
+        sceneworks_core::minimax_h3_import::config_binding(config, provenance),
+    );
+    Ok(context)
+}
+
+/// Compile and register an approved linked source without copying or modifying its bytes.
+/// A missing source config may fetch only the selected base's pinned config into the shared cache.
 async fn run_linked_checkpoint_import_job(
     api: &ApiClient,
     settings: &Settings,
@@ -5875,35 +6074,55 @@ async fn run_linked_checkpoint_import_job(
                 .ok(),
         )
         .map(|(root, parts)| root.join(parts));
+    let context = match import_plan_context(
+        api,
+        settings,
+        job,
+        linked_file.as_deref().unwrap_or(Path::new("")),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+    };
     let root_id = root_id.to_owned();
     let relative_path = relative_path.to_owned();
     // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
-    let compiled =
-        match tokio::task::spawn_blocking(move || store.compile_linked(&root_id, &relative_path))
-            .await
-        {
-            Ok(Ok(compiled)) => compiled,
-            // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
-            // wrong with the source; surface it verbatim rather than flattening it to "import failed".
-            Ok(Err(error)) => {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "Linked checkpoint import failed.",
-                    Some(error.to_string()),
-                )
-                .await;
-            }
-            Err(error) => {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "Linked checkpoint import failed.",
-                    Some(format!("Checkpoint inspection task failed: {error}")),
-                )
-                .await;
-            }
-        };
+    let compiled = match tokio::task::spawn_blocking(move || {
+        store.compile_linked_with_context(&root_id, &relative_path, context)
+    })
+    .await
+    {
+        Ok(Ok(compiled)) => compiled,
+        // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
+        // wrong with the source; surface it verbatim rather than flattening it to "import failed".
+        Ok(Err(error)) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(format!("Checkpoint inspection task failed: {error}")),
+            )
+            .await;
+        }
+    };
     if let Some(reason) = minimax_h3_source_family_error(&job.payload, Some(&compiled.plan.family))
     {
         CheckpointPlanStore::open(&settings.data_dir)
@@ -5942,6 +6161,10 @@ async fn run_linked_checkpoint_import_job(
         if compiled.plan.family == MINIMAX_H3_IMPORT_FAMILY {
             if let Err(reason) =
                 MiniMaxH3ImportAssembly::from_declared_plan(&compiled.plan, &manifest_entry)
+                    .and_then(|assembly| {
+                        validate_resident_h3_interfaces(settings, &manifest_entry, &compiled.plan)?;
+                        Ok(assembly)
+                    })
             {
                 // A second catalog name may reference this same approved source. A refused new
                 // declaration must not destroy the unchanged binding an existing model owns.
@@ -6161,6 +6384,10 @@ async fn recover_committed_h3_import(
             WorkerError::InvalidPayload("Recovered H3 import has no manifestEntry".into())
         })?;
     let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&resolved.plan, &entry)
+        .and_then(|assembly| {
+            validate_resident_h3_interfaces(settings, &entry, &resolved.plan)?;
+            Ok(assembly)
+        })
         .map_err(WorkerError::InvalidPayload)?;
     let primary =
         sceneworks_core::base_weights::minimax_h3_import_primary(target).ok_or_else(|| {
@@ -6180,14 +6407,14 @@ async fn recover_committed_h3_import(
         .semantic_digest()
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let duplicates = store
-        .duplicates_of(&semantic, &checkpoint_id)
+        .duplicates_of_plan(&resolved.plan, &checkpoint_id)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     entry.insert("importPlan".into(), json!({"checkpointId":checkpoint_id,"planId":resolved.plan.plan_id,"semanticDigest":semantic}));
-    stamp_imported_minimax_h3_entry(&mut entry, &assembly);
     let classification = base_weight_manifest_classification(&primary);
     if let Some((_, quant)) = classification {
         entry.insert("importQuantFormat".into(), json!(quant));
     }
+    stamp_imported_minimax_h3_entry(&mut entry, &assembly);
     entry
         .entry("paths")
         .or_insert_with(|| json!({}))
@@ -6656,7 +6883,30 @@ pub(crate) async fn run_model_import_job(
     // behind it, so a caller that reaches `finalize` by any other route is still checked.
     let declared_sha256 =
         optional_payload_string(&job.payload, "expectedSha256").and_then(normalize_sha256);
-    let install = match ingest.finalize(&primary_relative, declared_sha256.as_deref()) {
+    let context = match import_plan_context(
+        api,
+        settings,
+        job,
+        imported_model_file.as_deref().unwrap_or(&staging_dir),
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Model import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+    };
+    let install = match ingest.finalize_with_context(
+        &primary_relative,
+        declared_sha256.as_deref(),
+        context,
+    ) {
         Ok(install) => install,
         Err(error) => {
             return fail_job(
@@ -6768,7 +7018,11 @@ pub(crate) async fn run_model_import_job(
             match MiniMaxH3ImportAssembly::from_declared_plan(
                 &install.compiled.plan,
                 &manifest_entry,
-            ) {
+            )
+            .and_then(|assembly| {
+                validate_resident_h3_interfaces(settings, &manifest_entry, &install.compiled.plan)?;
+                Ok(assembly)
+            }) {
                 Ok(assembly) => {
                     manifest_entry.insert(
                         "importPlan".to_owned(),

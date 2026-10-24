@@ -4132,29 +4132,15 @@ async fn create_generation_job_with_status(
     // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
     // change the identity the generated asset will report.
     //
-    // Never from a caller's payload: `modelManifestEntry` here is the entry
-    // `ensure_runtime_model_sources` just re-resolved from the SERVER catalog, and
-    // `resolved_model_provenance` re-derives the identity from the persisted plan rather than
-    // trusting anything a request wrote. A job with no bound plan behind it gets `None` — the
-    // honest answer for a builtin entry, and the same one a legacy job already carries.
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
     let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
         Some(entry) => {
-            // sc-26687 / sc-26690: the inherited component licence terms of an imported
-            // checkpoint's assembly must be acknowledged before the job they feed is admitted, at
-            // the same boundary the fine-tune's own terms are and independently of them.
-            //
-            // `entry` is the SERVER-resolved one the route's own canonical resolver minted and
-            // `ensure_runtime_model_sources` re-derived, so this checks the terms the catalog
-            // actually binds rather than any caller claim. Idempotent with the component-download
-            // gate in `queue_model_import_job`.
-            //
-            // COVERAGE, stated precisely: every TYPED generation route (its handler attaches
-            // `modelManifestEntry`) and every generated-component download. It does NOT claim raw
-            // POST /jobs carriers — `ensure_runtime_model_sources` only fills gaps and trusts a
-            // present primary, so a raw carrier can arrive with no primary at all and this would
-            // no-op. sc-26690 owns the raw `jobs.rs::create_job` gate for those, called on the
-            // trusted canonical selection after the same canonicalization calls and before the
-            // atomic enqueue.
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
             crate::models::ensure_inherited_component_licenses_acknowledged(
                 &state,
                 entry,

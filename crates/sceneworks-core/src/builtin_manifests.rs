@@ -46,6 +46,27 @@ pub const BUILTIN_MANIFESTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// Read one trusted shipped model from the same embedded catalog used to seed installations.
+/// Shared by component semantics and provenance; this is not an imported-model registry.
+pub fn builtin_model_entry(
+    id: &str,
+) -> Option<&'static serde_json::Map<String, serde_json::Value>> {
+    static MODELS: std::sync::LazyLock<Option<Vec<serde_json::Value>>> =
+        std::sync::LazyLock::new(|| {
+            let (_, text) = BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")?;
+            let value: serde_json::Value =
+                serde_json::from_str(&crate::jsonc::strip_jsonc_comments(text)).ok()?;
+            value.get("models")?.as_array().cloned()
+        });
+    MODELS
+        .as_ref()?
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(id))?
+        .as_object()
+}
+
 /// The immutable Hugging Face location of the Chatterbox voice-encoder weights.
 ///
 /// This is derived from the shipped model manifest so downloads and runtime resolution have one pin

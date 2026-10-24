@@ -962,16 +962,22 @@ pub struct ImportPlanV1 {
     pub plan_id: String,
     pub family: String,
     pub layers: Vec<ImportLayerV1>,
+    /// Immutable loader configuration and its provenance, independent of physical ownership.
+    pub context: BTreeMap<String, serde_json::Value>,
 }
 
 impl Serialize for ImportPlanV1 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
-        let mut state = serializer.serialize_struct("ImportPlanV1", 4)?;
+        let mut state = serializer
+            .serialize_struct("ImportPlanV1", 4 + usize::from(!self.context.is_empty()))?;
         state.serialize_field("schemaVersion", &self.schema_version)?;
         state.serialize_field("planId", &self.plan_id)?;
         state.serialize_field("family", &self.family)?;
         state.serialize_field("layers", &self.layers)?;
+        if !self.context.is_empty() {
+            state.serialize_field("context", &self.context)?;
+        }
         state.end()
     }
 }
@@ -984,6 +990,8 @@ struct ImportPlanV1Wire {
     plan_id: String,
     family: String,
     layers: Vec<ImportLayerV1>,
+    #[serde(default)]
+    context: BTreeMap<String, serde_json::Value>,
 }
 
 impl From<ImportPlanV1Wire> for ImportPlanV1 {
@@ -993,6 +1001,7 @@ impl From<ImportPlanV1Wire> for ImportPlanV1 {
             plan_id: value.plan_id,
             family: value.family,
             layers: value.layers,
+            context: value.context,
         }
     }
 }
@@ -1022,6 +1031,8 @@ struct SemanticPlanV1<'a> {
     schema_version: u32,
     family: &'a str,
     layers: Vec<SemanticLayerV1<'a>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    context: &'a BTreeMap<String, serde_json::Value>,
 }
 
 impl ImportPlanV1 {
@@ -1036,6 +1047,7 @@ impl ImportPlanV1 {
             plan_id: plan_id.into(),
             family: family.into(),
             layers,
+            context: BTreeMap::new(),
         };
         plan.validate()?;
         Ok(plan)
@@ -1046,6 +1058,26 @@ impl ImportPlanV1 {
     pub fn semantic_digest(&self) -> Result<String, CheckpointImportContractError> {
         self.validate()?;
         Ok(identity(PLAN_SEMANTIC_DOMAIN, &self.semantic_form()?))
+    }
+
+    /// Duplicate equivalence only; never a persisted plan commitment. Legacy-family declarations
+    /// add explanatory provenance, but H3 declarations also bind task partition and component
+    /// semantics that tensor shapes cannot establish. Preserve those, and every other context key.
+    /// An unknown historical H3 declaration stays distinct rather than inferring its partition.
+    pub fn duplicate_equivalence_digest(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        let mut context = self.context.clone();
+        let key = crate::model_artifacts::provenance::MODEL_DECLARATION_KEY;
+        if let Some(mut declaration) = context.remove(key) {
+            if self.family == crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY {
+                declaration["baseLineage"] = serde_json::json!({});
+                declaration["inheritedLicenseAcknowledgments"] = serde_json::json!([]);
+                context.insert(key.into(), declaration);
+            }
+        }
+        let mut semantic = self.semantic_form()?;
+        semantic.context = &context;
+        Ok(identity(PLAN_SEMANTIC_DOMAIN, &semantic))
     }
 
     /// Identity that also binds each layer's exact physical owner, path, and provenance.
@@ -1108,6 +1140,27 @@ impl ImportPlanV1 {
             }
             previous = Some(layer.layer_id.clone());
         }
+        // Optional for historical plans. Once present this authority has the same structural
+        // contract as the published context schema, while all unrelated loader context remains open.
+        if let Some(declaration) = self.context.get("modelDeclaration") {
+            if declaration
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_f64)
+                != Some(1.0)
+                || !declaration
+                    .get("baseLineage")
+                    .is_some_and(serde_json::Value::is_object)
+                || !declaration
+                    .get("declaredSemantics")
+                    .is_some_and(serde_json::Value::is_object)
+                || !declaration
+                    .get("inheritedLicenseAcknowledgments")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|components| components.iter().all(serde_json::Value::is_object))
+            {
+                return Err(invalid("invalid immutable model declaration"));
+            }
+        }
         Ok(())
     }
 
@@ -1122,6 +1175,7 @@ impl ImportPlanV1 {
             schema_version: self.schema_version,
             family: &self.family,
             layers,
+            context: &self.context,
         })
     }
 

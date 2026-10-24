@@ -105,6 +105,9 @@ pub const NVFP4_CODEC_ID: &str = "nvfp4-v1";
 pub const DENSE_BF16_CODEC_ID: &str = "dense-bf16-v1";
 /// ComfyUI `comfy_quant` int8 tensorwise/per-row.
 pub const INT8_PER_ROW_CODEC_ID: &str = "int8-per-row-v1";
+/// Descriptor-validated rotated INT8 source/native format, not the generic dense decoder.
+/// The stable identity is owned by the existing backend-neutral native validation contract.
+pub const CONVROT_INT8_CODEC_ID: &str = gen_core::convrot_int8::CODEC_ID;
 /// Dense F16.
 pub const DENSE_F16_CODEC_ID: &str = "dense-f16-v1";
 /// Dense F32.
@@ -118,9 +121,10 @@ pub const MXFP8_CODEC_ID: &str = "mxfp8-v1";
 /// A GGUF container (the ggml block codecs live inside it).
 pub const GGUF_CONTAINER_CODEC_ID: &str = "gguf-container-v1";
 
-/// Every codec id this build knows, sorted. Mirrors the engine's registered codec set; the guard
-/// [`is_codec_id`] is what keeps a request tier from entering a codec field.
+/// Every codec identity this build knows, sorted: registered checkpoint decoders and validated
+/// native projection formats. [`is_codec_id`] keeps request tiers out of source/execution facts.
 pub const KNOWN_CODEC_IDS: &[&str] = &[
+    CONVROT_INT8_CODEC_ID,
     DENSE_BF16_CODEC_ID,
     DENSE_F16_CODEC_ID,
     DENSE_F32_CODEC_ID,

@@ -7,12 +7,9 @@
 //! Every supported operation denoises with the imported bytes; resident components are named
 //! load-time companions only. The worker revalidates this binding before loading.
 
-use std::sync::LazyLock;
-
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_import::{CheckpointContainerV1, ImportPlanV1};
-use crate::jsonc::strip_jsonc_comments;
 
 /// The catalog family token of every MiniMax-H3 checkpoint, builtin or imported.
 pub const MINIMAX_H3_IMPORT_FAMILY: &str = "minimax-h3";
@@ -111,6 +108,58 @@ pub fn validate_declared_source_family(
     Ok(())
 }
 
+/// A complete configuration snapshot, not a foreign file locator. Source-owned documents are
+/// sealed by the plan's source digests; selected-base fallback records its exact download identity.
+pub fn config_binding(config: Value, provenance: Value) -> Value {
+    use sha2::{Digest, Sha256};
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&config).expect("JSON config"))
+    );
+    json!({"config":config,"sha256":digest,"provenance":provenance})
+}
+
+pub fn bound_config(
+    context: &std::collections::BTreeMap<String, Value>,
+) -> Result<Option<crate::minimax_h3_codec::H3Config>, String> {
+    let Some(binding) = context.get("transformerConfig") else {
+        return Ok(None);
+    };
+    let config = binding
+        .get("config")
+        .filter(|v| v.is_object())
+        .ok_or("bound transformer configuration is missing")?;
+    let provenance = binding
+        .get("provenance")
+        .ok_or("bound configuration provenance is missing")?;
+    match provenance.get("kind").and_then(Value::as_str) {
+        Some("source") => {}
+        Some("selected-base") => {
+            for field in ["baseModel", "repo", "revision", "path"] {
+                if provenance
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_none_or(|v| v.trim().is_empty())
+                {
+                    return Err(format!("bound configuration provenance is missing {field}"));
+                }
+            }
+            let revision = provenance["revision"].as_str().expect("checked");
+            if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("bound configuration requires an exact commit revision".into());
+            }
+            crate::checkpoint_plan_store::portable_relative_path_parts(
+                provenance["path"].as_str().expect("checked"),
+            )?;
+        }
+        _ => return Err("unknown bound configuration provenance".into()),
+    }
+    if config_binding(config.clone(), provenance.clone()).get("sha256") != binding.get("sha256") {
+        return Err("bound configuration digest mismatch".into());
+    }
+    Ok(Some(crate::minimax_h3_codec::H3Config(config.clone())))
+}
+
 /// Resolve task semantics only; the returned stock id must NEVER be used as weight identity.
 pub fn entry_partition_model(
     entry: &Map<String, Value>,
@@ -141,6 +190,10 @@ pub struct MiniMaxH3ImportAssembly {
     pub transformer_dir: String,
     /// Bound JSON descriptors (`config.json` and any shard index) in the source directory.
     pub descriptor_layer_ids: Vec<String>,
+    /// Native encoding proven by the complete inventory, never by an approximate header hint.
+    pub source_encoding: Option<String>,
+    /// Complete source table/basis identity and source/compute precision geometry, when pruned.
+    pub pruning: Option<crate::minimax_h3_codec::H3PruningBinding>,
 }
 
 impl MiniMaxH3ImportAssembly {
@@ -212,12 +265,24 @@ impl MiniMaxH3ImportAssembly {
         let mut transformer_layer_ids: Vec<_> =
             transformers.iter().map(|l| l.layer_id.clone()).collect();
         transformer_layer_ids.sort();
+        let source_encoding = match plan.context.get("sourceEncoding") {
+            None => None,
+            Some(Value::String(value)) if value == "convrot_int8" => Some(value.clone()),
+            Some(_) => return Err("unknown MiniMax-H3 source encoding in plan context".into()),
+        };
+        let pruning = plan
+            .context
+            .get("adalnPruning")
+            .map(crate::minimax_h3_codec::H3PruningBinding::from_value)
+            .transpose()?;
         Ok(Self {
             partition: MiniMaxH3Partition::from_entry(entry)?,
             transformer_layer_id: transformer.layer_id.clone(),
             transformer_layer_ids,
             transformer_dir,
             descriptor_layer_ids,
+            source_encoding,
+            pruning,
         })
     }
 
@@ -252,12 +317,19 @@ impl MiniMaxH3ImportAssembly {
             }
             components.insert((*component).to_owned(), json!({ "source": "resident", "model": model, "purpose": if *component == "transformer_ref" { "load_only" } else { "shared" } }));
         }
-        json!({
+        let mut binding = json!({
             "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION,
             "family": MINIMAX_H3_IMPORT_FAMILY,
             "partition": self.partition.as_str(),
             "components": components,
-        })
+        });
+        if let Some(encoding) = &self.source_encoding {
+            binding["sourceEncoding"] = json!(encoding);
+        }
+        if let Some(pruning) = &self.pruning {
+            binding["adalnPruning"] = pruning.to_json();
+        }
+        binding
     }
 }
 
@@ -308,7 +380,16 @@ pub fn verify_entry_assembly(
     entry: &Map<String, Value>,
     plan: &ImportPlanV1,
 ) -> Result<MiniMaxH3ImportAssembly, String> {
+    crate::model_artifacts::provenance::validate_entry_declaration(plan, entry)?;
     let assembly = MiniMaxH3ImportAssembly::from_declared_plan(plan, entry)?;
+    let config = bound_config(&plan.context)?
+        .ok_or("the import plan has no bound configuration; re-import the checkpoint")?;
+    config.validate()?;
+    if plan.context["transformerConfig"]["provenance"]["kind"] == "selected-base"
+        && plan.context["transformerConfig"]["provenance"]["baseModel"] != entry["baseModel"]
+    {
+        return Err("bound configuration belongs to another compatible base".into());
+    }
     if let Some(binding) = entry.get("importPlan").and_then(Value::as_object) {
         if binding
             .get("planId")
@@ -345,6 +426,18 @@ pub fn verify_entry_assembly(
     Ok(assembly)
 }
 
+/// Bind the plan's pruning declaration to the complete source inventory actually pinned for load.
+/// Same-shaped foreign tables, reduced weights, folded biases or precision metadata cannot reuse it.
+pub fn verify_imported_pruning(
+    assembly: &MiniMaxH3ImportAssembly,
+    inventory: &crate::minimax_h3_codec::H3SourceInventory,
+) -> Result<(), String> {
+    if assembly.pruning != inventory.pruning {
+        return Err("MiniMax-H3 source pruning identity/topology no longer matches its import plan; rescan or re-import the checkpoint".into());
+    }
+    Ok(())
+}
+
 /// Stamp a compiled dense H3 DiT import onto its catalog entry: the video type, the source shape,
 /// and the validated binding beside the persisted plan identity.
 ///
@@ -366,6 +459,9 @@ pub fn stamp_imported_minimax_h3_entry(
             MINIMAX_H3_BASE_PARTITION_MODEL
         }),
     );
+    if let Some(encoding) = &assembly.source_encoding {
+        entry.insert("importQuantFormat".into(), json!(encoding));
+    }
     entry.insert(
         "family".to_owned(),
         Value::String(MINIMAX_H3_IMPORT_FAMILY.to_owned()),
@@ -376,6 +472,13 @@ pub fn stamp_imported_minimax_h3_entry(
         "importSourceShape".to_owned(),
         Value::String(MINIMAX_H3_IMPORT_SOURCE_SHAPE.to_owned()),
     );
+    // Config-only provisioning is complete: its bytes now live in the immutable shared plan.
+    // It is not a resident component and must not become an external loose-file dependency.
+    if let Some(rows) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+        rows.retain(|row| {
+            row.get("componentId").and_then(Value::as_str) != Some("import_transformer_config")
+        });
+    }
     let import_plan = entry
         .entry("importPlan".to_owned())
         .or_insert_with(|| json!({}));
@@ -387,39 +490,12 @@ pub fn stamp_imported_minimax_h3_entry(
     }
 }
 
-/// The shipped task surfaces, parsed once. Geometry and operation policy come from the catalog,
-/// while imported bytes and explicit task compatibility retain their independent identities.
-static BUILTIN_PARTITION_ENTRIES: LazyLock<Option<Vec<Map<String, Value>>>> = LazyLock::new(|| {
-    let (_, contents) = crate::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")?;
-    let manifest: Value = serde_json::from_str(&strip_jsonc_comments(contents)).ok()?;
-    Some(
-        manifest
-            .get("models")?
-            .as_array()?
-            .iter()
-            .filter_map(|model| {
-                matches!(
-                    model.get("id").and_then(Value::as_str),
-                    Some(MINIMAX_H3_BASE_PARTITION_MODEL | MINIMAX_H3_REFERENCE_PARTITION_MODEL)
-                )
-                .then(|| model.as_object().cloned())
-                .flatten()
-            })
-            .collect(),
-    )
-});
-
 fn builtin_base_partition_entry() -> Option<&'static Map<String, Value>> {
     builtin_partition_entry(MINIMAX_H3_BASE_PARTITION_MODEL)
 }
 
 fn builtin_partition_entry(id: &str) -> Option<&'static Map<String, Value>> {
-    BUILTIN_PARTITION_ENTRIES
-        .as_ref()?
-        .iter()
-        .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+    crate::builtin_manifests::builtin_model_entry(id)
 }
 
 fn builtin_reference_partition_entry() -> Option<&'static Map<String, Value>> {
@@ -532,6 +608,58 @@ pub fn import_component_files_complete(snapshot: &std::path::Path, row: &Value) 
     }
 }
 
+/// Check only the interfaces the imported DiT shares with resident components. Trunk geometry,
+/// RoPE and schedules belong to the source architecture, not to a stock-base equality check.
+pub fn import_component_configuration_compatible(
+    snapshot: &std::path::Path,
+    row: &Value,
+    config: &Value,
+) -> Result<(), String> {
+    let subdir = row.get("subdir").and_then(Value::as_str).or_else(|| {
+        row.get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .find_map(|file| file.strip_suffix("/*"))
+    });
+    let component = row
+        .get("componentId")
+        .and_then(Value::as_str)
+        .or_else(|| subdir.and_then(|dir| dir.rsplit('/').next()))
+        .unwrap_or_default();
+    let (dit_field, component_field) = match component {
+        "text_encoder" => ("text_dim", "hidden_size"),
+        "vae" | "video_vae" => ("in_channels", "latent_channels"),
+        "audio_vae" => ("audio_in_channels", "latent_channels"),
+        _ => return Ok(()),
+    };
+    let subdir = subdir
+        .ok_or_else(|| format!("{component}: bound component has no configuration directory"))?;
+    let parts = crate::checkpoint_plan_store::portable_relative_path_parts(subdir)?;
+    let document =
+        crate::minimax_h3_codec::read_h3_descriptor(&snapshot.join(parts).join("config.json"))?;
+    let component_config = if component == "text_encoder" {
+        document.get("text_config").unwrap_or(&document)
+    } else {
+        &document
+    };
+    let actual = component_config
+        .get(component_field)
+        .and_then(Value::as_u64)
+        .filter(|v| *v > 0)
+        .ok_or_else(|| format!("{component}/config.json has no positive {component_field}"))?;
+    let required = config
+        .get(dit_field)
+        .and_then(Value::as_u64)
+        .filter(|v| *v > 0)
+        .ok_or_else(|| format!("bound transformer configuration has no positive {dit_field}"))?;
+    if actual != required {
+        return Err(format!("incompatible {component}: {component_field}={actual}, but bound transformer {dit_field}={required}"));
+    }
+    Ok(())
+}
+
 /// Select the explicitly compatible base's reusable download closure, never its primary DiT.
 /// The caller selects a resident tier (reusing an installed tier before the catalog default).
 /// Platform filtering uses the same catalog mechanism as ordinary model installation.
@@ -579,15 +707,72 @@ pub fn import_component_downloads(
     Ok(rows)
 }
 
+/// Derive the selected base's dense architecture configuration, not the shared resident tier's
+/// packed-weight policy. This row is not a primary: completing it cannot install stock DiT.
+pub fn import_config_download(base: &Value, tier: &str, os: &str) -> Result<Value, String> {
+    use crate::model_artifacts::artifact_selection::{
+        model_download_for_variant, retain_downloads_for_os,
+    };
+    let mut base = base.clone();
+    retain_downloads_for_os(&mut base, os);
+    let mut row = model_download_for_variant(&base, "bf16")
+        .ok_or("selected base has no dense architecture download")?;
+    let files = row
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or("base primary has no file closure")?;
+    let configs: std::collections::BTreeSet<_> = files
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|path| {
+            if path == "config.json" || path.ends_with("/config.json") {
+                Some(path.to_owned())
+            } else {
+                path.strip_suffix("/*")
+                    .map(|dir| format!("{dir}/config.json"))
+            }
+        })
+        .collect();
+    if configs.len() != 1 {
+        return Err("selected base primary has no unambiguous configuration path".into());
+    }
+    let path = configs.into_iter().next().expect("one config");
+    let revision = row
+        .get("revision")
+        .and_then(Value::as_str)
+        .ok_or("base architecture configuration has no exact revision")?;
+    if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("base architecture configuration requires an exact commit revision".into());
+    }
+    crate::checkpoint_plan_store::portable_relative_path_parts(&path)?;
+    let object = row.as_object_mut().ok_or("invalid primary download")?;
+    for field in [
+        "default",
+        "estimatedSizeBytes",
+        "expectedSizeBytes",
+        "expectedSha256",
+        "footprint",
+        "subdir",
+    ] {
+        object.remove(field);
+    }
+    object.insert("files".into(), json!([path]));
+    object.insert("coRequisite".into(), json!(true));
+    object.insert("componentId".into(), json!("import_transformer_config"));
+    object.insert("variant".into(), json!(tier));
+    Ok(row)
+}
+
 /// Give an imported H3 entry the generation surface its explicit task declaration supports.
 ///
 /// The ROUTE-OWNED fields — `adapter`, `capabilities`, `video`, `defaults`, `limits` — are replaced,
 /// not filled: they state what the provider serves for this partition (its modes, its 17n+5
 /// duration lattice, its single fps, its step floor), and a value left over from an import request
 /// that guessed the wrong type (an image entry's capabilities) would advertise operations nothing
-/// can run. Everything descriptive (`ui`, licence text, memory hints) is `or_insert`, so an author's
-/// wording wins. Deliberately NOT copied: the builtin's downloads and paths (the imported DiT is its
-/// own weights), `mlx.repo` (the builtin tier repo), and `loraCompatibility` — adapter and turbo
+/// can run. Descriptive metadata retains the author's wording; inherited component terms and
+/// attribution are unioned afterward and cannot be erased by that wording or a false flag.
+/// Deliberately NOT copied: the builtin's downloads and paths (the imported DiT is its own
+/// weights), `mlx.repo` (the builtin tier repo), and `loraCompatibility` — adapter and turbo
 /// support on imported H3 checkpoints is a later story, and advertising adapters the imported route
 /// refuses would admit jobs nothing can run.
 pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) {
@@ -643,6 +828,8 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
             }
         }
     }
+    let license_components = inherited_component_entries(entry);
+    crate::license_acknowledgments::apply_inherited_component_licenses(entry, &license_components);
     if partition == MiniMaxH3Partition::Hybrid {
         entry.insert(
             "capabilities".to_owned(),
@@ -661,6 +848,22 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
     }
     // Withdraw the family-wide adapter advertisement `apply_model_manifest_defaults` synthesizes.
     entry.remove("loraCompatibility");
+}
+
+/// Trusted license owners of the components reused by this declaration. These rows describe
+/// component obligations, not ownership of the imported DiT. Reuse the existing builtin cache.
+pub fn inherited_component_entries(entry: &Map<String, Value>) -> Vec<Value> {
+    let Ok(partition) = MiniMaxH3Partition::from_entry(entry) else {
+        return Vec::new();
+    };
+    let mut ids = std::collections::BTreeSet::from([MINIMAX_H3_BASE_PARTITION_MODEL]);
+    if partition == MiniMaxH3Partition::Fl2va {
+        ids.insert(MINIMAX_H3_REFERENCE_PARTITION_MODEL);
+    }
+    ids.into_iter()
+        .filter_map(builtin_partition_entry)
+        .map(crate::license_acknowledgments::component_license_metadata)
+        .collect()
 }
 
 #[cfg(test)]
@@ -684,7 +887,18 @@ mod tests {
     }
 
     fn plan(family: &str, layers: Vec<ImportLayerV1>) -> ImportPlanV1 {
-        ImportPlanV1::new("checkpoint-plan-test", family, layers).expect("valid plan")
+        let mut plan =
+            ImportPlanV1::new("checkpoint-plan-test", family, layers).expect("valid plan");
+        if family == MINIMAX_H3_IMPORT_FAMILY {
+            plan.context.insert(
+                "transformerConfig".into(),
+                config_binding(
+                    crate::minimax_h3_codec::H3Config::published().0,
+                    json!({"kind":"source"}),
+                ),
+            );
+        }
+        plan
     }
 
     fn dense_dit_plan() -> ImportPlanV1 {

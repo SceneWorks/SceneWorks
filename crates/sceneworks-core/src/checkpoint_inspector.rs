@@ -154,6 +154,7 @@ pub struct CheckpointInspectionRequestV1 {
     pub root_path: PathBuf,
     pub relative_path: PathBuf,
     pub ownership: CheckpointOwnershipV1,
+    pub context: BTreeMap<String, Value>,
 }
 
 impl CheckpointInspectionRequestV1 {
@@ -235,6 +236,7 @@ impl CheckpointInspectionRequestV1 {
             root_path,
             relative_path,
             ownership,
+            context: BTreeMap::new(),
         })
     }
 }
@@ -534,11 +536,11 @@ pub fn inspect_checkpoint_with_hook(
         return result;
     }
 
-    let first_pass = inspect_discovered_pass(&resolved, &discovery);
+    let first_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     hook(CheckpointInspectionEventV1::FirstExactBytePassComplete);
-    let second_pass = inspect_discovered_pass(&resolved, &discovery);
+    let second_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     hook(CheckpointInspectionEventV1::SecondExactBytePassComplete);
-    let final_pass = inspect_discovered_pass(&resolved, &discovery);
+    let final_pass = inspect_discovered_pass(&resolved, &discovery, &request.context);
     result.diagnostics.extend(final_pass.diagnostics);
     compare_exact_byte_passes(
         &first_pass.observations,
@@ -623,6 +625,7 @@ pub fn inspect_checkpoint_with_hook(
         &family,
         &fingerprint,
         &result.evidence,
+        final_pass.context,
     ) {
         Ok((inventory, plan)) => {
             result.inventory = inventory;
@@ -648,6 +651,7 @@ struct InspectionPass {
     aggregate_tensor_name_bytes: usize,
     aggregate_evidence_string_bytes: usize,
     evidence_budget_exhausted: bool,
+    context: BTreeMap<String, Value>,
 }
 
 impl InspectionPass {
@@ -714,8 +718,12 @@ struct ArtifactObservation {
 fn inspect_discovered_pass(
     resolved: &ResolvedInput,
     discovery: &CheckpointDiscoveryV1,
+    context: &BTreeMap<String, Value>,
 ) -> InspectionPass {
-    let mut pass = InspectionPass::default();
+    let mut pass = InspectionPass {
+        context: context.clone(),
+        ..Default::default()
+    };
     let candidate_by_path = discovery
         .candidates
         .iter()
@@ -931,6 +939,16 @@ fn inspect_discovered_pass(
         &mut pass.diagnostics,
     );
     if h3_context {
+        if context
+            .get("sourceEncoding")
+            .is_some_and(|encoding| encoding.as_str() != Some("convrot_int8"))
+        {
+            pass.diagnostics.push(CheckpointDiagnosticV1::error(
+                CheckpointDiagnosticCodeV1::ContractViolation,
+                None,
+                "unknown MiniMax-H3 source encoding in plan context",
+            ));
+        }
         let files: Vec<_> = pass
             .observations
             .iter()
@@ -945,12 +963,63 @@ fn inspect_discovered_pass(
                 )
             })
             .collect();
-        if let Err(message) = crate::minimax_h3_codec::H3SourceInventory::from_files(&files) {
-            pass.diagnostics.push(CheckpointDiagnosticV1::error(
+        // Retained source-owned bindings are not permission to drop the source config on rescan.
+        // Only an explicitly selected base can supply a fallback when no current source claim exists.
+        let source_owned = files.iter().any(|(name, path)| {
+            name.rsplit('/').next() == Some("config.json")
+                || (path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("safetensors"))
+                    && crate::lora_family::read_safetensors_header(path)
+                        .ok()
+                        .is_some_and(|h| {
+                            h.get("__metadata__")
+                                .and_then(|m| m.get("h3_config"))
+                                .is_some()
+                        }))
+        });
+        let fallback = if !source_owned
+            && context
+                .get("transformerConfig")
+                .is_some_and(|b| b["provenance"]["kind"] == "selected-base")
+        {
+            crate::minimax_h3_import::bound_config(context)
+        } else {
+            Ok(None)
+        };
+        match fallback.and_then(|config| {
+            crate::minimax_h3_codec::H3SourceInventory::from_files_with_config(&files, config)
+        }) {
+            Ok(inventory) => {
+                // Reinspection derives source precision anew; a previous declaration cannot turn
+                // floating-point tensors into a native packed checkpoint.
+                pass.context.remove("sourceEncoding");
+                if inventory.convrot_int8 {
+                    pass.context
+                        .insert("sourceEncoding".into(), serde_json::json!("convrot_int8"));
+                }
+                // The reduced AdaLN binding is derived from the CURRENT operand bytes, never
+                // inherited: a stale or forged declaration cannot survive reinspection.
+                pass.context.remove("adalnPruning");
+                if let Some(pruning) = &inventory.pruning {
+                    pass.context
+                        .insert("adalnPruning".into(), pruning.to_json());
+                }
+                let provenance = if source_owned {
+                    serde_json::json!({"kind":"source"})
+                } else {
+                    context["transformerConfig"]["provenance"].clone()
+                };
+                pass.context.insert(
+                    "transformerConfig".into(),
+                    crate::minimax_h3_import::config_binding(inventory.config.0, provenance),
+                );
+            }
+            Err(message) => pass.diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::ContractViolation,
                 None,
                 message,
-            ));
+            )),
         }
     }
     pass.evidence
@@ -1182,6 +1251,7 @@ fn compile_inventory(
     family: &str,
     fingerprint: &str,
     evidence: &[CheckpointArtifactEvidenceV1],
+    context: BTreeMap<String, Value>,
 ) -> Result<(CheckpointInventoryV1, ImportPlanV1), String> {
     let mut layers = Vec::with_capacity(evidence.len());
     for artifact in evidence {
@@ -1251,8 +1321,12 @@ fn compile_inventory(
     plan_id_hasher.update(request.checkpoint_id.as_bytes());
     plan_id_hasher.update(b"\0");
     plan_id_hasher.update(fingerprint.as_bytes());
+    if !context.is_empty() {
+        plan_id_hasher.update(serde_json::to_vec(&context).map_err(|e| e.to_string())?);
+    }
     let plan_id = format!("checkpoint-plan-{:x}", plan_id_hasher.finalize());
-    let plan = ImportPlanV1::new(plan_id, family, layers).map_err(|error| error.to_string())?;
+    let mut plan = ImportPlanV1::new(plan_id, family, layers).map_err(|error| error.to_string())?;
+    plan.context = context;
     let record = CheckpointCatalogRecordV1::from_plan(request.checkpoint_id.clone(), &plan)
         .map_err(|error| error.to_string())?;
     let inventory = CheckpointInventoryV1::new(vec![record]).map_err(|error| error.to_string())?;

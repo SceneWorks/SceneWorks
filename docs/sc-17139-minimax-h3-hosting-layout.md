@@ -108,9 +108,42 @@ cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Raw 
 interleaved; each canonical projection gathers its head rows separately. Native gate-first
 `mlp.fc1` row halves become canonical value-first SwiGLU. Reference-runtime state-dict exports
 whose QKV is already reordered explicitly declare `h3_qkv_layout=contiguous`; raw files default
-to `interleaved`. Native variants supply full architecture JSON in bound `config.json` or string
-metadata `h3_config`; without it, every tensor must match the pinned published H3 architecture.
+to `interleaved`. Source-owned `config.json` or string metadata `h3_config` is authoritative;
+multiple source claims must agree. Weight-only files instead bind the explicitly selected compatible
+base's exact primary configuration, never a published architecture default.
 The task-neutral codec never derives the explicit partition declaration from names or shapes.
+
+### Reduced centered-curve AdaLN imports (sc-26684)
+
+The same import workflow also accepts the source checkpoint's complete reduced AdaLN topology:
+an F32 `adaln_t_table`, every reduced block projection and the final projection, with their folded
+biases. Native/ComfyUI names are normalized without reconstructing the full timestep MLP or
+changing the source basis. Stored BF16 projection weights and F16 folded biases remain at their
+original precision in the derivative; native execution widens these supplied operands to F32.
+The table replaces the timestep MLP, not the source architecture declaration.
+
+Coordinates follow the pinned
+[WanGP implementation](https://github.com/deepbeepmeep/Wan2GP/blob/47b06ff920c16b4b7b36de068367a5de0e0968e9/models/minimax_h3/transformer.py):
+`t = 1 - sigma` in `[0, 1]`, clamped linear interpolation at `t * (grid - 1)` (no `1000` multiplier).
+Text uses the video timestep; conditioned video uses `max(video_t, 0.999)`, audio uses its own
+timestep, and conditioned audio uses `1`. The observed rank-eight topology has 1025 table rows;
+admission checks the complete supplied geometry rather than a filename or publisher allowlist.
+
+The persisted assembly binds the entire table, reduced weights and folded biases, including
+their source dtypes, to the shared engine content identity. Canonical sources also receive an
+identity-addressed derivative directory, so a different table or basis cannot share a provider
+cache entry. Missing/inconsistent pruning data, forged assembly declarations and mismatched
+sealed derivatives refuse before provider loading. Native synthetic fixtures in
+`minimax_h3_import_fixture` execute both Metal and CUDA after managed ingest, comparing endpoints,
+off-grid and conditioned timesteps against the pinned executable CPU oracle, and refusing a
+same-shaped foreign cache. No downloaded checkpoint payload is committed as a fixture.
+
+The pinned engine's shared `SourcePruneSizing` authority charges the supplied operands at their
+actual F32 compute widths plus retained F32 modulation/coordinate buffers over the full admitted
+scheduler-shift domain. Pruned precompute does not release those operands, so it receives no
+fictitious stock AdaLN eviction credit. Mixed task routes compare corrected per-task footprints;
+the worker does not maintain a second estimator. Existing dense/stock packed Q4/Q8 behavior is
+preserved.
 
 ### Reusable managed and linked assembly (sc-26686)
 
@@ -128,11 +161,31 @@ DiT's task partition is never downloaded over or replaced. Hybrid imports do not
 task companion. Shared component jobs remain independently retryable and shared caches are not
 owned by the imported model. An imported entry is not installed/ready until its source plan and
 assembly resolve and every bound component row is present in its declared revision.
+The selected base's **dense architecture** primary contributes a **config-only** co-requisite
+(one literal `config.json`, no stock DiT weight glob), independently of the shared q4/q8/bf16 tier.
+Packed resident-weight policy is not architecture authority. The import worker awaits that exact
+pinned document when the source has
+no config, validates it against the complete tensor inventory, and embeds its full JSON, SHA-256,
+base/repository/revision/path and shared-tier provenance into the immutable `ImportPlanV1.context`.
+Source-owned configuration wins even when its rope/schedule/provider fields differ from the base.
+This context participates in plan semantic identity and derivative-cache identity, is replayed on
+rescan/restart, and supplies normalization and generation without a foreign loose-file locator.
+Once sealed, config-only provisioning is removed from resident component downloads; its presence
+alone never marks the stock DiT installed. Unknown provider fields and precision provenance survive.
+Native ConvRot precision is derived from the validated complete descriptor/tensor inventory as
+`context.sourceEncoding = "convrot_int8"`, then stamped as `importQuantFormat` only after plan
+validation. The approximate header hint `int8_tensorwise_per_row` is not a generic decoder claim;
+source encoding is recomputed on every inspection and unknown context encoding tokens refuse.
 The selected shared precision is persisted as `importComponentTier`, independently of imported
 DiT precision. Both native providers consume that tier and each persisted repository/revision
 binding directly, never `refs/main`, operator directory overrides, or a stock tier search. Explicit
 precision controls may confirm the selected shared tier but cannot silently substitute another
 closure. Assets retain the exact selected tier and component download bindings.
+Readiness and generation compare the bound DiT's `text_dim`, `in_channels` and
+`audio_in_channels` with the actual pinned text encoder hidden size and video/audio VAE latent
+channels. Already-resident complete components are checked before import publication too; missing
+or partial asynchronous component downloads remain unready. These interface checks do not impose
+whole-config equality, published trunk geometry, or stock rope/sampling schedules on a fine-tune.
 
 Interrupted managed transfers discard staging and can retry. A process interrupted after the
 managed commit can replay H3 publication only when the committed install marker belongs to that

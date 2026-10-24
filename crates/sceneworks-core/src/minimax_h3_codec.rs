@@ -8,7 +8,7 @@
 //! never materializes a dense tensor/model, and publishes through the shared derivative cache.
 //!
 //! Executable raw-to-Diffusers reference pinned at
-//! https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py
+//! <https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py>
 //! Runtime state_dict exports must explicitly declare `__metadata__.h3_qkv_layout=contiguous`;
 //! raw checkpoints default to the reference's interleaved source layout.
 
@@ -18,6 +18,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use gen_core::checkpoint_codec::{CheckpointCodecRegistry, WeightEncoding, DENSE_CODECS};
+use gen_core::convrot_int8::{ConvRotInt8, MAX_DESCRIPTOR_BYTES};
+use gen_core::pruned_adaln::{PrunedAdaLn, PruningIdentity, TABLE_KEY, TOPOLOGY_ID};
+use gen_core::weightsmeta::Dtype;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_derivative::{
@@ -31,13 +35,22 @@ pub const H3_CONFIG_FILE: &str = "config.json";
 pub const H3_INDEX_FILE: &str = "diffusion_pytorch_model.safetensors.index.json";
 
 /// Apply the inspector's descriptor policy before allocating or deserializing untrusted JSON.
-pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
+pub fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     let limit = crate::checkpoint_inspector::MAX_JSON_DESCRIPTOR_BYTES;
     let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let len = file
         .metadata()
         .map_err(|e| format!("{}: {e}", path.display()))?
         .len();
+    read_h3_descriptor_from_reader(file, len, limit, path)
+}
+
+fn read_h3_descriptor_from_reader(
+    reader: impl Read,
+    len: u64,
+    limit: u64,
+    path: &Path,
+) -> Result<Value, String> {
     let oversized = || {
         format!(
             "H3 descriptor {} exceeds {limit} byte descriptor limit",
@@ -49,7 +62,8 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
     }
     let mut bytes = Vec::with_capacity(len as usize);
     // Also reject growth between metadata and read without consuming the whole file.
-    file.take(limit + 1)
+    reader
+        .take(limit + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if bytes.len() as u64 > limit {
@@ -63,9 +77,9 @@ pub(crate) fn read_h3_descriptor(path: &Path) -> Result<Value, String> {
 pub struct H3Config(pub Value);
 
 impl H3Config {
-    /// Native exports without a config use the **pinned published architecture**, not dimensions
-    /// inferred from a filename. All tensor shapes must match it. Variant exports must provide
-    /// `config.json` or JSON `__metadata__.h3_config`; this preserves non-shape knobs such as RoPE.
+    /// The pinned published architecture for fixtures and explicit catalog declarations.
+    /// Production sources require their own sidecar/embedded config or an explicitly selected
+    /// base configuration; tensor shapes and filenames never select this value implicitly.
     pub fn published() -> Self {
         Self(json!({
             "_class_name": "MiniMaxH3Transformer3DModel",
@@ -87,13 +101,14 @@ impl H3Config {
             .ok_or_else(|| format!("MiniMax-H3 config requires positive integer {name:?}"))
     }
 
-    fn validate(&self) -> Result<(), String> {
+    /// Validate the complete architecture document without allocating its tensor inventory.
+    pub fn validate(&self) -> Result<(), String> {
         if self.0.get("_class_name").and_then(Value::as_str) != Some("MiniMaxH3Transformer3DModel")
         {
             return Err("config.json must declare MiniMaxH3Transformer3DModel".into());
         }
         if self.0.get("quantization").is_some() || self.0.get("quantization_config").is_some() {
-            return Err("MiniMax-H3 dense import does not decode quantized/pruned/ConvRot/W4A8 configs; re-export F16/BF16/F32".into());
+            return Err("MiniMax-H3 import requires an architecture config, not a stock packed-tier quantization policy; INT8 execution is declared by per-layer ConvRot operands".into());
         }
         for field in [
             "num_attention_heads",
@@ -241,12 +256,297 @@ impl H3Config {
         add("norm_out.norm.weight".into(), vec![h]);
         Ok(names)
     }
+
+    /// Complete inventory for the centered-curve AdaLN topology (sc-26684). The trunk, heads,
+    /// norms, biases and refiner keep the full geometry; the direct `U*S` table replaces the
+    /// four timestep-MLP tensors, and every AdaLN modulation projection narrows its input columns
+    /// from `time_embed_dim` to `rank`. `grid`/`rank` come from the source table, never a filename.
+    pub fn pruned_shapes(
+        &self,
+        grid: usize,
+        rank: usize,
+    ) -> Result<BTreeMap<String, Vec<usize>>, String> {
+        if grid < 2
+            || rank == 0
+            || grid > i32::MAX as usize
+            || rank > i32::MAX as usize
+            || grid.checked_mul(rank).is_none()
+        {
+            return Err(format!(
+                "MiniMax-H3 pruned AdaLN requires an F32 table with [grid >= 2, rank > 0], got [{grid}, {rank}]"
+            ));
+        }
+        let mut names = self.shapes()?;
+        for leaf in ["linear_1", "linear_2"] {
+            for suffix in ["weight", "bias"] {
+                names.remove(&format!("time_embedder.{leaf}.{suffix}"));
+            }
+        }
+        for (name, shape) in names.iter_mut() {
+            let reduced_input = name == "norm_out.linear.weight"
+                || (name.starts_with("transformer_blocks.")
+                    && name.ends_with(".adaln_proj.linear.weight"));
+            if reduced_input {
+                shape[1] = rank;
+            }
+        }
+        names.insert(TABLE_KEY.to_owned(), vec![grid, rank]);
+        Ok(names)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3QkvLayout {
     Interleaved,
     Contiguous,
+}
+
+/// Exact consumer binding between an H3 source's reduced centered-curve AdaLN topology and the
+/// shared native generators (sc-26684). `identity` is the full 64-hex engine content hash over
+/// every canonical operand value in contract order, at the ORIGINAL stored dtype, produced by
+/// `gen_core::pruned_adaln::PrunedAdaLn::identity_builder` over the same normalized bytes both
+/// native caches consume. `sourceBytes` counts stored operand bytes at their dtype width and
+/// `computeBytes` counts the same operands once widened to F32; they are deliberately separate
+/// quantities, never interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct H3PruningBinding {
+    pub topology_id: String,
+    /// Full 64-hex engine identity hash of the complete reduced operand set.
+    pub identity: String,
+    pub grid: usize,
+    pub rank: usize,
+    pub source_bytes: u64,
+    pub compute_bytes: u64,
+}
+
+impl H3PruningBinding {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "topologyId": &self.topology_id,
+            "identity": &self.identity,
+            "grid": self.grid,
+            "rank": self.rank,
+            "sourceBytes": self.source_bytes,
+            "computeBytes": self.compute_bytes,
+        })
+    }
+
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let binding: Self = serde_json::from_value(value.clone())
+            .map_err(|error| format!("H3 AdaLN pruning binding: {error}"))?;
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    /// The shared topology identity the native generators consume. A forged or partial binding
+    /// still parses here; it can never pass a provider comparison against the actual source,
+    /// whose identity is recomputed from operand bytes.
+    pub fn engine_identity(&self) -> Result<PruningIdentity, String> {
+        self.validate()?;
+        let mut identity = [0u8; 32];
+        let digits = self.identity.as_bytes();
+        for (index, byte) in identity.iter_mut().enumerate() {
+            let high = (digits[index * 2] as char).to_digit(16);
+            let low = (digits[index * 2 + 1] as char).to_digit(16);
+            *byte = match (high, low) {
+                (Some(high), Some(low)) => (high * 16 + low) as u8,
+                _ => return Err("H3 AdaLN pruning binding: identity is not 64 hex digits".into()),
+            };
+        }
+        Ok(PruningIdentity(identity))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.topology_id != TOPOLOGY_ID {
+            return Err(format!(
+                "H3 AdaLN pruning binding: topologyId {:?} is not the current shared topology {TOPOLOGY_ID:?}",
+                self.topology_id
+            ));
+        }
+        if self.grid < 2
+            || self.rank == 0
+            || self.grid > i32::MAX as usize
+            || self.rank > i32::MAX as usize
+        {
+            return Err(format!(
+                "H3 AdaLN pruning binding: requires [grid >= 2, rank > 0], got [{}, {}]",
+                self.grid, self.rank
+            ));
+        }
+        let table = self
+            .grid
+            .checked_mul(self.rank)
+            .ok_or("H3 AdaLN pruning binding: table geometry overflows")?;
+        // The table itself is always F32; widened F32 operands are never narrower than stored.
+        let table_bytes = (table as u64)
+            .checked_mul(4)
+            .ok_or("H3 AdaLN pruning binding: table byte count overflows")?;
+        if self.source_bytes < table_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: sourceBytes {} cannot carry the F32 table ({table_bytes} bytes)",
+                self.source_bytes
+            ));
+        }
+        if self.compute_bytes < table_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} cannot carry the F32 table ({table_bytes} bytes)",
+                self.compute_bytes
+            ));
+        }
+        if !self.compute_bytes.is_multiple_of(4) {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} is not whole F32 elements",
+                self.compute_bytes
+            ));
+        }
+        // Every admitted operand is F16, BF16 or F32, so widening to F32 never shrinks the payload.
+        if self.compute_bytes < self.source_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} is narrower than sourceBytes {}",
+                self.compute_bytes, self.source_bytes
+            ));
+        }
+        if !self.source_bytes.is_multiple_of(2) {
+            return Err(format!(
+                "H3 AdaLN pruning binding: sourceBytes {} is not a whole operand byte count",
+                self.source_bytes
+            ));
+        }
+        if self.identity.len() != 64 || !self.identity.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(
+                "H3 AdaLN pruning binding: identity must be the full 64-hex engine hash".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The complete engine identity hex string, lowercase, one byte at a time.
+fn pruning_identity_hex(identity: PruningIdentity) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(64);
+    for byte in identity.0 {
+        hex.push(DIGITS[(byte >> 4) as usize] as char);
+        hex.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    hex
+}
+
+/// An iterable F32 view over one stored canonical operand. Reads stay inside one fixed chunk; the
+/// values are decoded losslessly from the ORIGINAL stored dtype exactly as the normalization copy
+/// schedule emits them (the schedule copies bytes, so canonical order equals source order).
+struct OperandValues<'a> {
+    reader: std::io::BufReader<File>,
+    ranges: &'a [(u64, u64)],
+    next_range: usize,
+    base: u64,
+    dtype: Dtype,
+    remaining: u64,
+    chunk: Vec<u8>,
+    values: Vec<f32>,
+    cursor: usize,
+    error: Option<String>,
+}
+
+const OPERAND_CHUNK: usize = 64 * 1024;
+
+impl<'a> OperandValues<'a> {
+    fn open(source: &Path, tensor: &'a Tensor, dtype: Dtype) -> Result<Self, String> {
+        let reader = std::io::BufReader::with_capacity(
+            OPERAND_CHUNK,
+            File::open(source)
+                .map_err(|error| format!("H3 AdaLN: {}: {error}", source.display()))?,
+        );
+        Ok(Self {
+            reader,
+            ranges: &tensor.ranges,
+            next_range: 0,
+            base: tensor.offset,
+            dtype,
+            remaining: 0,
+            chunk: vec![0u8; OPERAND_CHUNK],
+            values: Vec::new(),
+            cursor: 0,
+            error: None,
+        })
+    }
+
+    /// Decode the next bounded chunk of the current operand range. False ends the operand.
+    fn fill(&mut self) -> bool {
+        self.values.clear();
+        self.cursor = 0;
+        while self.values.is_empty() {
+            if self.remaining == 0 {
+                let Some(&(start, length)) = self.ranges.get(self.next_range) else {
+                    return false;
+                };
+                self.next_range += 1;
+                if self
+                    .reader
+                    .seek(SeekFrom::Start(self.base + start))
+                    .is_err()
+                {
+                    self.error = Some("H3 AdaLN: cannot seek the reduced operand payload".into());
+                    return false;
+                }
+                self.remaining = length;
+                if length == 0 {
+                    continue;
+                }
+            }
+            let width = self.dtype.size();
+            let take = self.remaining.min(self.chunk.len() as u64) as usize / width * width;
+            if take == 0 {
+                self.error = Some(format!(
+                    "H3 AdaLN: reduced operand bytes are not aligned to {width}-byte {} values",
+                    self.dtype.as_str()
+                ));
+                return false;
+            }
+            if let Err(error) = self.reader.read_exact(&mut self.chunk[..take]) {
+                self.error = Some(format!(
+                    "H3 AdaLN: truncated reduced operand payload: {error}"
+                ));
+                return false;
+            }
+            self.remaining -= take as u64;
+            let chunk = &self.chunk[..take];
+            match self.dtype {
+                Dtype::F32 => self.values.extend(
+                    chunk
+                        .chunks_exact(4)
+                        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())),
+                ),
+                Dtype::BF16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
+                    let bits = (u16::from_le_bytes(bytes.try_into().unwrap()) as u32) << 16;
+                    f32::from_bits(bits)
+                })),
+                Dtype::F16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
+                    let bits = u16::from_le_bytes(bytes.try_into().unwrap());
+                    half::f16::from_bits(bits).to_f32()
+                })),
+                _ => unreachable!("inspect admits only dense F16/BF16/F32 AdaLN operands"),
+            }
+        }
+        true
+    }
+}
+
+impl Iterator for OperandValues<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.error.is_some() {
+            return None;
+        }
+        if self.cursor == self.values.len() && !self.fill() {
+            return None;
+        }
+        let value = self.values[self.cursor];
+        self.cursor += 1;
+        Some(value)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +560,7 @@ struct Tensor {
     ranges: Vec<(u64, u64)>,
 }
 
-/// Verified source inventory and exact copy schedule. Header-only memory; no tensor payloads.
+/// Verified copy schedule; pruning values are streamed through bounded buffers, never retained.
 #[derive(Debug, Clone)]
 pub struct H3SourceInventory {
     pub config: H3Config,
@@ -268,6 +568,11 @@ pub struct H3SourceInventory {
     /// Files and namespace-wrapped exports need a canonical component directory too, even when
     /// their tensor leaves already use Diffusers spelling.
     pub requires_normalization: bool,
+    /// Descriptor-validated native symmetric INT8, never the affine MLX Q8 dialect.
+    pub convrot_int8: bool,
+    /// Content identity of the reduced centered-curve AdaLN topology this source actually carries.
+    /// Present only when the source stores the direct table instead of the timestep MLP.
+    pub pruning: Option<H3PruningBinding>,
     sources: Vec<PathBuf>,
     tensors: BTreeMap<String, Tensor>,
 }
@@ -275,16 +580,35 @@ pub struct H3SourceInventory {
 /// Resolve only the plan's declared files; callers must first re-verify/pin source identities.
 impl H3SourceInventory {
     pub fn from_resolved(resolved: &ResolvedCheckpointV1) -> Result<Self, String> {
-        Self::from_files(
+        Self::from_resolved_with_config(resolved, None)
+    }
+
+    /// Consume a plan with an explicitly bound fallback architecture document, when needed.
+    /// Source-owned configuration wins; callers seal the fallback's persisted provenance.
+    pub fn from_resolved_with_config(
+        resolved: &ResolvedCheckpointV1,
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
+        Self::from_files_with_config(
             &resolved
                 .layers
                 .iter()
                 .map(|l| (l.layer.target_path.clone(), l.path.clone()))
                 .collect::<Vec<_>>(),
+            bound_config,
         )
     }
 
     pub fn from_files(files: &[(String, PathBuf)]) -> Result<Self, String> {
+        Self::from_files_with_config(files, None)
+    }
+
+    /// Source-owned sidecar/embedded documents are authoritative; the bound configuration is
+    /// only a fallback. Complete JSON is preserved, including provider-relevant non-shape fields.
+    pub fn from_files_with_config(
+        files: &[(String, PathBuf)],
+        bound_config: Option<H3Config>,
+    ) -> Result<Self, String> {
         let mut weights = Vec::new();
         let mut config = None;
         let mut index = None;
@@ -360,9 +684,6 @@ impl H3SourceInventory {
                 }
             }
         }
-        if !native && weights.len() > 1 && config.is_none() {
-            return Err("sharded Diffusers H3 requires its explicit config.json".into());
-        }
         if native && weights.len() != 1 {
             return Err("native H3 import expects one safetensors file; export sharded sources in canonical Diffusers layout".into());
         }
@@ -371,13 +692,42 @@ impl H3SourceInventory {
                 "sharded H3 source requires diffusion_pytorch_model.safetensors.index.json".into(),
             );
         }
-        let config = config.unwrap_or_else(H3Config::published);
-        let expected = config.shapes()?;
+        let config = config.or(bound_config).ok_or("MiniMax-H3 source has no config.json or embedded h3_config; explicitly select a compatible base to bind its exact configuration before import")?;
         let codecs = CheckpointCodecRegistry::new(DENSE_CODECS.iter().copied())
             .map_err(|e| e.to_string())?;
         let mut tensors = BTreeMap::<String, Tensor>::new();
-        let mut physical = BTreeMap::<String, String>::new();
-        for (source, ((name, path), header)) in weights.iter().zip(&headers).enumerate() {
+        let mut physical = H3Physical::new();
+        for (source, header) in headers.iter().enumerate() {
+            for (key, entry) in header.as_object().ok_or("invalid H3 header")? {
+                if key == "__metadata__" {
+                    continue;
+                }
+                if let Some((previous, _)) = physical.insert(key, (source, entry)) {
+                    return Err(format!(
+                        "duplicate H3 tensor {key:?} in {:?} and {:?}",
+                        weights[previous].0, weights[source].0
+                    ));
+                }
+            }
+        }
+        // The table itself decides whether this is a reduced topology; shapes are validated
+        // against that choice and never guessed from a filename or a metadata claim.
+        let pruned = pruning_geometry(&physical)?;
+        let mut expected = match pruned {
+            Some((grid, rank)) => config.pruned_shapes(grid, rank)?,
+            None => config.shapes()?,
+        };
+        let quantized = convrot_outputs(
+            &headers, &weights, &physical, native, &config, qkv_layout, &expected,
+        )?;
+        for outputs in quantized.values() {
+            for (logical, shape, _) in outputs {
+                if !logical.ends_with(".weight") {
+                    expected.insert(logical.clone(), shape.clone());
+                }
+            }
+        }
+        for (source, ((_, path), header)) in weights.iter().zip(&headers).enumerate() {
             let mut file = File::open(path).map_err(|e| e.to_string())?;
             let mut len = [0u8; 8];
             file.read_exact(&mut len).map_err(|e| e.to_string())?;
@@ -391,12 +741,13 @@ impl H3SourceInventory {
                     .and_then(Value::as_str)
                     .ok_or_else(|| format!("tensor {key:?} lacks dtype"))?;
                 let (encoding,width) = match dtype {
-                    "BF16" => (WeightEncoding::DenseBf16,2u64),
-                    "F16" => (WeightEncoding::DenseF16,2u64),
-                    "F32" => (WeightEncoding::DenseF32,4u64),
-                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; dense F16/BF16/F32 only, not ConvRot/pruned/W4A8")),
+                    "BF16" => (Some(WeightEncoding::DenseBf16),2u64),
+                    "F16" => (Some(WeightEncoding::DenseF16),2u64),
+                    "F32" => (Some(WeightEncoding::DenseF32),4u64),
+                    "I8" | "U8" if quantized.contains_key(key) => (None,1u64),
+                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8, not pruned/W4A8")),
                 };
-                if codecs.for_encoding(encoding).is_none() {
+                if encoding.is_some_and(|encoding| codecs.for_encoding(encoding).is_none()) {
                     return Err(format!("unregistered H3 dense codec for {key:?}"));
                 }
                 let shape: Vec<usize> = entry
@@ -416,11 +767,6 @@ impl H3SourceInventory {
                 let end = entry["data_offsets"][1]
                     .as_u64()
                     .ok_or("tensor lacks offset")?;
-                if let Some(previous) = physical.insert(key.clone(), (*name).clone()) {
-                    return Err(format!(
-                        "duplicate H3 tensor {key:?} in {previous:?} and {name:?}"
-                    ));
-                }
                 if native && strip_prefix(key) == "rope.inv_freq" {
                     // The pinned converter consumes this known non-parameter buffer: the provider
                     // regenerates it from config. Verify values, not just its familiar name.
@@ -447,7 +793,9 @@ impl H3SourceInventory {
                     }
                     continue;
                 }
-                let mapped = if native {
+                let mapped = if let Some(outputs) = quantized.get(key) {
+                    outputs.clone()
+                } else if native {
                     native_outputs(strip_prefix(key), &config, qkv_layout, &shape, width)?
                 } else {
                     vec![(
@@ -493,10 +841,10 @@ impl H3SourceInventory {
                 let shard = shard
                     .as_str()
                     .ok_or("H3 index shard names must be strings")?;
-                let actual = physical.get(key).ok_or_else(|| {
+                let (source, _) = physical.get(key.as_str()).ok_or_else(|| {
                     format!("H3 index tensor {key:?} missing from shard {shard:?}")
                 })?;
-                let actual = Path::new(actual)
+                let actual = Path::new(weights[*source].0)
                     .file_name()
                     .and_then(|s| s.to_str())
                     .ok_or("invalid shard path")?;
@@ -506,10 +854,11 @@ impl H3SourceInventory {
                     ));
                 }
             }
-            for (key, shard) in &physical {
-                if !map.contains_key(key) {
+            for (key, (source, _)) in &physical {
+                if !map.contains_key(*key) {
                     return Err(format!(
-                        "unconsumed H3 shard tensor {key:?} in {shard:?}: absent from weight_map"
+                        "unconsumed H3 shard tensor {key:?} in {:?}: absent from weight_map",
+                        weights[*source].0
                     ));
                 }
             }
@@ -526,11 +875,20 @@ impl H3SourceInventory {
                 missing.join(", ")
             ));
         }
+        // The complete spine proved above; only now is the reduced topology hashed from its
+        // actual stored bytes, so a refused or partial topology never yields a binding.
+        let sources: Vec<_> = weights.iter().map(|(_, path)| (*path).clone()).collect();
+        let pruning = match pruned {
+            Some((grid, rank)) => Some(pruning_binding(&tensors, &config, &sources, grid, rank)?),
+            None => None,
+        };
         Ok(Self {
             config,
             native,
-            requires_normalization,
-            sources: weights.into_iter().map(|(_, p)| p.clone()).collect(),
+            requires_normalization: requires_normalization || pruning.is_some(),
+            convrot_int8: tensors.keys().any(|key| key.ends_with(".comfy_quant")),
+            pruning,
+            sources,
             tensors,
         })
     }
@@ -542,8 +900,13 @@ impl H3SourceInventory {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
             adapter_version: "1".into(),
-            codec_id: "dense-f16-bf16-f32".into(),
-            codec_version: "1".into(),
+            codec_id: if self.convrot_int8 {
+                crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
+            } else {
+                "dense-f16-bf16-f32"
+            }
+            .into(),
+            codec_version: "2".into(),
             backend: "portable".into(),
             outputs,
         }
@@ -620,6 +983,319 @@ fn strip_prefix(key: &str) -> &str {
 }
 
 type Output = (String, Vec<usize>, Vec<(u64, u64)>);
+
+type H3Physical<'a> = BTreeMap<&'a str, (usize, &'a Value)>;
+
+/// Timestep-MLP operands the direct centered-curve table replaces, in their canonical Diffusers
+/// spelling and the accepted native export spelling.
+const TIME_MLP_NAMES: [(&str, &str); 4] = [
+    (
+        "time_embedder.linear_1.weight",
+        "time_embedder.proj_in.weight",
+    ),
+    ("time_embedder.linear_1.bias", "time_embedder.proj_in.bias"),
+    (
+        "time_embedder.linear_2.weight",
+        "time_embedder.proj_out.weight",
+    ),
+    ("time_embedder.linear_2.bias", "time_embedder.proj_out.bias"),
+];
+
+/// Read the direct table's own geometry from headers before any operand is mapped. A present but
+/// malformed table refuses; only an absent table selects the full timestep-MLP inventory.
+fn pruning_geometry(physical: &H3Physical<'_>) -> Result<Option<(usize, usize)>, String> {
+    let mut geometry = None;
+    for (key, (_, entry)) in physical {
+        if strip_prefix(key) != TABLE_KEY {
+            continue;
+        }
+        if entry.get("dtype").and_then(Value::as_str) != Some("F32") {
+            return Err(format!(
+                "H3 AdaLN: {TABLE_KEY} must be stored F32, got {:?}",
+                entry.get("dtype")
+            ));
+        }
+        let shape = entry
+            .get("shape")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("H3 AdaLN: {TABLE_KEY} lacks a shape"))?
+            .iter()
+            .map(|dimension| {
+                dimension
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<usize>>>()
+            .ok_or_else(|| format!("H3 AdaLN: {TABLE_KEY} has an invalid shape"))?;
+        if shape.len() != 2 || shape[0] < 2 || shape[1] == 0 {
+            return Err(format!(
+                "H3 AdaLN: {TABLE_KEY} must be [grid >= 2, rank > 0], got {shape:?}"
+            ));
+        }
+        geometry = Some((shape[0], shape[1]));
+    }
+    if geometry.is_some() {
+        for (canonical, native_spelling) in TIME_MLP_NAMES {
+            if physical.keys().any(|key| {
+                let key = strip_prefix(key);
+                key == canonical || key == native_spelling
+            }) {
+                return Err(format!(
+                    "H3 AdaLN: {TABLE_KEY} conflicts with full timestep MLP {canonical}"
+                ));
+            }
+        }
+    }
+    Ok(geometry)
+}
+
+/// Hash the complete reduced topology from the authoritative copy schedule. Every operand is
+/// decoded losslessly from its stored dtype in contract order; a missing operand, an inconsistent
+/// stored dtype or a nonfinite value refuses the inventory before any execution or publication.
+fn pruning_binding(
+    tensors: &BTreeMap<String, Tensor>,
+    config: &H3Config,
+    sources: &[PathBuf],
+    grid: usize,
+    rank: usize,
+) -> Result<H3PruningBinding, String> {
+    let topology = PrunedAdaLn::inspect(
+        config.dim("hidden_size")?,
+        config.dim("num_layers")?,
+        config.dim("time_embed_dim")?,
+        |name| {
+            tensors
+                .get(name)
+                .and_then(|tensor| Dtype::parse(&tensor.dtype).map(|d| (d, tensor.shape.clone())))
+        },
+    )?
+    .ok_or_else(|| {
+        format!("H3 AdaLN: {TABLE_KEY} is present but the reduced AdaLN topology is incomplete")
+    })?;
+    if (topology.grid, topology.rank) != (grid, rank) {
+        return Err(format!(
+            "H3 AdaLN: table geometry [{}, {}] disagrees with the inspected [{grid}, {rank}]",
+            topology.grid, topology.rank
+        ));
+    }
+    let mut builder = topology.identity_builder();
+    let mut source_bytes = 0u64;
+    let mut compute_bytes = 0u64;
+    for operand in topology.operands() {
+        let tensor = tensors
+            .get(&operand.name)
+            .ok_or_else(|| format!("H3 AdaLN: missing reduced operand {}", operand.name))?;
+        if Dtype::parse(&tensor.dtype) != Some(operand.dtype) {
+            return Err(format!(
+                "H3 AdaLN: {} stored as {}, but the inspected topology declares {:?}",
+                operand.name, tensor.dtype, operand.dtype
+            ));
+        }
+        let elements = operand
+            .shape
+            .iter()
+            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            .ok_or("H3 AdaLN: operand element count overflows")?;
+        let source = sources
+            .get(tensor.source)
+            .ok_or("H3 AdaLN: operand source is outside the declared files")?;
+        let mut values = OperandValues::open(source, tensor, operand.dtype)?;
+        let hashed = builder.operand_values(&operand.name, &mut values);
+        if let Some(error) = values.error.take() {
+            return Err(error);
+        }
+        hashed?;
+        let stored = (elements as u64)
+            .checked_mul(operand.dtype.size() as u64)
+            .ok_or("H3 AdaLN: stored operand bytes overflow")?;
+        source_bytes = source_bytes
+            .checked_add(stored)
+            .ok_or("H3 AdaLN: stored operand bytes overflow")?;
+        compute_bytes = compute_bytes
+            .checked_add(
+                (elements as u64)
+                    .checked_mul(4)
+                    .ok_or("H3 AdaLN: widened operand bytes overflow")?,
+            )
+            .ok_or("H3 AdaLN: widened operand bytes overflow")?;
+    }
+    Ok(H3PruningBinding {
+        topology_id: TOPOLOGY_ID.to_owned(),
+        identity: pruning_identity_hex(builder.finish()?),
+        grid,
+        rank,
+        source_bytes,
+        compute_bytes,
+    })
+}
+
+/// Validate executable operands before scheduling copies. Codes are never decoded or allocated;
+/// descriptor reads are bounded and row scales are scanned one value at a time.
+fn convrot_outputs(
+    headers: &[Value],
+    files: &[(&String, &PathBuf)],
+    physical: &H3Physical<'_>,
+    native: bool,
+    config: &H3Config,
+    layout: H3QkvLayout,
+    expected: &BTreeMap<String, Vec<usize>>,
+) -> Result<BTreeMap<String, Vec<Output>>, String> {
+    let mut outputs = BTreeMap::new();
+    for (source, header) in headers.iter().enumerate() {
+        if header
+            .get("__metadata__")
+            .and_then(Value::as_object)
+            .is_some_and(|metadata| {
+                [
+                    "_quantization_metadata",
+                    "quant_format",
+                    "quantization_config",
+                ]
+                .iter()
+                .any(|key| metadata.contains_key(*key))
+            })
+        {
+            return Err("H3 requires authoritative per-layer ConvRot descriptors; competing file-level quantization declarations are unsupported".into());
+        }
+        if !header
+            .as_object()
+            .ok_or("invalid H3 header")?
+            .keys()
+            .any(|key| key.ends_with(".comfy_quant"))
+        {
+            continue;
+        }
+        let mut file = File::open(files[source].1).map_err(|e| e.to_string())?;
+        let mut len = [0; 8];
+        file.read_exact(&mut len).map_err(|e| e.to_string())?;
+        let body = 8 + u64::from_le_bytes(len);
+        let shape = |entry: &Value| -> Result<Vec<usize>, String> {
+            entry["shape"]
+                .as_array()
+                .ok_or("ConvRot operand lacks shape")?
+                .iter()
+                .map(|v| {
+                    v.as_u64()
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or_else(|| "invalid ConvRot shape".into())
+                })
+                .collect()
+        };
+        let offset = |entry: &Value| -> Result<u64, String> {
+            entry["data_offsets"][0]
+                .as_u64()
+                .ok_or_else(|| "ConvRot operand lacks offset".into())
+        };
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+        let mut descriptor_bytes = [0u8; MAX_DESCRIPTOR_BYTES];
+        for (key, entry) in header.as_object().ok_or("invalid H3 header")? {
+            let Some(base) = key.strip_suffix(".comfy_quant") else {
+                continue;
+            };
+            let descriptor_shape = shape(entry)?;
+            if entry["dtype"] != "U8"
+                || descriptor_shape.len() != 1
+                || descriptor_shape[0] == 0
+                || descriptor_shape[0] > MAX_DESCRIPTOR_BYTES
+            {
+                return Err(format!("H3 {key}: requires bounded U8 ConvRot descriptor"));
+            }
+            let weight_key = format!("{base}.weight");
+            let scale_key = format!("{base}.weight_scale");
+            let (_, weight) = physical
+                .get(weight_key.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing weight"))?;
+            let (scale_source, scale) = physical
+                .get(scale_key.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing weight_scale"))?;
+            if weight["dtype"] != "I8" || scale["dtype"] != "F32" {
+                return Err(format!(
+                    "H3 {key}: ConvRot requires signed I8 weight and F32 row scales"
+                ));
+            }
+            let weight_shape = shape(weight)?;
+            let scale_shape = shape(scale)?;
+            reader
+                .seek(SeekFrom::Start(body + offset(entry)?))
+                .map_err(|e| e.to_string())?;
+            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
+            reader.read_exact(payload).map_err(|e| e.to_string())?;
+            let descriptor = ConvRotInt8::parse(payload, &weight_shape, &scale_shape)
+                .map_err(|e| format!("H3 {key}: {e}"))?;
+            let mut foreign_reader;
+            let (scale_reader, scale_body) = if *scale_source == source {
+                (&mut reader, body)
+            } else {
+                let mut file = File::open(files[*scale_source].1).map_err(|e| e.to_string())?;
+                let mut len = [0; 8];
+                file.read_exact(&mut len).map_err(|e| e.to_string())?;
+                foreign_reader = std::io::BufReader::with_capacity(64 * 1024, file);
+                (&mut foreign_reader, 8 + u64::from_le_bytes(len))
+            };
+            scale_reader
+                .seek(SeekFrom::Start(scale_body + offset(scale)?))
+                .map_err(|e| e.to_string())?;
+            for _ in 0..descriptor.out_features {
+                let mut bytes = [0; 4];
+                scale_reader
+                    .read_exact(&mut bytes)
+                    .map_err(|e| e.to_string())?;
+                let value = f32::from_le_bytes(bytes);
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(format!(
+                        "H3 {scale_key}: requires finite positive F32 scales"
+                    ));
+                }
+            }
+            let mapped = if native {
+                native_outputs(strip_prefix(&weight_key), config, layout, &weight_shape, 1)?
+            } else {
+                vec![(
+                    strip_prefix(&weight_key).into(),
+                    weight_shape.clone(),
+                    vec![(0, (descriptor.out_features * descriptor.in_features) as u64)],
+                )]
+            };
+            let mut mapped_scales = Vec::new();
+            let mut mapped_descriptors = Vec::new();
+            for (logical, dimensions, ranges) in &mapped {
+                let supported = (logical.starts_with("transformer_blocks.")
+                    || logical.starts_with("token_refiner.refiner_blocks."))
+                    && (logical.contains(".attn.")
+                        || logical.contains(".ff.")
+                        || logical.ends_with(".adaln_proj.linear.weight"));
+                if !supported || expected.get(logical) != Some(dimensions) {
+                    return Err(format!(
+                        "H3 {key}: quantized projection {logical:?} is not a native INT8 consumer"
+                    ));
+                }
+                let logical_base = logical
+                    .strip_suffix(".weight")
+                    .ok_or("invalid ConvRot logical weight")?;
+                let input = descriptor.in_features as u64;
+                // Only output rows move: input rotation groups and descriptor bytes remain unchanged.
+                let scale_ranges = ranges
+                    .iter()
+                    .map(|&(start, len)| (start / input * 4, len / input * 4))
+                    .collect();
+                mapped_scales.push((
+                    format!("{logical_base}.weight_scale"),
+                    vec![dimensions[0], 1],
+                    scale_ranges,
+                ));
+                mapped_descriptors.push((
+                    format!("{logical_base}.comfy_quant"),
+                    descriptor_shape.clone(),
+                    vec![(0, payload.len() as u64)],
+                ));
+            }
+            outputs.insert(weight_key, mapped);
+            outputs.insert(scale_key, mapped_scales);
+            outputs.insert(key.clone(), mapped_descriptors);
+        }
+    }
+    Ok(outputs)
+}
 
 fn native_outputs(
     key: &str,

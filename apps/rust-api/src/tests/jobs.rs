@@ -2732,10 +2732,10 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     }
 }
 
-/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
-/// typed-image metadata shape so every generic job projection is covered without depending on a
-/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
-/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+/// SC-18314: server resolution is worker-private. Seed the store with the exact trusted typed-image
+/// metadata shape, then exercise the normal public projection/events and HTTP surfaces. Public raw
+/// callers cannot author this private carrier; their canonicalization is tested independently.
+/// The raw store and `/jobs/claim` retain the resolution; browser state retains only the opaque id.
 #[tokio::test]
 async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -2767,6 +2767,58 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         "payload": job_payload,
         "requestedGpu": "auto"
     });
+    async fn create_trusted_job(state: &crate::AppState, request: &Value) -> Value {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        let plan = ImportPlanV1::new(
+            "checkpoint-plan-private-boundary",
+            "sdxl",
+            vec![ImportLayerV1 {
+                layer_id: "checkpoint".into(),
+                role: "checkpoint".into(),
+                target_path: "model.safetensors".into(),
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked(
+                    "root-approved",
+                    "model.safetensors",
+                    "b".repeat(64),
+                )
+                .unwrap(),
+            }],
+        )
+        .unwrap();
+        let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+            &plan,
+            "private-boundary-model",
+        )
+        .unwrap();
+        let job = state
+            .jobs_store
+            .create_job_with_model_provenance(
+                crate::CreateJob {
+                    job_type: crate::JobType::ImageDetail,
+                    project_id: Some("project-1".into()),
+                    project_name: Some("Project 1".into()),
+                    payload: request["payload"].as_object().unwrap().clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                Some(&provenance),
+            )
+            .unwrap();
+        assert_eq!(
+            state.jobs_store.model_provenance(&job.id).unwrap(),
+            Some(provenance.clone())
+        );
+        assert_eq!(job.extra["modelProvenance"], provenance);
+        crate::publish(state, "job.updated", &job);
+        crate::publish_queue(state).await.unwrap();
+        serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
+    }
     let assert_public = |surface: &str, value: &Value| {
         let encoded = value.to_string();
         assert!(
@@ -2792,9 +2844,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     };
 
     let mut events = state.events.subscribe();
-    let (status, created) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let created = create_trusted_job(&state, &create_request).await;
     assert_public("create response", &created);
     assert_eq!(
         created["payload"]["advanced"]["textEncoderModel"],
@@ -2916,9 +2966,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
 
     // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
     // must survive public projection intact so the worker can validate and prepare its receipt.
-    let (status, worker_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    create_trusted_job(&state, &create_request).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -3078,9 +3126,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
     // the ordinary progress response. Claim one final raw row so that container boundary is also
     // proven public while the persisted worker payload remains exact.
-    let (status, termination_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
-    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job = create_trusted_job(&state, &create_request).await;
     let termination_job_id = termination_job["id"]
         .as_str()
         .expect("termination job id")
