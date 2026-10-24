@@ -477,8 +477,24 @@ test("Windows cleanup signals only re-authenticated owned identities", () => {
   // Cleanup plan: only live descendants whose birth still matches; PID reuse and
   // exited pids are dropped; the root joins only while its full identity holds.
   const known = new Map([[101, 11_000], [102, 12_000], [103, 13_000]]);
-  const fresh = rows([{ 103: { pid: 103, ppid: 1, birthMs: 99_000, path: "c:\\reused\\reused.exe" } }]);
+  const fresh = rows([[103, { pid: 103, ppid: 1, birthMs: 99_000, path: "c:\\reused\\reused.exe" }]]);
+  // 103 must be a REAL live row with a replacement birth identity, otherwise the
+  // exclusion below would only prove that an absent pid is skipped.
+  assert.equal(fresh.has(103), true);
+  assert.equal(fresh.get(103).birthMs, 99_000);
   assert.deepEqual(planAuthenticatedCleanup(fresh, identity, known, true).targets, [101, 102, 100]);
+  // Both directions in one sample: a live descendant whose birth still matches is
+  // selected, while the live reused pid above is excluded.
+  const mixed = rows([
+    [103, { pid: 103, ppid: 1, birthMs: 99_000, path: "c:\\reused\\reused.exe" }],
+    [104, { pid: 104, ppid: 100, birthMs: 13_000, path: "c:\\cargo\\child.exe" }],
+  ]);
+  assert.equal(mixed.has(104), true);
+  assert.deepEqual(
+    planAuthenticatedCleanup(mixed, identity, new Map([...known, [104, 13_000]]), true).targets,
+    [101, 102, 104, 100],
+    "a live matching-birth descendant is selected while the live reused pid is excluded",
+  );
   assert.deepEqual(planAuthenticatedCleanup(new Map(), identity, known, true).targets, []);
   assert.deepEqual(planAuthenticatedCleanup(fresh, identity, known, false).targets, [101, 102]);
   assert.deepEqual(planAuthenticatedCleanup(fresh, { ...identity, birthMs: 20_000 }, known, true).targets, [101, 102], "a reused root pid is never a target");

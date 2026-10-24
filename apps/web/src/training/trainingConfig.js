@@ -362,6 +362,30 @@ export function randomTrainingSeed(random = Math.random) {
   return String(Math.floor(random() * 1_000_000_000));
 }
 
+// MOSS seeds are literal nonnegative integers. Browser `Number` conversion
+// ROUNDS (`42.0000000000000001` → 42, `9007199254740990.5` → 9007199254740990),
+// so validate the DRAFT TEXT as exact decimal digits before any conversion.
+// Returns the exact safe integer for an accepted seed, NaN when the browser
+// cannot represent the text exactly, and null for empty/fractional/negative
+// text — an actionable error, never a silently rounded submitted seed.
+export function mossSeedDraft(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const parsed = Number(trimmed);
+  return Number.isSafeInteger(parsed) ? parsed : Number.NaN;
+}
+
+// The serialized snapshot mirrors that validated literal: NaN (unrepresentable)
+// becomes null — the API type contract rejects it, and validation blocks
+// submission — instead of a rounded value. Other families keep their existing
+// `numberFromDraft` coercion.
+export function mossSeedSnapshot(value) {
+  const seed = mossSeedDraft(value);
+  return Number.isNaN(seed) ? null : seed;
+}
+
 // The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
 // the current one (or just the current one when the target advertises none), one repeat each, so a
 // fresh list trains exactly the sizes the target already offers and the user tunes the mix.
@@ -1090,10 +1114,10 @@ export function configValidation(
     }
   }
   if (selectedTarget?.kernel === "moss_image_lora") {
-    const seed = numberFromDraft(configDraft.seed);
-    if (seed === null || seed < 0 || !Number.isInteger(seed)) {
+    const seed = mossSeedDraft(configDraft.seed);
+    if (seed === null) {
       issues.push(issue.error("seed", "Seed must be zero or a positive whole number"));
-    } else if (!Number.isSafeInteger(seed)) {
+    } else if (Number.isNaN(seed)) {
       issues.push(issue.error("seed", "This browser cannot represent that seed exactly; choose a smaller integer or submit the exact i64 through the API"));
     }
   }
@@ -1460,7 +1484,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       gradientAccumulation: numberFromDraft(configDraft.gradientAccumulation),
       resolution: objective === "depth" ? irisDepthResolution(configDraft) : numberFromDraft(configDraft.resolution),
       saveEvery: numberFromDraft(configDraft.saveEvery),
-      seed: numberFromDraft(configDraft.seed),
+      seed: selectedTarget?.kernel === "moss_image_lora"
+        ? mossSeedSnapshot(configDraft.seed)
+        : numberFromDraft(configDraft.seed),
       optimizer: asText(configDraft.optimizer).trim(),
       triggerWord: taskBag ? "" : asText(configDraft.triggerWord).trim(),
       advanced,

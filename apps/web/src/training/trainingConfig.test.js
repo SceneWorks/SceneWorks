@@ -1900,6 +1900,9 @@ describe("MOSS training draft serialization", () => {
     const seedIssues = (seed) => configValidation(
       { ...draft, seed: String(seed) }, { activeDataset: dataset, selectedTarget: moss },
     ).filter((entry) => entry.field === "seed");
+    const snapshotSeed = (seed) => trainingConfigSnapshot({
+      activeDataset: dataset, configDraft: { ...draft, seed }, selectedPreset: null, selectedTarget: moss,
+    }).config.seed;
     for (const seed of [0, 42, 1_000_000_001, Number.MAX_SAFE_INTEGER]) {
       expect(seedIssues(seed), String(seed)).toEqual([]);
     }
@@ -1907,6 +1910,15 @@ describe("MOSS training draft serialization", () => {
       expect(seedIssues(seed).length, seed).toBeGreaterThan(0);
     }
     expect(seedIssues("9223372036854775807")[0].message).toMatch(/browser cannot represent.*exactly/i);
+    // Exact-text validation: `Number()` ROUNDS both of these into a different
+    // integer, so the draft text must be refused rather than submitted as a
+    // silently rounded seed.
+    for (const seed of ["9007199254740990.5", "42.0000000000000001"]) {
+      expect(Number.isInteger(Number(seed)), `${seed} exercised the coercion trap`).toBe(true);
+      expect(seedIssues(seed).length, seed).toBeGreaterThan(0);
+      expect(seedIssues(seed)[0].message).toMatch(/zero or a positive whole number/i);
+      expect(snapshotSeed(seed), seed).toBeNull();
+    }
     let draws = 0;
     const concrete = randomTrainingSeed(() => { draws += 1; return 0.25; });
     expect(concrete).toBe("250000000");
@@ -1922,6 +1934,24 @@ describe("MOSS training draft serialization", () => {
       expect(snapshot.config.seed).toBe(Number(seed));
       expect(replay.config.seed).toBe(snapshot.config.seed);
     }
+    // The browser boundary value round-trips EXACTLY through draft and snapshot.
+    expect(snapshotSeed(String(Number.MAX_SAFE_INTEGER))).toBe(Number.MAX_SAFE_INTEGER);
+    const maxReplay = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: configDraftFromTarget(
+        { ...moss, defaults: trainingConfigSnapshot({
+          activeDataset: dataset,
+          configDraft: { ...draft, seed: String(Number.MAX_SAFE_INTEGER) },
+          selectedPreset: null,
+          selectedTarget: moss,
+        }).config },
+        dataset,
+        ["auto"],
+      ),
+      selectedPreset: null,
+      selectedTarget: moss,
+    });
+    expect(maxReplay.config.seed).toBe(Number.MAX_SAFE_INTEGER);
     expect(draws).toBe(1);
   });
 
