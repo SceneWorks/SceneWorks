@@ -149,6 +149,8 @@ function exactKeys(value, keys, label) {
 const DEVICE_TRANSITION_KEYS = ['schemaVersion','previousSourceSha','nextSourceSha','previousApprovedPlanSha256','previousHeadSha256','previousSequence','previousGenerationCount','previousConsumedIds','previousClaimSha256','previousDevice','nextDevice'];
 const PREVIOUS_CANDLE_DEVICE = {physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'};
 const NEXT_CANDLE_DEVICE = {physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'};
+/** The destination must be one of these two EXACT tuples; never a caller-supplied or mixed device. */
+const FIXED_CANDLE_DESTINATIONS = Object.freeze([PREVIOUS_CANDLE_DEVICE, NEXT_CANDLE_DEVICE]);
 /** Strict fixed device/source/prefix binding; absence preserves the legacy same-device format.
  * Does not itself authenticate the authorization: carried-prefix/append validation does that. */
 export function validateCandleDeviceTransitionBinding(approval) {
@@ -163,10 +165,11 @@ export function validateCandleDeviceTransitionBinding(approval) {
   for (const field of ['previousApprovedPlanSha256','previousHeadSha256','previousClaimSha256']) assert(sha.test(binding[field] ?? ''), `device transition ${field} required`);
   assert.equal(binding.previousSequence, 1); assert.equal(binding.previousGenerationCount, 1);
   assert.deepEqual(binding.previousConsumedIds, [CANDLE_CONSUMED]);
-  for (const [field, expected] of [['previousDevice',PREVIOUS_CANDLE_DEVICE],['nextDevice',NEXT_CANDLE_DEVICE]]) {
-    exactKeys(binding[field], ['physicalGpuId','gpuUuid','pciBusId'], `Candle ${field}`);
-    assert.deepEqual(binding[field], expected, `Candle ${field} is not the fixed authorized physical device`);
-  }
+  for (const field of ['previousDevice','nextDevice']) exactKeys(binding[field], ['physicalGpuId','gpuUuid','pciBusId'], `Candle ${field}`);
+  assert.deepEqual(binding.previousDevice, PREVIOUS_CANDLE_DEVICE, 'Candle previousDevice is not the fixed authorized physical device');
+  // The destination is one of the two EXACT approved physical devices: the historical GPU1 itself
+  // (same-device source/measurement/security transition) or the separately approved GPU0.
+  assert(FIXED_CANDLE_DESTINATIONS.some(device => JSON.stringify(binding.nextDevice) === JSON.stringify(device)), 'Candle nextDevice is not the fixed authorized physical device');
   return binding;
 }
 const MEASUREMENT_KIND = 'windows-owned-process-accounting-v1';

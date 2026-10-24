@@ -488,3 +488,26 @@ test('cross-device append preserves old claim and refuses forged claim and reset
   assert.equal((await appendCandleSourceTransition(args)).alreadyApplied,true);
   await assert.rejects(initializeLedger({approval:f.approval,backend:'candle',ledgerRoot:path.join(f.root,'reset')}),/alternate ledger/);
 });
+
+test('same-physical-device destination is accepted only as the exact historical GPU1 tuple', async t => {
+  const f = await pureTransitionFixture(t);
+  bindDeviceTransition(f);
+  f.approval.candleDeviceTransition.nextDevice = structuredClone(f.approval.candleDeviceTransition.previousDevice);
+  f.authorization.deviceTransition = structuredClone(f.approval.candleDeviceTransition);
+  resealCarriedTransition(f);
+  assert.equal(validateCandleSourceCompatibility(f.previousApproval,f.approval,f.authorization,f.previousReceipt),true);
+  assert.deepEqual(validateCandleDeviceTransitionBinding(f.approval).nextDevice, {physicalGpuId:'1',gpuUuid:'GPU-e4b79931-7be6-f216-460a-f5405cfafffe',pciBusId:'00000000:C1:00.0'});
+  assert.equal(candleReplayPrefix(f.receipt,f.approval).authorization.deviceTransition.nextDevice.physicalGpuId,'1');
+  // Mixed UUID/PCI tuples, arbitrary devices and a changed historical device are still refused.
+  for (const [label, mutate] of [
+    ['GPU1 id with the GPU0 UUID', x => { x.approval.candleDeviceTransition.nextDevice.gpuUuid = 'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0'; }],
+    ['GPU1 id with the GPU0 PCI', x => { x.approval.candleDeviceTransition.nextDevice.pciBusId = '00000000:21:00.0'; }],
+    ['arbitrary device tuple', x => { x.approval.candleDeviceTransition.nextDevice = {physicalGpuId:'2',gpuUuid:'GPU-ffffffff-ffff-ffff-ffff-ffffffffffff',pciBusId:'00000000:41:00.0'}; }],
+    ['changed historical device', x => { x.approval.candleDeviceTransition.previousDevice = {physicalGpuId:'0',gpuUuid:'GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0',pciBusId:'00000000:21:00.0'}; }],
+  ]) {
+    const bad = structuredClone(f); mutate(bad);
+    bad.authorization.deviceTransition = structuredClone(bad.approval.candleDeviceTransition);
+    resealCarriedTransition(bad);
+    assert.throws(() => verifyLedgerReceipt(bad.approval, bad.receipt), undefined, label);
+  }
+});
