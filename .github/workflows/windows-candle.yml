@@ -840,6 +840,18 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          rem Ordinary unit fixtures must never inherit a persistent model cache.
+          if not defined RUNNER_TEMP exit /b 1
+          set "HF_HOME="
+          for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "HF_HOME=%RUNNER_TEMP%\sc-unit-worker-%%G"
+          if not defined HF_HOME exit /b 1
+          if exist "%HF_HOME%" exit /b 1
+          set "HF_HUB_CACHE=%HF_HOME%\hub"
+          set "HUGGINGFACE_HUB_CACHE=%HF_HOME%\hub"
+          set "HF_HUB_OFFLINE=1"
+          set "TRANSFORMERS_OFFLINE=1"
+          mkdir "%HF_HUB_CACHE%"
+          if errorlevel 1 exit /b 1
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
           cargo test -p sceneworks-worker --features backend-candle %capability_facts_test_args%
@@ -931,6 +943,18 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          rem Ordinary unit fixtures must never inherit a persistent model cache.
+          if not defined RUNNER_TEMP exit /b 1
+          set "HF_HOME="
+          for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "HF_HOME=%RUNNER_TEMP%\sc-unit-memory-adapter-%%G"
+          if not defined HF_HOME exit /b 1
+          if exist "%HF_HOME%" exit /b 1
+          set "HF_HUB_CACHE=%HF_HOME%\hub"
+          set "HUGGINGFACE_HUB_CACHE=%HF_HOME%\hub"
+          set "HF_HUB_OFFLINE=1"
+          set "TRANSFORMERS_OFFLINE=1"
+          mkdir "%HF_HUB_CACHE%"
+          if errorlevel 1 exit /b 1
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
