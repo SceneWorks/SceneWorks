@@ -942,6 +942,21 @@ function FullscreenPreviewComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
+  const regeneratingRef = React.useRef(false);
+  const [regeneration, setRegeneration] = React.useState(null);
+  const regenerate = async () => {
+    if (regeneratingRef.current) return;
+    regeneratingRef.current = true;
+    setRegeneration({ assetId: asset.id, pending: true });
+    try {
+      await onRegenerate(asset);
+      setRegeneration(null);
+    } catch (error) {
+      setRegeneration({ assetId: asset.id, error: error.message || "Could not re-generate this image." });
+    } finally {
+      regeneratingRef.current = false;
+    }
+  };
 
   // Each generated image has its OWN seed on its per-asset recipe (asset.recipe.seed).
   // The generation-set recipe only carries the batch's base seed — shared across every
@@ -1428,12 +1443,16 @@ function FullscreenPreviewComponent({
                 not a direct image queue. */}
             {onRegenerate && asset.type === "image" && hasRecordedRecipe ? (
               <button
-                onClick={() => onRegenerate(asset)}
-                title="Regenerate this image with a new random seed"
+                disabled={Boolean(regeneration?.pending)}
+                onClick={regenerate}
+                title="Add a new variation to the queue without leaving this image"
                 type="button"
               >
                 Re-Generate
               </button>
+            ) : null}
+            {regeneration?.assetId === asset.id && regeneration.error ? (
+              <span role="alert">{regeneration.error}</span>
             ) : null}
             {/* An image someone else made, imported here, carrying the recipe that made it in its
                 own bytes (sc-15949 → sc-15952). It has no recorded recipe of its own — nothing on

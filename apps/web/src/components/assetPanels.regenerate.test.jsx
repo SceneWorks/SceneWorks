@@ -86,6 +86,34 @@ describe("FullscreenPreview — the Re-Generate action", () => {
     expect(onRegenerate).toHaveBeenCalledWith(expect.objectContaining({ id: "asset-img" }));
   });
 
+  it("keeps the viewer mounted and suppresses repeat clicks while submission is pending", async () => {
+    let finish;
+    const onRegenerate = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    const onClose = vi.fn();
+    await render({ asset: asset({ recipe: { model: "model", prompt: "lighthouse" } }), onRegenerate, onClose, onUseRecipe: vi.fn() });
+    const viewer = document.querySelector('[role="dialog"]');
+    await act(async () => {
+      regenerateButtons()[0].click();
+      regenerateButtons()[0].click();
+    });
+    expect(onRegenerate).toHaveBeenCalledOnce();
+    expect(regenerateButtons()[0].disabled).toBe(true);
+    await act(async () => finish({ id: "new-job" }));
+    expect(regenerateButtons()[0].disabled).toBe(false);
+    expect(document.querySelector('[role="dialog"]')).toBe(viewer);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("shows submission errors inside the viewer and allows retry", async () => {
+    const onRegenerate = vi.fn().mockRejectedValueOnce(new Error("Host unavailable")).mockResolvedValueOnce({ id: "job" });
+    await render({ asset: asset({ recipe: { model: "model", prompt: "lighthouse" } }), onRegenerate, onUseRecipe: vi.fn() });
+    await act(async () => regenerateButtons()[0].click());
+    expect(document.querySelector('[role="alert"]').textContent).toBe("Host unavailable");
+    await act(async () => regenerateButtons()[0].click());
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(onRegenerate).toHaveBeenCalledTimes(2);
+  });
+
   it("offers Re-Generate only when wired", async () => {
     // Not wired (the prop is absent) — mirrors the suite fixtures that don't pass it — so no button.
     await render({
