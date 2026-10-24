@@ -17165,11 +17165,20 @@ mod minimax_h3_import_declaration_tests {
         let repairs = projected["repairActions"].as_array().unwrap();
         assert_eq!(repairs.len(), 1, "only audio VAE needs repair: {repairs:?}");
         assert_eq!(repairs[0]["componentId"], "audio_vae");
-        let (status, job) = request(
+        let (status, error) = request(
             router.clone(),
             "POST",
             "/api/v1/models/repair_h3/download",
             json!({"componentId":repairs[0]["componentId"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(error["code"], "license_acknowledgment_required");
+        let (status, job) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/models/repair_h3/download",
+            json!({"componentId":repairs[0]["componentId"], "licenseAcknowledged":true}),
         )
         .await;
         assert_eq!(status, StatusCode::CREATED, "{job}");

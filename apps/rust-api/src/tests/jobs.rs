@@ -5334,7 +5334,7 @@ async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() 
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
     let current_plan = ImportPlanV1::new(
-        "checkpoint-plan-current",
+        format!("checkpoint-plan-{}", "c".repeat(64)),
         "minimax-h3",
         vec![ImportLayerV1 {
             layer_id: "dit".into(),
@@ -5363,7 +5363,7 @@ async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() 
             .unwrap(),
     )
     .unwrap();
-    let config = settings.config_dir.clone();
+    let config = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
         config.join("builtin.models.jsonc"),
@@ -5381,10 +5381,27 @@ async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() 
         .to_string(),
     )
     .unwrap();
-    let app = create_app(settings).unwrap();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    // Exercise the same canonical catalog and S11 provenance resolver as admission. An absent
+    // fixture entry must not turn this plan-rebind test into an unrelated missing-checkpoint test.
+    let entry = crate::resolve_model_manifest_entry(&state, "same-import-id")
+        .await
+        .unwrap();
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    let actual =
+        crate::imported_reference_from_provenance(entry.as_object().unwrap(), provenance.as_ref())
+            .expect("canonical imported fixture has a validated replay identity");
+    assert_eq!(actual["checkpointId"], checkpoint_id);
+    assert_eq!(actual["planId"], current_plan.plan_id);
+    let mut expected = actual;
+    expected["planId"] = json!(format!("checkpoint-plan-{}", "b".repeat(64)));
     let (status,error) = request(app.clone(),"POST","/api/v1/video/jobs",json!({
         "projectId":"p", "model":"same-import-id", "mode":"text_to_video", "prompt":"original weights only",
-        "expectedImportedModelRef":{"modelId":"same-import-id","checkpointId":checkpoint_id,"planId":"checkpoint-plan-original"}
+        "expectedImportedModelRef":expected
     })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     assert!(

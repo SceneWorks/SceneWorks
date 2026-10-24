@@ -2326,6 +2326,18 @@ fn reference_payload_findings(
         let mut payload = JsonObject::new();
         payload.insert("model".to_owned(), json!(partition.model_id));
         payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
+        // Match CompiledRequest::job_body's keyframe carriers too. This gate now checks source
+        // presence as well as reference counts; omitting a declared first frame would reject a
+        // valid image-to-video plan before its assets can be imported.
+        if shot.conditioning.first_frame_role.is_some() {
+            payload.insert("sourceAssetId".to_owned(), json!("placeholder_first_frame"));
+        }
+        if shot.conditioning.last_frame_role.is_some() {
+            payload.insert(
+                "lastFrameAssetId".to_owned(),
+                json!("placeholder_last_frame"),
+            );
+        }
         // One placeholder per PICTURE, not per role (sc-24024): roles sharing a pack file are
         // supplied as one image, so a shot binding ten roles across nine files posts nine ids. The
         // count comes from `shot_reference_pictures` — the same function the dispatch builds the
@@ -7144,6 +7156,37 @@ mod unit_tests {
             &ModelEntries::single("some_model", &entry)
         )
         .is_empty());
+    }
+
+    #[test]
+    fn the_reference_payload_gate_preserves_declared_keyframes_without_inventing_them() {
+        let mut plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
+                "conditioning": { "mode": "image_to_video", "firstFrameRole": "plate" }
+            }]
+        }))
+        .unwrap();
+        let entry = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let pack = empty_pack();
+        let entries = ModelEntries::single("some_model", &entry);
+        assert!(reference_payload_findings(&plan, &pack, &entries).is_empty());
+
+        // A missing source must still be rejected, even when a last frame was declared. Only
+        // trusted FL2VA/hybrid entries have the route's last-frame-only exception.
+        plan.shots[0].conditioning.first_frame_role = None;
+        plan.shots[0].conditioning.last_frame_role = Some("end_plate".into());
+        let findings = reference_payload_findings(&plan, &pack, &entries);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].message.contains("requires a source image"));
     }
 
     /// A pack declaring nothing, for the gates whose plans name roles no pack ever approved.
