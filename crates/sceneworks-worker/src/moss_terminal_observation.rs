@@ -175,6 +175,10 @@ pub(crate) fn entry(engine: &str, event: &str) -> WorkerResult<()> {
     }
     Ok(())
 }
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) fn provider_run() -> WorkerResult<()> {
     let Some(lock) = JOURNAL.get() else {
         return Ok(());

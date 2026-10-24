@@ -152,7 +152,18 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
   assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
-  assert.deepEqual(jobs, ["qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["moss-dispatch", "moss-edit-terminal", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  const jobBlock = (name) => workflow.split(`  ${name}:\n`)[1]?.split(/^  [a-z][a-z0-9-]*:\n/m)[0];
+  const mossDispatch = jobBlock("moss-dispatch"), mossTerminal = jobBlock("moss-edit-terminal");
+  assert.match(mossDispatch, /MOSS_SOURCE_SHA: \$\{\{ inputs.ref \}\}/);
+  assert.match(mossDispatch, /MOSS_INFERENCE_SHA: \$\{\{ inputs.inference_sha \}\}/);
+  assert.match(mossDispatch, /validateDispatchEnvelope\(process\.env\.MOSS_DISPATCH,process\.env\.MOSS_SOURCE_SHA,process\.env\.MOSS_INFERENCE_SHA,process\.env\.GITHUB_SHA\)/);
+  assert.match(mossDispatch, /dispatch: \$\{\{ steps.validate.outputs.dispatch \}\}/);
+  assert.match(mossTerminal, /needs: moss-dispatch/);
+  assert.match(mossTerminal, /uses: \.\/\.github\/workflows\/moss-edit-terminal.yml[\s\S]*?with:\n      source_sha: \$\{\{ inputs.ref \}\}\n      inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  for (const field of ["candidate_id", "bundle_run_id", "bundle_artifact_id", "bundle_manifest_sha256", "phase", "upload_path", "upload_kind", "execution_run_id", "execution_run_attempt", "review_artifact_id", "review_run_id"]) {
+    assert.ok(mossTerminal.includes(`${field}: \${{ fromJSON(needs.moss-dispatch.outputs.dispatch).${field} }}`), `${field} must come from the validated dispatch`);
+  }
   const runs = (profile, backend) => jobs.filter((job) => {
     const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
     assert.ok(condition, `missing ${job} dispatch predicate`);
@@ -161,6 +172,7 @@ function assertDispatcherIsolation(workflow) {
     return Function("inputs", `return (${condition})`)({ profile, backend });
   });
   for (const backend of ["mlx", "candle"]) {
+    assert.deepEqual(runs("moss-edit-terminal", backend), ["moss-dispatch", "moss-edit-terminal"], "MOSS proof must skip all catalog mutation steps");
     assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
     assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
     assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
@@ -174,7 +186,23 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
   const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
-  for (const mutant of mutants) assert.throws(() => assertDispatcherIsolation(mutant));
+  const mossTerminal = workflow.slice(workflow.indexOf("  moss-edit-terminal:\n"), workflow.indexOf("  qwen-app-lifecycle:\n"));
+  mutants.push(
+    workflow.replace("moss-dispatch:\n    if: ${{ inputs.profile == 'moss-edit-terminal' }}", "moss-dispatch:\n    if: ${{ inputs.profile == 'catalog' }}"),
+    workflow.replace("moss-edit-terminal:\n    if: ${{ inputs.profile == 'moss-edit-terminal' }}", "moss-edit-terminal:\n    if: ${{ inputs.backend == 'mlx' }}"),
+    workflow.replace("MOSS_SOURCE_SHA: ${{ inputs.ref }}", "MOSS_SOURCE_SHA: ${{ github.sha }}"),
+    workflow.replace("MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}", "MOSS_INFERENCE_SHA: main"),
+    workflow.replace("validateDispatchEnvelope(process.env.MOSS_DISPATCH", "JSON.parse(process.env.MOSS_DISPATCH"),
+    workflow.replace("steps.validate.outputs.dispatch", "inputs.moss_terminal"),
+    workflow.replace(mossTerminal, mossTerminal.replace("needs: moss-dispatch", "needs: qwen-app-lifecycle")),
+    workflow.replace(mossTerminal, mossTerminal.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}")),
+    workflow.replace(mossTerminal, mossTerminal.replace("inference_sha: ${{ inputs.inference_sha }}", "inference_sha: main")),
+    workflow.replace("phase: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).phase }}", "phase: execute"),
+  );
+  for (const mutant of mutants) {
+    assert.notEqual(mutant, workflow, "each mutation must change the dispatcher");
+    assert.throws(() => assertDispatcherIsolation(mutant));
+  }
 });
 
 test("frozen dense snapshot uses processor tokenizer files and rejects the older tokenizer layout", async () => {
