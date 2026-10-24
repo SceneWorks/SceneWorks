@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { proofSelection, requireManualSelection, verifyProofResult } from "./ci/h3-import-native-proof.mjs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -50,6 +51,63 @@ function workflowStep(job, name) {
   const next = job.indexOf("\n      - ", at + marker.length);
   return job.slice(at, next === -1 ? undefined : next);
 }
+
+test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  assert.match(server, /^on:\n  workflow_dispatch:/m);
+  assert.doesNotMatch(server, /^  (push|pull_request|merge_group|schedule):/m);
+  for (const file of ["macos-mlx.yml", "windows-candle.yml"]) {
+    const ordinary = await source(`.github/workflows/${file}`);
+    assert.doesNotMatch(ordinary, /(?:pruned|w4a8)_import_native_(?:mlx|cuda)_projection_smoke/);
+  }
+  assert.match(await source(".github/workflows/macos-mlx.yml"), /run: cargo test -- --skip nax_16bit_sdpa_is_correct/);
+  for (const backend of ["mlx", "cuda"]) {
+    const job = workflowJob(server, `h3-import-${backend}`);
+    const expression = workflowExpression(job);
+    for (const event of ["push", "pull_request", "merge_group", "workflow_dispatch"]) {
+      for (const operation of [undefined, "standard", "source", "h3-import-mlx", "h3-import-cuda", "h3-import-both"]) {
+        assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+          event === "workflow_dispatch" && [`h3-import-${backend}`, "h3-import-both"].includes(operation));
+      }
+    }
+    assert.match(job, /cancel-in-progress: false/);
+    assert.match(job, /if: \$\{\{ always\(\) \}\}/);
+    assert.match(job, /if-no-files-found: error/);
+    assert.match(job, new RegExp(`node scripts/ci/h3-import-native-proof\\.mjs ${backend}`));
+  }
+  assert.match(workflowJob(server, "h3-import-mlx"), /runs-on: \[self-hosted, macOS, ARM64, rw-llm\]/);
+  assert.match(workflowJob(server, "h3-import-mlx"), /test "\$RUNNER_NAME" = nax-macos-2/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /group: windows-candle-gpu-real-weights/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "0"/);
+  const fixture = await source("crates/sceneworks-worker/src/minimax_h3_import_fixture.rs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const bare = name.split("::").at(-1);
+      assert.match(fixture, new RegExp(`#\\[ignore[^\\n]*\\]\\nfn ${bare}\\(`), `${bare} remains ignored in ordinary cargo test`);
+    }
+  }
+});
+
+test("H3 native proof evidence refuses zero tests, ignored tests, wrong selection and failed commands", async () => {
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const good = `running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out;`;
+      verifyProofResult(good, name, 0);
+      for (const bad of [good.replace("1 passed", "0 passed"), good.replace("0 ignored", "1 ignored"), good.replace("0 failed", "1 failed"), good.replace("running 1 test", "running 0 tests"), good.replace(name, "unrelated_test")]) {
+        assert.throws(() => verifyProofResult(bad, name, 0));
+      }
+      assert.throws(() => verifyProofResult(good, name, 1));
+    }
+    requireManualSelection("workflow_dispatch", backend, backend);
+    requireManualSelection("workflow_dispatch", "both", backend);
+    for (const event of ["push", "pull_request", "merge_group", undefined]) assert.throws(() => requireManualSelection(event, backend, backend));
+    for (const selection of [undefined, "standard", "", backend === "mlx" ? "cuda" : "mlx"]) assert.throws(() => requireManualSelection("workflow_dispatch", selection, backend));
+  }
+  assert.throws(() => proofSelection("cpu"));
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  for (const token of ["sourceSha", "inferenceSha", "fixtureSha256", "configuration", "durationMs", "receipt.json", "--exact", "--ignored", "--test-threads=1", "--no-run", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HUGGINGFACE_HUB_CACHE", "SCENEWORKS_DATA_DIR", "tree_guard.py", '"8", "180"']) assert.ok(runner.includes(token), token);
+});
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
