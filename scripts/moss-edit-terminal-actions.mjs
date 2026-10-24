@@ -31,11 +31,15 @@ export function runtimeConfig(bundle,{sourceRoot,inferenceRoot,root,backend,buil
     workerId:`moss-${bundle.candidateId}-${backend}`,observationJournal:resolve(root,'journal-0.jsonl'),playwrightModule:resolve(root,'playwright/node_modules/playwright/index.mjs'),
     handoffRoot:resolve(root,'prior/handoff'),priorEvidenceRoot:resolve(root,'prior/evidence'),reviewRoot:resolve(root,'reviews')};
 }
-export async function isolatePackages(config,{omitAdapter=false}={}) {
+export async function isolatePackages(config,{omitAdapter=false,installedInventory=null}={}) {
   requireThat(config.hfHome===resolve(config.root,'hf')&&config.packageSource!==config.hfHome,'native jobs require their own HF projection; shared caches are read-only');
+  if(installedInventory) {
+    const identities=items=>items.map(({file,sha256})=>({file,sha256}));
+    requireThat(!omitAdapter&&typeof installedInventory.hfHome==='string'&&installedInventory.hfHome!==config.hfHome&&canonical(identities(installedInventory.files))===canonical(identities(config.packageFiles)),'installed projection must match every frozen package identity');
+  }
   for(const item of config.packageFiles) {
-    const source=safePath(config.packageSource,item.file);requireThat((await fileIdentity(source)).sha256===item.sha256,'source package file differs from immutable input inventory');
     if(omitAdapter&&(config.editAdapterFiles??[]).includes(item.file))continue;
+    const source=safePath(installedInventory?.hfHome??config.packageSource,item.file);requireThat((await fileIdentity(source)).sha256===item.sha256,'source package file differs from immutable input inventory');
     const target=safePath(config.hfHome,item.file);await mkdir(dirname(target),{recursive:true,mode:0o700});await cp(source,target,{dereference:true,errorOnExist:true,force:false});
   }
 }
@@ -152,7 +156,14 @@ export async function prepareGuardFixtures(config,api) {
     const asset=await api.request(route);requireThat(asset.id===uploaded.id&&asset.projectId===projectId&&asset.type===fixture.type&&asset.file?.path,'actual uploaded fixture/project/type readback mismatch');
     const media=`/api/v1/projects/${encodeURIComponent(projectId)}/files/${asset.file.path.split('/').map(encodeURIComponent).join('/')}`;
     requireThat(sha(await api.request(media,{raw:true}))===fixture.sha256,'actual guard upload/readback bytes changed');
-    let actualSha256=fixture.sha256;
+    let actualSha256=fixture.sha256,deleted=null;
+    if(fixture.deleteAfterUpload) {
+      requireThat(fixture.project==='campaign'&&!fixture.corruptWith&&fixture.cases?.length&&fixture.cases.every(name=>['missing-reference','missing-tensor'].includes(name)),'only fresh owned missing-input fixtures may be deleted');
+      const result=await api.request(`${route}/purge?permanent=true`,{method:'DELETE'});
+      let absent=false;try{await api.request(route);}catch(error){requireThat(error.status===404,'deleted fixture readback must be an actual HTTP404');absent=true;}
+      requireThat(absent,'fresh fixture still exists after permanent deletion');
+      deleted={route:`${route}/purge?permanent=true`,result,readbackStatus:404};
+    }
     if(fixture.corruptWith) {
       requireThat(fixture.type==='tensor'&&fixture.project==='campaign','only an explicitly owned campaign tensor may be corrupted');
       const corrupt=await readFile(safePath(config.bundleRoot,fixture.corruptWith.file));requireThat(sha(corrupt)===fixture.corruptWith.sha256&&sha(corrupt)!==fixture.sha256,'actual corrupt tensor bytes/SHA required');
@@ -161,21 +172,22 @@ export async function prepareGuardFixtures(config,api) {
       await writeFile(safePath(owned,asset.file.path),corrupt,{mode:0o600});actualSha256=sha(corrupt);
       requireThat(sha(await api.request(media,{raw:true}))===actualSha256,'corrupt owned tensor bytes not actually served');
     }
-    const readback=await api.request(route);requireThat(readback.id===asset.id&&readback.projectId===projectId,'fixture identity changed after setup');
+    const readback=deleted?asset:await api.request(route);requireThat(readback.id===asset.id&&readback.projectId===projectId,'fixture identity changed after setup');
     const uploadedFile=`guard-fixtures/${fixture.alias}-uploaded.bin`,actualFile=`guard-fixtures/${fixture.alias}-actual.bin`;
     await mkdir(root,{recursive:true,mode:0o700});await writeFile(resolve(root,`${fixture.alias}-uploaded.bin`),bytes,{flag:'wx',mode:0o600});
-    await writeFile(resolve(root,`${fixture.alias}-actual.bin`),await api.request(media,{raw:true}),{flag:'wx',mode:0o600});
-    bindings[fixture.alias]={projectId,asset:readback,uploadedSha256:fixture.sha256,actualSha256,uploadedFile,actualFile,cases:fixture.cases??[]};
+    await writeFile(resolve(root,`${fixture.alias}-actual.bin`),deleted?bytes:await api.request(media,{raw:true}),{flag:'wx',mode:0o600});
+    bindings[fixture.alias]={projectId,asset:readback,uploadedSha256:fixture.sha256,actualSha256,uploadedFile,actualFile,cases:fixture.cases??[],...(deleted?{deleted}:{} )};
     await save(resolve(root,`${fixture.alias}.json`),bindings[fixture.alias]);
   }
   await save(resolve(root,'bindings.json'),bindings);
   const resolved=resolveGuardAliases(config.guardRequests,bindings);
-  for(const name of ['foreign-reference','foreign-tensor','corrupt-tensor','embeddings-nonfinite','mask-nonbinary'])if(Object.hasOwn(resolved,name)) {
+  for(const name of ['missing-reference','missing-tensor','foreign-reference','foreign-tensor','corrupt-tensor','embeddings-nonfinite','mask-nonbinary'])if(Object.hasOwn(resolved,name)) {
     const fixture=(config.guardFixtures??[]).find(item=>item.cases?.includes(name)),binding=fixture&&bindings[fixture.alias];
     requireThat(binding&&canonical(resolved[name].request).includes(JSON.stringify(binding.asset.id)),`${name} requires its actual uploaded/read-back fixture ID`);
-    requireThat(fixture.project===(name.startsWith('foreign-')?'foreign':'campaign')&&fixture.type===(name==='foreign-reference'?'image':'tensor'),`${name} fixture has wrong real project/type`);
-    if(!name.startsWith('foreign-'))requireThat(fixture.corruptWith&&binding.actualSha256!==binding.uploadedSha256,`${name} requires actual owned corrupt/nonfinite/nonbinary bytes`);
-    if(name==='foreign-reference')requireThat(!resolved[name].refs?.length,'foreign reference guard cannot overwrite its actual foreign ID with ordinary references');
+    requireThat(fixture.project===(name.startsWith('foreign-')?'foreign':'campaign')&&fixture.type===(name.endsWith('-reference')?'image':'tensor'),`${name} fixture has wrong real project/type`);
+    if(name.startsWith('missing-'))requireThat(binding.deleted?.readbackStatus===404,`${name} requires actual deletion and HTTP404 readback`);
+    else if(!name.startsWith('foreign-'))requireThat(fixture.corruptWith&&binding.actualSha256!==binding.uploadedSha256,`${name} requires actual owned corrupt/nonfinite/nonbinary bytes`);
+    if(name.endsWith('-reference'))requireThat(!resolved[name].refs?.length,'missing/foreign reference guard cannot overwrite its actual fixture ID with ordinary references');
   }
   await save(resolve(config.root,'evidence','resolved-guards.json'),resolved);return resolved;
 }
@@ -276,7 +288,9 @@ async function deviceReceipt(config,state,label) {
   validateAdmission(receipt,state.lock,config.backend);const path=resolve(config.root,'devices',`${label}.json`);await save(path,receipt);return path;
 }
 export async function executeBackend(config) {
-  await isolatePackages(config);
+  const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,config.backend,'inventory.json')),config.backend,await sourceIdentity(config));
+  const installedPath=resolve(config.buildRoot,config.backend,'packages.json');requireThat(canonical(await fileIdentity(installedPath))===canonical(inventory.files.packages),'installed package inventory differs from source-bound native build');
+  await isolatePackages(config,{installedInventory:await json(installedPath)});
   await verifyBuild(config);const paths=buildPaths(config);config.apiBinary=paths.apiBinary;
   // Each execution phase is fresh. An interrupted phase retains immutable attempts;
   // do not start another stack and replay submissions under the same candidate.
@@ -352,8 +366,8 @@ export async function executeBackend(config) {
     for(const name of state.plan.requiredGuardCases) {
       requireThat(launch.guardRequests[name].noProviderLoadProbe===OBSERVATION_METHOD,'every refusal must freeze the actual source-bound MOSS journal probe');
       let coldRestart=null;
-      if(name==='device-budget-before-load'&&launch.guardRequests[name].expectedTerminal==='failed') {
-        coldRestart=await stack.restartIdleWorker('allocated-device-budget-cold-refusal');await actualJournal(config,expectedJournal);
+      if(['device-budget-before-load','corrupt-adapter'].includes(name)&&launch.guardRequests[name].expectedTerminal==='failed') {
+        coldRestart=await stack.restartIdleWorker(`allocated-${name}-cold-refusal`);await actualJournal(config,expectedJournal);
       }
       const mutation=await adapterRefusalState(config,name,launch.guardRequests[name]);
       try {

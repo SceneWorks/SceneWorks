@@ -451,17 +451,19 @@ The workflow runs these concrete phases:
    native worker, and drives the actual React acknowledgement/installer. It
    retains the observed download POST, actual jobs/progress, installed status,
    and screenshots. A preinstalled adapter cannot substitute for installation.
-   The final package SHA inventory is written only after actual installation
+   Omitted adapter files require no preinstalled source copy. The final package
+   SHA inventory is written only after actual installation
    and verification of every expected component. Installation may download the
-   exact pinned package; generation subsequently uses the owned offline cache.
+   exact pinned package. Execution verifies the source-bound build inventory and
+   copies its actual installed private projection into a fresh owned offline cache.
 3. Both immutable native artifacts must exist before `execute-mlx`. That job
    creates the owned campaign project, prepares the original image/tensor
    inputs, resolves actual refusal fixture uploads/readbacks, retains installer
    captures, and freezes the shared path-independent candidate exactly once.
    The controller runs all 25 MLX rows and 29 allocated refusal cases through
-   the existing CLI (27 malformed image-job HTTP refusals, the declared
-   per-artifact host-budget import refusal, and the actual device-budget
-   queued-worker failure; all remain one allocated call each). UI rows reserve one intent and call the real React
+   the existing CLI (26 malformed image-job HTTP refusals, the declared
+   per-artifact host-budget import refusal, and actual device-budget/corrupt-adapter
+   queued-worker failures; all remain one allocated call each). UI rows reserve one intent and call the real React
    Playwright driver; they do not use direct API mutations as UI evidence.
 4. The controller stops only the processes it spawned, requires their exit,
    checkpoints every owned SQLite DB, checks integrity, and retains a complete
@@ -533,7 +535,9 @@ missing, substituted or changed bytes fail before native build/execution.
   Guard names do not excuse a request that tests a different failure condition.
   The host slot is source-owned as described below; the device-budget slot uses
   `expectedStatus:201,expectedTerminal:"failed"` and exact actual memory-admission
-  error text. Other malformed image-job cases must refuse at HTTP and cannot
+  error text. The corrupt-adapter slot also uses actual201→failed worker preparation,
+  the exact frozen-component identity error, and zero provider load/run entries.
+  Other malformed image-job cases must refuse at HTTP and cannot
   substitute queued failures.
 - `guardFixtures:[{alias,cases,project,file,sha256,filename,mime,type,corruptWith?}]`.
   `project` is `campaign` or `foreign`; foreign assets are actually uploaded to
@@ -543,6 +547,11 @@ missing, substituted or changed bytes fail before native build/execution.
   foreign-reference/tensor and corrupt/nonfinite/nonbinary tensor cases must
   name their actual fixture aliases. The setup retains uploaded/served bytes,
   asset metadata and SHA identities, all bound into the shared lock.
+
+Missing-reference/tensor fixtures use `deleteAfterUpload:true`: upload and hash-read
+the fresh campaign-owned asset, permanently purge that exact ID through the real
+API, and require actual HTTP404 readback. The missing-input guard retains that
+same real ID. No synthetic missing IDs or empty-input substitutes are accepted.
 
 The product rejects nonfinite/nonbinary NPY during import. To test the image-job
 boundary, `corruptWith:{file,sha256}` first uploads a valid owned tensor, then
@@ -579,7 +588,7 @@ cold/warm run dispatch before admission. Neither is called a model allocation.
 Bounded startup/health/metrics contexts remain distinct as well. Actual
 `provider_run` hooks sit immediately before the two MOSS generate/edit calls,
 after all warm admission checks; `provider_load` sits at the admitted runtime
-constructor. The device-budget case drains and restarts only the owned idle
+constructor. The device-budget and corrupt-adapter cases drain and restart only the owned idle
 worker, retains actual exit/restart identity, observes its new ready journal,
 and requires the actual queued job to fail with no output and no provider entry.
 Only that exact job may add bounded context/cache dispatch entries during its

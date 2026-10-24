@@ -92,6 +92,15 @@ test('actual foreign upload setup retains second owned project and byte-bound re
   let posted;const api={async request(path,options={}){if(path==='/api/v1/projects')return {id:'actual-second-owned-project'};if(options.method==='POST'){posted=Buffer.from(await options.body.get('file').arrayBuffer());return {id:'actual-upload'};}if(options.raw)return bytes;return {id:'actual-upload',projectId:'actual-second-owned-project',type:'tensor',file:{path:'media/fixture.npy'}};}};
   const result=await prepareGuardFixtures(config,api);assert.equal(result.foreign.request.assetId,'actual-upload');assert.deepEqual(posted,bytes);assert.equal((await json(resolve(root,'evidence/guard-fixtures/foreign.json'))).actualSha256,sha(bytes));
 });
+test('missing-input setup purges only a fresh campaign fixture and retains its actual ID and HTTP404',async()=>{
+  const root=await temporary('missing-fixture'),bytes=Buffer.from('actual uploaded fixture bytes');await writeFile(resolve(root,'fixture.npy'),bytes);
+  const config={root,bundleRoot:root,projectId:'campaign',candidateId:'candidate',guardFixtures:[{alias:'missing',project:'campaign',file:'fixture.npy',sha256:sha(bytes),filename:'fixture.npy',mime:'application/x-npy',type:'tensor',deleteAfterUpload:true,cases:['missing-tensor']}],guardRequests:{'missing-tensor':{request:{assetId:'$fixture:missing'}}}};
+  const calls=[];let deleted=false;
+  const api={async request(path,options={}){calls.push({path,method:options.method??'GET'});if(options.method==='POST')return {id:'fresh-actual-id'};if(options.method==='DELETE'){assert.equal(path,'/api/v1/projects/campaign/assets/fresh-actual-id/purge?permanent=true');deleted=true;return {id:'fresh-actual-id'};}if(deleted){const error=Error('actual missing fixture');error.status=404;throw error;}if(options.raw)return bytes;return {id:'fresh-actual-id',projectId:'campaign',type:'tensor',file:{path:'media/fixture.npy'}};}};
+  const result=await prepareGuardFixtures(config,api);assert.equal(result['missing-tensor'].request.assetId,'fresh-actual-id');const binding=await json(resolve(root,'evidence/guard-fixtures/missing.json'));assert.equal(binding.deleted.readbackStatus,404);assert.equal(binding.asset.id,'fresh-actual-id');assert.deepEqual(await readFile(resolve(root,'evidence/guard-fixtures/missing-actual.bin')),bytes);assert.equal(calls.filter(call=>call.method==='DELETE').length,1);
+  const wrong={...api,async request(path,options={}){if(options.method==='DELETE')throw Error('delete denied');if(options.method==='POST')return {id:'fresh-second-id'};if(options.raw)return bytes;return {id:'fresh-second-id',projectId:'campaign',type:'tensor',file:{path:'media/fixture.npy'}};}};
+  const deniedRoot=await temporary('missing-denied');await assert.rejects(()=>prepareGuardFixtures({...config,root:deniedRoot},wrong),/delete denied/);
+});
 test('owned adapter negative states are real missing/corrupt bytes and restore exact original',async()=>{
   const root=await temporary('adapter'),file='hub/snapshot/edit.safetensors',original=Buffer.from('original adapter');await mkdir(resolve(root,'hf/hub/snapshot'),{recursive:true});await writeFile(resolve(root,'hf',file),original);
   const config={root,hfHome:resolve(root,'hf'),candidateId:'candidate',editAdapterFiles:[file],packageFiles:[{file,sha256:sha(original)}]};
@@ -102,6 +111,15 @@ test('owned adapter negative states are real missing/corrupt bytes and restore e
 test('private HF projection dereferences exact source bytes without changing shared inputs',async()=>{
   const root=await temporary('packages'),source=resolve(root,'source'),run=resolve(root,'run'),bytes=Buffer.from('frozen model bytes');await mkdir(source);await writeFile(resolve(source,'weights'),bytes);
   const config={root:run,hfHome:resolve(run,'hf'),packageSource:source,packageFiles:[{file:'weights',sha256:sha(bytes)}]};await isolatePackages(config);await writeFile(resolve(config.hfHome,'weights'),'owned negative state');assert.deepEqual(await readFile(resolve(source,'weights')),bytes);
+});
+test('installer omits unavailable source adapter and execution copies only the authenticated installed projection',async()=>{
+  const root=await temporary('installed-projection'),source=resolve(root,'shared'),installed=resolve(root,'build/hf'),buildRoot=resolve(root,'build'),runRoot=resolve(root,'execute'),backbone=Buffer.from('exact backbone'),adapter=Buffer.from('exact installed adapter');
+  await mkdir(source);await mkdir(installed,{recursive:true});await writeFile(resolve(source,'backbone'),backbone);await writeFile(resolve(installed,'backbone'),backbone);await writeFile(resolve(installed,'adapter'),adapter);
+  const packageFiles=[{file:'backbone',sha256:sha(backbone)},{file:'adapter',sha256:sha(adapter)}],build={root:buildRoot,hfHome:resolve(buildRoot,'projection/hf'),packageSource:source,packageFiles,editAdapterFiles:['adapter']};build.root=resolve(buildRoot,'projection');
+  await isolatePackages(build,{omitAdapter:true});assert.deepEqual(await readFile(resolve(build.hfHome,'backbone')),backbone);await assert.rejects(()=>readFile(resolve(build.hfHome,'adapter')),{code:'ENOENT'});await assert.rejects(()=>readFile(resolve(source,'adapter')),{code:'ENOENT'});
+  const run={root:runRoot,hfHome:resolve(runRoot,'hf'),packageSource:source,packageFiles};await isolatePackages(run,{installedInventory:{hfHome:installed,files:packageFiles}});assert.deepEqual(await readFile(resolve(run.hfHome,'adapter')),adapter);
+  await assert.rejects(()=>isolatePackages({...run,root:resolve(root,'wrong'),hfHome:resolve(root,'wrong/hf')},{installedInventory:{hfHome:installed,files:[packageFiles[0]]}}),/every frozen package/);
+  await writeFile(resolve(installed,'adapter'),'tampered');await assert.rejects(()=>isolatePackages({...run,root:resolve(root,'tampered'),hfHome:resolve(root,'tampered/hf')},{installedInventory:{hfHome:installed,files:packageFiles}}),/source package file differs/);assert.deepEqual(await readFile(resolve(source,'backbone')),backbone);
 });
 test('raw JSON API transport sends exact NaN spelling and retains actual HTTP refusal',async()=>{
   const original=globalThis.fetch,rawJson='{"training_shift":NaN}';let observed;
@@ -200,6 +218,14 @@ test('device-budget queued failure retains actual response/job and cannot replac
   validateWorkerRefusal(specification,request,job,endpoint,'cuda');
   for(const change of [{status:'completed'},{workerId:'another'},{error:'shape error'},{result:{assets:[{id:'unexpected-output'}]}},{payload:{...request,model:'moss_image_sft'}}])assert.throws(()=>validateWorkerRefusal(specification,request,{...job,...change},endpoint,'cuda'));
   const strict=await temporary('strict-http');await assert.rejects(()=>submitGuard(api,{expectedStatus:400,errorIncludes:['malformed']},request,strict),error=>error.jobId===queued.id);assert.equal((await json(resolve(strict,'unexpected-enqueue.json'))).id,queued.id);
+});
+test('corrupt adapter worker preparation can fail after enqueue with no provider entry and no outputs',()=>{
+  const request={projectId:'actual-project',model:'moss_image_sft'},specification={expectedStatus:201,expectedTerminal:'failed',errorIncludes:['MOSS edit frozen component identity mismatch: adapter_model.safetensors']},endpoint={workerId:'actual-worker',workerGpuId:'1'};
+  const job={id:'actual-job',projectId:request.projectId,payload:request,status:'failed',backend:'1',workerId:endpoint.workerId,startedAt:at(1),updatedAt:at(2),result:{assets:[]},error:'Invalid payload: MOSS edit frozen component identity mismatch: adapter_model.safetensors'};
+  validateWorkerRefusal(specification,request,job,endpoint,'cuda');
+  const after=journal(['startup_begin','ready_after_bounded_startup_probe','heartbeat','job_begin','job_end','heartbeat']);assert.equal(noLoadComparison(journal(),after,identity,{beforeAt:at(3),afterAt:at(6),jobId:job.id}).after.providerLoads,0);
+  assert.throws(()=>validateWorkerRefusal(specification,request,{...job,error:'some other native error'},endpoint,'cuda'));
+  const provider=journal(['startup_begin','ready_after_bounded_startup_probe','heartbeat','job_begin','provider_load','job_end','heartbeat']);assert.throws(()=>noLoadComparison(journal(),provider,identity,{beforeAt:at(3),afterAt:at(7),jobId:job.id}),/allocation-capable/);
 });
 const hostSourceFixture=()=>({
   advanced:`pub struct EditAdvanced {\npub positive: P,\npub negative: N,\npub negative_prompts: T,\npub noise: Q,\npub output: O,\n}\npub struct EmbeddingsRef {\npub values: T,\npub mask: T,\n}\nmeta.shape[0] > 8; if !(1..=4096).contains(&context); meta.shape[2] != 4096; filter(|n| *n > 0 && *n <= 8); images,128,native.height as usize / 16,native.width as usize / 16; m.dtype != "uint8" || m.shape != meta.shape[..2]; .metadata.as_ref().expect("resolved metadata").byte_length; *n <= tensor_artifact::MAX_REQUEST_BYTES; pub fn references(options: &EditAdvanced) -> Vec<&TensorRef> {\n for e in [&options.positive, &options.negative] {refs.push(&e.values);refs.push(mask);} refs.push(noise);\n}`,

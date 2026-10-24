@@ -262,6 +262,7 @@ test('bounded API-free prepare to actual clean-source freeze writes a valid lock
   const sources={sceneworks:treeIdentity(product),inference:treeIdentity(inference)},files=Object.fromEntries(await Promise.all(BACKEND_FILES.map(async name=>[name,await fileIdentity(artifact)])));
   for(const backend of ['mlx','cuda']) {launcher.artifactInventories[backend]=resolve(directory,`${backend}-inventory.json`);await save(launcher.artifactInventories[backend],{backend,sources,files});}
   for(const name of p.requiredGuardCases)launcher.guardRequests[name]=LATENT_UPSCALE_GUARDS.includes(name)?{...latentUpscaleGuard(name),noProviderLoadProbe:'inert-source-fixture'}:{request:{},expectedStatus:400,errorIncludes:['fixture rejection'],noProviderLoadProbe:'inert-source-fixture'};
+  launcher.guardRequests['corrupt-adapter']={request:{},expectedStatus:201,expectedTerminal:'failed',errorIncludes:['MOSS edit frozen component identity mismatch'],noProviderLoadProbe:'inert-source-fixture'};
   const configPath=resolve(output,'launch.json');await save(configPath,launcher);await freeze(configPath);
   const lock=await json(resolve(output,'protocol.lock.json'));assert.equal(lock.sources.inference.head,inferenceHead);assert.equal(lock.counts.renders,50);assert.equal(lock.counts.guards,58);assert.equal(lock.counts.guardCasesPerBackend,29);assert.equal(lock.files.harnessLibrary.sha256,p.cacheComparisonPolicy.implementationSha256);
   assert.equal(JSON.stringify(lock).includes(directory),false);assert.equal('launcherSha256' in lock,false);await frozen(configPath);

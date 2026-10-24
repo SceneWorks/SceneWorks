@@ -93,7 +93,7 @@ export async function freeze(configPath) {
       requireThat(canonical(guard?.request) === canonical(exact.request) && canonical(guard.refs) === canonical(exact.refs) && guard.expectedStatus === exact.expectedStatus && canonical(guard.errorIncludes) === canonical(exact.errorIncludes), 'freeze the exact valid latent+enabled inline-upscale request/actionable refusal');
     }
     const worker=guard?.expectedTerminal!==undefined;
-    requireThat(!worker||(name==='device-budget-before-load'&&guard.expectedTerminal==='failed'&&guard.expectedStatus===201&&guard.rawJson===undefined),'only the allocated device-budget guard may observe a real queued worker refusal');
+    requireThat(!worker||(['device-budget-before-load','corrupt-adapter'].includes(name)&&guard.expectedTerminal==='failed'&&guard.expectedStatus===201&&guard.rawJson===undefined),'only the allocated device-budget/corrupt-adapter guards may observe real queued worker refusals');
     if(guard?.upload) {
       requireThat(name==='host-budget-refusal'&&canonical(guard)===canonical(hostGuardSpec()),'only the exact source-owned host slot may use the per-artifact import budget route');
       requireThat(resolve(config.files.hostTensorBound)===safePath(root,guard.invariant),'shared candidate must freeze the actual source-derived host invariant receipt');
@@ -465,7 +465,7 @@ async function guard(configPath, name, backend, admissionPath) {
   await save(resolve(path, 'admission.json'), admitted);
   const api=client(state.config,backend),queued=await submitGuard(api,specification,request,path);let workerJob=null;
   if(queued) {
-    requireThat(name==='device-budget-before-load','worker refusal is forbidden for other malformed inputs');
+    requireThat(['device-budget-before-load','corrupt-adapter'].includes(name),'worker refusal is forbidden for other malformed inputs');
     try {
       workerJob=await waitJob(api,{expected:'failed'},queued.id,path,specification.timeoutMs??120000);
       validateWorkerRefusal(specification,request,workerJob,state.binding.endpoint,backend);await save(resolve(path,'terminal-job.json'),workerJob);
@@ -592,7 +592,7 @@ async function verify(configPath, retained = false) {
     } else requireThat(receipt.route==='/api/v1/image/jobs','refusal left the exact image-job route');
     requireThat((proof.jobId??null)===(receipt.jobId??null),'refusal journal belongs to a different actual worker job');
     if(specification.expectedTerminal==='failed') {
-      requireThat(name==='device-budget-before-load','worker refusal substituted for malformed HTTP refusal');
+      requireThat(['device-budget-before-load','corrupt-adapter'].includes(name),'worker refusal substituted for malformed HTTP refusal');
       const job=await json(resolve(path,'terminal-job.json')),queued=await json(resolve(path,'queued-response.json'));
       requireThat(job.id===receipt.jobId&&queued.job.id===job.id&&queued.http.status===201&&sha(queued.http.body)===queued.http.sha256&&Buffer.byteLength(queued.http.body)===queued.http.byteLength&&canonical(JSON.parse(queued.http.body))===canonical(queued.job)&&digest(job)===receipt.jobSha256,'queued/terminal worker-refusal identities changed');
       validateWorkerRefusal(specification,JSON.parse(request),job,binding.endpoint,backend);
