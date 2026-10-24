@@ -84,6 +84,11 @@ The job store freezes the projection in the original enqueue transaction, indepe
 payload/result JSON. Typed handlers supply their server-resolved primary; raw image utility jobs
 rebuild their execution carrier through the existing source-selection tables, and raw Batch Detail
 uses its existing catalog canonicalizer. Replay re-canonicalizes before its own atomic enqueue.
+The singular primary carrier is an additional server-selected projection: existing plural runtime
+carriers remain intact for utility workers and saved workflows.
+Inherited-import enforcement requires positive plan, declaration, dependency, or import-origin
+evidence, not an architecture-family name. Ordinary custom HF/local catalog models retain their
+own license guards and unknown lineage, without invented compatible-base or partition claims.
 Completion reads only the frozen database authority: a historical NULL is unknown, never a reason
 to reconstruct identity from an old payload carrier or retry terminal persistence forever. Edits,
 multi-input derivatives, and native worker frame/tracking/timeline sidecars retain parent model

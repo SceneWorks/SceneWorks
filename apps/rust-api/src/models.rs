@@ -875,18 +875,43 @@ pub(crate) async fn ensure_inherited_component_licenses_acknowledged(
     license_acknowledged: bool,
 ) -> Result<(), ApiError> {
     use sceneworks_core::license_acknowledgments as acknowledgments;
-    // This gate owns inherited IMPORT obligations, not the existing stock-model license policy.
-    // Shipped rows need no import-only partition/base declaration. Never exempt a plan binding,
-    // even if an invalid catalog row tries to put one under a shipped id.
-    if !entry.contains_key("importPlan")
-        && !entry.contains_key("baseModel")
-        && !entry.contains_key("minimaxH3Partition")
-        && entry
-            .get("id")
-            .and_then(Value::as_str)
-            .and_then(sceneworks_core::builtin_manifests::builtin_model_entry)
-            .is_some()
-    {
+    // Architecture is not an import claim. Ordinary stock/custom HF or local catalog rows keep
+    // their own license guards; only positive plan, declaration, or import-origin evidence owes
+    // inherited-component authority. Never let a false author license/stock flag erase evidence.
+    let import_path = |path: &str| {
+        path.starts_with("models/imports/")
+            || path.contains("/models/imports/")
+            || path.starts_with("linked/")
+    };
+    let source = entry.get("source").and_then(Value::as_object);
+    let import_origin = sceneworks_core::jobs_store::imported_entry_installed_path(entry)
+        .is_some_and(import_path)
+        || source.is_some_and(|source| {
+            source.contains_key("rootId")
+                || source
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .is_some_and(import_path)
+        });
+    let has_import_evidence = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+        .is_some()
+        || [
+            "importPlan",
+            "baseModel",
+            "minimaxH3Partition",
+            "importSourceShape",
+            "importComponentTier",
+            "importQuantFormat",
+            "modelDeclaration",
+            "modelProvenance",
+        ]
+        .iter()
+        .any(|key| entry.contains_key(*key))
+        || entry
+            .get("inheritedLicenseAcknowledgments")
+            .is_some_and(|value| value.as_array().is_none_or(|rows| !rows.is_empty()))
+        || import_origin;
+    if !has_import_evidence {
         return Ok(());
     }
     let declaration =

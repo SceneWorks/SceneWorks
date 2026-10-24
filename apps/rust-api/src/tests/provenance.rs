@@ -348,6 +348,16 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
         );
         assert!(queued.payload.get("baseModelManifestEntry").is_none());
         assert!(queued.payload.get("modelProvenance").is_none());
+        if let Some(entries) = queued
+            .payload
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
+        {
+            assert!(
+                entries.iter().all(|entry| entry["id"] == actual_model),
+                "plural execution carriers must also be regenerated, never retain the forgery"
+            );
+        }
         let asset = persist_authority_output(
             &state,
             &project.id,
@@ -373,6 +383,12 @@ async fn raw_http_carriers_cannot_freeze_another_import_and_replays_keep_executi
         assert_eq!(status, StatusCode::CREATED, "{job_type}: {replay}");
         assert_eq!(replay["payload"]["modelManifestEntry"]["id"], actual_model);
         assert!(!replay["payload"]["baseModelManifestEntry"].is_object());
+        if let Some(entries) = replay["payload"]["modelManifestEntries"].as_array() {
+            assert!(
+                entries.iter().all(|entry| entry["id"] == actual_model),
+                "replay must reauthorize plural carriers as well as its primary"
+            );
+        }
         let replay_id = replay["id"].as_str().unwrap();
         assert_eq!(
             replay["revision"],
@@ -684,5 +700,96 @@ async fn shipped_h3_rows_keep_their_stock_policy_but_cannot_hide_a_plan_binding(
                 .await
                 .is_err()
         );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_custom_h3_catalogs_keep_own_terms_without_invented_import_lineage() {
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let manifests = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifests).unwrap();
+    let mut rows = Vec::new();
+    for (id, source) in [
+        (
+            "custom_h3_hf",
+            json!({"provider":"huggingface","repo":"community/complete-h3"}),
+        ),
+        (
+            "custom_h3_local",
+            json!({"provider":"local","path":"models/custom/full-h3"}),
+        ),
+    ] {
+        let mut entry = sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3")
+            .unwrap()
+            .clone();
+        entry.insert("id".into(), json!(id));
+        entry.insert("source".into(), source);
+        entry.insert("runtimeQuantTiers".into(), json!(["q4", "q8", "bf16"]));
+        entry.insert("quantization".into(), json!({"bits":8,"group_size":64}));
+        entry.insert(
+            "paths".into(),
+            json!({"model":temp.path().join("ordinary-catalog/full-h3")}),
+        );
+        entry.insert("inheritedLicenseAcknowledgments".into(), json!([]));
+        rows.push(Value::Object(entry));
+    }
+    std::fs::write(
+        manifests.join("user.models.jsonc"),
+        json!({"schemaVersion":1,"models":rows}).to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    for row in rows {
+        let entry = row.as_object().unwrap();
+        crate::models::ensure_inherited_component_licenses_acknowledged(&state, entry, false)
+            .await
+            .unwrap();
+        assert!(
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry
+            )
+            .unwrap()
+            .is_none()
+        );
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/{}/download", entry["id"].as_str().unwrap()),
+            json!({"requestedGpu":"auto"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(error["code"], "license_acknowledgment_required");
+        for (key, value) in [
+            ("importPlan", json!({"checkpointId":"missing-custom-plan"})),
+            ("baseModel", json!("minimax_h3")),
+            ("minimaxH3Partition", json!("fl2va")),
+            ("importSourceShape", json!("transformer_directory")),
+            (
+                "inheritedLicenseAcknowledgments",
+                json!([{"id":"minimax_h3"}]),
+            ),
+            (
+                "source",
+                json!({"provider":"local","path":"models/imports/custom-h3"}),
+            ),
+        ] {
+            let mut claimed_import = entry.clone();
+            claimed_import.insert(key.into(), value);
+            claimed_import.insert("trustedStock".into(), json!(true));
+            claimed_import.insert("requiresLicenseAcknowledgment".into(), json!(false));
+            assert!(
+                crate::models::ensure_inherited_component_licenses_acknowledged(
+                    &state,
+                    &claimed_import,
+                    false
+                )
+                .await
+                .is_err(),
+                "positive {key} evidence cannot be erased by false license/stock flags"
+            );
+        }
     }
 }

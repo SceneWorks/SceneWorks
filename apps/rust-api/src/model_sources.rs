@@ -361,15 +361,15 @@ pub(crate) async fn ensure_runtime_model_sources(
     }
     if let Some(primary_id) = primary_id {
         let entry = payload
-            .get_mut("modelManifestEntries")
-            .and_then(Value::as_array_mut)
+            .get("modelManifestEntries")
+            .and_then(Value::as_array)
             .and_then(|entries| {
                 entries
                     .iter()
-                    .position(|entry| {
+                    .find(|entry| {
                         entry.get("id").and_then(Value::as_str) == Some(primary_id.as_str())
                     })
-                    .map(|index| entries.remove(index))
+                    .cloned()
             })
             .ok_or_else(|| {
                 ApiError::internal("Canonical utility model carrier was not resolved")
