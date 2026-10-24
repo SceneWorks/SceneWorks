@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { SLOTS, EXECUTOR, STALE_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES, processIdentity, authenticatedTerminalCleanup, SAFE_REASON_CODES } from './flux3-terminal-queue.mjs';
+import { SLOTS, EXECUTOR, STALE_MS, CAMPAIGN_MS, API_FRESH_MS, queueInputs, electedRole, validateApi, ancestors, workerIdentity, signed, authenticated, verifyRoster, driverEnvironment, superviseChild, verifyQueueReservation, publishNew, holdUntilSafe, verifyObservedRoster, verifyAccessProofs, digest as queueDigest, createAtomicPublisher, ATOMIC_RENAME_BUDGET_MS, ATOMIC_RENAME_BACKOFF_MS, HEARTBEAT_MS, assessStartupApi, createExecutorApiRefresh, API_REFRESH_MS, assertNoPeerFailure, unregisteredMemberAbsent, assertStartupDeadline, waitForOwnJob, queueFailureReport, QueuePhaseFailure, safeQueueFailure, QUEUE_PHASES, processIdentity, authenticatedTerminalCleanup, SAFE_REASON_CODES } from './flux3-terminal-queue.mjs';
 import { executionGroups, assertGroupPassed, validateQueueOperation, executeAdmittedQueueOperation } from './flux3-terminal-queue-campaign.mjs';
 import { loadProductTargets, terminalPlan } from './flux3-image-klein-terminal-plan.mjs';
 import { guardHardware } from './flux3-image-klein-terminal-session.mjs';
@@ -601,7 +601,7 @@ async function holderTerminalFixture() {
   f.table.push({ pid: 900, ppid: 101, startedAt: 'helper', executable: 'C:/Windows/powershell.exe', command: 'powershell.exe', sessionId: 2 });
   f.table.find(p => p.pid === 110).ppid = 900;
   const local = { kind: f.binding.kind, identity: structuredClone(f.binding.identity), deadline: f.binding.deadline, members: structuredClone(f.binding.members), api: structuredClone(f.binding.api) };
-  const published = { ...structuredClone(local), container, containerAttestation: signed({ identity: structuredClone(f.binding.identity), container }, f.keys[EXECUTOR].privateKey), api: structuredClone(f.binding.api) };
+  const published = { ...structuredClone(local), deadline: local.deadline + 45000, container, containerAttestation: signed({ identity: structuredClone(f.binding.identity), container }, f.keys[EXECUTOR].privateKey), api: structuredClone(f.binding.api) };
   const ackPayload = JSON.stringify({ exitCode: 0, childPid: 901, jobName: container.jobName, identity: structuredClone(f.binding.identity), cleanupVerified: true, activeProcesses: 0, kind: 'flux3-container-cleanup-ack' });
   const sign = (await import('node:crypto')).sign;
   const ack = { payload: ackPayload, signature: sign('sha256', Buffer.from(ackPayload), containerKeys.privateKey).toString('base64') };
@@ -632,7 +632,7 @@ test('a holder concludes only after the PUBLISHED binding matches its local view
       ['published attempt differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, attempt: 2 } })],
       ['published source differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, sourceSha: 'f'.repeat(40) } })],
       ['published control differs', async () => t.write('binding.json', { ...published, identity: { ...published.identity, controlSha256: 'e'.repeat(64) } })],
-      ['published deadline differs', async () => t.write('binding.json', { ...published, deadline: published.deadline + 1 })],
+      ['published deadline outside the campaign window', async () => t.write('binding.json', { ...published, deadline: published.deadline + 8 * 60 * 60 * 1000 + 1 })],
       ['substituted executor member', async () => t.write('binding.json', { ...published, members: { ...published.members, [EXECUTOR]: { ...published.members[EXECUTOR], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) } } })],
       ['substituted other member', async () => t.write('binding.json', { ...published, members: { ...published.members, 'cuda-windows-3': { ...published.members['cuda-windows-3'], jobId: published.members['cuda-windows-3'].jobId + 1 } } })],
       ['forged container attestation', async () => t.write('binding.json', { ...published, containerAttestation: { ...published.containerAttestation, signature: Buffer.from('forged').toString('base64') } })],
@@ -647,5 +647,44 @@ test('a holder concludes only after the PUBLISHED binding matches its local view
     // The active campaign path is untouched: a live roster still verifies with all four rows.
     await t.restore();
     assert.deepEqual(verifyRoster(f.binding, f.pulses, f.table, f.controllerPid, NOW), [200, 300, 400]);
+  } finally { await rm(t.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
+test('published deadline is a bounded correlation only, never authentication and never a budget extension', async () => {
+  const t = await holderTerminalFixture();
+  try {
+    const { f, dir, local, published } = t;
+    const identity = f.binding.identity;
+    // Actual construction: each role derives its own deadline after its rendezvous, so the values
+    // differ by the start stagger. A realistic stagger is accepted.
+    assert.notEqual(published.deadline, local.deadline);
+    assert.equal(await authenticatedTerminalCleanup(dir, local, identity), true);
+    // Exact campaign-window boundary is the outer edge of the bound.
+    await t.write('binding.json', { ...published, deadline: local.deadline + CAMPAIGN_MS });
+    assert.equal(await authenticatedTerminalCleanup(dir, local, identity), true, 'boundary accepted');
+    await t.write('binding.json', { ...published, deadline: local.deadline + CAMPAIGN_MS + 1 });
+    assert.equal(await authenticatedTerminalCleanup(dir, local, identity), false, 'one millisecond beyond the window refused');
+    for (const [label, deadline] of [
+      ['missing', undefined], ['zero', 0], ['negative', -1], ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY], ['unsafe integer', Number.MAX_SAFE_INTEGER + 2], ['string', String(local.deadline)],
+    ]) {
+      const candidate = { ...published };
+      if (deadline === undefined) delete candidate.deadline; else candidate.deadline = deadline;
+      await t.write('binding.json', candidate);
+      assert.equal(await authenticatedTerminalCleanup(dir, local, identity), false, `published deadline ${label}`);
+    }
+    // A caller whose own budget already expired may still conclude CLEANUP-ONLY: the proof is valid,
+    // and the caller's deadline is untouched, so no budget is extended by the published document.
+    const expiredLocal = { ...structuredClone(local), deadline: NOW - 60000 };
+    const snapshot = structuredClone(expiredLocal);
+    await t.write('binding.json', { ...published, deadline: expiredLocal.deadline + 45000 });
+    assert.equal(await authenticatedTerminalCleanup(dir, expiredLocal, identity), true, 'expired caller concludes from an authenticated terminal');
+    assert.deepEqual(expiredLocal, snapshot, 'caller deadline/binding never rewritten from the published document');
+    // An ACTIVE campaign without a complete cleanup proof never concludes, expired or not.
+    await t.restore();
+    await rm(path.join(dir, `${EXECUTOR}.cleanup.json`));
+    assert.equal(await authenticatedTerminalCleanup(dir, local, identity), false, 'no cleanup envelope');
+    await t.restore();
+    assert.equal(await authenticatedTerminalCleanup(dir, local, identity), true, 'restored proof still concludes');
   } finally { await rm(t.dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
