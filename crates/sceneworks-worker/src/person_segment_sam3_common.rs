@@ -179,7 +179,7 @@ pub(crate) fn require_segmenter_weights(settings: &Settings) -> WorkerResult<(Pa
 pub(crate) fn normalize_chw(rgb: &[u8], size: usize) -> Vec<f32> {
     let plane = size * size;
     let mut out = vec![0f32; 3 * plane];
-    for (p, px) in rgb.chunks_exact(3).enumerate() {
+    for (p, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         for c in 0..3 {
             out[c * plane + p] = px[c] as f32 / 127.5 - 1.0;
         }
