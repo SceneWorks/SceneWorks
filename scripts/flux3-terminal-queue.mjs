@@ -199,7 +199,12 @@ export async function authenticatedTerminalCleanup(dir, binding, identity) {
       assert.equal(proof?.kind, 'flux3-four-slot-reservation');
       sameIdentity(proof.identity, identity);
       assert.equal(binding?.kind, 'flux3-four-slot-reservation');
-      assert.equal(proof.deadline, binding.deadline);
+      // Deadlines are computed per role AFTER each rendezvous, so equality never holds. This is a
+      // conservative correlation bound only -- the deadline is NOT signed into the container
+      // attestation and authenticates nothing; the signed chain below does that. The caller's own
+      // deadline is never overwritten with the published one.
+      const validDeadline = value => Number.isSafeInteger(value) && value > 0;
+      assert(validDeadline(proof.deadline) && validDeadline(binding.deadline) && Math.abs(proof.deadline - binding.deadline) <= CAMPAIGN_MS, 'published deadline outside the campaign window');
       const local = binding?.members ?? {}, executorMember = local[EXECUTOR];
       assert(executorMember?.publicKey, 'holder must already hold the announced executor member');
       assert.deepEqual(proof.members?.[EXECUTOR], executorMember, 'published executor member differs from the announced one');
