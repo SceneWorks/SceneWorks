@@ -427,7 +427,7 @@ jobs:
     if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle' }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
-    # choice here: both Windows runners are processes on ONE box.
+    # choice here: all four Windows listeners are processes on ONE box.
     runs-on: [self-hosted, Windows, X64, cuda]
     concurrency:
       group: memory-catalog-campaign-candle-cuda
