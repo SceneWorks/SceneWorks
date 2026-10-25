@@ -9,7 +9,7 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
-import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment } from './lib/moss-private-hf.mjs';
+import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -439,4 +439,34 @@ test('every artifact job normalizes paths before its first operation and install
   }
   assert.doesNotMatch(workflow,/path: \$\{\{ inputs.upload_path/);assert.match(workflow,/path: \$\{\{ env.MOSS_UPLOAD_PATH/);
   assert.ok(controller.indexOf('}finally{await stack.stop();}')<controller.indexOf('await materializePrivateAdapter(config)'));assert.ok(controller.indexOf('await materializePrivateAdapter(config)')<controller.indexOf("await save(resolve(out,'packages.json')"));
+});
+
+async function installerHardlinkFixture(t) {
+  const fixture=await installerPointerFixture(t);for(const row of fixture.originals){await unlink(row.path);await link(row.blob,row.path);}return fixture;
+}
+test('runtime-proven exact two private installer hardlinks become independent exclusive files',async t=>{
+  const {config,originals}=await installerHardlinkFixture(t),before=await lstat(originals[0].path,{bigint:true});assert.equal(before.nlink,2n);
+  const operations=await materializePrivateAdapter(config);assert.equal(operations.length,2);
+  for(const row of originals){const file=await lstat(row.path,{bigint:true}),blob=await lstat(row.blob,{bigint:true});assert.equal(file.nlink,1n);assert.equal(blob.nlink,1n);assert.notEqual(file.ino,blob.ino);assert.deepEqual(await readFile(row.path),row.bytes);assert.deepEqual(await readFile(row.blob),row.bytes);}
+  for(const operation of operations){assert.equal(operation.operation,'materialize-proven-private-installer-hardlink');assert.equal(operation.originalLinkIdentity.nlink,'2');assert.equal(operation.originalBlobIdentity.nlink,'2');assert.equal(operation.originalLinkIdentity.ino,operation.originalBlobIdentity.ino);assert.equal(operation.sameIdentityEntries.length,2);assert.equal(operation.afterSnapshot.nlink,'1');assert.equal(operation.afterBlob.nlink,'1');}
+  await privateHfIntegrity(config);const row=originals[0],mutation=await adapterRefusalState(config,'missing-adapter',{adapterFile:config.editAdapterFiles[0]});await mutation.restore();assert.deepEqual(await readFile(row.path),row.bytes);
+});
+test('hardlink normalization refuses external or third aliases, wrong hashes and unrelated nonexclusive files before replacement',async t=>{
+  for(const kind of ['third-external','third-internal','outside-pair','wrong-hash','unrelated','wrong-blob']) {
+    const {base,config,originals}=await installerHardlinkFixture(t),first=originals[0],second=originals[1];
+    if(kind==='third-external')await link(first.blob,resolve(base,'outside-third'));
+    if(kind==='third-internal')await link(first.blob,resolve(config.hfHome,'third-alias'));
+    if(kind==='outside-pair'){await unlink(first.blob);await link(first.path,resolve(base,'outside-second'));}
+    if(kind==='wrong-hash')await writeFile(first.blob,'wrong bytes');
+    if(kind==='unrelated')await link(resolve(config.hfHome,config.packageFiles[0].file),resolve(base,'unrelated-shared'));
+    if(kind==='wrong-blob'){await unlink(first.blob);await link(first.path,resolve(config.hfHome,'f'.repeat(64)));}
+    const before=await Promise.all(originals.map(row=>lstat(row.path,{bigint:true})));
+    await assert.rejects(()=>materializePrivateAdapter(config),undefined,kind);
+    for(const [index,row] of originals.entries()){const after=await lstat(row.path,{bigint:true});assert.equal(after.ino,before[index].ino,kind);assert.equal(after.nlink,before[index].nlink,kind);}
+    assert.equal((await lstat(second.path)).nlink,2);assert.equal((await lstat(second.path)).ino,(await lstat(second.blob)).ino);await assert.rejects(()=>lstat(resolve(config.root,'adapter-materialization.json')),{code:'ENOENT'});
+  }
+});
+test('exclusive-file refusals identify the exact leaf, type and unrounded link identity',async t=>{
+  const {base,build}=await privateHfFixture(t),path=resolve(build.hfHome,build.packageFiles[0].file);await link(path,resolve(base,'external-alias'));const info=await lstat(path,{bigint:true});
+  await assert.rejects(()=>privateHfIntegrity(build),error=>{assert.match(error.message,/private HF requires exclusive regular files/);const metadata=JSON.parse(error.message.slice(error.message.indexOf('{')));assert.equal(metadata.path,path);assert.equal(metadata.type,'file');assert.equal(metadata.dev,String(info.dev));assert.equal(metadata.ino,String(info.ino));assert.equal(metadata.nlink,'2');return true;});
 });
