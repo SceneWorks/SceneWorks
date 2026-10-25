@@ -2834,7 +2834,14 @@ fn resolve_imported_h3_components(
             .join(format!("{:x}", identity.finalize()));
         std::fs::create_dir_all(&root)?;
         for name in shared {
-            stage_h3_component(&root.join(name), &component(name)?)?;
+            dit.load_authority
+                .stage_component(
+                    &settings.data_dir,
+                    &dit.assembly,
+                    &root.join(name),
+                    &component(name)?,
+                )
+                .map_err(WorkerError::InvalidPayload)?;
         }
         root
     };
@@ -2941,47 +2948,16 @@ fn stage_imported_minimax_h3_assembly(
             },
         ),
     ] {
-        stage_h3_component(&staged.join(name), target)?;
+        dit.load_authority
+            .stage_component(
+                &settings.data_dir,
+                &dit.assembly,
+                &staged.join(name),
+                target,
+            )
+            .map_err(WorkerError::InvalidPayload)?;
     }
     Ok(staged)
-}
-
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-fn stage_h3_component(link: &Path, target: &Path) -> WorkerResult<()> {
-    if std::fs::read_link(link).ok().as_deref() == Some(target) {
-        return Ok(());
-    }
-    if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    match std::fs::symlink_metadata(link) {
-        #[cfg(unix)]
-        Ok(_) => std::fs::remove_file(link)?,
-        #[cfg(windows)]
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link)?;
-    #[cfg(windows)]
-    {
-        std::fs::create_dir_all(link)?;
-        for entry in std::fs::read_dir(target)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-            let destination = link.join(entry.file_name());
-            match std::fs::remove_file(&destination) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-            std::fs::hard_link(entry.path(), &destination).map_err(|error| WorkerError::InvalidPayload(format!("cannot stage imported H3 file {}: {error}; keep the import and component cache on the same hardlink-capable volume", destination.display())))?;
-        }
-    }
-    Ok(())
 }
 
 /// Candle shares the installed conditioner/VAEs and derives Ref2VA's DiT by the same sibling rule.

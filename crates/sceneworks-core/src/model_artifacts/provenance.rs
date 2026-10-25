@@ -443,55 +443,220 @@ pub fn capture_h3_component_closure_with_check(
     Ok(json!(closure))
 }
 
-/// Metadata-only identity proof for aliases created by the existing component staging path.
-/// A matching filename/hash is not source/revision authority: aliases must name the SAME file.
-fn acquired_component_is_source(
-    pin: &gen_core::PinnedWeightsFile,
-    expected: &Path,
-    target: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<bool, String> {
-    if pin.loader_path() == expected || pin.canonical_target_path() == target {
-        return Ok(true);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let observed = pin.target_fingerprint();
-        Ok(metadata.is_file()
-            && metadata.dev() == observed.device
-            && metadata.ino() == observed.inode)
-    }
-    #[cfg(windows)]
-    {
-        // Same established volume/file-index proof used by the platform materialization guard.
-        // The pin itself remains the stronger replacement-sensitive acquired authority.
-        let expected = std::fs::File::open(expected).map_err(|error| error.to_string())?;
-        let acquired = std::fs::File::open(pin.loader_path()).map_err(|error| error.to_string())?;
-        let expected =
-            winapi_util::file::information(&expected).map_err(|error| error.to_string())?;
-        let acquired =
-            winapi_util::file::information(&acquired).map_err(|error| error.to_string())?;
-        let _ = metadata;
-        Ok(
-            expected.volume_serial_number() == acquired.volume_serial_number()
-                && expected.file_index() == acquired.file_index(),
-        )
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = metadata;
-        Ok(false)
+/// In-memory provenance emitted ONLY by the actual component staging operation. Private fields,
+/// no serde constructor: a caller cannot turn a path mapping or a shared HF blob into authority.
+/// The frozen source/revision/path and SHA/size are redeemed against the actual acquired pin.
+#[derive(Clone, Debug)]
+pub struct H3ComponentStagingReceipt {
+    source: std::path::PathBuf,
+    staged: std::path::PathBuf,
+    source_directory: std::path::PathBuf,
+    staged_directory: std::path::PathBuf,
+    revision: String,
+    sha256: String,
+    size_bytes: u64,
+    source_stamp: crate::checkpoint_plan_store::SourceStampV1,
+    staged_stamp: crate::checkpoint_plan_store::SourceStampV1,
+}
+
+impl H3ComponentStagingReceipt {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        use crate::checkpoint_plan_store::{SourceStampV1, StoreClockV1};
+        if self.source.strip_prefix(&self.source_directory).ok()
+            != self.staged.strip_prefix(&self.staged_directory).ok()
+        {
+            return Err("H3 component staging path binding changed".into());
+        }
+        #[cfg(unix)]
+        if std::fs::read_link(&self.staged_directory).map_err(|e| e.to_string())?
+            != self.source_directory
+        {
+            return Err("H3 component staging source/revision link changed".into());
+        }
+        for (path, before) in [
+            (&self.source, &self.source_stamp),
+            (&self.staged, &self.staged_stamp),
+        ] {
+            let after = SourceStampV1::of(path, StoreClockV1::SYSTEM).map_err(|e| e.to_string())?;
+            if !before.identifies_same_entry(&after) {
+                return Err("H3 component staging source/revision entry changed".into());
+            }
+        }
+        Ok(())
     }
 }
 
+/// Stage the existing directory alias, then bind each frozen member to the ORIGINAL revision
+/// spelling. No payload hashes are acquired here: the prepared pin later proves the recorded
+/// SHA/size, with cooperative cancellation. This is not a second cache or persisted registry.
+pub(crate) fn stage_h3_component_with_receipts(
+    data_dir: &Path,
+    assembly: &Value,
+    link: &Path,
+    target: &Path,
+) -> Result<Vec<H3ComponentStagingReceipt>, String> {
+    use crate::checkpoint_plan_store::{SourceStampV1, StoreClockV1};
+    if !["minimax-h3-shared", "minimax-h3-assemblies"]
+        .iter()
+        .any(|name| link.starts_with(data_dir.join("cache").join(name)))
+    {
+        return Err("H3 component staging destination is outside the owned assembly cache".into());
+    }
+    let resolver = crate::model_artifacts::ModelArtifactResolver::new(
+        crate::hf_home::model_source_library(data_dir),
+    );
+    // Resolve authority BEFORE creating aliases, never infer a revision from the alias target's
+    // canonical path/inode: distinct revision paths commonly share one HF repository blob.
+    let mut frozen = Vec::new();
+    for member in assembly
+        .get("componentClosure")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or("missing frozen H3 component closure")?
+    {
+        let row = &member["download"];
+        let repo = row["repo"]
+            .as_str()
+            .ok_or("missing frozen component repository")?;
+        let revision = member["revision"]
+            .as_str()
+            .ok_or("missing frozen component revision")?;
+        if row["revision"].as_str() != Some(revision) {
+            return Err("component revision commitment mismatch".into());
+        }
+        let (_, snapshot) = resolver
+            .discover_source_snapshot(repo, Some(revision))
+            .map_err(|e| e.to_string())?;
+        for file in member["files"]
+            .as_array()
+            .ok_or("missing frozen component files")?
+        {
+            let relative = file["relativePath"]
+                .as_str()
+                .ok_or("missing frozen component path")?;
+            crate::checkpoint_plan_store::portable_relative_path_parts(relative)?;
+            let source = snapshot.join(relative);
+            if let Ok(relative) = source.strip_prefix(target) {
+                frozen.push((
+                    source.clone(),
+                    link.join(relative),
+                    revision.to_owned(),
+                    file["sha256"]
+                        .as_str()
+                        .ok_or("missing frozen component SHA")?
+                        .to_owned(),
+                    file["sizeBytes"]
+                        .as_u64()
+                        .ok_or("missing frozen component size")?,
+                    SourceStampV1::of(&source, StoreClockV1::SYSTEM).map_err(|e| e.to_string())?,
+                ));
+            }
+        }
+    }
+    if std::fs::read_link(link).ok().as_deref() != Some(target) {
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        match std::fs::symlink_metadata(link) {
+            #[cfg(unix)]
+            Ok(_) => std::fs::remove_file(link).map_err(|e| e.to_string())?,
+            #[cfg(windows)]
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).map_err(|e| e.to_string())?;
+        #[cfg(windows)]
+        {
+            std::fs::create_dir_all(link).map_err(|e| e.to_string())?;
+            for entry in std::fs::read_dir(target).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+                    continue;
+                }
+                let destination = link.join(entry.file_name());
+                match std::fs::remove_file(&destination) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                std::fs::hard_link(entry.path(), destination).map_err(|e| format!("cannot stage imported H3 file: {e}; keep the import and component cache on the same hardlink-capable volume"))?;
+            }
+        }
+    }
+    let receipts = frozen
+        .into_iter()
+        .map(
+            |(source, staged, revision, sha256, size_bytes, source_stamp)| {
+                let receipt = H3ComponentStagingReceipt {
+                    staged_stamp: SourceStampV1::of(&staged, StoreClockV1::SYSTEM)
+                        .map_err(|e| e.to_string())?,
+                    source,
+                    staged,
+                    revision,
+                    sha256,
+                    size_bytes,
+                    source_stamp,
+                    source_directory: target.to_owned(),
+                    staged_directory: link.to_owned(),
+                };
+                receipt.validate()?;
+                Ok(receipt)
+            },
+        )
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(receipts)
+}
+
+fn acquired_component_is_source(
+    pin: &gen_core::PinnedWeightsFile,
+    expected: &Path,
+    revision: &str,
+    staging: &[H3ComponentStagingReceipt],
+) -> Result<bool, String> {
+    if pin.loader_path() == expected {
+        return Ok(true);
+    }
+    if let Some(receipt) = staging.iter().find(|receipt| {
+        receipt.source == expected
+            && receipt.staged == pin.loader_path()
+            && receipt.revision == revision
+    }) {
+        receipt.validate()?;
+        let digest = format!(
+            "sha256:{}",
+            pin.content_sha256()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        if receipt.sha256 != digest || receipt.size_bytes != pin.target_fingerprint().size {
+            return Err(
+                "H3 component staging SHA/bytes binding differs from acquired content".into(),
+            );
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Compare already acquired component seals to the persisted assembly. No rehash, network or fresh
-/// authority. Exact revision source identity, size and SHA must all match. Supported symlink and
-/// hardlink staging aliases retain physical file identity; same-named copies do not authorize it.
+/// authority. Direct pins must name the selected revision path, not merely the same HF blob.
 pub fn verify_prepared_h3_component_closure(
     data_dir: &Path,
     assembly: &Value,
     files: &[gen_core::PinnedWeightsFile],
+) -> Result<(), String> {
+    verify_prepared_h3_component_closure_with_staging(data_dir, assembly, files, &[])
+}
+
+/// Staged aliases additionally redeem provenance emitted by the actual staging operation.
+pub fn verify_prepared_h3_component_closure_with_staging(
+    data_dir: &Path,
+    assembly: &Value,
+    files: &[gen_core::PinnedWeightsFile],
+    staging: &[H3ComponentStagingReceipt],
 ) -> Result<(), String> {
     let closure = assembly.get("componentClosure").and_then(Value::as_array)
         .filter(|rows| !rows.is_empty())
@@ -541,14 +706,10 @@ pub fn verify_prepared_h3_component_closure(
                 .ok_or_else(|| refuse("missing file path".into()))?;
             crate::checkpoint_plan_store::portable_relative_path_parts(relative)?;
             let path = snapshot.join(relative);
-            let target = std::fs::canonicalize(&path)
-                .map_err(|error| refuse(format!("source {relative} unavailable: {error}")))?;
-            let metadata = std::fs::metadata(&path)
-                .map_err(|error| refuse(format!("source {relative} unavailable: {error}")))?;
             committed_paths.insert(path.clone());
             let mut acquired = false;
             for pin in files {
-                if !acquired_component_is_source(pin, &path, &target, &metadata).map_err(refuse)? {
+                if !acquired_component_is_source(pin, &path, revision, staging).map_err(refuse)? {
                     continue;
                 }
                 pin.verify_unchanged().map_err(|error| {
@@ -1099,7 +1260,32 @@ mod tests {
         std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
         std::fs::hard_link(&source, &alias).unwrap();
         let alias_pin = gen_core::PinnedWeightsFile::pin(alias).unwrap();
-        verify_prepared_h3_component_closure(&data, &assembly, &[alias_pin]).unwrap();
+        assert!(
+            verify_prepared_h3_component_closure(&data, &assembly, &[alias_pin])
+                .unwrap_err()
+                .contains("source/revision mismatch"),
+            "bare hardlinks have no staging provenance"
+        );
+        let backbone = temporary.path().join("backbone");
+        std::fs::create_dir_all(&backbone).unwrap();
+        let authority = crate::minimax_h3_load::H3SourceAuthority::new(
+            Vec::new(),
+            backbone,
+            Default::default(),
+        )
+        .unwrap();
+        let staged = data.join("cache/minimax-h3-shared/fixture/tokenizer");
+        authority
+            .stage_component(&data, &assembly, &staged, source.parent().unwrap())
+            .unwrap();
+        let staged_pin = gen_core::PinnedWeightsFile::pin(staged.join("tokenizer.json")).unwrap();
+        verify_prepared_h3_component_closure_with_staging(
+            &data,
+            &assembly,
+            &[staged_pin],
+            &authority.component_staging(),
+        )
+        .unwrap();
         let stale = gen_core::PinnedWeightsFile::pin(&source).unwrap();
         std::fs::write(&source, b"[]").unwrap();
         assert!(
@@ -1108,6 +1294,104 @@ mod tests {
                 .contains("acquired seal changed"),
             "an old acquired digest cannot authorize an in-place replacement"
         );
+    }
+
+    #[test]
+    fn two_revision_shared_hf_blob_cannot_replace_frozen_source_authority() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let hub = temporary.path().join("hub");
+        let _guard = crate::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        let (_, mut entry) = frozen_h3_plan();
+        entry["downloads"][0]["files"] = json!(["tokenizer/tokenizer.json"]);
+        let repo = hub.join("models--fixture--components");
+        let blob = repo.join("blobs/shared-object");
+        std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        std::fs::write(&blob, b"{}").unwrap();
+        let paths: Vec<_> = ["1".repeat(40), "2".repeat(40)]
+            .iter()
+            .map(|revision| {
+                let path = repo
+                    .join("snapshots")
+                    .join(revision)
+                    .join("tokenizer/tokenizer.json");
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&blob, &path).unwrap();
+                #[cfg(not(unix))]
+                std::fs::hard_link(&blob, &path).unwrap();
+                path
+            })
+            .collect();
+        let assembly = json!({"componentClosure":capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap()});
+        let selected = gen_core::PinnedWeightsFile::pin(&paths[0]).unwrap();
+        let other = gen_core::PinnedWeightsFile::pin(&paths[1]).unwrap();
+        assert_eq!(selected.content_sha256(), other.content_sha256());
+        #[cfg(unix)]
+        assert_eq!(
+            selected.canonical_target_path(),
+            other.canonical_target_path(),
+            "both revisions really share ONE repository blob"
+        );
+        verify_prepared_h3_component_closure(&data, &assembly, std::slice::from_ref(&selected))
+            .unwrap();
+        assert!(
+            verify_prepared_h3_component_closure(&data, &assembly, std::slice::from_ref(&other))
+                .unwrap_err()
+                .contains("source/revision mismatch"),
+            "shared bytes/inode do not authorize revision B"
+        );
+        let backbone = temporary.path().join("backbone");
+        std::fs::create_dir_all(&backbone).unwrap();
+        let authority = crate::minimax_h3_load::H3SourceAuthority::new(
+            Vec::new(),
+            backbone,
+            Default::default(),
+        )
+        .unwrap();
+        let staged = data.join("cache/minimax-h3-shared/shared-blob-control/tokenizer");
+        authority
+            .stage_component(&data, &assembly, &staged, paths[0].parent().unwrap())
+            .unwrap();
+        let staged_pin = gen_core::PinnedWeightsFile::pin(staged.join("tokenizer.json")).unwrap();
+        assert!(
+            verify_prepared_h3_component_closure(
+                &data,
+                &assembly,
+                std::slice::from_ref(&staged_pin)
+            )
+            .is_err(),
+            "even a legitimate alias needs its receipt"
+        );
+        verify_prepared_h3_component_closure_with_staging(
+            &data,
+            &assembly,
+            &[staged_pin],
+            &authority.component_staging(),
+        )
+        .unwrap();
+        assert!(
+            verify_prepared_h3_component_closure_with_staging(
+                &data,
+                &assembly,
+                &[other],
+                &authority.component_staging()
+            )
+            .is_err(),
+            "a receipt for an alias must not authorize the other snapshot path"
+        );
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&staged).unwrap();
+            std::os::unix::fs::symlink(paths[1].parent().unwrap(), &staged).unwrap();
+            assert!(
+                authority
+                    .validate()
+                    .unwrap_err()
+                    .contains("source/revision link changed"),
+                "retargeting the staged directory to B must fail even though the blob is unchanged"
+            );
+        }
     }
 
     #[cfg(feature = "test-support")]
