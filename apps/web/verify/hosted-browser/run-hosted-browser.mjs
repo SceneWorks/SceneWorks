@@ -10,9 +10,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   PLAYWRIGHT_VERSION,
@@ -27,6 +26,8 @@ import {
   evaluateSourceIdentity,
   productionWebDigest,
   resolveArtifactDir,
+  resolveBrowsersPath,
+  resolvePlaywrightEntry,
 } from "./guard.mjs";
 import { CASES } from "./cases.mjs";
 
@@ -204,20 +205,23 @@ async function main() {
   }
   const artifactDir = resolvedArtifactDir;
 
-  let chromium;
+  let chromium, playwrightTools, playwrightBrowsersPath;
   try {
-    ({ chromium } = await import("playwright"));
+    // Explicit private per-run tools root only: never the apps/web npm graph or a
+    // global resolution fallback. Install and browser CLI paths are handled by the workflow.
+    playwrightTools = resolvePlaywrightEntry({ root: process.env.SC26687_PLAYWRIGHT_ROOT });
+    playwrightBrowsersPath = resolveBrowsersPath(process.env, { root: process.env.SC26687_PLAYWRIGHT_ROOT });
+    ({ chromium } = await import(pathToFileURL(playwrightTools.entry).href));
   } catch (error) {
     const message =
-      "The playwright package is required for this hosted proof.\n" +
-      `Install exactly it in the job before running this driver:\n` +
-      `  npm install --no-save --prefix apps/web playwright@${PLAYWRIGHT_VERSION}\n` +
-      "  (cd apps/web && npx playwright install --with-deps chromium)\n" +
+      "The playwright package is required from the isolated per-run tools root for this hosted proof.\n" +
+      "Set SC26687_PLAYWRIGHT_ROOT to the private prefix the workflow installed " +
+      `playwright@${PLAYWRIGHT_VERSION} into (and PLAYWRIGHT_BROWSERS_PATH under it).\n` +
       `Original error: ${error.message}`;
     refuse("dependency-contract", [message]);
     process.exit(2);
   }
-  const installedPlaywright = playwrightVersion();
+  const installedPlaywright = assertPlaywrightVersion(playwrightTools.version);
   try {
     assertPlaywrightVersion(installedPlaywright);
   } catch (error) {
@@ -325,6 +329,8 @@ async function main() {
         guardSha256: sha256File(resolve(HERE, "guard.mjs")),
         playwrightVersion: installedPlaywright,
         expectedPlaywrightVersion: PLAYWRIGHT_VERSION,
+        playwrightToolsRoot: process.env.SC26687_PLAYWRIGHT_ROOT ?? null,
+        playwrightBrowsersPath,
         browserVersion: browser.version(),
         nodeVersion: process.version,
         port: PORT,
@@ -366,16 +372,6 @@ async function main() {
     } finally {
       if (server) await server.close();
     }
-  }
-}
-
-function playwrightVersion() {
-  try {
-    const require = createRequire(import.meta.url);
-    const manifest = JSON.parse(readFileSync(require.resolve("playwright/package.json"), "utf8"));
-    return manifest.version ?? "unknown";
-  } catch {
-    return "unknown";
   }
 }
 
