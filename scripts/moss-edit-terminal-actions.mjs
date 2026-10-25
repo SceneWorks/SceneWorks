@@ -332,8 +332,7 @@ export async function prepareContinuationCudaPackages(config,rehydrateConfig,ori
   catch(error){if(error.code!=='ENOENT')throw error;mode='rehydrated-exact-packages';}
   if(mode==='stopped-execution-HF') {
     await adoptStoppedExecutionPrivateHf(config,stopped.artifactRoot,inventory.files.packages,originalRunId,originalAttempt,stopped.runId,stopped.attempt,stopped.artifactId);
-    await mkdir(resolve(config.root,'evidence/external'),{recursive:true});
-    for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await cp(resolve(stopped.artifactRoot,name),resolve(config.root,'evidence/external',`stopped-cuda-${name}`),{errorOnExist:true,force:false});
+    await retainStoppedCudaSource(config,stopped.artifactRoot);
   } else if(mode==='original-sealed-HF')await adoptOriginalPrivateHf(config,installed,inventory.files.packages,originalRunId,originalAttempt);
   else {
     await rehydrateCudaPackages(rehydrateConfig);
@@ -343,6 +342,13 @@ export async function prepareContinuationCudaPackages(config,rehydrateConfig,ori
     await cp(resolve(rehydrateConfig.root,'installation'),resolve(config.root,'rehydration/installation'),{recursive:true,errorOnExist:true,force:false});
   }
   await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode,originalRunId,originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json')),...(stopped?{stoppedArtifact:{runId:stopped.runId,attempt:stopped.attempt,artifactId:stopped.artifactId}}:{})});
+}
+export async function retainStoppedCudaSource(config,artifactRoot) {
+  // Evidence belongs to the create-only Mac handoff import later in executeBackend.
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await cp(resolve(artifactRoot,name),resolve(config.root,`stopped-cuda-${name}`),{errorOnExist:true,force:false});
+}
+export async function importCompletedMlxEvidence(config) {
+  await cp(config.priorEvidenceRoot,resolve(config.root,'evidence'),{recursive:true,errorOnExist:true,force:false});
 }
 export async function completedMlxHandoff(config,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha,toolingRoot) {
   requireThat(config.backend==='cuda'&&treeIdentity(toolingRoot).head===cudaToolingSha&&cudaToolingSha!==mlxToolingSha,'completed Mac/CUDA tooling identities must be separate clean commits');
@@ -507,7 +513,7 @@ export async function executeBackend(config) {
   const token=randomBytes(32).toString('hex');process.env.MOSS_EDIT_ACTIONS_TOKEN=token;
   if(config.backend==='cuda') {
     const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;await importState(config,config.handoffRoot);
-    await cp(config.priorEvidenceRoot,resolve(config.root,'evidence'),{recursive:true,errorOnExist:true,force:false});
+    await importCompletedMlxEvidence(config);
     if(config.completedMlx) {
       await save(resolve(config.root,'evidence/external/completed-mlx-artifact-for-cuda.json'),config.completedMlx);
       await cp(resolve(config.root,'prior/supplement.json'),resolve(config.root,'evidence/external/completed-mlx-handoff-supplement.json'),{errorOnExist:true,force:false});

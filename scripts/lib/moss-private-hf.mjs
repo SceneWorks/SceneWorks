@@ -92,7 +92,10 @@ export async function adoptStoppedExecutionPrivateHf(config,artifactRoot,invento
     origin={originalBuildHf:recorded.from,originalOwner:recorded.originalOwner,initialTransfer:await fileIdentity(resolve(artifactRoot,'hf-transfer.json'))};
   } else {
     requireThat([recorded.priorRunId,recorded.priorAttempt,recorded.priorArtifactId].every(value=>Number.isSafeInteger(value)&&value>0)&&recorded.from===resolve(dirname(recorded.from),'hf')&&basename(dirname(recorded.from))===`moss-execute-${recorded.priorRunId}-${recorded.priorAttempt}-cuda`,'prior CUDA execution owner path changed');
-    const parentPath=resolve(artifactRoot,'evidence/external/stopped-cuda-hf-transfer.json'),parent=await json(parentPath);
+    const top=resolve(artifactRoot,'stopped-cuda-hf-transfer.json'),legacy=resolve(artifactRoot,'evidence/external/stopped-cuda-hf-transfer.json');
+    const hasTop=!await absent(top),hasLegacy=!await absent(legacy);
+    requireThat(hasTop!==hasLegacy,'stopped CUDA predecessor has missing or ambiguous archived transfer');
+    const parentPath=hasTop?top:legacy,parent=await json(parentPath);
     requireThat(canonical(recorded.priorTransfer)===canonical(await fileIdentity(parentPath))&&['same-volume-original-stopped-CUDA-HF-adoption','same-volume-stopped-CUDA-HF-adoption'].includes(parent.operation)&&parent.to===recorded.from&&parent.originalRunId===originalRunId&&parent.originalAttempt===originalAttempt&&canonical(parent.originalPackages)===canonical(inventoryIdentity)&&canonical(parent.before)===canonical(parent.after)&&canonical(parent.after)===canonical(recorded.before)&&canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,parent[key]])))===canonical(identity(config)),'stopped CUDA predecessor transfer is missing or changed');
     const parentOrigin=parent.origin??{originalBuildHf:parent.from,originalOwner:parent.originalOwner,initialTransfer:recorded.priorTransfer};
     requireThat(canonical(recorded.origin)===canonical(parentOrigin),'stopped CUDA origin chain changed');origin=recorded.origin;

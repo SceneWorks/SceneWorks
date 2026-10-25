@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory } from './moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -619,7 +619,7 @@ test('original stopped CUDA HF is adopted into a new run only from its sealed ex
   assert.deepEqual(receipt.before,receipt.after);await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});
   await assert.rejects(()=>adoptOriginalPrivateHf(current,installed,{},123,1),/already exists/);
 });
-test('stopped CUDA execution HF follows two authenticated same-volume ownership hops without rehydration',async t=>{
+test('stopped CUDA HF survives legacy and top-level authenticated ownership hops before evidence import',async t=>{
   const {base,build,run,installed}=await privateHfFixture(t,'cuda'),parent=resolve(base,'moss-sc-26752'),priorRoot=resolve(parent,'moss-execute-456-1-cuda'),currentRoot=resolve(parent,'moss-execute-789-1-cuda'),artifactRoot=resolve(base,'downloaded-artifact');
   await Promise.all([mkdir(priorRoot),mkdir(currentRoot),mkdir(artifactRoot)]);
   const prior={...run,root:priorRoot,hfHome:resolve(priorRoot,'hf')},current={...run,root:currentRoot,hfHome:resolve(currentRoot,'hf')},inventory={byteLength:12,sha256:sha('native package inventory')};
@@ -636,7 +636,7 @@ test('stopped CUDA execution HF follows two authenticated same-volume ownership 
   await assert.rejects(()=>lstat(prior.hfHome),{code:'ENOENT'});assert.equal((await privateHfIntegrity(current)).length,43);
   const archive=resolve(currentRoot,'evidence/external/stopped-cuda-hf-transfer.json');await mkdir(resolve(currentRoot,'evidence/external'),{recursive:true});await writeFile(archive,await readFile(resolve(artifactRoot,'hf-transfer.json')));
   await save(resolve(currentRoot,'cuda-package-preparation.json'),{mode:'stopped-execution-HF',originalRunId:123,originalAttempt:1,candidateId:current.candidateId,sourceSha:current.sourceSha,inferenceSha:current.inferenceSha,originalNativePackages:inventory,transfer:await fileIdentity(resolve(currentRoot,'hf-transfer.json')),stoppedArtifact:{runId:456,attempt:1,artifactId:654}});
-  const secondArtifact=resolve(base,'second-downloaded-artifact'),nextRoot=resolve(parent,'moss-execute-987-1-cuda');await mkdir(secondArtifact);await mkdir(nextRoot);const next={...current,root:nextRoot,hfHome:resolve(nextRoot,'hf')};
+  const secondArtifact=resolve(base,'second-downloaded-artifact'),nextRoot=resolve(parent,'moss-execute-987-1-cuda');await mkdir(secondArtifact);await mkdir(nextRoot);const next={...current,root:nextRoot,hfHome:resolve(nextRoot,'hf')};await save(resolve(nextRoot,'runtime.json'),next);
   for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await writeFile(resolve(secondArtifact,name),await readFile(resolve(currentRoot,name)));
   await mkdir(resolve(secondArtifact,'evidence/external'),{recursive:true});await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),await readFile(archive));
   await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),'changed predecessor');
@@ -645,6 +645,17 @@ test('stopped CUDA execution HF follows two authenticated same-volume ownership 
   await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),await readFile(archive));
   const chained=await adoptStoppedExecutionPrivateHf(next,secondArtifact,inventory,123,1,789,1,753);
   assert.equal(chained.priorRunId,789);assert.deepEqual(chained.origin,receipt.origin);assert.deepEqual(chained.before,chained.after);await assert.rejects(()=>lstat(current.hfHome),{code:'ENOENT'});
+  await retainStoppedCudaSource(next,secondArtifact);
+  const macEvidence=resolve(base,'completed-mac-evidence');await mkdir(macEvidence);await save(resolve(macEvidence,'frozen.json'),{rows:25,guards:29});
+  await importCompletedMlxEvidence({...next,priorEvidenceRoot:macEvidence});
+  assert.deepEqual(await json(resolve(nextRoot,'evidence/frozen.json')),{rows:25,guards:29});assert.equal((await json(resolve(nextRoot,'stopped-cuda-hf-transfer.json'))).to,current.hfHome);
+  await assert.rejects(()=>importCompletedMlxEvidence({...next,priorEvidenceRoot:macEvidence}),/already exists|EEXIST/);
+  assert.deepEqual(await json(resolve(nextRoot,'evidence/frozen.json')),{rows:25,guards:29});
+  await save(resolve(nextRoot,'cuda-package-preparation.json'),{mode:'stopped-execution-HF',originalRunId:123,originalAttempt:1,candidateId:next.candidateId,sourceSha:next.sourceSha,inferenceSha:next.inferenceSha,originalNativePackages:inventory,transfer:await fileIdentity(resolve(nextRoot,'hf-transfer.json')),stoppedArtifact:{runId:789,attempt:1,artifactId:753}});
+  const thirdArtifact=resolve(base,'third-downloaded-artifact'),thirdRoot=resolve(parent,'moss-execute-999-1-cuda');await mkdir(thirdArtifact);await mkdir(thirdRoot);const third={...next,root:thirdRoot,hfHome:resolve(thirdRoot,'hf')};
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json', 'stopped-cuda-hf-transfer.json'])await writeFile(resolve(thirdArtifact,name),await readFile(resolve(nextRoot,name)));
+  const continued=await adoptStoppedExecutionPrivateHf(third,thirdArtifact,inventory,123,1,987,1,852);
+  assert.deepEqual(continued.origin,receipt.origin);assert.equal(continued.priorRunId,987);await assert.rejects(()=>lstat(next.hfHome),{code:'ENOENT'});
 });
 test('all 43 installed packages transfer by rename, retaining original receipts and exclusive adapter ownership',async t=>{
   const {build,run,installed}=await privateHfFixture(t),original=await readFile(resolve(build.root,'hf-owner.json')),before=await lstat(resolve(build.hfHome,installed.files[0].file));
