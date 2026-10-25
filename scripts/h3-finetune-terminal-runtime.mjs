@@ -7,7 +7,7 @@ import { randomUUID,createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
+import { mkdir, open, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
@@ -44,8 +44,47 @@ async function confined(root, value) {
   assert.ok(within(logical,candidate)||within(r,candidate),'path must remain below owned directory');
   const p=await realpath(candidate);inside(r,p);return p;
 }
-export function requireGenerationSourceCancelContract(){
-  const error=new Error('BLOCKED: cold generation-source-prep cancellation requires the actual native typed byte observer, agreed SW event contract, and detached-preparation/lease-release acknowledgment. Planned source identity is not a completed seal. No label, callback count, memo hit or canceled render is proof.');error.code='H3_NATIVE_OBSERVER_PENDING';throw error;
+// ---------------------------------------------------------------------------
+// Cold generation source-preparation cancellation (lifecycle.generation-source-prep-cancel).
+//
+// This binds the REAL SceneWorks contract, not a label or callback count:
+//   * span `h3_import_preparation` (jobId, checkpointId, phase="source-and-normalization")
+//     is entered INSIDE the detached spawn_blocking preparation task;
+//   * `artifact_seal_hash_progress` events carry path, acquisition ("ColdContentRead"),
+//     state ("Reading"|"Acquired"|"Canceled"|"Failed"), hashed_bytes, source_bytes.
+//     Native cold reads check the cancel flag every CHUNK bytes, so a cooperative cancel is
+//     acknowledged at the NEXT checkpoint — source-derived, not an invented timeout;
+//   * `h3_normalization_copy_progress` carries Writing|Canceled|Failed plus
+//     copied_payload_bytes/total_payload_bytes — but a cold HASH cancel happens BEFORE
+//     codec copying, so a valid hash-only cancel emits NONE of these events;
+//   * `h3_import_source_prepared` / `h3_import_prepared_load` must be ABSENT for a
+//     canceled preparation;
+//   * the root job `.message` marker is posted only after `CancelJoinGuard::cancel_and_join`
+//     has awaited the detached task's exit. Its real bound is CANCEL_JOIN_GRACE (30s) plus
+//     CANCEL_JOIN_ABANDON (5s) in `crates/sceneworks-worker/src/progress.rs`; a hard-abandoned
+//     task cannot prove lease release, so acknowledgement must arrive UNDER the 30s grace.
+// ---------------------------------------------------------------------------
+export const SOURCE_PREP_CHUNK_BYTES = 8 * 1024 * 1024; // native ArtifactSeal hash chunk; not a callback-count proxy
+export const PREP_CANCEL_ACK_MS = 30000;            // CancelJoinGuard::CANCEL_JOIN_GRACE
+export const PREP_CANCEL_ABANDON_MS = 5000;         // CancelJoinGuard::CANCEL_JOIN_ABANDON
+export const PREP_SPAN_PHASE = 'source-and-normalization';
+export const PREP_CANCELED_MARKER = 'h3-preparation-canceled';
+const receiptNameFor = jobId => `source-cancel-${encodeURIComponent(jobId)}.json`;
+const traceFields = event => event?.fields ?? event ?? {};
+export function observedSourceBytes(value){if(value===undefined||value===null||value==='None')return null;const number=typeof value==='number'?value:/^\d+$/.test(String(value))?Number(value):NaN;return Number.isSafeInteger(number)&&number>=0?number:null;}
+const traceSpan = event => [event?.span,...(Array.isArray(event?.spans)?[...event.spans].reverse():[]),event].find(span=>span&&span.phase!==undefined)??{};
+// Only actual cold source-hash progress inside the preparation span is admissible.
+function coldSourceProgress(event) {
+  const fields = traceFields(event);
+  if (fields.event !== 'artifact_seal_hash_progress') return null;
+  const span = traceSpan(event);
+  return span.phase === PREP_SPAN_PHASE ? { fields, span } : null;
+}
+function ownedBelow(root, value) {
+  const paths=path.win32.isAbsolute(root)?path.win32:path.posix;
+  if(typeof value!=='string'||!paths.isAbsolute(value))return undefined;
+  const resolved=paths.resolve(value),relative=paths.relative(paths.resolve(root),resolved);
+  return relative&&!relative.startsWith('..')&&!paths.isAbsolute(relative)?resolved:undefined;
 }
 export function authorized(p, c) {
   assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
@@ -200,7 +239,8 @@ export class OwnedService {
   async initialize() {
     if(!this.fake){authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await verifyInputs(this.c,[this.p.output,this.swRoot,this.inferenceRoot]);}
     assert.ok(this.c.declaredSourceBindings?.length,'every API case requires declared source and legal authority inputs');
-    for(const source of this.c.declaredSourceBindings)assertLicenseAuthority(source,{allowUnitFake:this.fake});
+    for(const source of this.c.declaredSourceBindings){assertLicenseAuthority(source,{allowUnitFake:this.fake});const role=source.family==='ltx'?'adapter':'checkpoint',sha256=source.family==='ltx'?source.ltxAdapter.sha256:source.model.sha256;assert.ok(this.c.inputs.some(input=>input.role===role&&input.sha256===sha256),'explicit source authority must bind a verified source-role input before any import');for(const component of source.model.components)assert.ok(this.c.inputs.some(input=>input.role==='component'&&input.sha256===component.sha256),'inherited component authority must bind actual staged input bytes');for(const adapter of source.adapters??[])assert.ok(this.c.inputs.some(input=>input.role==='adapter'&&input.sha256===adapter.sha256),'adapter authority must bind actual staged adapter-role bytes');}
+    this.sourceDtypeFacts=await verifyDenseSourceDtypes(this.c,this.p.output);
     const r=this.c.runtime;
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
@@ -346,8 +386,120 @@ export class OwnedService {
     }
     if(route.startsWith('/api/v1/models/library-roots')&&body?.path)await confined(this.p.output,body.path);
   }
+  // Retained JSON events from the live owned worker/API buffers plus every prior epoch log.
+  async preparationTrace() {
+    const chunks=[];
+    for(const proc of [this.api,this.worker]) if(typeof proc?.log==='function') chunks.push(proc.log());
+    for(const epoch of this.epochs.slice(0,-1)) for(const kind of ['api','worker']) {
+      try{ chunks.push(await readFile(path.join(this.dir,`${kind}-${epoch.epoch}.log`),'utf8')); }
+      catch(error){ if(error.code!=='ENOENT') throw error; }
+    }
+    const events=[];
+    for(const text of chunks) for(const line of text.split('\n')) { try{ const value=JSON.parse(line); if(traceFields(value).event) events.push(value); }catch{} }
+    return events;
+  }
+  // Wait for an ACTUAL partial cold checkpoint on this job's preparation span; never a memo hit,
+  // a zero-byte label or the full source. A complete/fast read is a loud failure, not a pass.
+  async waitColdPartialReading(jobId,deadline) {
+    for(;;) {
+      const events=await this.preparationTrace();
+      const rows=events.filter(event=>{
+        const progress=coldSourceProgress(event), fields=progress?.fields;
+        if(!progress||String(tracedJobId(event))!==String(jobId))return false;
+        const hashed=Number(fields.hashed_bytes),source=observedSourceBytes(fields.source_bytes);
+        return fields.acquisition==='ColdContentRead'&&fields.state==='Reading'&&Number.isSafeInteger(hashed)&&hashed>0&&Number.isSafeInteger(source)&&hashed<source;
+      });
+      if(rows.length)return rows.at(-1);
+      const job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+      assert.ok(!terminal(job.status),'cold source preparation finished before a partial cold checkpoint was observed; no cancellation proof exists');
+      assert.ok(Date.now()<deadline,'cold source preparation never emitted an actual partial ColdContentRead checkpoint');
+      await (this.deps.sleep??sleep)(50);
+    }
+  }
+  // The root marker is posted only AFTER CancelJoinGuard::cancel_and_join awaited the detached task.
+  // Acknowledgement must arrive UNDER the 30s grace; a 30s+ wait is a hard-abandon, not proof.
+  async waitPreparationCanceled(jobId,requestedAt) {
+    for(;;) {
+      const job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+      if(job.status==='canceled') {
+        assert.equal(typeof job.message,'string','canceled preparation must carry a root message');
+        assert.ok(job.message.includes(PREP_CANCELED_MARKER),'canceled preparation lacks the joined-teardown root marker');
+        const elapsedMs=Date.now()-requestedAt;
+        assert.ok(elapsedMs>=0&&elapsedMs<PREP_CANCEL_ACK_MS,`cooperative cancellation was not acknowledged under the ${PREP_CANCEL_ACK_MS}ms joined grace; the guard would have hard-abandoned the detached task`);
+        return {job,observedAt:new Date(requestedAt+elapsedMs).toISOString(),acknowledgedAt:new Date(requestedAt+elapsedMs).toISOString(),elapsedMs,hardAbandoned:false};
+      }
+      assert.ok(!['completed','failed','interrupted','cancelled'].includes(job.status),`job reached non-canceled terminal state ${job.status}; source-preparation cancellation was not observed`);
+      assert.ok(Date.now()-requestedAt<PREP_CANCEL_ACK_MS,'cooperative cancellation was not acknowledged under the joined grace; hard-abandon evidence is not lease-release proof');
+      await (this.deps.sleep??sleep)(25);
+    }
+  }
+  // Managed install -> fresh owned Idle restart (cold memo) -> generation -> observed partial cold
+  // checkpoint -> cooperative cancel -> joined-teardown marker -> actual trace/request/job binding ->
+  // fresh Idle -> owned model removal as lease-release witness. Originals are never touched.
+  async sourceCancel(action,captures) {
+    await this.assertOwner();
+    assert.ok(action.generationCapture&&action.modelCapture,'source cancellation must bind the actual submitted generation and its owned imported model');
+    const jobId=action.generationCapture.split('/').reduce((v,k)=>v[k],captures);
+    const modelId=action.modelCapture.split('/').reduce((v,k)=>v[k],captures);
+    assert.ok(typeof jobId==='string'&&typeof modelId==='string','actual generation/model captures required');
+    assert.ok(this.jobs.has(jobId),'source cancellation target must be this owned submitted generation');
+    const receipt={actionKind:'source-cancel',kind:'generation-source-prep-cancel-receipt',version:1,proof_kind:this.fake?'unit_fake':'campaign_native',caseId:this.c.id,backend:this.c.backend,jobId,modelId,chunkBytes:SOURCE_PREP_CHUNK_BYTES,spanPhase:PREP_SPAN_PHASE};
+    const receiptPath=path.join(this.dir,receiptNameFor(jobId));
+    try {
+      const job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+      assert.equal(job.payload?.model,modelId,'generation must reference the actually installed imported model');
+      receipt.generationJob=job; // Actual queued canonical snapshot; this is planned provenance, NOT a completed native seal.
+      const planned=job.modelProvenance?.plan??job.payload?.modelProvenance?.plan??job.payload?.expectedImportedModelRef;
+      assert.ok(planned?.checkpointId&&planned.semanticDigest,'canceled preparation must bind the actual queued planned import commitment');
+      receipt.plannedImportRef=structuredClone(planned);
+      const deadline=Date.now()+this.c.timeoutSeconds*1000;
+      const reading=await this.waitColdPartialReading(jobId,deadline);
+      const fields=traceFields(reading),sourceBytes=observedSourceBytes(fields.source_bytes),partialBytes=Number(fields.hashed_bytes);
+      assert.equal(fields.acquisition,'ColdContentRead');assert.equal(fields.state,'Reading');
+      assert.ok(Number.isSafeInteger(sourceBytes)&&sourceBytes>0,'actual source_bytes required');
+      assert.ok(Number.isSafeInteger(partialBytes)&&partialBytes>0&&partialBytes<sourceBytes,'a partial cold checkpoint between zero and the full source is required');
+      const sourcePath=await confined(this.p.output,fields.path); // Canonical confinement BEFORE stat/hash, including symlink escape refusal.
+      assert.equal(traceSpan(reading).checkpointId,planned.checkpointId,'cold source trace differs from the actual planned checkpoint commitment');
+      assert.equal((await stat(sourcePath)).size,sourceBytes,'source_bytes differs from the actual owned source size');
+      receipt.observation=reading;
+      const requestedAt=Date.now();
+      const response=await this.request('POST',`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`);
+      receipt.cancelRequest={method:'POST',route:`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,requestedAt:new Date(requestedAt).toISOString(),response};
+      receipt.terminal=await this.waitPreparationCanceled(jobId,requestedAt);
+      // Audit only AFTER cancellation: a full independent read before POST /cancel would
+      // miss the actual partial-hash window while falsely labeling the audit post-cancel.
+      receipt.sourceAudit={path:fields.path,canonicalPath:sourcePath,ownedRoot:await realpath(this.p.output),sizeBytes:sourceBytes,sha256:await hashFile(sourcePath),auditedAt:new Date().toISOString(),meaning:'Independent post-cancel Node content audit; NOT a native acquired seal/memo or model load'};
+      assert.ok(this.c.inputs.some(input=>input.role==='checkpoint'&&input.sha256===receipt.sourceAudit.sha256),'observed private source must match an actual verified checkpoint-role input');
+      const events=await this.preparationTrace(),retained=event=>events.some(value=>JSON.stringify(value)===JSON.stringify(event));
+      assert.ok(retained(reading),'observed cold partial reading is absent from the retained worker/API trace');
+      const canceled=events.find(event=>{const progress=coldSourceProgress(event),value=progress?.fields;return progress&&String(tracedJobId(event))===String(jobId)&&value.path===fields.path&&value.acquisition==='ColdContentRead'&&value.state==='Canceled';});
+      assert.ok(canceled,'retained trace lacks the actual Canceled source progress event');
+      const canceledFields=traceFields(canceled),canceledBytes=Number(canceledFields.hashed_bytes);
+      assert.ok(Number.isSafeInteger(canceledBytes)&&canceledBytes>=partialBytes&&canceledBytes<sourceBytes,'Canceled must report the exact partial bytes actually reached, below the full source');
+      receipt.canceled=canceled;
+      assert.ok(!events.some(event=>{const progress=coldSourceProgress(event),value=progress?.fields;return progress&&String(tracedJobId(event))===String(jobId)&&value.path===fields.path&&value.state==='Acquired';}),'the canceled source path was fully Acquired; no cold-preparation cancellation occurred');
+      // Cold source HASH cancellation happens BEFORE codec copying (confirmed against aa3):
+      // a valid hash-only cancel has NO copy event. A Writing/copy event means the hashing
+      // window was missed and cancellation did not actually occur during source hashing.
+      assert.ok(!events.some(event=>traceFields(event).event==='h3_normalization_copy_progress'&&String(tracedJobId(event))===String(jobId)),'a normalization copy event shows the hashing window was missed; the source was already copied when canceled');
+      assert.ok(!events.some(event=>traceFields(event).event==='h3_import_source_prepared'&&String(tracedJobId(event))===String(jobId)),'canceled preparation published h3_import_source_prepared; the source was prepared, not canceled');
+      assert.ok(!events.some(event=>traceFields(event).event==='h3_import_prepared_load'&&String(tracedJobId(event))===String(jobId)),'canceled preparation reached a native load closure');
+      const idle=await this.waitIdle();
+      assert.ok(idle.status!=='exited'&&idle.worker?.status==='idle'&&!idle.worker.currentJobId,'fresh owned worker must acknowledge Idle after joined teardown');
+      receipt.teardown={guardGraceMs:PREP_CANCEL_ACK_MS,guardAbandonMs:PREP_CANCEL_ABANDON_MS,idle};
+      const removalAt=new Date().toISOString();
+      const removal=await this.request('DELETE',`/api/v1/models/${encodeURIComponent(modelId)}?permanent=true`);
+      assert.equal(removal.id,modelId,'removal must target the actually installed imported model');
+      assert.equal(removal.removedManifestEntry,true,'owned model removal refused; the source lease was not released');
+      receipt.removal={method:'DELETE',route:`/api/v1/models/${encodeURIComponent(modelId)}?permanent=true`,at:removalAt,response:removal};
+      receipt.sourceRole={modelId,checkpointSha256:receipt.sourceAudit.sha256};
+      return receipt;
+    } catch(error) { receipt.error=error.message; throw error; }
+    finally { await writeFile(receiptPath,JSON.stringify(receipt,null,2)+'\n'); }
+  }
   async action(action,captures) {
     await this.assertOwner();
+    if(action.kind==='source-cancel') return this.sourceCancel(action,captures);
     if(action.kind==='restart' || action.kind==='interrupt-import') {
       if(action.jobCapture){const job=action.jobCapture.split('/').reduce((v,k)=>v[k],captures);assert.ok(typeof job==='string');this.jobs.add(job);}
       if(action.kind==='interrupt-import'){
@@ -435,6 +587,17 @@ export function loadIdentity(event,job,inputs) {
   const pins=role=>closure.prepared_sources.filter(s=>inputs.some(i=>i.role===role&&i.sha256===s.sha256));
   return {checkpointSha256:checkpoint.sha256,planId:closure.identity.planId,semanticDigest:closure.identity.semanticDigest,topology:assembly.adalnPruning??{kind:'no-pruning-binding-in-observed-assembly'},quantization:{sourceEncoding:assembly.sourceEncoding??null,observedAssembly:assembly},components:pins('component'),adapters:pins('adapter'),operation:closure.operation,samplingPolicy:{steps:closure.steps,schedulerShift:closure.schedulerShift},seed:closure.seed};
 }
+export async function verifyDenseSourceDtypes(c,outputRoot){
+  const format=c.id.split('.').at(-1),expected={'dense-f16':'F16','dense-bf16':'BF16','dense-f32':'F32'}[format];if(!expected)return undefined;
+  const facts=[];let matrices=0;
+  for(const source of c.declaredSourceBindings){const files=source.model.sourceKind==='directory'?source.model.files.filter(file=>file.path.toLowerCase().endsWith('.safetensors')):[{path:source.model.sourcePath,sha256:source.model.sha256}];
+    for(const file of files){assert.ok(c.inputs.some(input=>input.role==='checkpoint'&&input.path===file.path&&input.sha256===file.sha256),'dense format must bind the actual selected source file');const canonical=await confined(outputRoot,file.path),handle=await open(canonical,'r');
+      try{const read=async(buffer,position)=>{let done=0;while(done<buffer.length){const result=await handle.read(buffer,done,buffer.length-done,position+done);assert.ok(result.bytesRead>0,'truncated source metadata');done+=result.bytesRead;}};const prefix=Buffer.alloc(8);await read(prefix,0);const length=prefix.readBigUInt64LE();assert.ok(length>0n&&length<=64n*1024n*1024n&&length+8n<=BigInt((await handle.stat()).size),'bounded actual safetensors metadata required');const bytes=Buffer.alloc(Number(length));await read(bytes,8);const header=JSON.parse(bytes.toString('utf8'));
+        const histogram={};for(const [name,tensor]of Object.entries(header)){if(name==='__metadata__')continue;histogram[tensor.dtype]=(histogram[tensor.dtype]??0)+1;if(tensor.shape?.length>=2&&/\.(?:attn\.(?:to_[qkv]|to_out\.0|qkv_proj|out_proj)|mlp\.(?:fc1|fc2)|ff\.net\.(?:0\.proj|2))\.weight$/.test(name)){assert.equal(tensor.dtype,expected,'actual source body precision differs from its format label');matrices++;}assert.ok(!name.includes('comfy_quant'),'dense source case cannot substitute a quantized dialect');}facts.push({path:file.path,sha256:file.sha256,histogram});
+      }finally{await handle.close();}
+    }
+  }assert.ok(matrices>0,'no actual H3 body matrices in declared dense source');return{expectedBodyDtype:expected,bodyMatrices:matrices,files:facts,meaning:'actual bounded source header facts, not a scenario precision label'};
+}
 export function resolvedMediaContract(c,job){
   const selected=c.declaredSourceBindings?.find(v=>v.model.modelId===job.payload.model);assert.ok(selected,'actual media requires its declared source/base contract');
   const model=selected.family==='ltx'?selected.model.modelId:selected.model.baseModel;
@@ -483,19 +646,114 @@ export async function verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decod
   }
   return results;
 }
+export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake=false}={}){
+  const spec=scenario.identificationControl;assert.ok(spec,'content identification requires actual renamed and different-bytes fixtures');
+  const input=c.inputs.find(value=>value.role==='identity-control-fixture'&&value.path===spec.receipt);assert.ok(input,'actual staged control receipt must be independently input-bound');
+  const copied=inside(dir,'identification-input.json');assert.equal(await hashFile(copied),input.sha256);const control=await json(copied);
+  assert.equal(control.kind,'h3-finetune-stage-identity-controls');assert.equal(control.status,'prepared-not-modelproof');assert.ok(control.proof_kind==='campaign_stage_derived'||allowUnitFake&&control.proof_kind==='unit_fake','synthetic identity fixture is not real staged content');
+  assert.equal(control.sourcePath,spec.originalPath);assert.equal(control.sourceExpectedSHA,spec.expectedSha256);assert.equal(control.sourceActualSHA,spec.expectedSha256);assert.equal(control.renamed.actualSHA,spec.expectedSha256);assert.notEqual(control.renamed.path,control.sourcePath);assert.notEqual(control.differentBytes.actualSHA,spec.expectedSha256);assert.equal(control.differentBytes.expectedOriginalSHA,spec.expectedSha256);
+  for(const [file,sha256]of [[control.sourcePath,spec.expectedSha256],[control.renamed.path,spec.expectedSha256],[control.differentBytes.path,control.differentBytes.actualSHA]])assert.ok(c.inputs.some(value=>value.role==='checkpoint'&&value.path===file&&value.sha256===sha256),'all original/copied/different source bytes must be actual verified input roles');
+  const positive=bundle.captures?.[`${spec.positive}_av0_done`],binding=byJob.get(positive?.id);assert.ok(binding,'renamed source must actually generate with a native closure/output');assert.equal(binding.runtimeIdentity.checkpointSha256,spec.expectedSha256);
+  const selected=c.declaredSourceBindings.find(value=>value.model.modelId===positive.payload.model);assert.equal(selected?.model.sourcePath,control.renamed.path,'the actual renamed copy must be the selected import source');assert.ok(bundle.requests.some(record=>record.route==='/api/v1/models/import'&&record.request?.modelId===selected.model.modelId&&record.request.sourcePath===control.renamed.path&&record.request.expectedSha256===spec.expectedSha256),'renamed source must be actually submitted, not substituted by an original/builtin');
+  const negative=bundle.captures?.[`${spec.negative}_refused`];assert.equal(negative?.status,'failed','different bytes must not be accepted as the original source');assert.equal(negative.payload.expectedSha256,spec.expectedSha256);assert.ok(negative.error?.includes('integrity check')&&negative.error.includes(control.differentBytes.actualSHA)&&negative.error.includes(spec.expectedSha256),'actual API checksum refusal must identify both observed and expected content');
+  const request=bundle.requests.find(record=>record.route==='/api/v1/models/import'&&record.result?.id===negative.id);assert.ok(request&&request.request.sourcePath===control.differentBytes.path&&request.request.expectedSha256===spec.expectedSha256,'negative refusal must bind the actually submitted different-byte fixture');
+  return {sameContentRecognized:{original:control.sourcePath,relocated:control.renamed.path,sha256:spec.expectedSha256,nativeJobId:positive.id},differentContentRefused:{jobId:negative.id,observedSha256:control.differentBytes.actualSHA,expectedSha256:spec.expectedSha256},meaning:'content identity independent of name/path/repository layout; no new training claimed'};
+}
 export const tracedJobId=event=>(event.fields??event).jobId??event.span?.jobId??event.spans?.find(span=>span.jobId)?.jobId;
 export function verifyCacheCoverage(bundle,scenario,byJob,observed){
   const spec=scenario.cacheCoverage;assert.ok(spec,'cache coverage requires source-bound execution contract');
   const find=name=>{const job=bundle.captures?.[name],binding=byJob.get(job?.id);assert.ok(binding,'cache phase lacks actual completed job/source/output');assert.deepEqual(binding.job,job);return binding;};
   const [cold,warm,staged]=[find(spec.cold),find(spec.warm),find(spec.staged)];
   assert.equal(normalizeLoadEvent(cold.event).cacheState,'Cold','cold must actually miss generator metadata cache');assert.equal(normalizeLoadEvent(warm.event).cacheState,'Warm','warm must actually hit generator metadata cache');
-  for(const binding of [cold,warm,staged]){assert.equal((binding.event.fields??binding.event).retains_dit_weights,false,'metadata warmth must not masquerade as retained DiT weights');assert.equal(binding.runtimeIdentity.checkpointSha256,cold.runtimeIdentity.checkpointSha256);assert.equal(binding.runtimeIdentity.semanticDigest,cold.runtimeIdentity.semanticDigest);assert.deepEqual(creativePayload(submittedPayload(bundle.requests??[],binding.job)),creativePayload(submittedPayload(bundle.requests??[],cold.job)),'cache/staging changed creative request');}
-  const policy=binding=>{const record=observed.find(event=>(event.fields??event).event==='generation_memory_policy_applied'&&tracedJobId(event)===binding.job.id);assert.ok(record,'actual configured per-job memory policy event required');const fields=record.fields??record;assert.equal(fields.scope_configured,true);assert.ok(fields.strategy&&fields.stage_residency!==undefined);return fields;};
+  for(const binding of [cold,warm,staged]){assert.equal((binding.event.fields??binding.event).cache_layer,'generator_metadata','actual cache layer must be generator metadata');for(const key of ['loaded_spec_offload_policy','loaded_spec_load_shape'])assert.ok(typeof(binding.event.fields??binding.event)[key]==='string'&&(binding.event.fields??binding.event)[key].length,'observed loaded-spec policy/shape required');assert.equal((binding.event.fields??binding.event).retains_dit_weights,false,'metadata warmth must not masquerade as retained DiT weights');assert.equal(binding.runtimeIdentity.checkpointSha256,cold.runtimeIdentity.checkpointSha256);assert.equal(binding.runtimeIdentity.semanticDigest,cold.runtimeIdentity.semanticDigest);assert.deepEqual(creativePayload(submittedPayload(bundle.requests??[],binding.job)),creativePayload(submittedPayload(bundle.requests??[],cold.job)),'cache/staging changed creative request');}
+  const policy=binding=>{const record=observed.find(event=>(event.fields??event).event==='generation_memory_policy_applied'&&tracedJobId(event)===binding.job.id);assert.ok(record,'actual configured per-job memory policy event required');const fields=record.fields??record;assert.equal(fields.scope_configured,true);assert.ok(fields.strategy);assert.equal(typeof fields.stage_residency,'boolean','actual applied stage-residency policy must be observed, not a scenario label');return fields;};
   const before=policy(warm),after=policy(staged);policy(cold);
-  assert.equal(after.stream_transformer_blocks,true,'staged run must actually configure bounded transformer residency');assert.ok(Number.isInteger(after.window_size)&&after.window_size>0&&after.window_component,'actual configured window/component required');
+  assert.equal(after.stream_transformer_blocks,true,'staged run must actually configure bounded transformer residency');assert.ok(Number.isInteger(after.window_size)&&after.window_size>0&&['Dit','TextEncoder','Both'].includes(after.window_component),'actual configured window/component required');
   assert.ok(before.stream_transformer_blocks!==true||!Number.isFinite(before.window_size)||after.window_size<before.window_size,'unchanged sequential/resident policy is not a staged transition');
   assert.ok(bundle.actions.some(action=>action.kind==='restart'&&action.memoryCap),'constrained staging must be bound to actual owned-worker restart/cap input');
   return {cacheLayer:'generator-metadata-not-DiT-residency',coldJobId:cold.job.id,warmJobId:warm.job.id,stagedJobId:staged.job.id,policyBefore:before,policyAfter:after};
+}
+// Re-verify a cold source-preparation cancellation from retained bytes only. The receipt is a
+// correlation index, never the proof: every event must reappear verbatim in the retained
+// worker/API epoch logs, and the terminal snapshot must reappear in the actual API transcript.
+export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=false,receiptName,contentReadback=false}={}) {
+  assert.ok(typeof receiptName==='string'&&receiptName.length>0,'actual retained source-cancel receipt is required; labels or invented receipts are not proof');
+  const receipt=await json(inside(dir,receiptName));
+  assert.equal(receipt.kind,'generation-source-prep-cancel-receipt');assert.equal(receipt.version,1);
+  assert.ok(receipt.proof_kind==='campaign_native'||(allowUnitFake&&receipt.proof_kind==='unit_fake'),'unit_fake receipt is never campaign evidence');
+  assert.equal(receipt.caseId,c.id);assert.equal(receipt.backend,c.backend);
+  assert.ok(c.declaredSourceBindings?.length,'planned source/legal authority cannot be absent during readback');
+  const jobId=receipt.jobId,modelId=receipt.modelId;assert.ok(jobId&&modelId,'actual generation/model identity required');assert.equal(receipt.generationJob?.id,jobId,'planned snapshot must be the actual canceled generation job');
+  const planned=c.declaredSourceBindings.filter(source=>source.model?.modelId===modelId);assert.ok(planned.length,'canceled generation model is not a declared planned source');
+  const declaredShas=new Set(planned.flatMap(source=>[source.model.sha256,...(source.model.files??[]).map(file=>file.sha256)]));
+  assert.equal(receipt.spanPhase,PREP_SPAN_PHASE);
+  assert.equal(receipt.chunkBytes,SOURCE_PREP_CHUNK_BYTES);
+  const observation=receipt.observation;assert.ok(observation,'actual partial ColdContentRead observation required');
+  const observed=traceFields(observation);assert.equal(observed.event,'artifact_seal_hash_progress','actual native artifact observer required; a core checksum callback is not the native pin');assert.equal(tracedJobId(observation),jobId,'cold progress must belong to the canceled generation');
+  assert.equal(observed.acquisition,'ColdContentRead','only a cold content read is admissible; memo/other acquisitions are not cancellation evidence');
+  assert.equal(observed.state,'Reading');
+  assert.equal(traceSpan(observation).phase,PREP_SPAN_PHASE,'observation must belong to the source-and-normalization preparation span');
+  const partialBytes=Number(observed.hashed_bytes),sourceBytes=observedSourceBytes(observed.source_bytes);
+  assert.ok(Number.isSafeInteger(partialBytes)&&partialBytes>0,'zero/tiny partial bytes are not a cold checkpoint');
+  assert.ok(Number.isSafeInteger(sourceBytes)&&partialBytes<sourceBytes,'hashed_bytes must be partial, not the full source');
+  const audit=receipt.sourceAudit;assert.ok(audit,'independent post-cancel source audit required');
+  sha(audit.sha256);
+  assert.ok(declaredShas.has(audit.sha256),'observed owned source identity differs from the declared checkpoint source');
+  assert.ok(c.inputs?.some(input=>input.role==='checkpoint'&&input.sha256===audit.sha256),'observed owned source is not a verified checkpoint-role input');
+  assert.equal(audit.path,observed.path,'post-cancel audit must bind the actual observed source path');
+  assert.equal(audit.sizeBytes,sourceBytes,'source audit size differs from the observed source_bytes');
+  // The owned install may be removed by the lease-release witness after the audit, so the
+  // retained proof is the audit's declared-input sha (rehashed by runCase on the original
+  // checkpoint input before/after) plus the owned-root path, never a later re-stat.
+  const ownedRoot=contentReadback?audit.ownedRoot:await realpath(p.output);assert.equal(audit.ownedRoot,ownedRoot,'owned source audit root differs from actual backend output root');
+  assert.ok(ownedBelow(ownedRoot,audit.canonicalPath)&&(ownedBelow(ownedRoot,audit.path)||ownedBelow(p.output,audit.path)),'observed source escaped the owned output/service roots');
+  const canceled=receipt.canceled;assert.ok(canceled,'actual Canceled source progress event required');
+  const canceledFields=traceFields(canceled),canceledBytes=Number(canceledFields.hashed_bytes);assert.equal(canceledFields.event,'artifact_seal_hash_progress');assert.equal(tracedJobId(canceled),jobId);assert.equal(traceSpan(canceled).phase,PREP_SPAN_PHASE);const canceledSourceBytes=observedSourceBytes(canceledFields.source_bytes);assert.ok(canceledSourceBytes===null||canceledSourceBytes===sourceBytes,'source size changed during canceled hashing');
+  assert.equal(canceledFields.path,observed.path,'Canceled source progress must refer to the same observed owned source path');assert.equal(canceledFields.state,'Canceled');assert.equal(canceledFields.acquisition,'ColdContentRead');
+  assert.ok(Number.isSafeInteger(canceledBytes)&&canceledBytes>=partialBytes&&canceledBytes<sourceBytes,'Canceled must report exact partial bytes actually reached, below the full source');
+  // Cold source HASH cancellation is BEFORE codec copying; a valid hash-only cancel has NO
+  // h3_normalization_copy_progress event. A Writing/copy event means the hashing window was missed.
+  assert.ok(!receipt.normalization,'a normalization copy event shows the hashing window was missed, not a cold hash cancellation');
+  const terminal=receipt.terminal;assert.ok(terminal?.job,'terminal canceled job snapshot required');
+  assert.equal(terminal.job.id,jobId);assert.equal(terminal.job.status,'canceled','job must terminate canceled');
+  assert.ok(typeof terminal.job.message==='string'&&terminal.job.message.includes(PREP_CANCELED_MARKER),'joined-teardown canceled root message marker required');
+  assert.equal(terminal.hardAbandoned,false,'hard-abandoned cancellation cannot prove lease release');
+  assert.ok(Date.parse(audit.auditedAt)>=Date.parse(terminal.acknowledgedAt),'independent audit must occur AFTER joined cancellation, not postpone POST /cancel');
+  const plannedRef=receipt.generationJob.modelProvenance?.plan??receipt.generationJob.payload?.modelProvenance?.plan??receipt.generationJob.payload?.expectedImportedModelRef;
+  assert.ok(plannedRef?.checkpointId&&plannedRef.semanticDigest,'actual queued planned source commitment required, not a fabricated completed seal');assert.deepEqual(receipt.plannedImportRef,plannedRef);assert.equal(traceSpan(observation).checkpointId,plannedRef.checkpointId,'partial trace differs from planned checkpoint');
+  assert.ok(Number.isInteger(terminal.elapsedMs)&&terminal.elapsedMs>=0&&terminal.elapsedMs<PREP_CANCEL_ACK_MS,`cooperative cancellation must be acknowledged under the ${PREP_CANCEL_ACK_MS}ms joined grace`);
+  const requestedAt=Date.parse(receipt.cancelRequest?.requestedAt),acknowledgedAt=Date.parse(terminal.acknowledgedAt);assert.ok(Number.isFinite(requestedAt)&&Number.isFinite(acknowledgedAt));assert.equal(terminal.elapsedMs,acknowledgedAt-requestedAt,'cancel grace must derive from actual request/ack timestamps, not a free elapsed label');
+  assert.equal(receipt.cancelRequest?.method,'POST');assert.equal(receipt.cancelRequest?.route,`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,'cooperative cancel request must target the actual generation job');
+  const teardown=receipt.teardown;assert.equal(teardown?.guardGraceMs,PREP_CANCEL_ACK_MS);assert.equal(teardown?.guardAbandonMs,PREP_CANCEL_ABANDON_MS);
+  const idle=teardown?.idle;assert.ok(idle?.status!=='exited'&&idle?.worker?.status==='idle'&&!idle.worker.currentJobId,'fresh owned worker Idle after joined teardown required');
+  const removal=receipt.removal;assert.equal(removal?.method,'DELETE');assert.equal(removal?.route,`/api/v1/models/${encodeURIComponent(modelId)}?permanent=true`);
+  assert.equal(removal?.response?.id,modelId,'removal must target the actually installed imported model');
+  assert.equal(removal?.response?.removedManifestEntry,true,'refused model removal cannot prove source lease release');
+  assert.ok(Date.parse(removal.at)>=Date.parse(idle.worker.lastSeenAt),'owned model removal must follow the fresh Idle acknowledgement');
+  assert.deepEqual(receipt.generationJob?.payload?.model,modelId);
+  // Raw retained trace binding (never the receipt dictionary alone).
+  const lifecycle=await json(inside(dir,'service-lifecycle.json'));
+  let raw='';
+  for(const epoch of lifecycle.epochs??[]) for(const kind of ['api','worker']) raw+=await readFile(inside(dir,`${kind}-${epoch.epoch}.log`),'utf8')+'\n';
+  const events=[];for(const line of raw.split('\n')){try{const value=JSON.parse(line);if(traceFields(value).event)events.push(value);}catch{}}
+  const retained=event=>events.some(value=>JSON.stringify(value)===JSON.stringify(event));
+  assert.ok(retained(observation),'partial cold observation is absent from retained worker/API trace');
+  assert.ok(retained(canceled),'Canceled source progress is absent from retained trace');
+  assert.ok(!events.some(event=>traceFields(event).event==='h3_normalization_copy_progress'&&String(tracedJobId(event))===String(jobId)),'retained trace shows normalization copy began; the cold hash cancellation window was missed');
+  assert.ok(!events.some(event=>{const progress=coldSourceProgress(event),value=progress?.fields;return progress&&String(tracedJobId(event))===String(jobId)&&value.path===observed.path&&value.state==='Acquired';}),'retained trace shows the source was fully Acquired');
+  assert.ok(!events.some(event=>traceFields(event).event==='h3_import_source_prepared'&&String(tracedJobId(event))===String(jobId)),'retained trace published h3_import_source_prepared for the canceled job');
+  assert.ok(!events.some(event=>traceFields(event).event==='h3_import_prepared_load'&&String(tracedJobId(event))===String(jobId)),'retained trace contains a native load for the canceled job');
+  // Actual request/job snapshots from the API transcript.
+  const transcript=await json(inside(dir,'api-transcript.json'));
+  const jobPath=`/api/v1/jobs/${encodeURIComponent(jobId)}`;
+  assert.ok(transcript.transcript.some(row=>row.method==='GET'&&row.route===jobPath&&row.result?.id===jobId&&row.result?.status==='canceled'&&typeof row.result?.message==='string'&&row.result.message.includes(PREP_CANCELED_MARKER)),'retained API transcript lacks the actual canceled job snapshot with root marker');
+  const submit=transcript.transcript.find(row=>row.method==='POST'&&row.route==='/api/v1/video/jobs'&&row.result?.id===jobId);
+  assert.ok(submit,'retained API transcript lacks the actual generation submission');
+  assert.equal(submit.request?.model,modelId,'queued generation did not reference the planned imported model');
+  for(const [key,value]of Object.entries(submit.request))assert.deepEqual(receipt.generationJob?.payload?.[key],value,`queued generation differs from submitted ${key}`);
+  const queuedRef=submit.result?.modelProvenance?.plan??submit.result?.payload?.modelProvenance?.plan??submit.result?.payload?.expectedImportedModelRef;
+  assert.deepEqual(receipt.plannedImportRef,queuedRef,'planned commitment differs from actual API submission receipt');
+  return {jobId,modelId,partialBytes,sourceBytes,elapsedMs:terminal.elapsedMs,checkpointSha256:audit.sha256,removalId:modelId};
 }
 export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUnitFake=false,contentReadback=false}={}) {
   const bundle=await json(inside(dir,'source-job-output.json'));
@@ -504,6 +762,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
   const scenarioInput=c.inputs.find(i=>i.role==='scenario'&&i.path===c.runtime.scenario);assert.ok(scenarioInput&&typeof bundle.scenarioText==='string');assert.equal(createHash('sha256').update(bundle.scenarioText).digest('hex'),scenarioInput.sha256,'actual scenario bytes differ from bound input');const scenario=JSON.parse(bundle.scenarioText);assert.equal(scenario.caseId,c.id);
   assert.equal(bundle.build.sceneworks,p.sceneworks);assert.equal(bundle.build.inference,p.inference);
   if(!contentReadback){await confined(p.output,bundle.build.binary);assert.equal(await hashFile(bundle.build.binary),bundle.build.sha256,'owned service binary drift');}
+  if(/\.dense-(f16|bf16|f32)$/.test(c.id)){const expected={'dense-f16':'F16','dense-bf16':'BF16','dense-f32':'F32'}[c.id.split('.').at(-1)];assert.equal(bundle.sourceDtypeFacts?.expectedBodyDtype,expected);assert.ok(bundle.sourceDtypeFacts.bodyMatrices>0);for(const file of bundle.sourceDtypeFacts.files)assert.ok(c.inputs.some(input=>input.role==='checkpoint'&&input.path===file.path&&input.sha256===file.sha256));if(!contentReadback)assert.deepEqual(bundle.sourceDtypeFacts,await verifyDenseSourceDtypes(c,p.output));}
   const lifecycle=await json(inside(dir,'service-lifecycle.json'));for(const record of lifecycle.drains)assert.equal(await hashFile(inside(dir,record.path)),record.sha256,'owned cancellation/restart record drift');
   if(c.id.endsWith('.restart-replay'))assert.ok(bundle.epochs.length>=2 && bundle.actions.some(v=>v.kind==='restart'),'restart/replay requires actual owned restart records');
   if(c.id.endsWith('.interruption-retry'))assert.ok(bundle.epochs.length>=2 && bundle.actions.some(v=>v.kind==='interrupt-import'),'import interruption/retry requires actual owned cooperative cancellation/restart records');
@@ -541,9 +800,10 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     const actual=await compareControlMedia(inside(dir,b.media.av),inside(dir,r.media.av),inside(dir,i.media.av),comparison.stream,comparison.minimumDelta,comparison.maximumBaselineDelta,decode,delta);
     if(!contentReadback)for(const key of ['interventionDelta','repeatedBaselineDelta','threshold'])assert.equal(actual[key],comparison[key],'retained sensitivity differs from actual decoded media'); // Portable decoding rechecks declared bounds, not a host-specific ffmpeg scalar golden.
   }
+  const identification=c.id.endsWith('.renamed')?await verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake}):undefined;
   const ownership=c.id.endsWith('.managed-linked-equivalence')?await verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode,delta):undefined;
   const cache=c.id.endsWith('.cold-warm-staged')?verifyCacheCoverage(bundle,scenario,byJob,observed):undefined;
-  return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
+  return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(identification?{identification}:{}),...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
 }
 export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const service=await new OwnedService(p,c,swRoot,inferenceRoot,dir,deps).initialize();
@@ -551,6 +811,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const records=[],actions=[],bound=[],traceEvents=[];let result,metrics,error;
   try {
     const scenarioText=await readFile(c.runtime.scenario,'utf8'),scenario=JSON.parse(scenarioText);assert.equal(scenario.caseId,c.id);assert.equal(scenario.baseUrl,service.baseUrl,'scenario must target newly owned service');
+    if(scenario.identificationControl){const input=c.inputs.find(value=>value.role==='identity-control-fixture'&&value.path===scenario.identificationControl.receipt);assert.ok(input,'staged identity-control metadata input required');assert.ok((await stat(input.path)).size<=1024*1024,'identity control receipt must be bounded metadata, never a weight payload');assert.equal(await hashFile(input.path),input.sha256);await copyFile(input.path,inside(dir,'identification-input.json'));}
     result=await runScenario(scenario,{fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
       records.push(r);
       if(r.result?.id && r.method==='POST' && (r.route==='/api/v1/models/import'||r.route==='/api/v1/loras/import'||r.route==='/api/v1/video/jobs'||/\/(retry|duplicate)$/.test(r.route)))service.jobs.add(r.result.id);
@@ -573,9 +834,13 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     const loads=bound.map(b=>({media:b,job:jobs.find(j=>j.id===b.jobId),event:traceEvents.find(t=>(t.fields??t).jobId===b.jobId)}));
     const imported=loads.filter(v=>v.job.payload.model?.startsWith('imported_'));
     const matched=imported.filter(v=>v.event);assert.equal(matched.length,imported.length,'EVERY successful imported generation/replay needs its actual native load closure');
-    if(scenario.steps.some(s=>s.path==='/api/v1/video/jobs'||typeof s.path==='string'&&s.path.endsWith('/duplicate')))assert.ok(loads.length>0,'no actual successful model execution');
+    const sourceCancel=actions.find(action=>action.actionKind==='source-cancel');
+    // A canceled cold preparation has NO successful load, AV or peak requirement; only a
+    // successful generation path requires one.
+    if(!c.id.endsWith('.generation-source-prep-cancel')&&scenario.steps.some(s=>s.path==='/api/v1/video/jobs'||typeof s.path==='string'&&s.path.endsWith('/duplicate')))assert.ok(loads.length>0,'no actual successful model execution');
+    if(c.id.endsWith('.generation-source-prep-cancel'))assert.ok(sourceCancel,'cold source-preparation cancellation case did not produce an actual action receipt');
     const proofs=matched.map(v=>({...v,runtimeIdentity:loadIdentity(v.event,v.job,c.inputs)}));
-    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,scenarioText,captures:result.captures,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
+    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,...(service.sourceDtypeFacts?{sourceDtypeFacts:service.sourceDtypeFacts}:{}),scenarioText,captures:result.captures,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
     const comparisons=[];
     for(const spec of scenario.comparisons??[]) {
       const find=name=>{const job=result.captures[name];const value=proofs.find(p=>p.job.id===job?.id);assert.ok(value,'actual completed comparison job/load/output binding missing');return value;};
@@ -586,7 +851,8 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     }
     await save(path.join(dir,'comparisons.json'),comparisons);
     const primary=proofs[0];const h=await (deps.hardware??hardware)(c.backend,c.runtime.deviceId);
-    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json',...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',testInputSha256:c.inputs[0].sha256,metrics};
+    const sourceCancelReceipt=sourceCancel?receiptNameFor(sourceCancel.jobId):undefined;
+    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
     if(primary){Object.assign(e,{runtimeIdentity:primary.runtimeIdentity,loadEvent:primary.event,completedJob:{id:primary.job.id,status:primary.job.status,providerId:normalizeLoadEvent(primary.event).providerId,output:primary.media.av},av:primary.media.av});}
     if(c.artifact)Object.assign(e,{source:p.source,artifact:c.artifact});
     if(c.group==='capability') {assert.ok(comparisons.length);const control=proofs.find(v=>v.job.id===comparisons[0].interventionJobId);e.control={av:control.media.av,checkpointSha256:control.runtimeIdentity.checkpointSha256,seed:control.runtimeIdentity.seed,intervention:'Actual scenario comparison manifest; see all source-bound contrasts',comparisons:'comparisons.json',bindings:'source-job-output.json'};}
@@ -595,12 +861,18 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     observations.done=true;await observations.loop;
     let observationWriteError;
     try{await save(path.join(dir,'sampler-exit.json'),{samples:observations.samples,gaps:observations.gaps,budgetExceeded:observations.budgetExceeded,proof_kind:service.fake?'unit_fake':'campaign_native'});}catch(e){observationWriteError=e;}
+    // Always persist the actual action receipts, including a failed/missed cancellation.
+    try{await writeFile(path.join(dir,'source-cancel-actions.json'),JSON.stringify({proof_kind:service.fake?'unit_fake':'campaign_native',actions:actions.filter(action=>action.actionKind==='source-cancel')},null,2)+'\n');}catch{}
     try{await service.stop();await save(path.join(dir,'service-lifecycle.json'),{epochs:service.epochs,quiescence:service.quiescence,drains:await Promise.all(service.drainRecords.map(async name=>({path:name,sha256:await hashFile(path.join(dir,name))}))),observationWriteError:observationWriteError?.message,proof_kind:service.fake?'unit_fake':'campaign_native'});if(observationWriteError&&!error)throw observationWriteError;}catch(stopError){await save(path.join(dir,'shutdown-failure.json'),{error:stopError.message,originalError:error?.message,epochs:service.epochs});if(!error)throw stopError;}
   }
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   try{const [mode,planPath,id,swRoot,inferenceRoot]=process.argv.slice(2);const p=await json(planPath),c=p.cases.find(v=>v.id===id);assert.ok(c);authorized(p,c);const dir=process.env.H3_CASE_DIR;assert.equal(process.env.H3_CASE_ID,id);assert.ok(dir);await confined(p.output,dir);
-    if(mode==='generation-source-prep-cancel')requireGenerationSourceCancelContract();
+    if(mode==='generation-source-prep-cancel'){
+      assert.ok(id.endsWith('.generation-source-prep-cancel'),'this dispatcher is only for the canonical cold source-preparation cancellation case');
+      const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);
+      console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);
+    }
     else if(mode==='numeric'){const r=await executeNativeComparison(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else if(mode==='fixture'){const r=await executeFixture(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else{assert.equal(mode,'api');const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);}
