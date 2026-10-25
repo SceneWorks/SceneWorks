@@ -269,6 +269,7 @@ mod tests {
                 stacks: vec![vec![2, 2]],
             }),
             decoder_workspace: None,
+            native_quant: None,
         });
         let workspace = Workspace {
             conditioning: 1,

@@ -3038,6 +3038,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
             stacks: vec![vec![GIB; 16]],
         }),
         decoder_workspace: None,
+        native_quant: None,
     });
     let eager = with_load_shape(streamed.clone(), LoadShape::EagerMaterialization);
     // 20 GiB weights + 18 GiB headroom = a 38 GiB resident floor; rung 4 sheds the whole 16 GiB

@@ -9971,6 +9971,7 @@ mod tests {
                 ]],
             }),
             decoder_workspace: None,
+            native_quant: None,
         });
         let rung4 = contract
             .strategies
@@ -11737,6 +11738,7 @@ mod tests {
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: None,
             decoder_workspace: None,
+            native_quant: None,
         });
         for windows in [None, Some(2)] {
             let longer = synthesize_estimate_ladder_with_conditioning(
