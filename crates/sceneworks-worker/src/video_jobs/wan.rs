@@ -2943,10 +2943,11 @@ pub(super) async fn generate_video_using(
                                 WorkerError::Canceled(message)
                             } else { WorkerError::InvalidPayload(message) }
                         })?;
-                    sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure(
+                    sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure_with_staging(
                         &preparation_data_dir,
                         &assembly,
                         receipt.files(),
+                        &receipt.component_staging(),
                     )
                     .map_err(|message| {
                         WorkerError::InvalidPayload(format!(

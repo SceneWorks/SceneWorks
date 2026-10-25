@@ -35,6 +35,9 @@ pub struct H3SourceAuthority {
     seals: Vec<PinnedWeightsFile>,
     directory: PathBuf,
     planned: BTreeSet<String>,
+    component_staging: std::sync::Arc<
+        parking_lot::Mutex<Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt>>,
+    >,
     _leases: Option<std::sync::Arc<H3SourceLeases>>,
 }
 
@@ -54,6 +57,7 @@ impl H3SourceAuthority {
             seals,
             directory,
             planned,
+            component_staging: Default::default(),
             _leases: None,
         };
         authority.validate()?;
@@ -90,7 +94,32 @@ impl H3SourceAuthority {
             })
     }
 
+    /// The existing staging operation and its provenance are inseparable. Clones retain these
+    /// private receipts alongside source/derivative leases through preparation, cache hits and cancel.
+    pub fn stage_component(
+        &self,
+        data_dir: &Path,
+        assembly: &Value,
+        link: &Path,
+        target: &Path,
+    ) -> Result<(), String> {
+        let receipts = crate::model_artifacts::provenance::stage_h3_component_with_receipts(
+            data_dir, assembly, link, target,
+        )?;
+        self.component_staging.lock().extend(receipts);
+        Ok(())
+    }
+
+    pub fn component_staging(
+        &self,
+    ) -> Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt> {
+        self.component_staging.lock().clone()
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        for receipt in self.component_staging.lock().iter() {
+            receipt.validate()?;
+        }
         for seal in &self.seals {
             seal.verify_unchanged().map_err(|e| e.to_string())?;
         }
@@ -294,6 +323,15 @@ impl PreparedH3Load {
 
     pub fn files(&self) -> &[PinnedWeightsFile] {
         &self.files
+    }
+
+    pub fn component_staging(
+        &self,
+    ) -> Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt> {
+        self.authority
+            .as_ref()
+            .map(H3SourceAuthority::component_staging)
+            .unwrap_or_default()
     }
 
     /// Prepared file closure, not `physicalReadHashes`: content identity is not proof of tensor use.
