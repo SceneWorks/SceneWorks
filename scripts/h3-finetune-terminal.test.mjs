@@ -209,6 +209,25 @@ test('actual reusable preflight rejects source-ref drift before product executio
   const good=spawnSync(process.execPath,['--input-type=module','-e',code],{env,encoding:'utf8'});assert.equal(good.status,0,good.stderr);
   const bad=spawnSync(process.execPath,['--input-type=module','-e',code],{env:{...env,GITHUB_SHA:inf},encoding:'utf8'});assert.equal(bad.status,1);assert.match(bad.stderr,/caller workflow commit/);
 });
+test('terminal compiler selection derives only the checked-out root pin without executing Rust locally',async t=>{
+  const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
+  const reader=workflow.slice(workflow.indexOf('      - name: Read the checked-out root Rust pin'),workflow.indexOf('      - name: Prepare the root-pinned compiler'));
+  assert.match(reader,/working-directory: sceneworks/);
+  const code=/node --input-type=module -e '\n([\s\S]*?)\n          '/.exec(reader)?.[1];assert.ok(code);
+  const dir=await mkdtemp(path.join(os.tmpdir(),'h3-toolchain-unit-fake-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const rootPin=/^channel = "([^"]+)"$/m.exec(await readFile(new URL('../rust-toolchain.toml',import.meta.url),'utf8'))[1];
+  const output=path.join(dir,'environment'),paths=path.join(dir,'paths'),cargoHome=path.join(dir,'cargo');
+  const run=()=>spawnSync(process.execPath,['--input-type=module','-e',code],{cwd:dir,env:{...process.env,GITHUB_ENV:output,GITHUB_PATH:paths,CARGO_HOME:cargoHome},encoding:'utf8'});
+  for(const pin of [rootPin,'9.8.7']){
+    await writeFile(path.join(dir,'rust-toolchain.toml'),`[toolchain]\nchannel = "${pin}"\n`);await writeFile(output,'');await writeFile(paths,'');
+    const result=run();assert.equal(result.status,0,result.stderr);assert.equal(await readFile(output,'utf8'),`RUSTUP_TOOLCHAIN=${pin}\n`);assert.equal(await readFile(paths,'utf8'),path.join(cargoHome,'bin')+'\n');
+  }
+  for(const source of ['[toolchain]\nchannel = "stable"\n','[toolchain]\nchannel = "1.98"\n','[toolchain]\n','channel = "9.8.7"\nchannel = "9.8.6"\n']){
+    await writeFile(path.join(dir,'rust-toolchain.toml'),source);await writeFile(output,'');assert.notEqual(run().status,0);assert.equal(await readFile(output,'utf8'),'');
+  }
+  const prepare=workflow.slice(workflow.indexOf('      - name: Prepare the root-pinned compiler'),workflow.indexOf('      - name: Execute or reverify'));
+  assert.match(prepare,/rustup toolchain install "\$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update/);assert.match(prepare,/rustup run "\$RUSTUP_TOOLCHAIN" rustc --version/);assert.doesNotMatch(prepare,/rustup (?:default|override)|1\.97\.1/);
+});
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
   for(const name of ['h3-finetune-terminal.test.mjs','h3-finetune-terminal-cases.test.mjs','h3-finetune-terminal-runtime.test.mjs'])assert.ok(p.scripts.check.includes(`scripts/${name}`));
@@ -216,10 +235,18 @@ test('ordinary check selects the CPU-only preparation tests rather than a termin
 });
 test('delivery records reject old CI, wrong main pin and unresolved limitations', async t => {
   const { p } = await fixture(t);
-  p.delivery = { requiredCI: [{ headSha: sw, conclusion: 'success', url: 'https://example.test/ci' }], featureEndReview: { sceneworks: sw, inference: inf, unresolvedFindings: 0, url: 'https://example.test/review' }, inferenceMain: { sha: inf, url: 'https://example.test/inference-main' }, sceneworksMain: { sha: 'e'.repeat(40), sourceCommit: sw, inferencePin: inf, url: 'https://example.test/sw-main' }, shortcutReadbacks: [26679,26691].map(id => ({ id, observedState: 'In Progress', readAt: '2026-10-24T00:00:00Z', url: `https://app.shortcut.com/trefry/${id}` })), limitations: [] };
+  p.delivery = { requiredCI: [{ headSha: sw, conclusion: 'success', url: 'https://example.test/ci' }], featureEndReview: { scope: 'epic-requirements-and-production-delta', sceneworks: sw, inference: inf, unresolvedFindings: 0, url: 'https://example.test/review' }, inferenceMain: { sha: inf, url: 'https://example.test/inference-main' }, sceneworksMain: { sha: 'e'.repeat(40), sourceCommit: sw, inferencePin: inf, url: 'https://example.test/sw-main' }, shortcutReadbacks: [26679,26691].map(id => ({ id, observedState: 'In Progress', readAt: '2026-10-24T00:00:00Z', url: `https://app.shortcut.com/trefry/${id}` })), limitations: [] };
   validateDelivery(p);
   for (const mutate of [d => d.requiredCI[0].headSha = 'f'.repeat(40), d => d.sceneworksMain.inferencePin = sw, d => d.limitations.push('Missing CUDA AV')]) {
     const copy = structuredClone(p); mutate(copy.delivery); assert.throws(() => validateDelivery(copy));
+  }
+  const prior=structuredClone(p);
+  prior.delivery.featureEndReview.sceneworks='c'.repeat(40);prior.delivery.featureEndReview.inference='d'.repeat(40);
+  assert.throws(()=>validateDelivery(prior),/focused late-delta/);
+  prior.delivery.lateDeltaReview={scope:'late-pin-generated-repair-delta',baseSceneworks:prior.delivery.featureEndReview.sceneworks,baseInference:prior.delivery.featureEndReview.inference,sceneworks:sw,inference:inf,unresolvedFindings:0,url:'https://example.test/late-review'};
+  validateDelivery(prior);
+  for(const mutate of [d=>d.featureEndReview.scope='pin-only',d=>d.featureEndReview.unresolvedFindings=1,d=>d.featureEndReview.sceneworks='not-a-sha',d=>d.lateDeltaReview.baseSceneworks=sw,d=>d.lateDeltaReview.baseInference=inf,d=>d.lateDeltaReview.sceneworks='e'.repeat(40),d=>d.lateDeltaReview.inference='f'.repeat(40),d=>d.lateDeltaReview.unresolvedFindings=1,d=>d.lateDeltaReview.scope='second-whole-branch-review',d=>delete d.lateDeltaReview.url]){
+    const copy=structuredClone(prior);mutate(copy.delivery);assert.throws(()=>validateDelivery(copy));
   }
 });
 test('honest sampled CUDA process/device-used peaks do not require native allocator highwater', async t => {

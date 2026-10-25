@@ -53,6 +53,18 @@ function workflowStep(job, name) {
   return job.slice(at, next === -1 ? undefined : next);
 }
 
+test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
+    "pruned/W4 model forwards belong only in explicitly selected manual validation");
+  assert.doesNotMatch(hosted, /--ignored\b/,
+    "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
+  assert.match(hosted, /run: cargo test -- --skip nax_16bit_sdpa_is_correct/,
+    "retain the ordinary workspace unit/math checks");
+  assert.match(hosted, /cargo clippy/,
+    "retain ordinary compilation/lint coverage");
+});
+
 test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
   const server = await source(".github/workflows/server-candle-linux.yml");
   assert.match(server, /^on:\n  workflow_dispatch:/m);
@@ -2593,38 +2605,14 @@ test("the Rust gate verifies tier integrity without gating the epic-end memory m
   assert.equal(scripts["check:rust-derived-docs"], "npm run check:tier-integrity");
   assert.doesNotMatch(scripts["check:rust-derived-docs"], /check:memory-matrix/);
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
 
-test("the pre-push derived-docs trigger is scoped to tier integrity, not memory evidence", async () => {
-  const hook = await source("scripts/git-hooks/pre-push");
-  const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
-  assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
-  const trigger = new RegExp(pattern);
-  for (const relative of [
-    "config/manifests/builtin.models.jsonc",
-    "config/tier-integrity.jsonc",
-    "packages/schemas/tier-integrity.schema.json",
-    "scripts/check-tier-integrity.mjs",
-    "scripts/tier-integrity-measurement-receipts.mjs",
-    "scripts/lib/jsonc.mjs",
-    "docs/generated/tier-integrity.json",
-    "docs/generated/tier-integrity.md",
-  ]) {
-    assert.ok(trigger.test(relative), `${relative} must trigger the tier-integrity check`);
-  }
-  for (const epicEndArtifact of [
-    "config/inference-provider-closures.json",
-    "config/rung4-contract-prerequisites.json",
-    "docs/generated/memory-matrix.json",
-    "docs/generated/memory-calibration-evidence.json",
-  ]) {
-    assert.equal(
-      trigger.test(epicEndArtifact),
-      false,
-      `${epicEndArtifact} must not wire the memory-matrix freshness gate back into pre-push`,
-    );
-  }
+test("pushes have no preflight hook while Rust checks remain available manually", async () => {
+  await assert.rejects(source("scripts/git-hooks/pre-push"), { code: "ENOENT" });
+  const scripts = JSON.parse(await source("package.json")).scripts;
+  assert.equal(scripts["rust:check:neither"], "node scripts/check-neither-build.mjs");
+  assert.equal(scripts["rust:check:candle"], "node scripts/check-candle-build.mjs");
+  assert.match(await source("scripts/git-hooks/pre-commit"), /npm run rust:fmt/);
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {

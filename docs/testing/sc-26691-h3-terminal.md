@@ -2,6 +2,19 @@
 
 This is executable **campaign preparation**, not accepted real-weight evidence. Story sc-26691 remains In Progress. No pin, campaign dispatch, model download, feature review, or main merge is performed by these scripts. The existing `h3-veda-*` registration-only workflows remain intentionally untouched. There are no measurement-currency or new runtime-admission gates.
 
+## Finalization ownership and review order
+
+The current `sceneworks-epic` terminal workflow supersedes older helper-PR and repeated-review procedures. The coordinator is the sole publisher. These private preparation commits are inputs to the coordinator's owned isolated checkout of the **existing feature branch**, not a request for a new S12/helper/sync/pin PR into feature.
+
+1. Integrate all code stories, then perform **one combined epic-requirements and entire production-delta review per repository**, before inference-main merge, the permanent pin and the campaign. Resolve valid findings locally and self-verify; no second blanket review is required.
+2. Combine terminal repairs and necessary base integration in the owned feature checkout. Verify current remote head and ownership, preserve concurrent work, and publish **one combined fast-forward feature update per repository**. Create/reuse **exactly one feature-to-main PR per repository**, after its prepared final publication; no helper PR or early PR merely to establish existence.
+3. Merge inference through its protected main PR and record the resulting actual main SHA. In SceneWorks, combine the permanent pin at every pin site, currently required generated artifacts and final repairs. A focused independent review covers this late pin/generated/repair delta and consumer implications—not another whole-branch review.
+4. Commit the clean stationary pair before the authorized campaign. Publish the reviewed feature candidate first if remote Actions needs its ref; link external evidence without a metadata-only publication. Run the full actual product/model acceptance, not the CPU fakes. Merge SceneWorks through its single protected feature-to-main PR only after exact-head checks and complete terminal evidence agree.
+
+Delivery metadata records `featureEndReview.scope: "epic-requirements-and-production-delta"` with the **actual reviewed** `sceneworks`/`inference` SHAs, zero unresolved findings and its review URL. Those pre-finalization SHAs need not equal the later campaign pair. When they differ, `lateDeltaReview` must have `scope: "late-pin-generated-repair-delta"`, `baseSceneworks`/`baseInference` equal to that combined review's pair, `sceneworks`/`inference` equal to the final campaign pair, zero unresolved findings and its focused-review URL. Do not relabel the earlier review as if it reviewed the final pin. These are recorded evidence links, not automatic publication/merge authorization or substitute reviews.
+
+S10's unmerged CPU proof route is not copied into this preparation branch. After its actual merge, preserve its semantic legacy-selection/order/uniqueness contracts and all CPU/import/terminal guards and queues in the combined router. Pending commits and native feature `1585120a63170b493789ffcaa97659b920a09960` are not an invented permanent source pair.
+
 ## Execution path
 
 - `node scripts/h3-finetune-terminal.mjs list` prints the complete required inventory: the eight frozen artifact/backend executions, plus backend-local numerical, conditioning, generalization, and lifecycle mechanisms. No filename or precision substitution is allowed. Capability mechanisms may use different *compatible* artifacts, not falsely exercise an unsupported operation on every file.

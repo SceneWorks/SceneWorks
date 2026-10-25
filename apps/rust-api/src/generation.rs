@@ -2442,6 +2442,7 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    ensure_expected_imported_model_reference(&state, &job_payload, &model_manifest_entry)?;
     let auto_duration_active =
         normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor

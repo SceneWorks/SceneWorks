@@ -1195,7 +1195,26 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
             "{layout}: {refusal}"
         );
         assert!(imported.install_dir.is_dir());
-        assert!(store.resolve(&imported.checkpoint_id).is_ok());
+        let resolved = store.resolve(&imported.checkpoint_id).unwrap();
+        let inventory =
+            sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config(
+                &resolved,
+                sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context).unwrap(),
+            )
+            .unwrap();
+        let derivatives =
+            sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
+                .unwrap();
+        let expected_key = inventory.requires_normalization.then(|| {
+            derivatives
+                .cache_key(&resolved, &inventory.derivative_request())
+                .unwrap()
+        });
+        assert_eq!(
+            provider.load_authority.derivative_cache_key(),
+            expected_key,
+            "{layout}: receipt must name the leased derivative, never a source-only load"
+        );
         // An uncancellable blocking preparation retains its authority after the async owner
         // drops. Both the managed source and normalized derivative must remain leased.
         let receipt_key = provider.load_authority.derivative_cache_key();
@@ -1208,16 +1227,13 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
         blocking_authority.validate().unwrap();
         assert_eq!(
             blocking_authority.derivative_cache_key(),
-            receipt_key,
-            "receipt identity and both leases survive cancellation of the async owner"
+            expected_key,
+            "{layout}: receipt identity and both leases survive cancellation of the async owner"
         );
         assert!(
             store.remove_managed("leased_h3").is_err(),
             "{layout}: reader still holds the source lease"
         );
-        let derivatives =
-            sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
-                .unwrap();
         assert!(
             derivatives.remove_managed_install("leased_h3").is_err(),
             "{layout}: active preparation cannot lose its normalized source"

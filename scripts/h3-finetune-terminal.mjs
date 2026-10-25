@@ -410,8 +410,21 @@ export function validateDelivery(p) {
   const link = v => assert.match(v ?? '', /^https:\/\//);
   assert.ok(Array.isArray(d.requiredCI) && d.requiredCI.length > 0);
   for (const check of d.requiredCI) { assert.ok([p.sceneworks, p.inference].includes(check.headSha), 'CI source mismatch'); assert.equal(check.conclusion, 'success'); link(check.url); }
-  assert.equal(d.featureEndReview?.sceneworks, p.sceneworks); assert.equal(d.featureEndReview?.inference, p.inference);
-  assert.equal(d.featureEndReview.unresolvedFindings, 0); link(d.featureEndReview.url);
+  // The combined epic/production review precedes the permanent pin, so its source
+  // pair need not be the later stationary campaign pair. Bind any intervening delta
+  // to the focused final-pair review instead of demanding a second whole-branch review.
+  const review = d.featureEndReview;
+  sha40(review?.sceneworks); sha40(review?.inference);
+  assert.equal(review.scope, 'epic-requirements-and-production-delta');
+  assert.equal(review.unresolvedFindings, 0); link(review.url);
+  if (review.sceneworks !== p.sceneworks || review.inference !== p.inference || d.lateDeltaReview) {
+    const late = d.lateDeltaReview;
+    assert.ok(late, 'changed reviewed pair requires focused late-delta review');
+    assert.equal(late.scope, 'late-pin-generated-repair-delta');
+    assert.equal(late.baseSceneworks, review.sceneworks); assert.equal(late.baseInference, review.inference);
+    assert.equal(late.sceneworks, p.sceneworks); assert.equal(late.inference, p.inference);
+    assert.equal(late.unresolvedFindings, 0); link(late.url);
+  }
   assert.equal(d.inferenceMain?.sha, p.inference); link(d.inferenceMain.url);
   sha40(d.sceneworksMain?.sha); assert.equal(d.sceneworksMain.sourceCommit, p.sceneworks); assert.equal(d.sceneworksMain.inferencePin, p.inference); link(d.sceneworksMain.url);
   assert.ok(Array.isArray(d.shortcutReadbacks) && d.shortcutReadbacks.some(r => r.id === 26679) && d.shortcutReadbacks.some(r => r.id === 26691));

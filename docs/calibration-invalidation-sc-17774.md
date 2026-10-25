@@ -240,7 +240,7 @@ fetch needs no token; see the module header for why the opposite was believed fo
 The table above is deliberately narrow, and the omission is the point of epic 18093 R3: **no gate
 anywhere fails or warns a pull request because a measurement is out of date.** Staleness is a
 signal; the runtime absorbs it with a widened margin. An audit of the whole composite —
-`npm run check` and each of its sub-scripts, `npm run rust:check`, `scripts/git-hooks/pre-push`,
+`npm run check` and each of its sub-scripts, `npm run rust:check`, the since-removed pre-push hook,
 and every step of `check.yml` — found no currency gate to remove, and this section exists so the
 next reader can tell the surviving gates apart from one instead of re-deriving the distinction.
 
@@ -250,7 +250,7 @@ Three classes, and only the first would be re-measurement pressure:
 | --- | --- | --- |
 | **currency / re-measurement** | *(none)* | nothing in the composite demands a re-capture, and nothing may be added that does |
 | **integrity of the evidence and the table** | `check:memory-calibration` (schema + well-formedness of every record, `harnessVersion`, `evidenceSemantics`'s fail-closed "record carries no digest" / "lane is undeclared"); `inference-closure-digest.mjs --check` and `backfill-closure-digests.mjs --verify` in `check.yml`; `bump-inference.mjs`'s refusal of a pin bump that leaves `config/inference-provider-closures.json` un-regenerated | **stays.** These answer "is this data real and well-formed", never "is it recent" |
-| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:tier-integrity`; `check:calibration-cost-model` was a third member until sc-18100 retired it with its generator) in `check`, `rust:check` and pre-push | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
+| **derived-artifact consistency** | `check:rust-derived-docs` (`check:memory-matrix`, `check:tier-integrity`; `check:calibration-cost-model` was a third member until sc-18100 retired it with its generator) in `check` and `rust:check` | **stays.** A closure digest that rotates changes the matrix's *source fingerprint* (and its content when a lane's currency actually flips); the remedy is `npm run generate:memory-matrix`, which is mechanical, sub-second, and needs no GPU, no weights and no capture |
 
 Measured on the corpus at `40fa7583`: **every** measured lane is stale — 9 declared lanes, 8 of them
 carrying at least one binding or record, 0 of those closure-current, 1 declared but never captured;

@@ -2343,8 +2343,16 @@ fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
 #[tokio::test]
 async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = crate::test_env::offline_settings();
-    settings.data_dir = data_dir.path().to_path_buf();
+    // `offline_settings`, not `Settings::from_env()`: this decode heartbeats through `ApiClient`
+    // while ffmpeg runs, and `from_env` defaults `api_url` to the real local API. On a machine
+    // with anything else listening on that port the heartbeat gets a real non-2xx and — unlike a
+    // transport error, which `heartbeat` swallows — aborts the decode before it asserts anything.
+    // Pinned unroutable, the request fails locally and is ignored, so the ffmpeg path under test
+    // is the only thing that decides the result.
+    let settings = Settings {
+        data_dir: data_dir.path().to_path_buf(),
+        ..offline_settings()
+    };
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc17160");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -2614,8 +2622,11 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     }
 
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = crate::test_env::offline_settings();
-    settings.data_dir = data_dir.path().to_path_buf();
+    // Pinned unroutable for the same reason as the sibling decode test — see the note there.
+    let settings = Settings {
+        data_dir: data_dir.path().to_path_buf(),
+        ..offline_settings()
+    };
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc24070");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -2713,7 +2724,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let mono = tracks[0];
     let mismatched = mono
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 1.0 / 32_768.0)
         .count();
     assert_eq!(
@@ -2729,7 +2742,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let stereo = tracks[1];
     let distinct = stereo
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 0.1)
         .count();
     assert!(
@@ -7336,13 +7351,19 @@ fn mochi_raw_settings_record_the_loaded_tier() {
 // `offline_settings` is the one way to build a `Settings` for a test whose path could reach a
 // download: it pins every network field unroutable, so no call site has to remember that
 // `huggingface_base_url` (not `api_url`) is what a tier fetch dials. See its doc comment.
-// Its consumers include the candle Mochi twins, so it rides the same `any(macos, candle)` gate
-// as the helpers above rather than the macOS-only one below.
+// It rides NO gate, because its consumers don't: the two reference-audio decode tests below are
+// ungated (they need ffmpeg, not a backend) and build their settings from it. Gating this import
+// while they stay compiled is exactly the wider-narrower mismatch the note above warns about —
+// it just fails as E0425 rather than unused_imports.
+use crate::test_env::offline_settings;
+
+// The consumers that WRITE vars — the candle Mochi twins among them — so this keeps the
+// `any(macos, candle)` gate of the helpers above rather than the macOS-only one below.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-use crate::test_env::{offline_settings, temp_env_var, temp_env_vars};
+use crate::test_env::{temp_env_var, temp_env_vars};
 
 // The macOS-gated adapter fixtures (wan Lightning + ltx distill) pin a var for a whole test body —
 // see the cfg note above.
@@ -9940,7 +9961,7 @@ fn scail2_dir() -> Option<PathBuf> {
 fn scail2_smoke_color_mask(w: u32, h: u32, bg: [u8; 3]) -> Image {
     let (wu, hu) = (w as usize, h as usize);
     let mut px = vec![0u8; wu * hu * 3];
-    for chunk in px.chunks_exact_mut(3) {
+    for chunk in px.as_chunks_mut::<3>().0 {
         chunk.copy_from_slice(&bg);
     }
     for y in (hu / 4)..(3 * hu / 4) {

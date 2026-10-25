@@ -117,6 +117,28 @@ jobs:
             assert.equal(p.sceneworks,e.SW_SHA); assert.equal(p.inference,e.INF_SHA);
             assert.equal(p.cases.find(c=>c.id===e.CASE_ID)?.backend,e.BACKEND);
           '
+      - name: Read the checked-out root Rust pin
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import {readFile,appendFile} from "node:fs/promises";
+            import path from "node:path";
+            import os from "node:os";
+            const pins=[...(await readFile("rust-toolchain.toml","utf8")).matchAll(/^channel\s*=\s*"([^"]+)"\s*$/gm)];
+            assert.equal(pins.length,1,"one root Rust channel is required");
+            const pin=pins[0][1]; assert.match(pin,/^\d+\.\d+\.\d+$/);
+            await appendFile(process.env.GITHUB_ENV,`RUSTUP_TOOLCHAIN=${pin}\n`);
+            await appendFile(process.env.GITHUB_PATH,path.join(process.env.CARGO_HOME || path.join(os.homedir(),".cargo"),"bin")+"\n");
+          '
+      - name: Prepare the root-pinned compiler without changing the runner default
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update -c rustfmt -c clippy
+          rustup run "$RUSTUP_TOOLCHAIN" rustc --version
+          rustup run "$RUSTUP_TOOLCHAIN" cargo --version
       - name: Execute or reverify one durable source-bound case
         shell: bash
         working-directory: sceneworks

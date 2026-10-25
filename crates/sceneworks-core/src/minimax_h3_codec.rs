@@ -516,17 +516,23 @@ impl<'a> OperandValues<'a> {
             match self.dtype {
                 Dtype::F32 => self.values.extend(
                     chunk
-                        .chunks_exact(4)
-                        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())),
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|bytes| f32::from_le_bytes(*bytes)),
                 ),
-                Dtype::BF16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
-                    let bits = (u16::from_le_bytes(bytes.try_into().unwrap()) as u32) << 16;
-                    f32::from_bits(bits)
-                })),
-                Dtype::F16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
-                    let bits = u16::from_le_bytes(bytes.try_into().unwrap());
-                    half::f16::from_bits(bits).to_f32()
-                })),
+                Dtype::BF16 => self
+                    .values
+                    .extend(chunk.as_chunks::<2>().0.iter().map(|bytes| {
+                        let bits = (u16::from_le_bytes(*bytes) as u32) << 16;
+                        f32::from_bits(bits)
+                    })),
+                Dtype::F16 => self
+                    .values
+                    .extend(chunk.as_chunks::<2>().0.iter().map(|bytes| {
+                        let bits = u16::from_le_bytes(*bytes);
+                        half::f16::from_bits(bits).to_f32()
+                    })),
                 _ => unreachable!("inspect admits only dense F16/BF16/F32 AdaLN operands"),
             }
         }
@@ -1405,8 +1411,10 @@ fn w4a8_outputs(
                 .validate_s_rel(&buffer[..count])
             } else {
                 let values: Vec<_> = buffer[..count]
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect();
                 if suffix == "codebook" {
                     descriptor.validate_codebook(&values)
