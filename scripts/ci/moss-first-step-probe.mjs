@@ -1,10 +1,11 @@
 // Fixed, authenticated first-step comparison only. Actual compilation/model work is Actions-only.
-import {readFile,writeFile,mkdir,lstat,stat,realpath,readlink,readdir,copyFile,statfs} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,lstat,stat,realpath,readlink,readdir,copyFile,statfs,appendFile,cp} from 'node:fs/promises';
 import {createReadStream,createWriteStream,constants} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {resolve,dirname} from 'node:path';
 import {spawn} from 'node:child_process';
-import {safe,verifyPayload,validateRuntime,PAYLOAD_SHA} from './moss-upstream-reference.mjs';
+import {fileURLToPath} from 'node:url';
+import {safe,verifyPayload,validateRuntime,PAYLOAD_SHA} from './moss-upstream-reference-common.mjs';
 import {copyCacheExclusive} from './moss-owned-cache-maintenance.mjs';
 export const PROBE_STAGED='/Users/michael/.codex/epic-runs/sc-26752/first-step-probe-r15/payload';
 export const PROBE_SHA='440a33b4ddb9cadaecb3b73291f648b1c03fe0239a7ea682cf29d56b7f4c8796';
@@ -58,3 +59,144 @@ export async function executeProbe(root,payload,env=process.env){
  await run(runtime.launcher,['-B',resolve(payload,'compare_first_step.py'),'--upstream',resolve(root,'upstream'),'--native',resolve(root,'native'),'--output',resolve(root,'comparison.json')],{cwd:payload,env:common,log:resolve(root,'comparison.log')});
  await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({nativePin:PIN,binary,binarySha256,inputsSha256:await fileHash(inputs),upstreamSha256:await fileHash(resolve(root,'upstream/upstream.json')),nativeSha256:await fileHash(resolve(root,'native/native.json')),scope:'one original30-step schedule first update; metrics only, no quality tolerance gate'},null,2)+'\n',{flag:'wx'});
 }
+
+// Separate fixed diagnostic: reuse already encoded upstream inputs, never execute Python/models upstream.
+export const ENCODING_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-only-prep/payload';
+export const ENCODING_SHA='3004cb310e3e3e98de8ea0901ca848f2b67c81f9aebb7aff6ca974e19230ffd2';
+const ENCODING_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-first-step-40195966134-1/target';
+const ENCODING_HUB=BASE+'/moss-execute-40198829729-1-mlx/hf/hub';
+const INPUT_SHA='47b07acccc6491dbc1f4c5c3135fe37d4d65f4afb496d28dafd8ca63a08cd47d';
+const UPSTREAM_SHA='ade384909936c7b55326ce3bf7a804e827c9b6b1ffbdc9232e7e36b5016b9b57';
+const ENCODING_SHAPES={positive:[1,71,4096],negative:[1,10,4096],positive_mask:[1,71],negative_mask:[1,10],reference_0:[1,128,21,32]};
+export function encodingEnvelope(raw,ref,sha,backend){
+ const value=JSON.parse(raw);
+ check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase','closed encoding envelope required');
+ check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact encoding source and mlx required');
+ check(['upload-encoding','execute-encoding'].includes(value.phase),'unknown encoding phase');
+ for(const key of ['artifact_id','artifact_run_id'])check(value.phase==='upload-encoding'?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact encoding artifact identity required');
+ return value;
+}
+async function tensorValues(root,name,item,shape){
+ check(item&&item.file===name+'.f32le'&&item.dtype==='f32le'&&JSON.stringify(item.shape)===JSON.stringify(shape),'encoding tensor contract mismatch');
+ const length=shape.reduce((a,b)=>a*b,4),path=safe(root,item.file);await noLinks(path);
+ const info=await lstat(path);check(length<=4*1024*1024&&item.byteLength===length&&info.isFile()&&info.size===length,'encoding tensor length mismatch');
+ const bytes=await readFile(path);check(digest(bytes)===item.sha256,'encoding tensor SHA mismatch');
+ const values=[];for(let i=0;i<bytes.length;i+=4){const value=bytes.readFloatLE(i);check(Number.isFinite(value),'nonfinite encoding tensor');if(name.endsWith('_mask'))check(value===1,'fixed unpadded mask must be all ones');values.push(value);}return values;
+}
+export async function verifyEncodingPayload(root,expected=ENCODING_SHA){
+ await noLinks(root);const bytes=await readFile(resolve(root,'payload-manifest.json'));check(bytes.length<65536&&digest(bytes)===expected,'encoding manifest SHA mismatch');
+ const manifest=JSON.parse(bytes);check(manifest.kind==='sc-26752-normal-encoding/v1'&&manifest.nativePin===PIN&&manifest.upstreamRun==='40195966134'&&manifest.inputsSha256===INPUT_SHA&&manifest.upstreamSha256===UPSTREAM_SHA,'encoding provenance mismatch');
+ check(Array.isArray(manifest.files)&&manifest.files.length===13,'fixed encoding payload closure required');const wanted=new Set(['payload-manifest.json']);
+ for(const item of manifest.files){check(!wanted.has(item.file),'duplicate encoding file');wanted.add(item.file);const path=safe(root,item.file);await noLinks(path);const info=await lstat(path);check(info.isFile()&&info.nlink===1&&info.size===item.byteLength&&info.size<=8*1024*1024&&await fileHash(path)===item.sha256,'encoding payload file mismatch');}
+ async function walk(path,prefix=''){for(const entry of await readdir(path,{withFileTypes:true})){check(!entry.isSymbolicLink(),'encoding payload link');const file=prefix+entry.name;if(entry.isDirectory())await walk(resolve(path,entry.name),file+'/');else check(wanted.has(file),'unlisted encoding file');}}await walk(root);
+ const inputBytes=await readFile(resolve(root,'upstream/inputs.json')),upstreamBytes=await readFile(resolve(root,'upstream/upstream.json'));
+ check(digest(inputBytes)===INPUT_SHA&&digest(upstreamBytes)===UPSTREAM_SHA,'retained upstream identity mismatch');
+ const inputs=JSON.parse(inputBytes),upstream=JSON.parse(upstreamBytes);
+ check(inputs.kind==='sc-26752-first-step-inputs/v1'&&inputs.nativeHead===PIN&&upstream.status==='CAPTURED_FIRST_STEP_ONLY'&&upstream.inputsSha256===INPUT_SHA&&upstream.predictions===2&&upstream.updates===1,'retained capture incomplete');
+ check(Object.keys(inputs.tensors).length===6,'exact six retained inputs required');
+ for(const [name,shape] of Object.entries({...ENCODING_SHAPES,noise:[1,128,32,48]}))await tensorValues(resolve(root,'upstream'),name,inputs.tensors[name],shape);
+ check(await fileHash(resolve(root,'B.png'))===inputs.provenance.referenceSha256,'reference PNG identity mismatch');
+ return manifest;
+}
+// macOS clonefile(2) has no ordinary-copy fallback. Node's FORCE flag is unsupported
+// by this host's libuv; use the system interpreter only to invoke the native syscall.
+const CLONE_TREE_PYTHON = String.raw`
+import ctypes, os, pathlib, stat, sys
+source, destination = map(pathlib.Path, sys.argv[1:])
+libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+clone = libc.clonefile
+clone.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+clone.restype = ctypes.c_int
+for directory, dirs, files in os.walk(source, followlinks=False):
+    relative = pathlib.Path(directory).relative_to(source)
+    for name in dirs:
+        child = pathlib.Path(directory) / name
+        if not stat.S_ISDIR(child.lstat().st_mode): raise RuntimeError('linked clone directory')
+        (destination / relative / name).mkdir(mode=0o700)
+    for name in files:
+        child = pathlib.Path(directory) / name
+        if not stat.S_ISREG(child.lstat().st_mode): raise RuntimeError('nonregular clone file')
+        target = destination / relative / name
+        if clone(os.fsencode(child), os.fsencode(target), 1) != 0:
+            code = ctypes.get_errno()
+            raise OSError(code, os.strerror(code), str(child))
+`;
+async function nativeCloneTree(source,destination){
+ check(process.platform==='darwin','encoding clone requires macOS clonefile');
+ await new Promise((done,fail)=>{let error='';const child=spawn('/usr/bin/python3',['-I','-B','-c',CLONE_TREE_PYTHON,source,destination],{stdio:['ignore','ignore','pipe'],env:{PATH:'/usr/bin:/bin'}});child.stderr.on('data',b=>{if(error.length<65536)error+=b.toString();});child.on('error',fail);child.on('close',code=>code===0?done():fail(Error(`clonefile failed without fallback (${code}): ${error}`)));});
+}
+// No hardlinks, symlinks, existing destination, fallback, or writes into retained target.
+export async function cloneEncodingTarget(source,destination,cloneTree=nativeCloneTree){
+ await noLinks(source);await noLinks(dirname(destination));
+ const src=await lstat(source,{bigint:true}),parent=await lstat(dirname(destination),{bigint:true});
+ check(src.isDirectory()&&src.dev===parent.dev,'encoding clone requires same-volume directories');
+ check(!resolve(destination).startsWith(resolve(source)+'/')&&!resolve(source).startsWith(resolve(destination)+'/')&&resolve(source)!==resolve(destination),'encoding clone roots overlap');
+ const entries=[];
+ async function inspect(dir,prefix=''){for(const entry of await readdir(dir,{withFileTypes:true})){const file=prefix+entry.name,path=resolve(source,file),info=await lstat(path,{bigint:true});check(!info.isSymbolicLink()&&(info.isFile()||info.isDirectory()),'encoding cache contains unsupported link/type');if(info.isDirectory())await inspect(path,file+'/');else entries.push({file,info});}}await inspect(source);
+ await mkdir(destination,{mode:0o700});await cloneTree(source,destination);let bytes=0n;
+ for(const entry of entries){const after=await lstat(resolve(source,entry.file),{bigint:true}),cloned=await lstat(resolve(destination,entry.file),{bigint:true});
+  for(const key of ['dev','ino','size','mtimeNs','ctimeNs'])check(after[key]===entry.info[key],'retained cache changed while cloning');
+  check(cloned.isFile()&&cloned.dev===after.dev&&cloned.ino!==after.ino&&cloned.nlink===1n&&cloned.size===after.size&&(cloned.mode&0o777n)===(after.mode&0o777n),'encoding clone is not an independent file');bytes+=after.size;
+ }
+ return {files:entries.length,logicalBytes:String(bytes),method:'macOS clonefile(2) CLONE_NOFOLLOW; no fallback',sourceRetained:true};
+}
+export function encodingMetrics(reference,native){
+ check(reference.length===native.length&&reference.length>0,'encoding metric cardinality');let error=0,ref=0,out=0,dot=0,absolute=0,signed=0,max=0,equal=0;
+ for(let i=0;i<reference.length;i++){const a=reference[i],b=native[i];check(Number.isFinite(a)&&Number.isFinite(b),'nonfinite encoding metric');const d=b-a;error+=d*d;ref+=a*a;out+=b*b;dot+=a*b;absolute+=Math.abs(d);signed+=d;max=Math.max(max,Math.abs(d));equal+=Number(a===b);}
+ return {elements:reference.length,maxAbsError:max,meanAbsError:absolute/reference.length,rmse:Math.sqrt(error/reference.length),relativeL2:ref?Math.sqrt(error/ref):null,cosineSimilarity:ref&&out?dot/Math.sqrt(ref*out):null,signedMeanError:signed/reference.length,equalValues:equal};
+}
+export async function compareEncoding(payload,nativeRoot){
+ const inputs=JSON.parse(await readFile(resolve(payload,'upstream/inputs.json'))),bytes=await readFile(resolve(nativeRoot,'native.json'));check(bytes.length<65536,'oversized native encoding receipt');const native=JSON.parse(bytes);
+ check(native.kind==='sc-26752-native-normal-encoding/v1'&&native.status==='CAPTURED_ENCODING_ONLY'&&native.nativePin===PIN&&native.inputsSha256===INPUT_SHA,'incomplete native encoding');
+ check(native.requestSha256===await fileHash(resolve(payload,'request.json'))&&native.referencePngSha256===inputs.provenance.referenceSha256,'native encoding input mismatch');
+ check(Object.keys(native.tensors).sort().join(',')===Object.keys(ENCODING_SHAPES).sort().join(','),'unexpected native encoding tensor closure');
+ const request=JSON.parse(await readFile(resolve(payload,'request.json')));
+ for(const [key,prompt,length] of [['positiveReceipt',request.prompt,71],['negativeReceipt',request.negativePrompt,10]]){const receipt=native[key];check(receipt?.source==='text'&&receipt.sha256===digest(Buffer.from(prompt))&&receipt.sequence_length===length&&receipt.valid_tokens===length,'native text receipt mismatch');}
+ for(const item of Object.values(native.tensors))check(typeof item.sourceDtype==='string'&&item.sourceDtype.length>0,'native source dtype missing');
+ const metrics={};for(const [name,shape] of Object.entries(ENCODING_SHAPES))metrics[name]=encodingMetrics(await tensorValues(resolve(payload,'upstream'),name,inputs.tensors[name],shape),await tensorValues(nativeRoot,name,native.tensors[name],shape));
+ check(native.referenceReceipts.length===1&&native.referenceReceipts[0].latent_sha256===native.tensors.reference_0.sha256,'reference receipt tensor mismatch');
+ return {kind:'sc-26752-normal-encoding-comparison/v1',status:'METRICS_ONLY_NO_ACCEPTANCE_VERDICT',inputsSha256:INPUT_SHA,nativeReceiptSha256:digest(bytes),text:{positive:metrics.positive,negative:metrics.negative,positive_mask:metrics.positive_mask,negative_mask:metrics.negative_mask},vae:{reference_0:metrics.reference_0},note:'Normally encoded text and deterministic VAE only; no DiT, denoising, image generation or numerical acceptance threshold.'};
+}
+export async function executeEncoding(root,payload,env=process.env){
+ check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','encoding execution requires registered Mac Actions');
+ const manifest=await verifyEncodingPayload(payload),source=resolve(env.GITHUB_WORKSPACE,`moss-first-step-native-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`),nativeRoot=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752',`moss-encoding-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+ await noLinks(source);await noLinks(dirname(nativeRoot));await mkdir(nativeRoot,{mode:0o700});
+ const common={...env,CARGO_HOME:resolve(nativeRoot,'cargo-home'),CARGO_TARGET_DIR:resolve(nativeRoot,'target'),CARGO_BUILD_JOBS:'2',CMAKE_BUILD_PARALLEL_LEVEL:'2',CARGO_PROFILE_RELEASE_STRIP:'none',CARGO_INCREMENTAL:'0',HF_HOME:resolve(root,'hf'),HF_HUB_OFFLINE:'1',CUDA_VISIBLE_DEVICES:'',OMP_NUM_THREADS:'1'};
+ let gitIndex=0;const git=async args=>(await run('git',args,{cwd:source,env:common,log:resolve(root,`encoding-git-${++gitIndex}.log`)})).trimEnd();
+ check(await git(['rev-parse','HEAD'])===PIN&&await git(['status','--porcelain'])==='','encoding native checkout must be clean exact pin');
+ const identity=JSON.parse(await readFile(resolve(payload,'overlay/source-identity.json')));
+ check(identity.baseHead===PIN&&identity.libPath==='crates/media/mlx-gen/mlx-gen-moss-image/src/lib.rs'&&identity.newModulePath==='crates/media/mlx-gen/mlx-gen-moss-image/src/encoding_probe.rs'&&identity.test==='encoding_probe::fixed_normal_encoding_only','fixed encoding overlay identity required');
+ const lib=safe(source,identity.libPath);check(await fileHash(lib)===identity.originalLibSha256,'encoding original lib mismatch');
+ await git(['apply','--check',resolve(payload,'overlay/lib.rs.patch')]);await git(['apply',resolve(payload,'overlay/lib.rs.patch')]);await copyFile(resolve(payload,'overlay/encoding_probe.rs'),safe(source,identity.newModulePath),constants.COPYFILE_EXCL);
+ check(await fileHash(lib)===identity.overlayLibSha256,'encoding patched lib mismatch');
+ const delta=await git(['status','--porcelain','--untracked-files=all']);check(delta.split('\n').sort().join('\n')===[' M '+identity.libPath,'?? '+identity.newModulePath].sort().join('\n'),'unexpected encoding source delta');
+ const clone=await cloneEncodingTarget(ENCODING_WARM,common.CARGO_TARGET_DIR);await noLinks(CARGO_SEED);await copyCacheExclusive(CARGO_SEED,common.CARGO_HOME);
+ const models={base:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-Base/snapshots/1ceede80badddd6a7812069619edaa5633587192',shared:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-SFT/snapshots/fc5de0d56fc910cbca6f6625a70f5f582b26deb1',adapter:ENCODING_HUB+'/models--chinoll--Moss-Image-Edit/snapshots/3be9c40037e1b89b17aa85ff6f8ee805872aa558'};
+ await writeFile(resolve(root,'probe-authentication.json'),JSON.stringify({kind:'sc-26752-encoding-authentication/v1',manifestSha256:ENCODING_SHA,nativePin:PIN,routeSource:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,originalUpstreamRun:manifest.upstreamRun,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,overlay:identity,sourceDelta:delta,source,target:common.CARGO_TARGET_DIR,warmTarget:ENCODING_WARM,clone,models,modelAuthentication:'unchanged native Sources/ArtifactSeal authentication before learned tensor loading'},null,2)+'\n',{flag:'wx'});
+ const build=await run('rustup',['run','1.98.0','cargo','test','--locked','--release','-p','mlx-gen-moss-image','--lib','--no-run','--message-format=json'],{cwd:source,env:common,log:resolve(root,'native-build.log')});const binary=probeBinary(build,common.CARGO_TARGET_DIR),binarySha256=await fileHash(binary);
+ await verifyEncodingPayload(payload);
+ await run(binary,[identity.test,'--exact','--ignored','--nocapture','--test-threads=1'],{cwd:source,env:{...common,MOSS_ENCODING_ADMITTED:'1',MOSS_ENCODING_PAYLOAD:payload,MOSS_ENCODING_OUTPUT:resolve(root,'native'),MOSS_ENCODING_REQUEST_SHA:await fileHash(resolve(payload,'request.json')),MOSS_ENCODING_BASE:models.base,MOSS_ENCODING_SHARED:models.shared,MOSS_ENCODING_ADAPTER:models.adapter},log:resolve(root,'native.log')});
+ const comparison=await compareEncoding(payload,resolve(root,'native'));await writeFile(resolve(root,'comparison.json'),JSON.stringify(comparison,null,2)+'\n',{flag:'wx'});
+ await verifyEncodingPayload(payload);await cp(resolve(payload,'upstream'),resolve(root,'upstream'),{recursive:true,errorOnExist:true,force:false});
+ await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-encoding-completion/v1',nativePin:PIN,binary,binarySha256,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,nativeSha256:await fileHash(resolve(root,'native/native.json')),comparisonSha256:await fileHash(resolve(root,'comparison.json')),scope:'normal encoding only; upstream reused byte-for-byte; no DiT/sampling/image run'},null,2)+'\n',{flag:'wx'});
+}
+async function encodingMain(){
+ const phase=JSON.parse(process.env.MOSS_REFERENCE??'{}').phase;
+ if(!['upload-encoding','execute-encoding'].includes(phase)){
+  check(process.argv[2]==='route'&&['validate','execute'].includes(process.argv[3]),'fixed reference route required');
+  const code=await new Promise((done,fail)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('./moss-upstream-reference.mjs',import.meta.url)),process.argv[3]],{stdio:'inherit',env:process.env});child.on('error',fail);child.on('close',done);});check(code===0,'original reference route failed');return;
+ }
+ check(process.env.GITHUB_ACTIONS==='true'&&process.env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','registered Mac encoding route only');
+ const value=encodingEnvelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);
+ check(/^[1-9][0-9]+$/.test(process.env.GITHUB_RUN_ID)&&/^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT),'actual encoding Actions identity required');
+ const root=resolve(BASE,`moss-encoding-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
+ check(process.argv[2]==='route','fixed route required');
+ if(process.argv[3]==='validate'){
+  if(value.phase==='upload-encoding')await verifyEncodingPayload(ENCODING_STAGED);
+  await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:ENCODING_STAGED}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;
+ }
+ check(process.argv[3]==='execute'&&value.phase==='execute-encoding','fixed encoding execute required');
+ await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});
+ const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);await verifyEncodingPayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeEncoding(root,resolve(root,'payload'));
+}
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))await encodingMain();

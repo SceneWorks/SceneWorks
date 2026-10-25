@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdtemp,rm,symlink,realpath} from 'node:fs/promises';
+import {readFile,writeFile,mkdtemp,rm,symlink,realpath,mkdir,stat,link} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {envelope,PAYLOAD_SHA} from './moss-upstream-reference.mjs';
-import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA} from './moss-first-step-probe.mjs';
+import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,encodingEnvelope,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),ref='a'.repeat(40),pin='857f7a1996e3678a0773c3509ac0087522c19ce6';
 test('probe dispatch is closed, immutable-artifact-only, and cannot select backend/source/commands',()=>{
  for(const phase of ['upload-probe','execute-probe']){const value={phase,artifact_id:phase==='upload-probe'?null:'123456',artifact_run_id:phase==='upload-probe'?null:'1234567'};assert.deepEqual(envelope(JSON.stringify(value),ref,ref,'mlx'),value);for(const bad of [{...value,command:'cargo test'},{...value,payload:'/tmp/x'},{...value,device:'cpu'}])assert.throws(()=>envelope(JSON.stringify(bad),ref,ref,'mlx'));assert.throws(()=>envelope(JSON.stringify(value),ref,ref,'candle'));assert.throws(()=>envelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));}
@@ -29,6 +29,41 @@ test('native executable selection rejects old/external/multiple/non-test executa
 });
 test('sealed identity pins exact two-file cfg(test) overlay and original payload, with no numerical gate',async()=>{
  const bytes=await readFile(new URL('../fixtures/moss-first-step-probe/payload-manifest.json',import.meta.url)),manifest=JSON.parse(bytes);assert.equal(sha(bytes),PROBE_SHA);assert.equal(manifest.originalReferencePayloadSha256,PAYLOAD_SHA);assert.equal(manifest.nativePin,pin);assert.equal(manifest.files.length,10);for(const file of ['capture_first_step.py','compare_first_step.py','prior-authentication-binding.json','overlay/lib.rs.patch','overlay/first_step_probe.rs','overlay/source-identity.json'])assert.ok(manifest.files.find(x=>x.file===file));
- const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8');assert.match(code,/'rustup',\['run','1.98.0','cargo','test','--locked','--release'/);assert.match(code,/originalTargetRetained:true/);assert.match(code,/--ignored/);assert.match(code,/COPYFILE_EXCL/);assert.match(code,/copyCacheExclusive\(WARM,common.CARGO_TARGET_DIR\)/);assert.doesNotMatch(code,/\/bin\/cp/);assert.match(code,/unexpected native source delta/);assert.doesNotMatch(code,/git push|nvidia-smi|FICLONE_FORCE|shell:true/);
+ const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8');assert.match(code,/'rustup',\['run','1.98.0','cargo','test','--locked','--release'/);assert.match(code,/originalTargetRetained:true/);assert.match(code,/--ignored/);assert.match(code,/COPYFILE_EXCL/);assert.match(code,/copyCacheExclusive\(WARM,common.CARGO_TARGET_DIR\)/);assert.doesNotMatch(code,/\/bin\/cp/);assert.match(code,/unexpected native source delta/);assert.doesNotMatch(code.slice(0,code.indexOf('// Separate fixed diagnostic:')),/git push|nvidia-smi|FICLONE_FORCE|shell:true/);
  const workflow=await readFile(new URL('../../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8'),job=workflow.slice(workflow.indexOf('  moss-upstream-reference:'),workflow.indexOf('  moss-dispatch:')),maintenance=workflow.slice(workflow.indexOf('  moss-reference-maintenance:'),workflow.indexOf('  moss-upstream-reference:'));assert.match(job,/runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);assert.match(job,/memory-catalog-campaign-mlx-nax/);assert.match(job,/phase == 'execute-probe'/);assert.match(job,/path: moss-first-step-native-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);assert.match(job,/native\/\*\.f32le/);assert.doesNotMatch(job,/path:.*snapshot-view|path:.*target/);assert.doesNotMatch(maintenance,/upload-probe|execute-probe/);
+});
+test('encoding envelope is fixed, source-bound and artifact-only',()=>{
+ const value={phase:'execute-encoding',artifact_id:'123456',artifact_run_id:'123457'};
+ assert.deepEqual(encodingEnvelope(JSON.stringify(value),ref,ref,'mlx'),value);
+ assert.deepEqual(encodingEnvelope(JSON.stringify({...value,phase:'upload-encoding',artifact_id:null,artifact_run_id:null}),ref,ref,'mlx').phase,'upload-encoding');
+ for(const bad of [{...value,phase:'execute-probe'},{...value,command:'anything'},{...value,artifact_id:null},{...value,payload:'/tmp/elsewhere'}])assert.throws(()=>encodingEnvelope(JSON.stringify(bad),ref,ref,'mlx'));
+ assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,ref,'candle'));
+ assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));
+});
+test('encoding metrics separate observations from acceptance and reject invalid inputs',()=>{
+ const same=encodingMetrics([1,2,3],[1,2,3]);assert.equal(same.relativeL2,0);assert.equal(same.equalValues,3);assert.equal(same.cosineSimilarity,1);
+ const changed=encodingMetrics([1,2],[2,4]);assert.equal(changed.relativeL2,1);assert.equal(changed.maxAbsError,2);assert.equal(changed.cosineSimilarity,1);assert.ok(!('pass' in changed));
+ assert.throws(()=>encodingMetrics([1],[1,2]));assert.throws(()=>encodingMetrics([Infinity],[1]));
+});
+test('encoding COW clone preserves original after destination writes and rejects link/overwrite/fallback',async t=>{
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'moss-encoding-clone-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const source=resolve(root,'source');await mkdir(source);await mkdir(resolve(source,'nested'));await writeFile(resolve(source,'nested/proof'),'original');
+ const before=await stat(resolve(source,'nested/proof'));
+ if(process.platform==='darwin'){
+  const result=await cloneEncodingTarget(source,resolve(root,'cloned'));assert.equal(result.files,1);assert.match(result.method,/clonefile/);
+  await writeFile(resolve(root,'cloned/nested/proof'),'new');assert.equal(await readFile(resolve(source,'nested/proof'),'utf8'),'original');assert.equal((await stat(resolve(source,'nested/proof'))).ino,before.ino);
+  await assert.rejects(()=>cloneEncodingTarget(source,resolve(root,'cloned')),/EEXIST/);
+ }
+ await assert.rejects(()=>cloneEncodingTarget(source,resolve(source,'inside')),/overlap/);
+ let called=0;await assert.rejects(()=>cloneEncodingTarget(source,resolve(root,'unsupported'),async()=>{called++;throw Object.assign(Error('clone unsupported'),{code:'ENOTSUP'});}),/unsupported/);assert.equal(called,1);assert.equal(await readFile(resolve(source,'nested/proof'),'utf8'),'original');
+ await assert.rejects(()=>cloneEncodingTarget(source,resolve(root,'hardlinked'),async(a,b)=>{await mkdir(resolve(b,'nested'));await link(resolve(a,'nested/proof'),resolve(b,'nested/proof'));}),/independent|changed/);
+ await symlink(resolve(source,'nested/proof'),resolve(source,'alias'));
+ await assert.rejects(()=>cloneEncodingTarget(source,resolve(root,'linked')),/link\/type/);
+});
+test('encoding route has no upstream execution and retains ordinary route behavior',async()=>{
+ const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8'),encoding=code.slice(code.indexOf('export async function executeEncoding('),code.indexOf('async function encodingMain('));
+ assert.doesNotMatch(encoding,/capture_first_step|runtime.launcher|executeProbe|sample_latents/);
+ assert.match(encoding,/cloneEncodingTarget\(ENCODING_WARM/);assert.ok(encoding.indexOf('cloneEncodingTarget(')<encoding.indexOf("run('rustup'"));assert.match(encoding,/encoding_probe::fixed_normal_encoding_only/);
+ const workflow=await readFile(new URL('../../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8');assert.match(workflow,/moss-first-step-probe.mjs route validate/);assert.match(workflow,/phase == 'execute-encoding'/);
+ assert.match(code,/moss-upstream-reference-common.mjs/);assert.doesNotMatch(code,/import .*from '.\/moss-upstream-reference.mjs'/);
 });
