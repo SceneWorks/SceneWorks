@@ -2114,6 +2114,60 @@ fn only_a_derived_journal_declares_the_widened_document_version() {
 }
 
 #[test]
+fn a_canceled_derivative_publication_removes_staging_and_publishes_nothing() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+
+    // Cancel between the bounded measure/read passes, before any rename can publish.
+    let calls = std::cell::Cell::new(0u32);
+    let error = reservation
+        .publish_produced_with_check(&plan, &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancel during measured publication",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("cancel during measured publication"),
+        "the cancellation itself surfaces, not a generic publication failure: {error}"
+    );
+    assert_eq!(calls.get(), 2, "stopped inside the first bounded file pass");
+    assert!(
+        !staging.exists(),
+        "a canceled publication removes its own staging tree"
+    );
+    assert_eq!(
+        store.lookup_complete(&plan.cache_key().unwrap()).unwrap(),
+        None,
+        "nothing partial or complete is published for a canceled derivative"
+    );
+
+    // The same reservation slot can be re-acquired and published to completion afterwards —
+    // cancellation is a retryable interruption, not a poisoned entry.
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    let published = reservation
+        .publish_produced_with_check(&plan, &|| Ok(()))
+        .expect("retry publishes the complete derivative");
+    assert_eq!(published.state, ResolvedCacheEntryState::Complete);
+}
+
+#[test]
 fn a_produced_bundle_holding_an_undeclared_file_is_never_published() {
     let scratch = TempDir::new().unwrap();
     let input = scratch.path().join("library");

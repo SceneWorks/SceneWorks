@@ -2900,13 +2900,22 @@ pub(super) async fn generate_video_using(
                         "imported H3 load is missing its resolved source authority".into(),
                     )
                 })?;
+                let preparation_cancel = cancel.clone();
+                let preparation_span = tracing::info_span!("h3_import_preparation",
+                    jobId = %receipt_job_id, phase = "component-file-acquisition");
                 tokio::task::spawn_blocking(move || {
+                    let _entered = preparation_span.enter();
                     let receipt =
-                        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare_authorized(
+                        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare_authorized_with_check(
                             &mut spec,
                             Some(authority),
+                            &|| super::minimax_h3::h3_preparation_checkpoint(&preparation_cancel),
                         )
-                        .map_err(WorkerError::InvalidPayload)?;
+                        .map_err(|message| {
+                            if preparation_cancel.is_cancelled() && message.contains(super::minimax_h3::H3_PREPARATION_CANCELED) {
+                                WorkerError::Canceled(message)
+                            } else { WorkerError::InvalidPayload(message) }
+                        })?;
                     Ok::<_, WorkerError>((spec, Some(receipt)))
                 })
                 .await
@@ -2961,6 +2970,13 @@ pub(super) async fn generate_video_using(
                 );
                 let load_policy = loaded_policy.offload_policy;
                 let mut input = input;
+                let execution_span = if let Some(identity) = &input.imported_h3_identity {
+                    tracing::info_span!("h3_import_execution", jobId = %receipt_job_id,
+                        checkpointId = %identity["checkpointId"], semanticDigest = %identity["semanticDigest"])
+                } else {
+                    tracing::Span::none()
+                };
+                let _entered = execution_span.enter();
                 if let (Some(receipt), Some(identity)) = (&h3_receipt, &input.imported_h3_identity)
                 {
                     receipt
@@ -2976,6 +2992,10 @@ pub(super) async fn generate_video_using(
                         identity = %identity,
                         prepared_sources = %receipt.prepared_sources_json(),
                         cache_state = ?cache_state,
+                        cache_layer = "generator_metadata",
+                        retains_dit_weights = false,
+                        loaded_spec_offload_policy = ?load_policy,
+                        loaded_spec_load_shape = ?loaded_policy.load_shape,
                         provider_resident_delta_bytes = provider_resident_bytes,
                         operation = %admission_mode,
                         steps = ?input.steps,

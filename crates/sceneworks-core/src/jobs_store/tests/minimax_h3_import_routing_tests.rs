@@ -145,6 +145,10 @@ fn the_imported_h3_claim_is_narrow_on_every_axis() {
     // Control for the mutations below.
     assert_eq!(claimed_on_both(&t2v(imported_entry())), (true, true));
 
+    fn t2v_with_loras(loras: Value) -> Map<String, Value> {
+        payload(IMPORTED_ID, "text_to_video", loras, imported_entry())
+    }
+
     // The plan identity is what makes the entry plan-backed at all.
     let mut no_plan = imported_entry();
     no_plan.remove("importPlan");
@@ -176,16 +180,12 @@ fn the_imported_h3_claim_is_narrow_on_every_axis() {
         &builtin_alone
     ));
 
-    // Outside the bound base partition: references, a mis-shaped keyframe set, an adapter.
+    // Outside the bound base partition: references and mis-shaped keyframes.
     for (mode, extra) in [
         ("reference_to_video", json!({ "referenceAssetIds": ["r1"] })),
         ("text_to_video", json!({ "referenceAudioAssetIds": ["a1"] })),
         ("image_to_video", json!({})),
         ("first_last_frame", json!({ "sourceAssetId": "first" })),
-        (
-            "text_to_video",
-            json!({ "loras": [{ "id": "minimax_h3_turbo_4step_v01" }] }),
-        ),
     ] {
         let claim = payload(IMPORTED_ID, mode, extra.clone(), imported_entry());
         assert_eq!(
@@ -193,6 +193,26 @@ fn the_imported_h3_claim_is_narrow_on_every_axis() {
             (false, false),
             "{mode} {extra}: outside the imported DiT's bound surface"
         );
+    }
+
+    // The full native LoRA/LoKr/turbo surface is claimable on both backends — it reaches the same
+    // per-render selected-task adapter install the builtin partitions use. The native installer
+    // owns target/namespace/basis compatibility; this predicate owns only the request shape.
+    for loras in [
+        json!([{ "id": "minimax_h3_turbo_4step_v01" }]),
+        json!([{ "id": "user_style_rank16" }]),
+        json!([{ "id": "minimax_h3_turbo_4step_v01" }, { "id": "user_style_rank16" }]),
+    ] {
+        let claim = t2v_with_loras(loras.clone());
+        assert_eq!(
+            claimed_on_both(&claim),
+            (true, true),
+            "{loras}: compatible H3 adapters stay claimable on both native lanes"
+        );
+        assert!(video_request_is_claimable_by_any_lane(
+            &JobType::VideoGenerate,
+            &claim
+        ));
     }
 
     // The advanced job types are never an imported-H3 shape.

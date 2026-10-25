@@ -280,7 +280,7 @@ pub struct SourceStampV1 {
 }
 
 impl SourceStampV1 {
-    fn of(path: &Path, clock: StoreClockV1) -> std::io::Result<Self> {
+    pub(crate) fn of(path: &Path, clock: StoreClockV1) -> std::io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt as _;
         #[cfg(windows)]
@@ -316,7 +316,7 @@ impl SourceStampV1 {
 
     /// Whether `other` describes the same filesystem entry as this stamp — every field except
     /// `observed_nanos`, which dates the observation rather than the file.
-    fn identifies_same_entry(&self, other: &Self) -> bool {
+    pub(crate) fn identifies_same_entry(&self, other: &Self) -> bool {
         let mut compared = self.clone();
         compared.observed_nanos = other.observed_nanos;
         compared == *other
@@ -1174,9 +1174,11 @@ fn verify_source_and_capture_stamp(
     expected_sha256: &str,
     stamp: SourceStampV1,
     before_hash: impl FnOnce(),
+    check: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<SourceStampV1, CheckpointPlanError> {
     before_hash();
-    let hashed = sha256_file(path).map_err(|error| io_error(path, error))?;
+    let hashed =
+        source_file_sha256_with_check(path, check).map_err(|error| io_error(path, error))?;
     if hashed == expected_sha256 {
         return Ok(stamp);
     }
@@ -1190,17 +1192,56 @@ fn verify_source_and_capture_stamp(
     })
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<String> {
+/// One bounded source-content pass, returning lowercase SHA-256 without a prefix.
+/// Cancellation never returns or persists a partial digest.
+pub fn source_file_sha256_with_check(
+    path: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> std::io::Result<String> {
+    check()?;
+    let target = fs::canonicalize(path)?;
+    let before = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut hashed_bytes = 0u64;
+    let checkpoint = |hashed_bytes| match check() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = if error.kind() == std::io::ErrorKind::Interrupted { "Canceled" } else { "Failed" },
+                hashed_bytes, source_bytes = before.size_bytes,
+                "Source content acquisition stopped; no digest was published");
+            Err(error)
+        }
+    };
     loop {
+        checkpoint(hashed_bytes)?;
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        hashed_bytes += read as u64;
+        if hashed_bytes == read as u64 || hashed_bytes % (256 * 1024 * 1024) < read as u64 {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = "Reading", hashed_bytes,
+                source_bytes = before.size_bytes, "Actual bounded source-content hash progress");
+        }
+        checkpoint(hashed_bytes)?;
     }
+    checkpoint(hashed_bytes)?;
+    let after = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
+    if !before.identifies_same_entry(&after) || fs::canonicalize(path)? != target {
+        return Err(std::io::Error::other(format!(
+            "source changed while hashing {}",
+            path.display()
+        )));
+    }
+    checkpoint(hashed_bytes)?;
+    tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+        acquisition = "ColdContentRead", state = "Acquired", hashed_bytes,
+        source_bytes = before.size_bytes, "Complete source digest acquired after source identity verification");
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -2158,6 +2199,7 @@ impl CheckpointPlanStore {
                 fingerprint,
                 sampled,
                 || hook(CheckpointPlanVerificationEventV1::LayerStampCaptured),
+                &|| Ok(()),
             )?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
@@ -2366,6 +2408,17 @@ impl CheckpointPlanStore {
         &self,
         checkpoint_id: &str,
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_check(checkpoint_id, &|| Ok(()))
+    }
+
+    /// Resolve the same immutable plan, cooperatively stopping between bounded hash reads.
+    /// An interrupted digest never refreshes a persisted source stamp.
+    pub fn resolve_with_check(
+        &self,
+        checkpoint_id: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        check().map_err(|error| io_error(&self.root, error))?;
         let record = self.record(checkpoint_id)?;
         let plan = self.plan(checkpoint_id, &record.plan.plan_id)?;
         record
@@ -2399,6 +2452,7 @@ impl CheckpointPlanStore {
         let mut refreshed = !bindings_are_current;
         bindings.schema_version = SOURCE_BINDINGS_SCHEMA_VERSION;
         for layer in &plan.layers {
+            check().map_err(|error| io_error(&self.root, error))?;
             // The root a layer's relative path is joined onto is chosen by the LOCATOR, never by
             // the caller: a linked layer resolves under its approved library root, a managed layer
             // under its own SceneWorks-owned install directory. A managed layer naming an install
@@ -2471,6 +2525,7 @@ impl CheckpointPlanStore {
                     fingerprint,
                     current,
                     || {},
+                    check,
                 )?;
                 bindings
                     .stamps
@@ -2483,9 +2538,11 @@ impl CheckpointPlanStore {
                 rehashed,
             });
         }
+        check().map_err(|error| io_error(&self.root, error))?;
         if refreshed {
             self.persist_bindings(&bindings)?;
         }
+        check().map_err(|error| io_error(&self.root, error))?;
         Ok(ResolvedCheckpointV1 {
             checkpoint_id: checkpoint_id.to_owned(),
             record,
@@ -2498,6 +2555,54 @@ impl CheckpointPlanStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_hash_cancellation_interrupts_bounded_reads_and_retry_hashes_complete_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source.safetensors");
+        let bytes = vec![17u8; HASH_BUFFER_BYTES * 3 + 19];
+        fs::write(&path, &bytes).unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let error = source_file_sha256_with_check(&path, &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 4 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancel hash",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            calls.get(),
+            4,
+            "stop within the second bounded read, not at EOF"
+        );
+        assert_eq!(
+            source_file_sha256_with_check(&path, &|| Ok(())).unwrap(),
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "hashing never changes a linked original"
+        );
+    }
+
+    #[test]
+    fn source_hash_checks_cancellation_before_any_source_or_memo_lookup() {
+        let error = source_file_sha256_with_check(Path::new("absent-source"), &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancel before metadata",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    }
 
     /// A released store lock must be free IMMEDIATELY, even while a descriptor this process handed
     /// to a child still references the same open file description. `flock(2)` locks live on the

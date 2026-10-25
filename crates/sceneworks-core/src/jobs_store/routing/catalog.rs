@@ -1511,6 +1511,17 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
         .and_then(checkpoint_plan_checkpoint_id)
 }
 
+/// Whether one backend lane claims this plan-backed H3 video probe WITH a compatible adapter.
+/// The catalog's advertisement derives from the same predicates the scheduler consults, so the
+/// UI can never offer an adapter stack no lane will claim.
+pub fn imported_video_lane_claims_with_lora(lane: &str, probe: &Map<String, Value>) -> bool {
+    match lane {
+        "mlx" => super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, probe),
+        "candle" => super::candle::video_request_is_candle_eligible(&JobType::VideoGenerate, probe),
+        _ => false,
+    }
+}
+
 /// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
 /// lanes, because both providers load a staged DiT directory through the same `transformer`
 /// component seam.
@@ -1523,8 +1534,9 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
 /// * **shape** — the explicitly declared FL2VA, Ref2VA, or hybrid operation union. Tensor shapes
 ///   and model names never imply task compatibility. Builtin predicates validate conditioning,
 ///   while the imported entry and plan remain the weight identity.
-/// * **adapters** — none. LoRA and turbo support on imported H3 checkpoints is a later story; the
-///   entry advertises no adapters and the worker route refuses them.
+/// * **adapters** — the native H3 LoRA/LoKr and turbo surface. The same partition predicate owns
+///   request shape; source topology, target namespace and pruning-basis compatibility are validated
+///   by the native installer against the selected imported task, never by substituting stock weights.
 ///
 /// This is a claim, not a load: the worker still resolves and re-verifies the plan, the binding and
 /// the resident components, and refuses by name when it cannot.
@@ -1544,13 +1556,6 @@ pub(crate) fn plan_backed_minimax_h3_video_eligible(
             | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
     ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
         || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
-    {
-        return false;
-    }
-    if payload
-        .get("loras")
-        .and_then(Value::as_array)
-        .is_some_and(|loras| !loras.is_empty())
     {
         return false;
     }

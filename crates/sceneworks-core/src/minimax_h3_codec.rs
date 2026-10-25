@@ -448,12 +448,19 @@ struct OperandValues<'a> {
     values: Vec<f32>,
     cursor: usize,
     error: Option<String>,
+    check: &'a dyn Fn() -> std::io::Result<()>,
 }
 
 const OPERAND_CHUNK: usize = 64 * 1024;
 
 impl<'a> OperandValues<'a> {
-    fn open(source: &Path, tensor: &'a Tensor, dtype: Dtype) -> Result<Self, String> {
+    fn open(
+        source: &Path,
+        tensor: &'a Tensor,
+        dtype: Dtype,
+        check: &'a dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Self, String> {
+        check().map_err(|error| error.to_string())?;
         let reader = std::io::BufReader::with_capacity(
             OPERAND_CHUNK,
             File::open(source)
@@ -470,6 +477,7 @@ impl<'a> OperandValues<'a> {
             values: Vec::new(),
             cursor: 0,
             error: None,
+            check,
         })
     }
 
@@ -478,6 +486,10 @@ impl<'a> OperandValues<'a> {
         self.values.clear();
         self.cursor = 0;
         while self.values.is_empty() {
+            if let Err(error) = (self.check)() {
+                self.error = Some(error.to_string());
+                return false;
+            }
             if self.remaining == 0 {
                 let Some(&(start, length)) = self.ranges.get(self.next_range) else {
                     return false;
@@ -509,6 +521,10 @@ impl<'a> OperandValues<'a> {
                 self.error = Some(format!(
                     "H3 AdaLN: truncated reduced operand payload: {error}"
                 ));
+                return false;
+            }
+            if let Err(error) = (self.check)() {
+                self.error = Some(error.to_string());
                 return false;
             }
             self.remaining -= take as u64;
@@ -598,13 +614,22 @@ impl H3SourceInventory {
         resolved: &ResolvedCheckpointV1,
         bound_config: Option<H3Config>,
     ) -> Result<Self, String> {
-        Self::from_files_with_config(
+        Self::from_resolved_with_config_and_check(resolved, bound_config, &|| Ok(()))
+    }
+
+    pub fn from_resolved_with_config_and_check(
+        resolved: &ResolvedCheckpointV1,
+        bound_config: Option<H3Config>,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Self, String> {
+        Self::from_files_with_config_and_check(
             &resolved
                 .layers
                 .iter()
                 .map(|l| (l.layer.target_path.clone(), l.path.clone()))
                 .collect::<Vec<_>>(),
             bound_config,
+            check,
         )
     }
 
@@ -618,11 +643,21 @@ impl H3SourceInventory {
         files: &[(String, PathBuf)],
         bound_config: Option<H3Config>,
     ) -> Result<Self, String> {
+        Self::from_files_with_config_and_check(files, bound_config, &|| Ok(()))
+    }
+
+    pub fn from_files_with_config_and_check(
+        files: &[(String, PathBuf)],
+        bound_config: Option<H3Config>,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Self, String> {
+        check().map_err(|error| error.to_string())?;
         let mut weights = Vec::new();
         let mut config = None;
         let mut index = None;
         let mut directory = None;
         for (name, path) in files {
+            check().map_err(|error| error.to_string())?;
             let parent = Path::new(name).parent().unwrap_or(Path::new(""));
             if directory.is_some_and(|dir| dir != parent) {
                 return Err(format!("unconsumed MiniMax-H3 artifact {name:?}: all DiT files must share one directory"));
@@ -640,6 +675,7 @@ impl H3SourceInventory {
         }
         let mut headers = Vec::new();
         for (_, path) in &weights {
+            check().map_err(|error| error.to_string())?;
             if !crate::safetensors::file_is_structurally_valid(path) {
                 return Err(format!("invalid MiniMax-H3 safetensors {}", path.display()));
             }
@@ -888,9 +924,12 @@ impl H3SourceInventory {
         // actual stored bytes, so a refused or partial topology never yields a binding.
         let sources: Vec<_> = weights.iter().map(|(_, path)| (*path).clone()).collect();
         let pruning = match pruned {
-            Some((grid, rank)) => Some(pruning_binding(&tensors, &config, &sources, grid, rank)?),
+            Some((grid, rank)) => Some(pruning_binding(
+                &tensors, &config, &sources, grid, rank, check,
+            )?),
             None => None,
         };
+        check().map_err(|error| error.to_string())?;
         Ok(Self {
             config,
             native,
@@ -945,10 +984,43 @@ impl H3SourceInventory {
     /// Emit directly from seekable sources through a fixed 1 MiB buffer. Payload allocations are
     /// independent of model/tensor size; only small tensor headers and the output index are resident.
     pub fn produce(&self, outputs: &CheckpointDerivativeOutputs<'_>) -> Result<(), String> {
+        self.produce_with_check(outputs, &|| Ok(()))
+    }
+
+    pub fn produce_with_check(
+        &self,
+        outputs: &CheckpointDerivativeOutputs<'_>,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        check().map_err(|error| error.to_string())?;
         let mut index = Map::new();
         let mut total = 0u64;
+        let total_payload_bytes = self
+            .tensors
+            .values()
+            .flat_map(|tensor| tensor.ranges.iter())
+            .try_fold(0u64, |sum, &(_, bytes)| sum.checked_add(bytes))
+            .ok_or("H3 normalization payload size overflow")?;
+        let mut copied_payload_bytes = 0u64;
+        let copy_checkpoint = |copied_payload_bytes| {
+            check().map_err(|error| {
+                tracing::info!(
+                    event = "h3_normalization_copy_progress",
+                    state = if error.kind() == std::io::ErrorKind::Interrupted {
+                        "Canceled"
+                    } else {
+                        "Failed"
+                    },
+                    copied_payload_bytes,
+                    total_payload_bytes,
+                    "Normalization stopped before derivative publication"
+                );
+                error.to_string()
+            })
+        };
         let mut buffer = vec![0u8; 1024 * 1024];
         for (i, path) in self.sources.iter().enumerate() {
+            check().map_err(|error| error.to_string())?;
             let shard_name = self.shard_name(i);
             let mut header = Map::new();
             let selected: Vec<_> = self.tensors.iter().filter(|(_, t)| t.source == i).collect();
@@ -973,17 +1045,29 @@ impl H3SourceInventory {
                         .map_err(|e| e.to_string())?;
                     let mut remaining = len;
                     while remaining > 0 {
+                        copy_checkpoint(copied_payload_bytes)?;
                         let take = remaining.min(buffer.len() as u64) as usize;
                         input
                             .read_exact(&mut buffer[..take])
-                            .and_then(|_| out.write_all(&buffer[..take]))
                             .map_err(|e| e.to_string())?;
+                        copy_checkpoint(copied_payload_bytes)?;
+                        out.write_all(&buffer[..take]).map_err(|e| e.to_string())?;
+                        copied_payload_bytes += take as u64;
+                        if copied_payload_bytes == take as u64
+                            || copied_payload_bytes % (256 * 1024 * 1024) < take as u64
+                        {
+                            tracing::info!(event = "h3_normalization_copy_progress", state = "Writing",
+                                copied_payload_bytes, total_payload_bytes,
+                                "Actual bounded normalization payload copy; derivative is not yet published");
+                        }
+                        copy_checkpoint(copied_payload_bytes)?;
                         remaining -= take as u64;
                     }
                 }
             }
             total += offset;
         }
+        check().map_err(|error| error.to_string())?;
         serde_json::to_writer(
             outputs.create(H3_CONFIG_FILE).map_err(|e| e.to_string())?,
             &self.config.0,
@@ -993,7 +1077,8 @@ impl H3SourceInventory {
             outputs.create(H3_INDEX_FILE).map_err(|e| e.to_string())?,
             &json!({"metadata":{"total_size":total},"weight_map":index}),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        check().map_err(|error| error.to_string())
     }
 }
 
@@ -1080,6 +1165,7 @@ fn pruning_binding(
     sources: &[PathBuf],
     grid: usize,
     rank: usize,
+    check: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<H3PruningBinding, String> {
     let topology = PrunedAdaLn::inspect(
         config.dim("hidden_size")?,
@@ -1121,7 +1207,7 @@ fn pruning_binding(
         let source = sources
             .get(tensor.source)
             .ok_or("H3 AdaLN: operand source is outside the declared files")?;
-        let mut values = OperandValues::open(source, tensor, operand.dtype)?;
+        let mut values = OperandValues::open(source, tensor, operand.dtype, check)?;
         let hashed = builder.operand_values(&operand.name, &mut values);
         if let Some(error) = values.error.take() {
             return Err(error);

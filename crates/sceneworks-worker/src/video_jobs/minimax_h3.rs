@@ -1484,18 +1484,12 @@ pub(super) async fn generate_minimax_h3_using(
             phase = "source-acquisition-through-provider-handle",
             "Beginning imported H3 acquisition; deferred task components may materialize during generation");
     }
-    let imported = imported_minimax_h3_checkpoint_id(request)
-        .map(|_| {
-            if !minimax_h3_engine_is_registered() {
-                return Err(WorkerError::Engine(format!(
-                    "{} cannot render in this build: the MiniMax-H3 MLX engine is not in the \
-                     linked inference revision. No output was produced.",
-                    request.model
-                )));
-            }
-            resolve_imported_minimax_h3_dit(request, settings)
-        })
-        .transpose()?;
+    if imported_minimax_h3_checkpoint_id(request).is_some() && !minimax_h3_engine_is_registered() {
+        return Err(WorkerError::Engine(format!(
+            "{} cannot render in this build: the MiniMax-H3 MLX engine is not in the linked inference revision. No output was produced.", request.model
+        )));
+    }
+    let imported = prepare_imported_minimax_h3_dit(api, settings, job, request, backend).await?;
     let partition = imported
         .as_ref()
         .map(|_| imported_minimax_h3_partition_request(request))
@@ -1748,9 +1742,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
             phase = "source-acquisition-through-provider-handle",
             "Beginning imported H3 acquisition; deferred task components may materialize during generation");
     }
-    let imported = imported_minimax_h3_checkpoint_id(request)
-        .map(|_| resolve_imported_minimax_h3_dit(request, settings))
-        .transpose()?;
+    let imported = prepare_imported_minimax_h3_dit(api, settings, job, request, backend).await?;
     let partition = imported
         .as_ref()
         .map(|_| imported_minimax_h3_partition_request(request))
@@ -1778,52 +1770,53 @@ pub(super) async fn generate_candle_minimax_h3_using(
             (load, tier)
         }
     };
-    // The VRAM gate prices a DiT tier. An imported DiT is dense by construction (the import gate
-    // admits f16/bf16/f32 only), so it is priced as the dense tier rather than as the resident one.
-    let priced_tier = if imported.is_some() {
-        "bf16"
-    } else {
-        load.tier
-    };
-    let adapter_bytes =
-        gen_core::adapter_stack_resident_bytes(&adapters, gen_core::AdapterResidencyMode::Additive)
-            .ok_or_else(|| {
-                WorkerError::InvalidPayload(
-                    "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
-                        .to_owned(),
-                )
-            })?;
-    // Price the cold-load envelope from the same complete parsed controls used by
-    // the queued gate and generation, including budgets and dense overrides.
-    let sparse_bound = gen_core::veda::workspace::for_video_request(
-        gen_core::veda::workspace::Request {
-            veda: veda.as_ref(),
-            width: request.width,
-            height: request.height,
-            frames,
-            count: 1,
-            prompt: &request.prompt,
-            conditioning: &conditioning,
-            reference_image_short_edge,
-        },
-        gen_core::veda::workspace::Backend::Cuda,
-    )
-    .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    if let Some(bound) = sparse_bound.as_ref() {
-        crate::video_admission::admit_veda_host_workspace(
-            bound,
-            crate::yue2_admission::host_available_bytes().await,
-        )?;
-    }
-    if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
-        &request.model_manifest_entry,
-        priced_tier,
-        adapter_bytes,
-        &settings.gpu_id,
-        vram_budget.await,
-        sparse_bound.as_ref(),
-    ) {
-        return Err(error);
+    // Imported H3 handles acquire metadata/device context here, not model tensors. Their actual
+    // source constructor/working bounds and sparse geometry are admitted in the shared funnel,
+    // before any conditioner/DiT/decoder tensor materializes. A stock BF16 checkpoint's measured
+    // row (or stock patch geometry) cannot price a different quantized/pruned imported checkpoint.
+    if imported.is_none() {
+        let adapter_bytes = gen_core::adapter_stack_resident_bytes(
+            &adapters,
+            gen_core::AdapterResidencyMode::Additive,
+        )
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "MiniMax-H3 cannot determine the resident size of the requested adapter stack."
+                    .to_owned(),
+            )
+        })?;
+        // Price the cold-load envelope from the same complete parsed controls used by
+        // the queued gate and generation, including budgets and dense overrides.
+        let sparse_bound = gen_core::veda::workspace::for_video_request(
+            gen_core::veda::workspace::Request {
+                veda: veda.as_ref(),
+                width: request.width,
+                height: request.height,
+                frames,
+                count: 1,
+                prompt: &request.prompt,
+                conditioning: &conditioning,
+                reference_image_short_edge,
+            },
+            gen_core::veda::workspace::Backend::Cuda,
+        )
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        if let Some(bound) = sparse_bound.as_ref() {
+            crate::video_admission::admit_veda_host_workspace(
+                bound,
+                crate::yue2_admission::host_available_bytes().await,
+            )?;
+        }
+        if let Some(error) = crate::vram_gate::minimax_h3_fit_error_with_sparse(
+            &request.model_manifest_entry,
+            load.tier,
+            adapter_bytes,
+            &settings.gpu_id,
+            vram_budget.await,
+            sparse_bound.as_ref(),
+        ) {
+            return Err(error);
+        }
     }
     let task = minimax_h3_task(&conditioning);
     let mut raw_settings = minimax_h3_raw_settings(
@@ -1896,7 +1889,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
 /// The plan identity of an imported MiniMax-H3 entry, or `None` for every other request.
 ///
 /// Family + plan id, deliberately NOT the stamped assembly: an H3 entry that carries a plan but no
-/// valid binding must reach [`resolve_imported_minimax_h3_dit`] and be refused BY NAME, rather than
+/// valid binding must reach [`resolve_imported_minimax_h3_dit_with_check`] and be refused BY NAME, rather than
 /// fall through to a lane that would stub or load the builtin weights.
 #[cfg(any(
     target_os = "macos",
@@ -1931,6 +1924,7 @@ pub(super) struct ImportedMiniMaxH3Dit {
     pub(super) pruning: Option<sceneworks_core::minimax_h3_codec::H3PruningBinding>,
     component_bindings: Value,
     pub(super) load_authority: sceneworks_core::minimax_h3_load::H3SourceAuthority,
+    normalization_cache_outcome: &'static str,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
     _pins: Vec<gen_core::PinnedWeightsFile>,
@@ -1971,17 +1965,171 @@ pub(super) fn with_imported_h3_source_seals<T>(
     result
 }
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(super) const H3_PREPARATION_CANCELED: &str =
+    "[h3-preparation-canceled] checkpoint preparation canceled";
+
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(super) fn h3_preparation_checkpoint(cancel: &gen_core::CancelFlag) -> std::io::Result<()> {
+    if cancel.is_cancelled() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            H3_PREPARATION_CANCELED,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// CPU preparation is cooperative, not an abortable GPU operation. The blocking closure owns
+/// every source/derivative lease; even an abandoned async owner cannot release a reader's leases.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(super) async fn supervise_h3_preparation<R, P, F>(
+    cancel: gen_core::CancelFlag,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
+    poll_period: Duration,
+    mut poll: P,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    P: FnMut() -> F,
+    F: std::future::Future<Output = WorkerResult<bool>>,
+{
+    let mut guard = CancelJoinGuard::new(cancel.clone(), task);
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + poll_period, poll_period);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut *guard.handle_mut() => {
+                guard.disarm();
+                return result.map_err(|error| task_join_error("H3 checkpoint preparation", error))?;
+            }
+            _ = tick.tick() => {
+                match poll().await {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        cancel.cancel();
+                        guard.cancel_and_join().await;
+                        return Err(WorkerError::Canceled(H3_PREPARATION_CANCELED.into()));
+                    }
+                    Err(error) => {
+                        guard.cancel_and_join().await;
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+async fn prepare_imported_minimax_h3_dit(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    backend: &str,
+) -> WorkerResult<Option<ImportedMiniMaxH3Dit>> {
+    if imported_minimax_h3_checkpoint_id(request).is_none() {
+        return Ok(None);
+    }
+    let source_request = request.clone();
+    let source_settings = settings.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let preparation_span = tracing::info_span!("h3_import_preparation", jobId = %job.id,
+        checkpointId = imported_minimax_h3_checkpoint_id(request).unwrap_or_default(),
+        phase = "source-and-normalization");
+    let task = tokio::task::spawn_blocking(move || {
+        let _entered = preparation_span.enter();
+        resolve_imported_minimax_h3_dit_with_check(&source_request, &source_settings, &|| {
+            h3_preparation_checkpoint(&task_cancel)
+        })
+        .map_err(|error| {
+            if task_cancel.is_cancelled() && error.to_string().contains(H3_PREPARATION_CANCELED) {
+                WorkerError::Canceled(H3_PREPARATION_CANCELED.into())
+            } else {
+                error
+            }
+        })
+    });
+    let result = supervise_h3_preparation(cancel.clone(), task, Duration::from_secs(2), || async {
+        if shutdown_requested() {
+            return Ok(true);
+        }
+        // Heartbeats during CPU preparation are best-effort, like `cancel_requested_peek`: the
+        // supervisor keeps awaiting the blocking task either way, so a transient API failure
+        // never becomes a drop-and-run — it only risks the server-side stale sweep, which the
+        // completed render's own writes supersede. Cancel polling stays the authoritative signal.
+        if let Err(error) = heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await {
+            tracing::warn!(event = "h3_preparation_heartbeat_failed", jobId = %job.id,
+                error = %error, "preparation heartbeat failed; supervision continues");
+        }
+        if cancel_requested_peek(api, &job.id).await {
+            cancel.cancel();
+            let _ = update_job(
+                api,
+                &job.id,
+                video_progress(
+                    JobStatus::Running,
+                    ProgressStage::Preparing,
+                    0.0,
+                    "Canceling checkpoint preparation…",
+                    None,
+                    backend,
+                ),
+            )
+            .await;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
+    .await;
+    match result {
+        Ok(dit) => {
+            tracing::info!(event = "h3_import_source_prepared", jobId = %job.id,
+                identity = %imported_h3_load_identity(&dit),
+                normalization_cache_outcome = dit.normalization_cache_outcome,
+                derivative_cache_key = ?dit.load_authority.derivative_cache_key(),
+                "Imported source acquisition and any normalization completed; not a resident-weight cache or executed-tensor receipt");
+            Ok(Some(dit))
+        }
+        Err(WorkerError::Canceled(message)) => {
+            crate::mark_job_canceled(api, &job.id, &message).await?;
+            Err(WorkerError::Canceled(message))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Resolve and re-verify an imported MiniMax-H3 entry's DiT, or refuse with a typed
 /// `[checkpoint-plan:*]` reason. Never "not mine": a plan-backed H3 entry that is refused here has
 /// no other lane, and falling through would stub or render the builtin weights.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
+#[cfg(all(
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ),
+    test
 ))]
 pub(super) fn resolve_imported_minimax_h3_dit(
     request: &VideoRequest,
     settings: &Settings,
 ) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    resolve_imported_minimax_h3_dit_with_check(request, settings, &|| Ok(()))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_imported_minimax_h3_dit_with_check(
+    request: &VideoRequest,
+    settings: &Settings,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    check().map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let checkpoint_id = imported_minimax_h3_checkpoint_id(request)
         .unwrap_or_default()
         .to_owned();
@@ -2005,12 +2153,6 @@ pub(super) fn resolve_imported_minimax_h3_dit(
             ),
         ));
     }
-    if !request.loras.is_empty() {
-        return Err(refuse(
-            "unsupported-operation",
-            "adapters are not yet supported on imported MiniMax-H3 checkpoints".to_owned(),
-        ));
-    }
     let entry = &request.model_manifest_entry;
     let store =
         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
@@ -2018,7 +2160,7 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         .lease_source(&checkpoint_id)
         .map_err(|e| refuse("source-in-use", e.to_string()))?;
     let resolved = store
-        .resolve(&checkpoint_id)
+        .resolve_with_check(&checkpoint_id, check)
         .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
     let assembly = sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
         .map_err(|reason| refuse("ambiguous-component", reason))?;
@@ -2026,8 +2168,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         .layers
         .iter()
         .map(|layer| {
+            check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
             let pin = gen_core::PinnedWeightsFile::pin(&layer.path)
                 .map_err(|e| refuse("source-drift", e.to_string()))?;
+            check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
             let expected = layer
                 .layer
                 .source
@@ -2053,25 +2197,28 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     let bound_config = sceneworks_core::minimax_h3_import::bound_config(&resolved.plan.context)
         .map_err(|reason| refuse("invalid-bound-config", reason))?;
     let inventory = with_imported_h3_source_seals(&pins, || {
-        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config(
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_resolved_with_config_and_check(
             &resolved,
             bound_config,
+            check,
         )
     })
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
     sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
         .map_err(|reason| refuse("pruning-incompatible", reason))?;
-    let (directory, derivative) =
-        if inventory.requires_normalization {
-            use sceneworks_core::checkpoint_derivative::{
-                CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore,
-            };
-            let cache = CheckpointDerivativeStore::open(&settings.data_dir)
-                .map_err(|e| refuse("normalization", e.to_string()))?;
-            let normalization = inventory.derivative_request();
+    let (directory, derivative, normalization_cache_outcome) = if inventory.requires_normalization {
+        use sceneworks_core::checkpoint_derivative::{
+            CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore,
+        };
+        let cache = CheckpointDerivativeStore::open(&settings.data_dir)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        let normalization = inventory.derivative_request();
+        let cache_outcome =
             match cache
-                .ensure(&checkpoint_id, &normalization, |outputs| {
-                    with_imported_h3_source_seals(&pins, || inventory.produce(outputs))
+                .ensure_resolved_with_check(&resolved, &normalization, check, |outputs| {
+                    with_imported_h3_source_seals(&pins, || {
+                        inventory.produce_with_check(outputs, check)
+                    })
                 })
                 .map_err(|e| refuse("normalization", e.to_string()))?
             {
@@ -2080,53 +2227,59 @@ pub(super) fn resolve_imported_minimax_h3_dit(
                     "this H3 source is being normalized by another load; retry after it completes"
                         .into(),
                 )),
-                CheckpointDerivativeOutcomeV1::Produced(_)
-                | CheckpointDerivativeOutcomeV1::AlreadyPresent(_) => {}
-            }
-            let lease = cache
-                .acquire(&resolved, &normalization)
-                .map_err(|e| refuse("normalization", e.to_string()))?
-                .ok_or_else(|| {
-                    refuse(
-                        "normalization",
-                        "normalized H3 artifact disappeared before leasing".into(),
-                    )
-                })?;
-            let key = cache
-                .cache_key(&resolved, &normalization)
-                .map_err(|e| refuse("normalization", e.to_string()))?;
-            let directory = cache
-                .cache()
-                .bundle_path(&key)
-                .map_err(|e| refuse("normalization", e.to_string()))?;
-            (directory, Some(lease))
-        } else {
-            let layer = resolved
-                .layers
-                .iter()
-                .find(|layer| layer.layer.layer_id == assembly.transformer_layer_id)
+                CheckpointDerivativeOutcomeV1::Produced(_) => "produced",
+                CheckpointDerivativeOutcomeV1::AlreadyPresent(_) => "hit",
+            };
+        let lease = cache
+            .acquire_with_check(&resolved, &normalization, check)
+            .map_err(|e| refuse("normalization", e.to_string()))?
+            .ok_or_else(|| {
+                refuse(
+                    "normalization",
+                    "normalized H3 artifact disappeared before leasing".into(),
+                )
+            })?;
+        let key = cache
+            .cache_key(&resolved, &normalization)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        let directory = cache
+            .cache()
+            .bundle_path(&key)
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        (directory, Some(lease), cache_outcome)
+    } else {
+        let layer = resolved
+            .layers
+            .iter()
+            .find(|layer| layer.layer.layer_id == assembly.transformer_layer_id)
+            .ok_or_else(|| {
+                refuse(
+                    "missing-component",
+                    "bound transformer layer is absent".into(),
+                )
+            })?;
+        (
+            layer
+                .path
+                .parent()
                 .ok_or_else(|| {
                     refuse(
                         "missing-component",
-                        "bound transformer layer is absent".into(),
+                        "transformer has no component directory".into(),
                     )
-                })?;
-            (
-                layer
-                    .path
-                    .parent()
-                    .ok_or_else(|| {
-                        refuse(
-                            "missing-component",
-                            "transformer has no component directory".into(),
-                        )
-                    })?
-                    .to_path_buf(),
-                None,
-            )
-        };
+                })?
+                .to_path_buf(),
+            None,
+            "not_required",
+        )
+    };
+    check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
     with_imported_h3_source_seals(&pins, || {
-        verify_imported_h3_pruning_directory(&directory, assembly.pruning.as_ref())
+        verify_imported_h3_pruning_directory_with_check(
+            &directory,
+            assembly.pruning.as_ref(),
+            check,
+        )
     })
     .map_err(|reason| refuse("pruning-incompatible", reason))?;
     // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
@@ -2165,8 +2318,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
                 let path = directory
                     .join(&member.destination)
                     .join(&file.relative_path);
+                check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
                 let pin = gen_core::PinnedWeightsFile::pin(&path)
                     .map_err(|e| refuse("source-drift", e.to_string()))?;
+                check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
                 let actual = format!(
                     "sha256:{}",
                     pin.content_sha256()
@@ -2194,8 +2349,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     )
     .map_err(|e| refuse("source-drift", e))?
     .with_leases(source_lease, derivative);
+    check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
     Ok(ImportedMiniMaxH3Dit {
         load_authority,
+        normalization_cache_outcome,
         semantic_digest: resolved.plan.semantic_digest().ok(),
         plan_id: resolved.plan.plan_id.clone(),
         checkpoint_id,
@@ -2210,10 +2367,21 @@ pub(super) fn resolve_imported_minimax_h3_dit(
 
 /// Verify the leased canonical component against the source-bound table and complete reduced basis.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(any(target_os = "macos", feature = "backend-candle"), test))]
 pub(super) fn verify_imported_h3_pruning_directory(
     directory: &Path,
     expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
 ) -> Result<(), String> {
+    verify_imported_h3_pruning_directory_with_check(directory, expected, &|| Ok(()))
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn verify_imported_h3_pruning_directory_with_check(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), String> {
+    check().map_err(|error| error.to_string())?;
     let Some(expected) = expected else {
         return Ok(());
     };
@@ -2236,7 +2404,10 @@ pub(super) fn verify_imported_h3_pruning_directory(
         }
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    let canonical = sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)?;
+    let canonical =
+        sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files_with_config_and_check(
+            &files, None, check,
+        )?;
     if canonical.pruning.as_ref() != Some(expected) {
         return Err(
             "sealed H3 component has a different pruning table/basis identity or source precision"
