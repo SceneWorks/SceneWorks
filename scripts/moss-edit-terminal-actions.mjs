@@ -257,7 +257,7 @@ export async function buildBackend(config) {
     try {
       const project=await stack.api.request('/api/v1/projects',{method:'POST',body:{name:`MOSS installer ${config.candidateId}`}});
       const {capturePackageInstallUi}=await import('./moss-edit-terminal-browser.mjs');
-      const capture=await capturePackageInstallUi({apiUrl:`http://127.0.0.1:${config.port}`,projectId:project.id,captureRoot:resolve(out,'installation'),playwrightModule:config.playwrightModule,token,model:'moss_image_base'});
+      const capture=await capturePackageInstallUi({apiUrl:`http://127.0.0.1:${config.port}`,projectId:project.id,captureRoot:resolve(out,'installation'),playwrightModule:config.playwrightModule,token,model:'moss_image_base',utilityWorkerId:`${config.workerId}-utility`});
       installation={capture:await fileIdentity(capture),files:await filesUnder(resolve(out,'installation'))};
     }finally{await stack.stop();}
   }

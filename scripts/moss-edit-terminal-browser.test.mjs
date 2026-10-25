@@ -69,8 +69,18 @@ function installerFixture() {
   const entry = {id:model,installState:'installed',conditionalPurposes:{moss_image_edit:{installState:'missing',blocked:false}},conditionalComponents:[component]};
   const job = {id:'inert-download-job',type:'model_download',status:'queued',payload:{modelId:model,repo:component.repo,revision:component.revision}};
   const network = {method:'POST',path:`/api/v1/models/${model}/conditional-components/moss_image_edit/download`,status:201,request:{licenseAcknowledged:true},response:{purpose:'moss_image_edit',jobs:[job],components:[{...component,status:'queued',jobId:job.id}]}};
-  const progress = [{...job,status:'running',progress:0.5},{...job,status:'completed',progress:1}];
-  return {model,component,entry,network,progress};
+  const utilityWorkerId = 'owned-native-utility', owned = {workerId:utilityWorkerId,assignedGpu:'cpu',error:null};
+  // R5's actual seven SSE observations: claim, size estimate, transfer, verification, completion.
+  const progress = [
+    {...job,stage:'queued',progress:0,workerId:null,assignedGpu:null,error:null},
+    {...job,...owned,status:'preparing',stage:'preparing',progress:0},
+    {...job,...owned,status:'downloading',stage:'downloading',progress:0.1},
+    {...job,...owned,status:'downloading',stage:'downloading',progress:0.1},
+    {...job,...owned,status:'downloading',stage:'downloading',progress:0.7957257856892123},
+    {...job,...owned,status:'downloading',stage:'downloading',progress:0.95},
+    {...job,...owned,status:'completed',stage:'completed',progress:1},
+  ];
+  return {model,component,entry,network,progress,utilityWorkerId};
 }
 
 test('installer selects the pinned missing component and rejects preinstalled, blocked or incomplete base state', () => {
@@ -90,7 +100,7 @@ test('installer selects the pinned missing component and rejects preinstalled, b
   assert.throws(() => installerComponent([fixture.entry],'moss_image_other'), /exact MOSS/);
 });
 
-test('installer requires real acknowledged queued download identity and running-to-completed progress', () => {
+test('installer requires acknowledged pinned native downloading-to-completed progress from its owned CPU worker', () => {
   const fixture = installerFixture();
   assert.deepEqual(installedDownloadJobs(fixture),['inert-download-job']);
   const mutations = [
@@ -98,11 +108,24 @@ test('installer requires real acknowledged queued download identity and running-
     item => {item.network.response.jobs=[];},
     item => {item.network.response.components[0].status='installed';},
     item => {item.network.response.components[0].revision='b'.repeat(40);},
-    item => {item.progress=item.progress.filter(job => job.status !== 'running');},
-    item => {item.progress[1].status='failed';},
-    item => {item.progress[0].payload={...item.progress[0].payload,repo:'other/repo'};},
-    item => {item.progress[1].id='other-job';},
+    item => {item.progress=item.progress.filter(job => job.status !== 'downloading');},
+    item => {item.progress=[item.progress.at(-1)];},
+    item => {item.progress=item.progress.slice(0,2);},
+    item => {item.progress.pop();},
+    item => {for (const job of item.progress.filter(job => job.status === 'downloading')) job.status=job.stage='running';},
+    item => {item.progress[2].payload={...item.progress[2].payload,repo:'other/repo'};},
+    item => {item.progress[2].payload={...item.progress[2].payload,modelId:'moss_image_sft'};},
+    item => {item.progress[2].payload={...item.progress[2].payload,revision:'b'.repeat(40)};},
+    item => {item.progress[2].type='image_generate';},
+    item => {item.progress.at(-1).id='other-job';},
+    item => {item.utilityWorkerId='';},
+    item => {item.utilityWorkerId='foreign-worker';},
   ];
+  for (const index of [2,-1]) for (const [key,value] of [['workerId','foreign-worker'],['workerId',null],['assignedGpu','mlx'],['stage','running'],['error','download failed']]) mutations.push(item => {item.progress.at(index)[key]=value;});
+  for (const status of ['failed','canceled','interrupted']) {
+    mutations.push(item => {item.progress.at(-1).status=status;});
+    mutations.push(item => {item.progress.splice(2,0,{...item.progress[2],status});});
+  }
   for (const mutate of mutations) { const item=structuredClone(fixture); mutate(item); assert.throws(() => installedDownloadJobs(item)); }
 });
 

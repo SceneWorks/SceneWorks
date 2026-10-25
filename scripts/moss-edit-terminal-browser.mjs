@@ -374,7 +374,8 @@ export function installerComponent(catalog, model) {
   return { entry, component };
 }
 
-export function installedDownloadJobs({ model, component, network, progress }) {
+export function installedDownloadJobs({ model, component, network, progress, utilityWorkerId }) {
+  requireThat(typeof utilityWorkerId === 'string' && utilityWorkerId, 'installer requires its actual owned CPU utility worker identity');
   requireThat(network?.method === 'POST' && network.path === `/api/v1/models/${model}/conditional-components/moss_image_edit/download` && network.status === 201 && network.request?.licenseAcknowledged === true && network.response?.purpose === 'moss_image_edit', 'missing actual acknowledged edit-adapter download POST');
   const jobs = network.response.jobs;
   requireThat(Array.isArray(jobs) && jobs.length === 1 && new Set(jobs.map(job => job.id)).size === jobs.length && jobs.every(job => typeof job.id === 'string' && job.id && job.type === 'model_download'), 'actual installer must queue its one native model_download job; already-installed/no-job response cannot pass');
@@ -382,7 +383,10 @@ export function installedDownloadJobs({ model, component, network, progress }) {
   requireThat(Array.isArray(queued) && queued.length === 1 && queued[0].componentId === component.componentId && queued[0].repo === component.repo && queued[0].revision === component.revision && queued[0].status === 'queued' && queued[0].jobId === jobs[0].id, 'download response changed pinned component/job identity');
   for (const job of jobs) {
     const observed = progress.filter(item => item.id === job.id);
-    requireThat(observed.some(item => item.status === 'running') && observed.at(-1)?.status === 'completed', 'installer needs actual running and completed native download observations');
+    const downloading = observed.slice(0,-1).filter(item => item.status === 'downloading'), completed = observed.at(-1);
+    requireThat(downloading.length && completed?.status === 'completed', 'installer needs actual downloading and completed native download observations');
+    requireThat(observed.every(item => !item.error && !['failed','canceled','interrupted'].includes(item.status)), 'installer observed an unsuccessful native download');
+    requireThat([...downloading,completed].every(item => item.workerId === utilityWorkerId && item.assignedGpu === 'cpu' && item.stage === item.status), 'native download observations belong to another worker/device or stage');
     for (const item of [job,...observed]) requireThat(item.type === 'model_download' && item.payload?.modelId === model && item.payload?.repo === component.repo && item.payload?.revision === component.revision, 'observed download progress belongs to another model/repo/revision');
   }
   return jobs.map(job => job.id);
@@ -390,8 +394,9 @@ export function installedDownloadJobs({ model, component, network, progress }) {
 
 // Separate pre-freeze proof. The controller owns the isolated missing-adapter
 // projection and final package hashing; this function never edits any HF cache.
-export async function capturePackageInstallUi({ apiUrl, projectId, captureRoot, playwrightModule, token, model }) {
+export async function capturePackageInstallUi({ apiUrl, projectId, captureRoot, playwrightModule, token, model, utilityWorkerId }) {
   requireThat(typeof captureRoot === 'string' && isAbsolute(captureRoot) && typeof playwrightModule === 'string' && isAbsolute(playwrightModule), 'installer requires absolute fresh capture and Playwright module paths');
+  requireThat(typeof utilityWorkerId === 'string' && utilityWorkerId, 'installer requires its actual owned CPU utility worker identity');
   const base = new URL(apiUrl);
   requireThat(['http:','https:'].includes(base.protocol) && !base.username && !base.password && !base.search && !base.hash && projectId && token, 'installer requires the authenticated isolated API/project');
   requireThat(['moss_image_base','moss_image_sft'].includes(model), 'installer requires an exact MOSS Base/SFT catalog ID');
@@ -437,7 +442,7 @@ export async function capturePackageInstallUi({ apiUrl, projectId, captureRoot, 
       return ids.every(id => observation.progress.filter(job => job.id === id).at(-1)?.status === 'completed');
     },'actual native adapter download did not complete',60*60*1000);
     const progress = observation.progress.filter(job => ids.includes(job.id));
-    installedDownloadJobs({model,component,network,progress});
+    installedDownloadJobs({model,component,network,progress,utilityWorkerId});
     // The application's actual SSE completion refreshes its model catalog; do
     // not reload/override state to conceal a broken installed-state transition.
     await controls.getByText(/^Edit adapter: installed\./).waitFor({state:'visible'});
@@ -445,7 +450,7 @@ export async function capturePackageInstallUi({ apiUrl, projectId, captureRoot, 
     const after = (Array.isArray(catalogAfter) ? catalogAfter : catalogAfter.models)?.find(item => item.id === model);
     requireThat(after?.conditionalPurposes?.moss_image_edit?.installState === 'installed' && await install.count() === 0 && observation.posts.length === 0 && observation.installations.length === 1, 'installer did not finish exactly once without a generation dispatch');
     screenshots.push(await screenshot(page,captureRoot,'install-after'));
-    const capture = {version:VERSION,phase:'pre-freeze-package-install',observer:'actual-playwright-react-ui/v1',apiUrl:base.href,projectId,model,startedAt,capturedAt:now(),network,jobIds:ids,progress,actions,screenshots,statusBefore,statusAfter,catalogBefore:entry,catalogAfter:after,component,imageJobPosts:observation.posts};
+    const capture = {version:VERSION,phase:'pre-freeze-package-install',observer:'actual-playwright-react-ui/v1',apiUrl:base.href,projectId,model,utilityWorkerId,startedAt,capturedAt:now(),network,jobIds:ids,progress,actions,screenshots,statusBefore,statusAfter,catalogBefore:entry,catalogAfter:after,component,imageJobPosts:observation.posts};
     const path = resolve(captureRoot,'capture.json'); await save(path,capture); return path;
   } catch (error) {
     if (page) await screenshot(page,captureRoot,'install-failure').catch(() => {});
