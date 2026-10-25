@@ -1,8 +1,10 @@
 // CPU-only inert protocol tests. Never import Playwright, open a port or launch a browser.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { captureUi, capturePackageInstallUi, openAsset, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
+import { readFile, mkdtemp, writeFile, lstat, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
+import { createFreshCaptureDirectory, captureUi, capturePackageInstallUi, openAsset, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
 import { createPlan, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
 
 const inputs = { provenance: 'inert browser route fixture', single_case: { references: ['B'], width: 768, height: 512, prompt: 'single' },
@@ -171,4 +173,17 @@ test('replay refuses missing or ambiguous asset IDs even when their display name
     const library=assetLibrary(assets);
     await assert.rejects(openAsset(library.page,asset,[]),/ambiguous/);assert.deepEqual(library.opened,[]);
   }
+});
+
+test('production capture directory creates fresh nested parents and refuses stale leaves before runtime',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-fresh-capture-'));t.after(()=>rm(root,{recursive:true,force:true}));const capture=resolve(root,'fresh-session/captures/quality-mlx-base-single');
+  await createFreshCaptureDirectory(capture);assert.equal((await lstat(capture)).isDirectory(),true);assert.deepEqual(await readdir(capture),[]);
+  if(process.platform!=='win32'){assert.equal((await lstat(capture)).mode&0o777,0o700);assert.equal((await lstat(resolve(capture,'..'))).mode&0o777,0o700);}
+  await writeFile(resolve(capture,'sentinel'),'retained');await assert.rejects(()=>createFreshCaptureDirectory(capture),{code:'EEXIST'});assert.equal(await readFile(resolve(capture,'sentinel'),'utf8'),'retained');await assert.rejects(()=>createFreshCaptureDirectory('relative/capture'),/absolute/);
+});
+test('both browser entrypoints use the fresh parent/leaf helper before importing browser runtime',async t=>{
+  const source=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8');assert.equal((source.match(/await createFreshCaptureDirectory\(captureRoot\)/g)??[]).length,2);
+  for(const name of ['capturePackageInstallUi','captureUi']){const body=source.slice(source.indexOf(`export async function ${name}(`));assert.ok(body.indexOf('await createFreshCaptureDirectory(captureRoot)')<body.indexOf('await import(pathToFileURL(playwrightModule).href)'));}
+  const root=await mkdtemp(resolve(tmpdir(),'moss-capture-bootstrap-'));t.after(()=>rm(root,{recursive:true,force:true}));const captureRoot=resolve(root,'fresh/install/capture');
+  await assert.rejects(()=>capturePackageInstallUi({apiUrl:'http://127.0.0.1:17957/',projectId:'inert-owned-project',captureRoot,playwrightModule:resolve(root,'runtime-must-not-load.mjs'),token:'inert-token',model:'moss_image_base',utilityWorkerId:'inert-utility'}),{code:'ERR_MODULE_NOT_FOUND'});assert.equal((await lstat(captureRoot)).isDirectory(),true);
 });

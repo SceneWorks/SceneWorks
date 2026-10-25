@@ -7,14 +7,14 @@ import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
 import { OWNED_RUNS, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
-const runtimes = await Promise.all([4, 5, 6, 10].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
+const runtimes = await Promise.all([4, 5, 6, 10, 12].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.source, status: 'completed', conclusion: 'failure' });
 const jobs = binding => [{ id: 1, run_id: Number(binding.run), status: 'completed', conclusion: 'failure' }];
 const tree = (root, exists = true) => ({ root, exists, safe: true, reparsePoints: 0, bytes: exists ? 100 : 0, fileCount: exists ? 2 : 0, files: [] });
-function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, destinationExists = false, freeBytes = 8 * 1024 ** 3, r10Cache = false } = {}) {
-  const roots = new Set(OWNED_RUNS.map(item => path.join(item.root, 'hf')));
-  const from = path.join(OWNED_RUNS[r10Cache?3:2].root, 'target'), to = path.join(env.MOSS_ROOT, 'target');
+function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, destinationExists = false, freeBytes = 8 * 1024 ** 3, r10Cache = false, r12Cache = false, r12Hf = false } = {}) {
+  const roots = new Set(OWNED_RUNS.filter((item,index)=>index!==4||r12Cache||r12Hf).map(item => path.join(item.root, 'hf')));
+  const from = path.join(OWNED_RUNS[r12Cache?4:r10Cache?3:2].root, 'target'), to = path.join(env.MOSS_ROOT, 'target');
   roots.add(from); if (destinationExists) roots.add(to);
   const mutations = [], stops = new Map(), reports = [], writes = [];
   const io = {
@@ -32,7 +32,7 @@ function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, desti
       assert.ok([from, to].some(root => file === path.join(root, 'release', 'sceneworks-rust-api.exe'))); return Buffer.from('original R6 binary fixture');
     },
     metadata: async runtime => ({root:runtime.hfHome,entries:runtime.packageFiles.map((item,index)=>({path:item.file,type:'file',dev:'1',ino:String(9007199254740993n+BigInt(index)),nlink:index?'1':'2',byteLength:'1',sha256:item.sha256}))}),
-    hash: async file => {assert.ok([from,to].some(root=>file===path.join(root,'release','sceneworks-rust-api.exe')));return r10Cache?OWNED_RUNS[3].cacheBinarySha256:createHash('sha256').update('original R6 binary fixture').digest('hex');},
+    hash: async file => {assert.ok([from,to].some(root=>file===path.join(root,'release','sceneworks-rust-api.exe')));return r12Cache?OWNED_RUNS[4].cacheBinarySha256:r10Cache?OWNED_RUNS[3].cacheBinarySha256:createHash('sha256').update('original R6 binary fixture').digest('hex');},
     remove: async leaf => { assert.ok(OWNED_RUNS.some(item => leaf === path.join(item.root, 'hf'))); roots.delete(leaf); mutations.push(['remove', leaf]); },
     copy: async (source, target) => { assert.equal(source, from); assert.equal(target, to); assert.ok(!roots.has(target)); roots.add(target); mutations.push(['copy', source, target]); },
     ensure: async root => { assert.equal(root, env.MOSS_ROOT); roots.add(root); },
@@ -41,8 +41,8 @@ function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, desti
   };
   return { io, mutations, reports, writes, roots, from, to };
 }
-test('actual immutable R4/R5/R6/R10 runtime bytes bind only the stopped HF leaves', () => {
-  assert.deepEqual(OWNED_RUNS.map(item => item.run), ['40145054879', '40152001538', '40155160639', '40163530825']);
+test('actual immutable R4/R5/R6/R10/R12 runtime bytes bind only the stopped HF leaves', () => {
+  assert.deepEqual(OWNED_RUNS.map(item => item.run), ['40145054879', '40152001538', '40155160639', '40163530825', '40167292776']);
   for (const [index, binding] of OWNED_RUNS.entries()) {
     assert.equal(validateRuntime(binding, runtimes[index]).candidateId, binding.candidate);
     assert.throws(() => validateRuntime(binding, Buffer.concat([runtimes[index], Buffer.from(' ')])), /runtime bytes/);
@@ -197,4 +197,24 @@ test('production native filesystem cache copy refuses existing empty and populat
     assert.equal(await readFile(resolve(source,'release/api.exe'),'utf8'),'source binary');
   }
   await assert.rejects(()=>copyCacheExclusive(source,source),/already exists/);assert.equal(await readFile(resolve(source,'release/api.exe'),'utf8'),'source binary');
+});
+
+test('fixed actual R12 runtime permits only its HF leaf and verified original-preserving cache copy',async()=>{
+  const binding=OWNED_RUNS[4],runtime=validateRuntime(binding,runtimes[4]);assert.equal(runtimes[4].length,71286);assert.equal(binding.runtimeSha,'47a25951ea0e1d6fd076802c2ca68421e36d90a296fa1813fc344e6d0a461355');assert.equal(binding.source,'e6475176bf1cf07a46530adbe659aa0d6492c71a');assert.equal(binding.cacheBinarySha256,'07cb4ef31caba2f875d6750c461715f880c79288201af88af11997e31809d69d');assert.equal(runtime.hfHome,path.join(binding.root,'hf'));
+  const f=fixture({r12Cache:true}),remove=f.io.remove;f.io.remove=async leaf=>{if(leaf===runtime.hfHome){const proof=f.reports.find(item=>item.stage==='fixed-r12-readonly-metadata-before-hf-cleanup');assert.ok(proof);assert.equal(proof.runtimeSha256,binding.runtimeSha);assert.equal(proof.metadata.completeProjection,true);}return remove(leaf);};
+  const receipt=await maintain(env,f.io);assert.equal(receipt.cache.originalRun,binding.run);assert.equal(receipt.cache.originalBinarySha256,binding.cacheBinarySha256);assert.equal(receipt.cache.originalCacheRetained,true);assert.equal(f.roots.has(f.from),true);assert.equal(f.roots.has(f.to),true);assert.equal(f.roots.has(runtime.hfHome),false);
+  assert.throws(()=>validateRuntime({...binding,root:'E:\\models'},runtimes[4]),/root/);assert.throws(()=>validateRuntime(binding,Buffer.concat([runtimes[4],Buffer.from(' ')])),/runtime bytes/);
+  const bad=fixture({r12Cache:true,mutateRuntime:(bytes,index)=>index===4?Buffer.from('{}'):bytes});await assert.rejects(()=>maintain(env,bad.io));assert.deepEqual(bad.mutations,[]);
+  const reparse=fixture({r12Cache:true,mutateInspect:root=>root===runtime.hfHome?{...tree(root),reparsePoints:1}:undefined});await assert.rejects(()=>maintain(env,reparse.io));assert.deepEqual(reparse.mutations,[]);
+  const wrong=fixture({r12Cache:true});wrong.io.hash=async()=> '0'.repeat(64);await assert.rejects(()=>maintain(env,wrong.io),/source cache binary differs/);assert.equal(wrong.mutations.some(item=>item[0]==='copy'),false);
+  const copied=fixture({r12Cache:true});copied.io.hash=async file=>file.startsWith(copied.to)?'0'.repeat(64):binding.cacheBinarySha256;await assert.rejects(()=>maintain(env,copied.io),/copied cache binary differs/);
+  const existing=fixture({r12Cache:true,destinationExists:true});await maintain(env,existing.io);assert.equal(existing.mutations.some(item=>item[0]==='copy'),false);assert.equal(existing.roots.has(existing.from),true);
+});
+test('R12 completeness is independent of R12/R10/R6 cache selection and needs actual all43 hashes',async()=>{
+  for(const selected of ['r12','r10','r6']) {
+    const f=fixture({r12Cache:selected==='r12',r10Cache:selected==='r10',r12Hf:true});for(const binding of OWNED_RUNS.slice(0,4))f.roots.delete(path.join(binding.root,'hf'));
+    const observe=f.io.metadata;f.io.metadata=async runtime=>{const proof=await observe(runtime);proof.entries.pop();return proof;};const receipt=await maintain(env,f.io);assert.match(receipt.cache.state,/insufficient-proved/);assert.equal(receipt.cache.projectionReserveBytes,0);assert.equal(f.mutations.some(item=>item[0]==='copy'),false);
+  }
+  const complete=fixture({r12Cache:true});for(const binding of OWNED_RUNS.slice(0,4))complete.roots.delete(path.join(binding.root,'hf'));const seeded=await maintain(env,complete.io);assert.equal(seeded.cache.originalRun,OWNED_RUNS[4].run);assert.equal(seeded.cache.projectionReserveBytes,100);assert.ok(complete.mutations.some(item=>item[0]==='copy'));
+  const low=fixture({r12Cache:true,freeBytes:1});await maintain(env,low.io);assert.equal(low.mutations.some(item=>item[0]==='copy'),false);
 });

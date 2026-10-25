@@ -15,6 +15,7 @@ export const OWNED_RUNS = Object.freeze([
   { run: '40152001538', candidate: 'sc-26752-final-r5', source: '9ac78275e2f5f536541c1790fc840232fd5bdfdd', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', runtimeSha: '7ac52e00e6e712012b907a740e96e5c9d39c72483499205f637916e286e70b43' },
   { run: '40155160639', candidate: 'sc-26752-final-r6', source: '2490b2eed9bf986967c389ac69171d03b04835d7', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', runtimeSha: 'cfb0491496d4e29aafc466404526592fe2d2950a12f1566c74fcab9e728f007e' },
   { run: '40163530825', candidate: 'sc-26752-final-r10', source: 'c17fd74650f2464427b30cea7669c7a284ea4a73', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40163530825-1-cuda', runtimeSha: '546808654e2a0d44d26a5d594b9e7c20961b2b9d947e900effdefdf9f8c2d625', cacheBinarySha256: '93dbe1db05a946517484539199b69927ebc4eb9bae3bab508ba2636529b81b97', metadataRequired: true },
+  { run: '40167292776', candidate: 'sc-26752-final-r12', source: 'e6475176bf1cf07a46530adbe659aa0d6492c71a', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40167292776-1-cuda', runtimeSha: '47a25951ea0e1d6fd076802c2ca68421e36d90a296fa1813fc344e6d0a461355', cacheBinarySha256: '07cb4ef31caba2f875d6750c461715f880c79288201af88af11997e31809d69d', metadataRequired: true },
 ].map(item => Object.freeze({ ...item, attempt: 1, root: item.root ?? path.join(item.workspace, `moss-build-${item.run}-1-cuda`) })));
 // Bigint identities are serialized as decimal strings; never round Windows file IDs.
 export function entryIdentity(info) {
@@ -40,7 +41,7 @@ export async function observeHf(runtime) {
   return {root:runtime.hfHome,entries};
 }
 export function validateHfObservation(observation,hf,runtime) {
-  check(normal(observation.root??'')===normal(hf)&&Array.isArray(observation.entries)&&observation.entries.length<=10000,'R10 HF metadata escaped fixed root');
+  check(normal(observation.root??'')===normal(hf)&&Array.isArray(observation.entries)&&observation.entries.length<=10000,'owned HF metadata escaped fixed root');
   for(const entry of observation.entries) {
     check(typeof entry.path==='string'&&!path.isAbsolute(entry.path)&&!entry.path.split(/[\\/]/).some(part=>part==='..'||part==='.')&&!entry.path.includes(':')&&normal(path.join(hf,entry.path)).startsWith(normal(hf)+'\\'),'HF metadata path escaped');
     check(['file','symlink','other'].includes(entry.type)&&['dev','ino','nlink','byteLength'].every(key=>/^[0-9]+$/.test(entry[key]??'')),'invalid HF metadata identity');
@@ -145,7 +146,7 @@ export async function maintain(env, io) {
     const stop = await io.stopped(binding), hf = path.join(binding.root, 'hf');
     const inventory = validateTree(await io.inspect(hf), hf);
     let cache = null, cacheProbeError = null;
-    if (binding.run === '40155160639' || binding.run === '40163530825') {
+    if (binding.run === '40155160639' || binding.run === '40163530825' || binding.run === '40167292776') {
       try { cache = validateTree(await io.inspect(path.join(binding.root, 'target')), path.join(binding.root, 'target')); }
       catch (error) { cacheProbeError = String(error.message).slice(0, 200); } // Optional seed stays untouched.
     }
@@ -165,14 +166,14 @@ export async function maintain(env, io) {
     validateTree(await io.inspect(leaf), leaf);
     if(candidate.metadataRequired) {
       const metadata = validateHfObservation(await io.metadata(runtime), leaf, runtime);
-      check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'R10 HF metadata changed before cleanup');
-      io.report({stage:'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
+      check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'owned HF metadata changed before cleanup');
+      io.report({stage:candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
     }
     await io.remove(leaf); // Exact fixed HF leaf only; no root/cache/model-source wildcard.
     receipt.operations.push({ kind: 'remove-owned-hf', path: leaf, after: await io.volume() });
     io.report({ stage: 'hf-reclaimed', operation: receipt.operations.at(-1) });
   }
-  const original = receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
+  const original = receipt.candidates.find(item => item.run === '40167292776' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
   if (original.cache?.exists) {
     await io.stopped(original);
     validateRuntime(original, await io.read(path.join(original.root, 'runtime.json')));
@@ -180,7 +181,7 @@ export async function maintain(env, io) {
     const dest = validateTree(await io.inspect(target), target);
     const freeBeforeCopy = await io.volume();
     // Completeness is a property of the projection, never of which target cache was selected.
-    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (item.run === '40163530825' && item.metadata?.completeProjection === true)));
+    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (['40163530825', '40167292776'].includes(item.run) && item.metadata?.completeProjection === true)));
     const projectionReserveBytes = Math.max(0, ...completeProjections.map(item => item.inventory.bytes));
     const rebuildReserveBytes = 4 * 1024 ** 3;
     const requiredFreeBytes = cacheInventory.bytes + projectionReserveBytes + rebuildReserveBytes;
@@ -191,7 +192,7 @@ export async function maintain(env, io) {
     } else {
       const binaryHash = file => io.hash ? io.hash(file) : io.read(file).then(sha);
       const originalBinarySha256 = await binaryHash(path.join(from, 'release', 'sceneworks-rust-api.exe'));
-      if(original.cacheBinarySha256)check(originalBinarySha256===original.cacheBinarySha256,'fixed R10 source cache binary differs from actual retained artifact');
+      if(original.cacheBinarySha256)check(originalBinarySha256===original.cacheBinarySha256,'fixed source cache binary differs from actual retained artifact');
       await io.ensure(root);
       validateTree(await io.inspect(root), root);
       check(!(await io.inspect(target)).exists, 'destination appeared before cache copy');

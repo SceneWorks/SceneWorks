@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 // Real React interactions only. Importing this module cannot start a browser or job.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { resolve, isAbsolute, basename } from 'node:path';
+import { resolve, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
+
+// Parents may be new on the first row; each capture leaf must remain exclusive.
+export async function createFreshCaptureDirectory(captureRoot) {
+  requireThat(typeof captureRoot==='string'&&isAbsolute(captureRoot),'capture directory must be absolute');
+  await mkdir(dirname(captureRoot),{recursive:true,mode:0o700});
+  await mkdir(captureRoot,{mode:0o700});
+}
 
 const now = () => new Date().toISOString();
 const endpoint = value => new URL(value).pathname;
@@ -400,7 +407,7 @@ export async function capturePackageInstallUi({ apiUrl, projectId, captureRoot, 
   const base = new URL(apiUrl);
   requireThat(['http:','https:'].includes(base.protocol) && !base.username && !base.password && !base.search && !base.hash && projectId && token, 'installer requires the authenticated isolated API/project');
   requireThat(['moss_image_base','moss_image_sft'].includes(model), 'installer requires an exact MOSS Base/SFT catalog ID');
-  await mkdir(captureRoot,{mode:0o700});
+  await createFreshCaptureDirectory(captureRoot);
   const imported = await import(pathToFileURL(playwrightModule).href), chromium = imported.chromium ?? imported.default?.chromium;
   requireThat(chromium?.launch, 'explicit module did not export Playwright chromium');
   const browser = await chromium.launch({headless:true,args:['--disable-gpu','--disable-webgl','--disable-dev-shm-usage']});
@@ -468,7 +475,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
   requireThat(intent.transport === 'ui' && intent.lockSha256 === digest(state.lock) && intent.bindingSha256 === digest(state.binding) && intent.requestSha256 === digest(expected), 'controller must reserve this exact UI attempt once before capture');
   await resumeUiAttempt(state.root,row.backend,row.id,{lockSha256:digest(state.lock),bindingSha256:digest(state.binding),requestSha256:digest(expected)});
   token ??= process.env[state.binding.endpoint.tokenEnv]; requireThat(typeof token === 'string' && token, 'bound launcher token is missing');
-  await mkdir(captureRoot, { mode: 0o700 });
+  await createFreshCaptureDirectory(captureRoot);
   const imported = await import(pathToFileURL(playwrightModule).href), chromium = imported.chromium ?? imported.default?.chromium;
   requireThat(chromium?.launch, 'explicit module did not export Playwright chromium');
   const browser = await chromium.launch({ headless: true, args: ['--disable-gpu','--disable-webgl','--disable-dev-shm-usage'] });
