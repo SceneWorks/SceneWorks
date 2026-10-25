@@ -496,9 +496,8 @@ pub(crate) fn stage_h3_component_with_receipts(
     target: &Path,
 ) -> Result<Vec<H3ComponentStagingReceipt>, String> {
     use crate::checkpoint_plan_store::{SourceStampV1, StoreClockV1};
-    if !["minimax-h3-shared", "minimax-h3-assemblies"]
-        .iter()
-        .any(|name| link.starts_with(data_dir.join("cache").join(name)))
+    if !link.starts_with(data_dir.join("cache/minimax-h3-shared"))
+        && !link.starts_with(data_dir.join("cache/minimax-h3-assemblies"))
     {
         return Err("H3 component staging destination is outside the owned assembly cache".into());
     }

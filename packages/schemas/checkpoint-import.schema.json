@@ -32,6 +32,9 @@
         "files": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
       }
     },
+    "componentDownloads": {
+      "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/componentDownload" }
+    },
     "componentClosure": {
       "type": "array", "minItems": 1,
       "items": {
@@ -56,10 +59,19 @@
         "schemaVersion": { "enum": [1, 2] },
         "baseLineage": { "type": "object" }, "declaredSemantics": { "type": "object" },
         "inheritedLicenseAcknowledgments": { "type": "array", "items": { "type": "object" } },
-        "componentDownloads": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/componentDownload" } },
+        "componentDownloads": { "$ref": "#/$defs/componentDownloads" },
         "componentClosure": { "$ref": "#/$defs/componentClosure" }
       },
-      "allOf": [{ "if": { "properties": { "schemaVersion": { "const": 2 } } }, "then": { "required": ["componentDownloads", "componentClosure"] } }]
+      "allOf": [{
+        "if": { "properties": { "schemaVersion": { "const": 2 } } },
+        "then": {
+          "properties": {
+            "componentDownloads": { "$ref": "#/$defs/componentDownloads" },
+            "componentClosure": { "$ref": "#/$defs/componentClosure" }
+          },
+          "required": ["componentDownloads", "componentClosure"]
+        }
+      }]
     },
     "sourceLocator": {
       "oneOf": [

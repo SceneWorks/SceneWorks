@@ -2192,9 +2192,13 @@ async fn run_claimed_model_import_fixture(
     client: &reqwest::Client,
     job: &JobSnapshot,
 ) -> super::WorkerResult<()> {
-    let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
-    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)?;
+    claim_model_import_fixture(api, job).await?;
     super::model_jobs::run_model_import_job(api, settings, client, job).await
+}
+
+async fn claim_model_import_fixture(api: &ApiClient, job: &JobSnapshot) -> super::WorkerResult<()> {
+    let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
+    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)
 }
 
 struct ManagedImportFixture {
@@ -2587,6 +2591,16 @@ async fn a_cancelled_managed_import_leaves_no_partial_install() {
 /// The managed import job for a dense MiniMax-H3 DiT DIRECTORY (sc-26680), with the request
 /// guessing `type: "image"` — content decides.
 fn h3_import_job(fixture: &ManagedImportFixture, source: &std::path::Path) -> JobSnapshot {
+    h3_import_job_for_partition(fixture, source, "fl2va")
+}
+
+/// Choose the task and its complete component declaration together, BEFORE immutable capture.
+fn h3_import_job_for_partition(
+    fixture: &ManagedImportFixture,
+    source: &std::path::Path,
+    partition: &str,
+) -> JobSnapshot {
+    assert!(matches!(partition, "fl2va" | "ref2va" | "hybrid"));
     crate::minimax_h3_import_fixture::stage_component_snapshots(&fixture.settings.data_dir);
     let mut job = fixture.job(None);
     job.payload.insert(
@@ -2600,13 +2614,13 @@ fn h3_import_job(fixture: &ManagedImportFixture, source: &std::path::Path) -> Jo
         .expect("manifest entry");
     // What the API's synchronous gate resolved the family to from the same bytes.
     entry.insert("family".to_owned(), json!("minimax-h3"));
-    entry.insert("baseModel".to_owned(), json!("minimax_h3"));
-    entry.insert("minimaxH3Partition".to_owned(), json!("fl2va"));
+    entry.insert("baseModel".to_owned(), json!(if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" }));
+    entry.insert("minimaxH3Partition".to_owned(), json!(partition));
     entry.insert("importComponentTier".to_owned(), json!("q4"));
     entry.insert(
         "downloads".to_owned(),
         json!(crate::minimax_h3_import_fixture::component_downloads(
-            "q4", "fl2va"
+            "q4", partition
         )),
     );
     job
@@ -2734,7 +2748,7 @@ async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_inst
 #[tokio::test]
 async fn h3_import_registration_requires_exact_task_compatibility() {
     let _env = isolate_hf_cache();
-    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
     for (index, declaration, accepted) in [
         (0, json!({}), false),
         (
@@ -2762,18 +2776,23 @@ async fn h3_import_registration_requires_exact_task_compatibility() {
         let fixture = managed_import_fixture_with_id(base_url.clone(), &id).await;
         let source = fixture.settings.data_dir.join("models/incoming/declared");
         crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
-        let mut job = h3_import_job(&fixture, &source);
+        let partition = declaration["minimaxH3Partition"].as_str().unwrap_or("fl2va");
+        let mut job = h3_import_job_for_partition(&fixture, &source, partition);
         let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
         entry.remove("baseModel");
         entry.remove("minimaxH3Partition");
         entry.extend(declaration.as_object().unwrap().clone());
-        let _ = super::model_jobs::run_model_import_job(
+        posts.lock().unwrap().clear();
+        run_claimed_model_import_fixture(
             &ApiClient::new(&fixture.settings),
             &fixture.settings,
             &reqwest::Client::new(),
             &job,
         )
-        .await;
+        .await.expect("the worker reports declaration refusal or completes the actual claimed import");
+        let updates = posts.lock().unwrap().clone();
+        assert_eq!(updates.iter().any(|post| post["status"] == "completed"), accepted, "{declaration}: {updates:?}");
+        assert_eq!(updates.iter().any(|post| post["status"] == "failed"), !accepted, "{declaration}: {updates:?}");
         let registered = fixture.manifest_entry();
         assert_eq!(registered.is_some(), accepted, "{declaration}");
         if let Some(entry) = registered {
@@ -3360,6 +3379,16 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     std::fs::create_dir_all(upload.parent().unwrap()).unwrap();
                     std::fs::write(&upload, &bytes).unwrap();
                     let mut job = h3_import_job(&fixture, &upload);
+                    let base = Value::Object(sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3").unwrap().clone());
+                    let config_row = sceneworks_core::minimax_h3_import::import_config_download(&base, "q4", std::env::consts::OS).unwrap();
+                    let config_cache = huggingface_repo_cache_path(&fixture.settings.data_dir, config_row["repo"].as_str().unwrap()).unwrap()
+                        .join("snapshots").join(config_row["revision"].as_str().unwrap())
+                        .join(config_row["files"][0].as_str().unwrap());
+                    assert!(config_cache.starts_with(&fixture.settings.data_dir));
+                    std::fs::create_dir_all(config_cache.parent().unwrap()).unwrap();
+                    let config_bytes = std::fs::read(native.install_dir.join("config.json")).unwrap();
+                    std::fs::write(&config_cache, &config_bytes).unwrap();
+                    job.payload["manifestEntry"]["downloads"].as_array_mut().unwrap().push(config_row.clone());
                     job.payload.insert("uploadedSourcePath".into(), json!(true));
                     job.payload
                         .insert("importProvenance".into(), json!({"source":"upload"}));
@@ -3367,6 +3396,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     std::fs::create_dir(&fixture.manifest_path).unwrap();
                     let api = ApiClient::new(&fixture.settings);
                     let client = reqwest::Client::new();
+                    claim_model_import_fixture(&api, &job).await.unwrap();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
@@ -3375,11 +3405,12 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                         gen_core::CancelFlag::new(),
                     )
                     .await;
-                    assert!(posts
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|post| post["status"] == "failed"));
+                    let failed_updates = posts.lock().unwrap().clone();
+                    let failure = failed_updates.iter().find(|post| post["status"] == "failed")
+                        .unwrap_or_else(|| panic!("unwritable publication must report failure: {failed_updates:?}"));
+                    let error = failure["error"].as_str().unwrap();
+                    assert!(error.contains("directory") || error.contains("denied") || error.contains("os error"), "the deliberate manifest I/O fault, not component setup, must fail: {failure}");
+                    assert!(!failed_updates.iter().any(|post| post["status"] == "completed"), "{failed_updates:?}");
                     assert_eq!(
                         std::fs::read(&upload).unwrap(),
                         bytes,
@@ -3389,15 +3420,29 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     std::fs::remove_dir(&fixture.manifest_path).unwrap();
                     std::fs::write(&fixture.manifest_path, r#"{"schemaVersion":1,"models":[]}"#)
                         .unwrap();
+                    let mut retry = job.clone();
+                    retry.id = "job-upload-retry".into();
+                    retry.source_job_id = Some(job.id.clone());
+                    retry.attempts = job.attempts.checked_add(1).unwrap();
+                    claim_model_import_fixture(&api, &retry).await.unwrap();
+                    posts.lock().unwrap().clear();
                     super::run_utility_job(
                         &api,
                         &fixture.settings,
                         &client,
-                        job,
+                        retry,
                         gen_core::CancelFlag::new(),
                     )
                     .await;
-                    assert!(fixture.manifest_entry().is_some());
+                    let completed = posts.lock().unwrap().clone();
+                    assert!(!completed.iter().any(|post| post["status"] == "failed"), "{completed:?}");
+                    assert!(completed.iter().any(|post| post["status"] == "completed"), "{completed:?}");
+                    let published = fixture.manifest_entry().unwrap_or_else(|| panic!("successful retry must publish: {completed:?}"));
+                    assert!(!published["downloads"].as_array().unwrap().iter().any(|row| row["componentId"] == "import_transformer_config"));
+                    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+                    let resolved = store.resolve(published["importPlan"]["checkpointId"].as_str().unwrap()).unwrap();
+                    assert_eq!(resolved.plan.context["transformerConfig"]["provenance"]["revision"], config_row["revision"]);
+                    assert_eq!(std::fs::read(&config_cache).unwrap(), config_bytes, "repair never changes the pinned configuration source");
                     assert_eq!(
                         std::fs::read(fixture.install_dir.join("community.safetensors")).unwrap(),
                         bytes

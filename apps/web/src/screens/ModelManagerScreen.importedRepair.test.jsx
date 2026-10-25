@@ -18,7 +18,7 @@ const IMPORT = {
 };
 
 let container, root, fetchMock, errors, jobs;
-let libraryState;
+let libraryState, repairFailure;
 function Harness({ model, initialJobs = [] }) {
   const [currentJobs, setJobs] = useState(initialJobs);
   jobs = currentJobs;
@@ -54,7 +54,7 @@ async function render(model, initialJobs) {
 }
 beforeEach(() => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
-  errors = []; jobs = []; libraryState = "needs_rescan";
+  errors = []; jobs = []; libraryState = "needs_rescan"; repairFailure = false;
   window.localStorage.clear();
   fetchMock = vi.fn(async (url, options = {}) => {
     let payload = {};
@@ -68,7 +68,14 @@ beforeEach(() => {
         json: async () => body.componentId ? { id: "repair-job", createdAt: "2026-10-24T00:00:00Z", type: "model_download", status: "queued", payload: { modelId: "my_h3" } }
           : { detail: "Imported model is not downloadable" } };
     }
-    if (url.endsWith("/import")) payload = { id: "import-job", type: "model_import", status: "queued" };
+    if (options.method === "POST" && url.endsWith("/my_h3/repair")) {
+      return { ok: !repairFailure, status: repairFailure ? 409 : 201,
+        json: async () => repairFailure ? { detail: "Repair selection changed" }
+          : { id: "import-job", createdAt: "2026-10-25T00:00:00Z", type: "model_import", status: "queued", payload: { modelId: "my_h3" } } };
+    }
+    if (options.method === "POST" && url.endsWith("/import")) {
+      return { ok: false, status: 409, json: async () => ({ detail: "Existing selections require stable-ID repair" }) };
+    }
     if (url.endsWith("/rescan")) payload = { checkpointId: "linked/r/h3", state: "ready" };
     if (url.endsWith("/host-capabilities")) payload = { totalMemoryBytes: 32 * 1024 ** 3 };
     return { ok: true, status: 200, json: async () => payload };
@@ -105,12 +112,40 @@ describe("imported H3 card repair through real actions and HTTP boundary", () =>
     const urlInput = [...form.querySelectorAll("label")].find((node) => node.textContent.trim() === "Source URL").querySelector("input");
     await input(urlInput, "https://example.test/h3.safetensors");
     await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(requests("/import")).toHaveLength(1);
-    expect(JSON.parse(requests("/import")[0][1].body)).toEqual({
+    const repairs = requests("/my_h3/repair");
+    expect(repairs).toHaveLength(1);
+    expect(JSON.parse(repairs[0][1].body)).toEqual({
       ownershipMode: "managed", type: "video", name: "My H3", family: "minimax-h3",
-      baseModel: "minimax_h3_ref", minimaxH3Partition: "ref2va",
+      modelId: "my_h3", baseModel: "minimax_h3_ref", minimaxH3Partition: "ref2va",
       source: { kind: "url", url: "https://example.test/h3.safetensors" },
     });
+    expect(jobs.some((job) => job.id === "import-job" && job.payload.modelId === "my_h3")).toBe(true);
+    expect(requests("/import")).toHaveLength(0);
+    expect(requests("/my_h3/download")).toHaveLength(0);
+    expect(errors.filter(Boolean)).toEqual([]);
+  });
+
+  it("retains the stable selection and source after repair refusal, then retries the same operation", async () => {
+    await render({ ...IMPORT, repairActions: [{ id: "source", kind: "reimport", label: "Reimport transformer" }] });
+    await click(button(container.querySelector(".imported-checkpoint-repairs"), "Reimport transformer"));
+    const form = container.querySelector('form[aria-label="Add to SceneWorks"]');
+    await click(button(form, "URL"));
+    const source = form.querySelector('input[placeholder="https://..."]');
+    await input(source, "https://example.test/retry.safetensors");
+    repairFailure = true;
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(jobs).toEqual([]);
+    expect(container.textContent).toContain("Repair selection changed");
+    expect(source.value).toBe("https://example.test/retry.safetensors");
+    repairFailure = false;
+    await act(async () => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    const repairs = requests("/my_h3/repair");
+    expect(repairs).toHaveLength(2);
+    expect(repairs[1][1].body).toBe(repairs[0][1].body);
+    expect(JSON.parse(repairs[1][1].body).modelId).toBe("my_h3");
+    expect(jobs.map((job) => job.id)).toEqual(["import-job"]);
+    expect(requests("/import")).toHaveLength(0);
+    expect(requests("/my_h3/download")).toHaveLength(0);
   });
 
   it("keeps edited import drafts and does not reopen a dismissed repair on catalog rerender", async () => {
@@ -125,6 +160,7 @@ describe("imported H3 card repair through real actions and HTTP boundary", () =>
     await render({ ...model });
     expect(container.querySelector('.checkpoint-import-toggle').getAttribute("aria-expanded")).toBe("false");
     expect(requests("/import")).toHaveLength(0);
+    expect(requests("/my_h3/repair")).toHaveLength(0);
     await click(button(container.querySelector(".imported-checkpoint-repairs"), "Reimport transformer"));
     form = container.querySelector('form[aria-label="Add to SceneWorks"]');
     expect([...form.querySelectorAll("label")].find((node) => node.textContent.trim() === "Name").querySelector("input").value).toBe("Edited name");
@@ -140,6 +176,7 @@ describe("imported H3 card repair through real actions and HTTP boundary", () =>
     await click(button(container.querySelector(".imported-checkpoint-repairs"), "Reimport transformer"));
     expect(container.querySelector('.checkpoint-import-toggle').getAttribute("aria-expanded")).toBe("false");
     expect(requests("/import")).toHaveLength(0);
+    expect(requests("/my_h3/repair")).toHaveLength(0);
   });
 
   it("rescans linked source repairs in place, never downloading or transferring ownership", async () => {
@@ -150,6 +187,7 @@ describe("imported H3 card repair through real actions and HTTP boundary", () =>
     });
     await click(button(container.querySelector(".imported-checkpoint-repairs"), "Repair linked transformer"));
     expect(requests("/r/rescan")).toHaveLength(1);
+    expect(requests("/my_h3/repair")).toHaveLength(0);
     expect(JSON.parse(requests("/r/rescan")[0][1].body)).toEqual({ relativePath: "h3" });
     expect(requests("/my_h3/download")).toHaveLength(0);
     expect(requests("/import")).toHaveLength(0);
