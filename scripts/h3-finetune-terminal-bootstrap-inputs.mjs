@@ -54,9 +54,18 @@ function transport(deps) {
     return fetchImpl(url, { ...options, signal: AbortSignal.any(signals), redirect: options.redirect ?? 'error' });
   };
 }
-// Same tier/platform/corequisite policy as minimax_h3_import::import_component_downloads.
-// A stock DiT is never a reusable component of an imported checkpoint. The caller stages its
-// explicitly selected genuine companion through the existing asset-set path, not this resolver.
+// Mirrors minimax_h3_import::import_component_configuration_compatible: the canonical
+// assembly role is the declared componentId, or the last segment of its catalog subdirectory.
+// This classifies the catalog binding, never checkpoint architecture or tensor shapes.
+function componentDeclaration(row) {
+  const subdir = row.subdir ?? row.files?.find(file => file.endsWith('/*'))?.slice(0, -2);
+  if (subdir !== undefined) safeFile(subdir);
+  const id = row.componentId ?? subdir?.split('/').at(-1);
+  assert.ok(typeof id === 'string' && id.length > 0, 'explicit unambiguous catalog component role required');
+  return { id, subdir };
+}
+// Hard co-requisites include load-only companion partitions. Primary DiT rows and soft
+// predictors remain excluded by catalog metadata, not by names of component directories.
 export function selectComponentRows(catalog, selections, backend) {
   assert.ok(['mlx', 'cuda'].includes(backend), 'known terminal backend required');
   assert.ok(Array.isArray(selections) && selections.length > 0, 'explicit base/component selections required');
@@ -69,16 +78,15 @@ export function selectComponentRows(catalog, selections, backend) {
     const model = matches[0]; assert.equal(model.family, 'minimax-h3', 'genuine H3 catalog base required');
     const available = model.downloads.filter(r => !r.platforms || r.platforms.includes(os));
     assert.ok(available.some(r => r.coRequisite !== true && r.variant === tier), 'selected tier unavailable on this platform');
-    const rows = available.filter(r => r.coRequisite === true && r.required !== 'soft' && (!r.variant || r.variant === tier))
-      .filter(r => !(r.files ?? []).some(f => f.split('/').some(p => p === 'transformer' || p === 'transformer_ref')));
+    const rows = available.filter(r => r.coRequisite === true && r.required !== 'soft' && (!r.variant || r.variant === tier));
     assert.ok(rows.length > 0, 'base declares no reusable components');
     for (const row of rows) {
       assert.equal(row.provider, 'huggingface', 'unknown catalog source provider'); repoName(row.repo); sha40(row.revision);
-      assert.ok(typeof row.componentId === 'string' && row.componentId && !row.choice, 'explicit unambiguous catalog component required');
+      componentDeclaration(row); assert.ok(!row.choice, 'explicit unambiguous catalog component required');
       assert.ok(Array.isArray(row.files) && row.files.length > 0, 'catalog component file patterns required');
       for (const pattern of row.files) { safeFile(pattern); patternToRegExp(pattern); }
     }
-    assert.equal(new Set(rows.map(r => r.componentId)).size, rows.length, 'ambiguous catalog component selection');
+    assert.equal(new Set(rows.map(r => componentDeclaration(r).id)).size, rows.length, 'ambiguous catalog component selection');
     return { modelId, tier, rows };
   });
 }
@@ -200,8 +208,8 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
   // A hash is not available yet for non-LFS sidecars: context.scopeOnly requests scope checking,
   // not fabricated consent. The same actual callback binds the measured hash before staging.
   for (const { modelId, rows } of selections) for (const row of rows) {
-    const legal = fileLegal(book, row.componentId);
-    await acknowledgment(acknowledgmentFor, { repoType: 'model', repo: row.repo, revision: row.revision, legal }, { component: true, modelId, componentId: row.componentId, legal, scopeOnly: true });
+    const { id: componentId } = componentDeclaration(row), legal = fileLegal(book, componentId);
+    await acknowledgment(acknowledgmentFor, { repoType: 'model', repo: row.repo, revision: row.revision, legal }, { component: true, modelId, componentId, legal, scopeOnly: true });
   }
   const referenceAcknowledgments = new Map();
   for (const [file, sha256] of Object.entries(ref.referenceSha256)) {
@@ -215,6 +223,7 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
   for (const { modelId, tier, rows } of selections) {
     componentsByModel[modelId] = [];
     for (const row of rows) {
+      const { id: componentId, subdir: componentSubdir } = componentDeclaration(row);
       const key = `${row.repo}@${row.revision}`;
       if (!hfTrees.has(key)) hfTrees.set(key, await readPinnedHfTree(row.repo, row.revision, deps));
       const tree = hfTrees.get(key), selected = new Map();
@@ -223,7 +232,7 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
         for (const file of matches) selected.set(file.path, file);
       }
       for (const file of selected.values()) {
-        const entry = { repoType: 'model', repo: row.repo, revision: row.revision, file: file.path, expectedBytes: file.size, legal: fileLegal(book, row.componentId) };
+        const entry = { repoType: 'model', repo: row.repo, revision: row.revision, file: file.path, expectedBytes: file.size, legal: fileLegal(book, componentId) };
         entry.expectedSha256 = lfsIdentity(file);
         if (!entry.expectedSha256) {
           assert.ok(file.size <= SMALL_FILE_LIMIT && !/\.(safetensors|bin|pt|pth|ckpt)$/i.test(file.path), 'weight/large file requires actual LFS content SHA256, never Git blob identity or estimates');
@@ -232,9 +241,9 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
           const gitSha1 = createHash('sha1').update(`blob ${body.length}\0`).update(body).digest('hex');
           assert.equal(gitSha1, blob, 'Git blob SHA1 mismatch (not a content SHA256)'); entry.expectedSha256 = digest(body);
         }
-        const context = { component: true, modelId, componentId: row.componentId, legal: entry.legal };
+        const context = { component: true, modelId, componentId, legal: entry.legal };
         const ack = await acknowledgment(acknowledgmentFor, entry, context);
-        resolved.push({ entry, ack, modelId, tier, componentId: row.componentId });
+        resolved.push({ entry, ack, modelId, tier, componentId, componentSubdir, catalogDownload: row });
       }
     }
   }
@@ -256,7 +265,7 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
   const config = { path: configPath, sha256: digest(configBytes), dit, compatibleBase, provenance: { source: configSource, sha256: digest(configSourceBytes), codeSha: owner.codeSha, declaration: 'H3Config::published' } };
   inputs.push({ path: config.path, sha256: config.sha256, role: 'source-config' });
   const completed = new Map();
-  for (const { entry, ack, modelId, tier, componentId } of resolved) {
+  for (const { entry, ack, modelId, tier, componentId, componentSubdir, catalogDownload } of resolved) {
     const key = `${entry.repo}@${entry.revision}/${entry.file}`;
     let record = completed.get(key);
     if (!record) {
@@ -268,7 +277,7 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
       inputs.push({ path: record.finalPath, sha256: record.observedSha256, role: 'component' });
       seedFiles.push({ input: record.finalPath, destination: `hf/hub/models--${entry.repo.replaceAll('/', '--')}/snapshots/${entry.revision}/${entry.file}`, mode: 'hardlink' });
     }
-    componentsByModel[modelId].push({ id: componentId, source: entry.repo, revision: entry.revision, sha256: record.observedSha256, path: record.finalPath, file: entry.file, bytes: record.actualBytes, tier, licenseAcknowledged: ack.acknowledged, explicitAcknowledgment: ack });
+    componentsByModel[modelId].push({ id: componentId, source: entry.repo, revision: entry.revision, sha256: record.observedSha256, path: record.finalPath, file: entry.file, bytes: record.actualBytes, tier, licenseAcknowledged: ack.acknowledged, explicitAcknowledgment: ack, provenance: { componentSubdir, catalogDownload: structuredClone(catalogDownload) } });
   }
   // hf-hub cache lookup may require refs/<requested revision> even when the immutable
   // snapshot exists. These are private cache-index bytes, not model components or refs/main.

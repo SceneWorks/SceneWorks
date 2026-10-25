@@ -54,7 +54,7 @@ async function fixture(t, backend = 'mlx') {
     if (!trees.get(key).some(r => r.path === file)) trees.get(key).push(row);
     bodies.set(`${repo}/${revision}/${file}`, bytes);
   };
-  for (const { rows } of selectComponentRows(localCatalog, [{ modelId: 'minimax_h3', tier: 'q4' }], backend)) for (const row of rows) for (const pattern of row.files) {
+  for (const { rows } of selectComponentRows(localCatalog, [{ modelId: 'minimax_h3', tier: 'q4' }, { modelId: 'minimax_h3_ref', tier: 'q4' }], backend)) for (const row of rows) for (const pattern of row.files) {
     const file = pattern.replace(/\*$/, 'config.json'); add(row.repo, row.revision, file);
     if (pattern.endsWith('/*')) add(row.repo, row.revision, pattern.replace(/\*$/, 'model.safetensors'), true);
   }
@@ -87,6 +87,30 @@ async function fixture(t, backend = 'mlx') {
   return { ...args, args, temp, book, catalog: localCatalog, trees, bodies, calls, acks, rawAck, refBodies, cacheRoot };
 }
 
+test('actual unnamed hard catalog companion reaches measured bindings without admitting primary DiT or soft VEDA', async t => {
+  const f = await fixture(t), model = f.catalog.models.find(m => m.id === 'minimax_h3');
+  const companion = model.downloads.find(r => r.coRequisite === true && r.variant === 'q4' && r.files?.includes('q4/transformer_ref/*'));
+  assert.ok(companion); assert.equal(companion.componentId, undefined, 'regression must use the genuine unnamed catalog row');
+  const selection = [{ modelId: 'minimax_h3', tier: 'q4' }];
+  const [{ rows }] = selectComponentRows(f.catalog, selection, 'mlx');
+  assert.ok(rows.includes(companion), 'actual required companion must not be dropped for lacking componentId');
+  assert.ok(!rows.some(r => r.coRequisite !== true || r.required === 'soft'));
+  f.args.componentSelections = selection;
+  const result = await prepareBootstrapInputs(f.args), bindings = result.componentsByModel.minimax_h3.filter(c => c.id === 'transformer_ref');
+  assert.ok(bindings.length > 0, 'canonical assembly companion role reaches the parent plan');
+  for (const binding of bindings) {
+    assert.equal(binding.source, companion.repo); assert.equal(binding.revision, companion.revision);
+    assert.deepEqual(binding.provenance.catalogDownload, companion); assert.equal(binding.provenance.catalogDownload.componentId, undefined);
+    assert.equal(binding.provenance.componentSubdir, 'q4/transformer_ref');
+    assert.equal(binding.sha256, hash(await readFile(binding.path)));
+    assert.ok(result.componentRecords.some(r => r.finalPath === binding.path && r.observedSha256 === binding.sha256));
+    assert.ok(result.inputs.some(i => i.role === 'component' && i.path === binding.path && i.sha256 === binding.sha256));
+    assert.ok(result.seedFiles.some(s => s.input === binding.path && s.destination.endsWith(`/snapshots/${companion.revision}/${binding.file}`)));
+  }
+  assert.ok(!result.componentRecords.some(r => r.file.startsWith('q4/transformer/')), 'the selected base primary DiT remains excluded');
+  assert.ok(!result.componentRecords.some(r => r.repo.startsWith('Veda-Sparse/')), 'soft predictor remains excluded');
+});
+
 test('fresh private root stages measured components/references and source-bound published config, deduplicating both bases', async t => {
   const f = await fixture(t), sourceBefore = await snapshot(f.swRoot), evidenceBefore = await snapshot(f.evidenceRoot), rawBefore = structuredClone(f.rawAck);
   const r = await prepareBootstrapInputs(f.args);
@@ -94,9 +118,10 @@ test('fresh private root stages measured components/references and source-bound 
   for (const row of r.componentRecords) { assert.equal(row.actualBytes, (await stat(row.finalPath)).size); assert.equal(row.observedSha256, hash(await readFile(row.finalPath))); assert.ok(row.finalPath.startsWith(f.stageRoot + path.sep)); assert.equal(row.cache.hub, f.cacheRoot); }
   for (const model of ['minimax_h3', 'minimax_h3_ref']) {
     assert.ok(r.componentsByModel[model].some(c => c.id === 'text_encoder'));
-    for (const c of r.componentsByModel[model]) { assert.equal(c.licenseAcknowledged, f.rawAck.acknowledged); assert.equal(c.sha256, hash(await readFile(c.path))); assert.ok(!/transformer(_ref)?\//.test(c.file)); }
+    for (const c of r.componentsByModel[model]) { assert.equal(c.licenseAcknowledged, f.rawAck.acknowledged); assert.equal(c.sha256, hash(await readFile(c.path))); assert.equal(c.provenance.catalogDownload.coRequisite, true); }
   }
-  assert.deepEqual(r.componentsByModel.minimax_h3.map(c => c.path), r.componentsByModel.minimax_h3_ref.map(c => c.path));
+  const sharedPaths = components => components.filter(c => !['transformer', 'transformer_ref'].includes(c.id)).map(c => c.path);
+  assert.deepEqual(sharedPaths(r.componentsByModel.minimax_h3), sharedPaths(r.componentsByModel.minimax_h3_ref));
   assert.equal(r.inputs.filter(i => i.role === 'reference').length, 3);
   for (const [file, bytes] of f.refBodies) assert.deepEqual(await readFile(path.join(r.referenceDir, file)), bytes);
   assert.equal(r.config.sha256, hash(await readFile(r.config.path))); assert.deepEqual(r.config.dit, publishedH3Config(codec));
@@ -139,12 +164,13 @@ test('private cache ref metadata cannot write through a symlink into a foreign c
   assert.deepEqual(await snapshot(f.cacheRoot), cacheBefore);
 });
 
-test('real catalog rows obey tier/platform and omit all soft predictors and stock DiT siblings', () => {
+test('real catalog rows obey tier/platform and exclude primary DiTs and soft predictors', () => {
   for (const backend of ['mlx', 'cuda']) for (const tier of ['q4', 'q8', 'bf16']) for (const modelId of ['minimax_h3', 'minimax_h3_ref']) {
     const [{ rows }] = selectComponentRows(catalog, [{ modelId, tier }], backend);
     assert.ok(rows.some(r => r.componentId === 'text_encoder')); assert.ok(rows.some(r => r.componentId === 'video_vae')); assert.ok(rows.some(r => r.componentId === 'audio_vae'));
-    assert.ok(rows.every(r => r.coRequisite && r.required !== 'soft' && r.componentId && (!r.variant || r.variant === tier)));
-    assert.ok(rows.every(r => !r.files.some(f => /(^|\/)transformer(_ref)?\//.test(f))));
+    assert.ok(rows.every(r => r.coRequisite === true && r.required !== 'soft' && (!r.variant || r.variant === tier)));
+    const original = catalog.models.find(m => m.id === modelId).downloads;
+    assert.ok(rows.every(r => original.includes(r)), 'selected download declarations remain unchanged catalog rows');
   }
 });
 
