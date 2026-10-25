@@ -163,6 +163,19 @@ test('cancel/retry uses actual job handlers and never fabricates a successful na
     assert.equal(s.steps.some(s => s.path?.$concat?.includes('/retry')), check === 'interruption-retry');
   }
 });
+test('cold generation source-preparation cancellation installs, restarts cold, submits once and cancels without a completed wait', () => {
+  const e = execution(), s = buildScenario(named('lifecycle', 'generation-source-prep-cancel'), params(), [e]);
+  assert.deepEqual(s.steps.map(v => v.id), ['synthetic_import', 'synthetic_installed', 'synthetic_av0', 'synthetic_cancelled']);
+  assert.ok(!s.steps.some(v => v.id === 'synthetic_av0_done'), 'a canceled preparation must never wait for a completed generation');
+  assert.equal(s.steps.at(-1).expectedJobStatus, 'canceled');
+  assert.equal(s.steps.filter(v => v.path === '/api/v1/video/jobs').length, 1, 'exactly one actual generation attempt');
+  const restart = s.lifecycleActions.find(v => v.kind === 'restart'); assert.equal(restart.beforeStep, 'synthetic_av0');
+  const cancel = s.lifecycleActions.find(v => v.kind === 'source-cancel');
+  assert.equal(cancel.beforeStep, 'synthetic_cancelled'); assert.equal(cancel.generationCapture, 'synthetic_av0/id'); assert.equal(cancel.modelCapture, 'synthetic_installed/result/modelId');
+  const c = concretePlan(root, '/unit_fake/native', '/unit_fake/stage').cases.find(v => v.id === 'mlx.lifecycle.generation-source-prep-cancel');
+  assert.ok(!Object.hasOwn(c, 'blockedPrerequisite'), 'the source-blocked prerequisite must be replaced by the actual contract'); assert.ok(c.scenario);
+  assert.throws(() => buildScenario(named('lifecycle', 'generation-source-prep-cancel'), params(), [{ ...execution(), reuseInstalled: true }]), /managed imported installation/);
+});
 test('restart replay duplicates an actual persisted imported job after external task-owned restart', () => {
   const e = execution(); e.reuseInstalled = true; e.replayJobId = 'persisted-original-job';
   const s = buildScenario(named('lifecycle', 'restart-replay'), params(), [e]);
@@ -228,6 +241,7 @@ test('complete canonical preparation writes executable scenarios without executi
   const native=path.join(parent,'unit_fake_native');await mkdir(path.join(native,'tests','fixtures'),{recursive:true});
   for(const mechanism of ['convrot','pruned-interpolation','w4a8'])await writeFile(path.join(native,caseBook.numeric[mechanism].fixture),JSON.stringify({proof_kind:'unit_fake',cases:[]}));
   const out = path.join(parent, 'candidate'), p = { ...params(), proof_kind:'unit_fake', sceneworks: revision, inference: revision, swRoot: root, inferenceRoot: native, bindings: {} };
+  p.identificationControlReceipt=path.join(parent,'identity-controls.json');await writeFile(p.identificationControlReceipt,JSON.stringify({kind:'unit_fake_metadata_only'}));
   const plan = concretePlan(root, native, out);
   for (const c of plan.cases.filter(c => c.scenario)) {
     const check = c.id.split('.').slice(2).join('.'); let es = [execution()];
@@ -246,7 +260,7 @@ test('complete canonical preparation writes executable scenarios without executi
     }
     if (check==='ltx-add-select-generate') { es[0].family='ltx'; es[0].model.modelId=es[0].model.baseModel='ltx_2_3';es[0].model.outputAudioSampleRate=48000;es[0].ltxAdapter={id:'unit_fake_ltx_adapter',sourcePath:'/synthetic-only/adapter.safetensors',sha256:hash,baseModel:'ltx_2_3'}; }
     if (check==='independent-finetune') es[0].model.lineage={source:'synthetic independent',revision};
-    if (check==='renamed') Object.assign(es[0].model,{originalPath:'/synthetic-only/original.safetensors',originalSha256:hash});
+    if (check==='renamed'){Object.assign(es[0].model,{originalPath:'/synthetic-only/original.safetensors',originalSha256:hash});const negative=structuredClone(es[0]);negative.label='different_bytes';negative.model.modelId='imported_different_bytes';negative.model.sourcePath='/synthetic-only/different-bytes.safetensors';negative.model.sha256='a'.repeat(64);negative.identityControl={kind:'different-bytes-negative',expectedSourceSha256:hash};es.push(negative);}
     if (['native-single','sharded-diffusers'].includes(check)) es[0].model.sourceFormat=check;
     if (check==='sharded-diffusers') Object.assign(es[0].model,{sourceKind:'directory',files:[{path:'/synthetic-only/shard.safetensors',sha256:hash}]});
     if (check.startsWith('dense-')) es[0].model.sourceFormat=check.slice(6);

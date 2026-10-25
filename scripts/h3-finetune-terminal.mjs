@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
 const exec = promisify(execFile);
 export const SOURCE = { repo: 'WarmBloodAban/Minimax-h3_Singularity', revision: 'a56850c870825d6a8ae501a595c4dbbbc77bbc7e' };
 export const ARTIFACTS = [
@@ -456,7 +457,6 @@ export function normalizeLoadEvent(raw) {
   return { kind: 'prepared-native-load-closure', jobId: fields.jobId, providerId: fields.provider, backend: fields.native_backend, deviceLabel: fields.backend, identity: parse(fields.identity), prepared_sources: parse(fields.prepared_sources), seed: fields.seed, operation: fields.operation, steps: optionNumber(fields.steps), schedulerShift: optionNumber(fields.scheduler_shift), cacheState: fields.cache_state };
 }
 export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta = decodedDelta) {
-  if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
   const canonical = requiredCases().find(item => item.id === c.id);
   assert.ok(canonical, 'unknown acceptance case');
   for (const [key, value] of Object.entries(canonical)) assert.equal(c[key], value, 'case reclassification cannot weaken acceptance');
@@ -529,7 +529,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       assert.equal(transcript.caseId, c.id);
       const assertions = transcript.transcript.filter(r => r.assertion);
       assert.ok(assertions.length > 0, 'no API assertions executed');
-      for (const a of assertions) assert.deepEqual(a.actual, a.expected);
+      for (const a of assertions) assertRecordedAssertion(a);
       assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${assertions.length}`), 'API driver did not complete');
       files.push({ path: e.apiTranscript, sha256: await hashFile(contained(dir, e.apiTranscript)) });
     } else executedTests(log);
@@ -559,13 +559,18 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       files.push({ path: e.numeric.candidate, sha256: await hashFile(candidatePath) }, { path: e.numeric.reference, sha256: await hashFile(referencePath) });
     }
   }
-  let runtime;
+  let runtime, sourceCancel;
+  if (c.id.endsWith('.generation-source-prep-cancel')) {
+    const { verifyGenerationSourcePrepCancel } = await import('./h3-finetune-terminal-runtime.mjs');
+    sourceCancel = await verifyGenerationSourcePrepCancel(p, c, dir, { receiptName: e.sourceCancelReceipt });
+    assert.equal(e.runtimeBindings,'source-job-output.json','canceled preparation still requires actual service/source/binary verification, not a successful load');
+  }
   if (e.runtimeBindings) {
     assert.equal(e.runtimeBindings, 'source-job-output.json');
     const { verifyAPIBindings } = await import('./h3-finetune-terminal-runtime.mjs');
     runtime = await verifyAPIBindings(p, c, dir, decode, delta);
   }
-  return { evidenceSha256: await hashFile(contained(dir, c.evidence)), processLogSha256: createHash('sha256').update(log).digest('hex'), files, ...(av ? { av } : {}), ...(numeric ? { numeric } : {}), ...(runtime ? { runtime } : {}) };
+  return { evidenceSha256: await hashFile(contained(dir, c.evidence)), processLogSha256: createHash('sha256').update(log).digest('hex'), files, ...(av ? { av } : {}), ...(numeric ? { numeric } : {}), ...(runtime ? { runtime } : {}), ...(sourceCancel ? { sourceCancel } : {}) };
 }
 // No shell interpolation. The process must implement cooperative timeout/cancel (native GPU
 // execution must not be killed mid-command-buffer); Actions is the final job timeout boundary.
@@ -605,7 +610,6 @@ export async function runCase(p, id, root, inferenceRoot) {
   }
   await save(statePath, { ...identity, status: 'running', started: new Date().toISOString() });
   try {
-    if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
     const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(c.timeoutSeconds) }, timeoutSeconds: c.timeoutSeconds };
     if (c.group === 'numeric' && c.numericProof?.kind !== 'native-pinned-fixture') {
@@ -660,7 +664,6 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
   assert.equal(r.plan.sceneworks, p.sceneworks); assert.equal(r.plan.inference, p.inference); assert.deepEqual(r.plan.source, p.source);
   assert.equal(r.planSha256, digest(r.plan)); assert.ok(r.verificationRunId && r.verificationRunAttempt);
   const expected = requiredCases().filter(c => c.backend === backend);
-  assert.ok(allowUnitFake||!expected.some(c=>c.id.endsWith('.generation-source-prep-cancel')),'BLOCKED: native cold-preparation cancellation evidence contract is not implemented; backend cannot be certified complete');
   assert.equal(r.cases.length, expected.length); assert.equal(new Set(r.cases.map(c => c.id)).size, expected.length);
   for (const c of expected) {
     const row = r.cases.find(v => v.id === c.id), planned = r.plan.cases.find(v => v.id === c.id);
@@ -672,7 +675,6 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
 export async function backendComplete(p, backend) {
   const selected = p.cases.filter(v => v.backend === backend); assert.ok(selected.length);
   for (const c of selected) {
-    if(c.id.endsWith('.generation-source-prep-cancel'))return false; // Actual observer/ack contract is pending; labels or forged success rows cannot complete a backend.
     let r; try { r = await json(path.join(contained(p.output, c.id), 'execution.json')); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
     if (r.status !== 'passed' || r.planSha256 !== digest(p)) return false;
   }
@@ -698,7 +700,6 @@ export async function verifyBackend(p, backend, root, inferenceRoot) {
   return { path: filename, readback: r };
 }
 export async function verifyPortableCase(p, c, dir, row) {
-  if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
   assert.equal(await hashFile(path.join(dir, 'execution.json')), row.executionSha256, 'downloaded execution record differs from backend readback');
   const execution = await json(path.join(dir, 'execution.json')); assert.equal(execution.status, 'passed'); assert.equal(execution.planSha256, row.planSha256); assert.equal(execution.runId, row.runId); assert.equal(execution.runAttempt, row.runAttempt); assert.deepEqual(execution.verified, row.verified);
   const v = row.verified, log = await readFile(path.join(dir, 'process.log'), 'utf8');
@@ -722,8 +723,12 @@ export async function verifyPortableCase(p, c, dir, row) {
     for (const run of proof.runs) actual += await readFile(contained(dir, run.log), 'utf8') + '\n';
     assert.deepEqual(validateComparisonProof(c, proof, actual), v.numeric);
   } else if (c.group === 'numeric') compareNumeric(await json(contained(dir, e.numeric.candidate)), await json(contained(dir, e.numeric.reference)), c.tolerance);
-  else if (e.apiTranscript) { const t = await json(contained(dir, e.apiTranscript)); assert.equal(t.caseId, c.id); const a = t.transcript.filter(r => r.assertion); assert.ok(a.length); for (const item of a) assert.deepEqual(item.actual, item.expected); assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${a.length}`)); }
+  else if (e.apiTranscript) { const t = await json(contained(dir, e.apiTranscript)); assert.equal(t.caseId, c.id); const a = t.transcript.filter(r => r.assertion); assert.ok(a.length); for (const item of a) assertRecordedAssertion(item); assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${a.length}`)); }
   else if (!['artifact','capability'].includes(c.group)) executedTests(log);
+  if (c.id.endsWith('.generation-source-prep-cancel')) {
+    const { verifyGenerationSourcePrepCancel } = await import('./h3-finetune-terminal-runtime.mjs');
+    assert.deepEqual(await verifyGenerationSourcePrepCancel(p, c, dir, { contentReadback: true, receiptName: e.sourceCancelReceipt }), v.sourceCancel);
+  }
   return { id: c.id, inputContentReverifiedOn: c.backend, evidenceReverifiedLocally: true };
 }
 export async function verifyCampaign(p) {

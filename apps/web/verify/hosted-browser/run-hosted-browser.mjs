@@ -261,12 +261,11 @@ async function main() {
         page = await context.newPage();
         recorder = createRecorder(page);
         attachLogs(page, logs);
+        result.executed = true; // Count invocation, not page/setup failure as an executed case.
         const outcome = await testCase.run(page, recorder);
         result.status = "pass";
-        result.executed = true;
         result.evidence = outcome?.evidence ?? null;
       } catch (error) {
-        result.executed = true;
         result.error = error.message;
         result.stack = error.stack ?? null;
       } finally {

@@ -3,8 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access } from 'node:fs/promises';
-import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,requireGenerationSourceCancelContract,verifyOwnershipEquivalence,verifyCacheCoverage,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
+import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
 import { hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -29,6 +29,9 @@ async function replaceScenario(f,c,executions,parameters=f.parameters){
 }
 function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
   let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
+  const preparationCancel=f.c.id.endsWith('.generation-source-prep-cancel');
+  const prepSpan=jobId=>({jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'});
+  const preparationSource=()=>path.join(serviceDir,'data','source-prep','model.safetensors');
   const spawnOwned=(argv,env,cwd,logPath)=>{
     const kind=argv[0]===process.execPath?'guardian':env.SCENEWORKS_WORKER_ONLY==='1'?'worker':'api';
     serviceDir=path.dirname(env.SCENEWORKS_CONFIG_DIR);let code=null,logs='';let resolveExit;const done=new Promise(r=>resolveExit=r);
@@ -46,19 +49,41 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
       if(url.pathname==='/api/v1/health')value={status:'ok',service:'sceneworks-api'};
       else if(url.pathname==='/api/v1/workers'){const active=[...jobs.values()].find(j=>!['completed','canceled','failed','interrupted'].includes(j.status));value=[{id:activeWorker.env.SCENEWORKS_WORKER_ID,status:active?'busy':'idle',currentJobId:active?.id??null,lastSeenAt:new Date(++heartbeat).toISOString()}];}
       else if(url.pathname==='/api/v1/models/library-roots')value={roots:[{rootId:'unit_fake_root',path:f.root}]};
-      else if(url.pathname==='/api/v1/models/import'){const body=JSON.parse(options.body);const id=`import-${++jobNo}`;value={id,status:'queued',payload:body};jobs.set(id,{id,status:'queued',payload:body,result:{modelId:body.modelId}});status=201;}
+      else if(url.pathname==='/api/v1/models/import'){const body=JSON.parse(options.body);const id=`import-${++jobNo}`;value={id,status:'queued',payload:body};const actual=body.expectedSha256&&body.sourcePath?await hashFile(body.sourcePath):null,mismatch=actual&&actual!==body.expectedSha256;jobs.set(id,{id,status:mismatch?'failed':'queued',payload:body,result:mismatch?{}:{modelId:body.modelId},...(mismatch?{error:`Imported model failed its integrity check (sha256 ${actual}, source declares ${body.expectedSha256})`}:{})});status=201;}
+      else if(url.pathname==='/api/v1/video/jobs'&&preparationCancel){
+        // Cold preparation: the generation stays in preparation and emits an actual partial
+        // ColdContentRead checkpoint. It is never completed before the cancellation action.
+        const body=JSON.parse(options.body),id=`video-${++jobNo}`,source=preparationSource();
+        await mkdir(path.dirname(source),{recursive:true});await writeFile(source,await readFile(f.input));
+        const sourceBytes=(await stat(source)).size;
+        // Hash cancellation is BEFORE codec copying: no normalization copy event may be emitted.
+        // The core checksum can complete before the native seal starts: these are different observers.
+        activeWorker.append({jobId:id,span:prepSpan(id),event:'source_file_hash_progress',path:source,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:sourceBytes,source_bytes:sourceBytes});
+        activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:1,source_bytes:null});
+        activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes});
+        const modelProvenance={plan:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:semantic}},payload={...body,expectedImportedModelRef:modelProvenance.plan,generationSetId:id};jobs.set(id,{id,status:'preparing',payload,modelProvenance,result:{modelId:body.model}});value={id,status:'queued',payload,modelProvenance};status=201;
+      }
       else if(url.pathname==='/api/v1/video/jobs'){
         const body=JSON.parse(options.body),id=`video-${++jobNo}`,assetId=`asset-${jobNo}`,project=path.join(serviceDir,'data','projects','unit_fake.sceneworks');
         await mkdir(project,{recursive:true});const file=`${assetId}.mp4`;await writeFile(path.join(project,file),body.sourceAssetId??body.prompt??'unit_fake_video');
         const asset={id:assetId,projectId:body.projectId,type:'video',file:{path:file},recipe:{rawSettings:{proof_kind:'unit_fake'}}};assets.set(assetId,asset);
         const job={id,status:'completed',projectId:body.projectId,payload:{...body,generationSetId:id},result:{assetIds:[assetId]}};jobs.set(id,job);value={...job,status:'queued'};status=201;
-        activeWorker.append({event:'h3_import_prepared_load',jobId:id,provider:'unit_fake_native',backend:'unit_fake_gpu',native_backend:f.c.backend,seal_validated:true,retains_dit_weights:false,cache_state:nativeLoadCount++===0?'Cold':'Warm',identity:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:semantic,assembly:{family:'minimax-h3',partition:'fl2va',sourceEncoding:'unit_fake-convrot',components:{},componentClosure:[{revision:inf,files:[{relativePath:'component',sha256:'sha256:'+f.componentHash,sizeBytes:19}]}]},sourceFiles:[{path:f.input,sha256:f.digest}]},prepared_sources:[{path:f.input,sha256:f.digest},{path:f.component,sha256:f.componentHash}],operation:body.mode,seed:body.seed,steps:body.advanced.steps,scheduler_shift:null});
-        const constrained=Boolean(activeWorker.env.SCENEWORKS_MLX_MEMORY_CAP_GB||activeWorker.env.SCENEWORKS_CUDA_VRAM_CAP_GB);activeWorker.append({event:'generation_memory_policy_applied',jobId:id,scope_configured:true,stage_residency:'Sequential',stream_transformer_blocks:constrained,window_size:constrained?2:null,window_component:constrained?'dit':null,strategy:constrained?'unit_fake_btr':'unit_fake_default'});
+        activeWorker.append({event:'h3_import_prepared_load',jobId:id,provider:'unit_fake_native',backend:'unit_fake_gpu',native_backend:f.c.backend,seal_validated:true,cache_layer:'generator_metadata',loaded_spec_offload_policy:'Sequential',loaded_spec_load_shape:'unit_fake_observed_shape',retains_dit_weights:false,cache_state:nativeLoadCount++===0?'Cold':'Warm',identity:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:semantic,assembly:{family:'minimax-h3',partition:'fl2va',sourceEncoding:'unit_fake-convrot',components:{},componentClosure:[{revision:inf,files:[{relativePath:'component',sha256:'sha256:'+f.componentHash,sizeBytes:19}]}]},sourceFiles:[{path:f.input,sha256:f.digest}]},prepared_sources:[{path:f.input,sha256:f.digest},{path:f.component,sha256:f.componentHash}],operation:body.mode,seed:body.seed,steps:body.advanced.steps,scheduler_shift:null});
+        const constrained=Boolean(activeWorker.env.SCENEWORKS_MLX_MEMORY_CAP_GB||activeWorker.env.SCENEWORKS_CUDA_VRAM_CAP_GB);activeWorker.append({event:'generation_memory_policy_applied',jobId:id,scope_configured:true,stage_residency:constrained,stream_transformer_blocks:constrained,window_size:constrained?2:null,window_component:constrained?'Dit':'none',strategy:constrained?'unit_fake_btr':'unit_fake_default'});
       } else if(url.pathname.includes('/assets/'))value=assets.get(url.pathname.split('/').at(-1));
       else if(url.pathname.startsWith('/api/v1/projects/'))value={id:'unit_fake_project',path:path.join(serviceDir,'data','projects','unit_fake.sceneworks')};
       else if(url.pathname.endsWith('/duplicate')){const original=jobs.get(url.pathname.split('/').at(-2));assert.ok(original);return deps.fetch(new URL('/api/v1/video/jobs',url),{...options,body:JSON.stringify(original.payload)});}
-      else if(url.pathname.endsWith('/cancel')){const id=url.pathname.split('/').at(-2),job=jobs.get(id);job.cancelRequested=true;if(job.status==='queued')job.status='canceled';value=job;}
-      else if(url.pathname.startsWith('/api/v1/jobs/')){value=jobs.get(url.pathname.split('/').at(-1));if(value?.cancelRequested&&!['completed','failed'].includes(value.status))value.status='canceled';else if(value?.status==='queued')value.status='completed';}
+      else if(options.method==='DELETE'&&url.pathname.startsWith('/api/v1/models/')){
+        const id=decodeURIComponent(url.pathname.split('/').at(-1));value={id,removedManifestEntry:true,permanent:new URL(url).searchParams.get('permanent')==='true'};
+      }
+      else if(url.pathname.endsWith('/cancel')){
+        const id=url.pathname.split('/').at(-2),job=jobs.get(id);assert.ok(job,'cancel must target a submitted job');job.cancelRequested=true;
+        if(preparationCancel){
+          const source=preparationSource(),sourceBytes=(await stat(source)).size;
+          activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Canceled',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes});
+          job.status='canceled';job.message='h3-preparation-canceled after joined teardown';value=job;
+        } else { job.status='canceled'; value=job; }
+      } else if(url.pathname.startsWith('/api/v1/jobs/')){value=jobs.get(url.pathname.split('/').at(-1));if(value?.cancelRequested&&!['completed','failed','canceled'].includes(value.status))value.status='canceled';else if(value?.status==='queued')value.status='completed';}
       assert.ok(value,`no invented fake API route: ${url.pathname}`);return {status,text:async()=>JSON.stringify(value)};
     }};
   return {deps,children,calls,jobs,assets,spawnOwned,get serviceDir(){return serviceDir;}};
@@ -211,9 +236,92 @@ test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero usi
   await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env,exec}),/manual device zero/);
   for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'1'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'}])await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env:bad,exec}),/manual CUDA proof/);
 });
-test('cold generation-preparation cancellation is explicitly blocked, never passed by labels or invented callback counts',async()=>{
-  for(const fake of [undefined,{state:'passed'},{acquisition:'MemoryMemo',hashed_bytes:0},{callbacks:999,progress:'cold',leasesReleased:true}])assert.throws(()=>requireGenerationSourceCancelContract(fake),/BLOCKED.*actual native typed byte observer/);
-  const pending=requiredCases().filter(c=>c.id.endsWith('.generation-source-prep-cancel'));assert.deepEqual(pending.map(c=>c.backend),['mlx','cuda']);for(const c of pending)await assert.rejects(validateEvidence({},c,'/unit_fake_unread','test result: ok. 1 passed; 0 failed; 0 ignored;'),/BLOCKED/);
+test('native unknown source size stays unknown while a real zero-byte size stays zero',()=>{assert.equal(observedSourceBytes(undefined),null);assert.equal(observedSourceBytes(null),null);assert.equal(observedSourceBytes('None'),null);assert.equal(observedSourceBytes(0),0);assert.equal(observedSourceBytes('0'),0);assert.equal(observedSourceBytes(1024),1024);});
+async function coldCancelFake(t){
+  const f=await fixture(t,'lifecycle','generation-source-prep-cancel');
+  // An actual source larger than one cold checkpoint: the partial reading must be meaningful.
+  const bytes=Buffer.alloc(3*SOURCE_PREP_CHUNK_BYTES+4093);for(let i=0;i<bytes.length;i++)bytes[i]=(i*31+7)&0xff;
+  await writeFile(f.input,bytes);
+  const digest=await hashFile(f.input);f.digest=digest;f.execution.model.sha256=digest;
+  for(const subject of f.execution.licenseAuthority.subjects)if(subject.role==='source')subject.sha256=digest;
+  f.c.inputs.find(input=>input.role==='checkpoint').sha256=digest;
+  await replaceScenario(f,f.c,[f.execution]);
+  const fake=fakeRuntime(f),result=await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  return {f,fake,result,receiptName:result.evidence.sourceCancelReceipt,dir:f.dir};
+}
+async function copyCase(dir,name){
+  const target=`${dir}-${name}`;await cp(dir,target,{recursive:true});return target;
+}
+async function editReceipt(dir,mutate){
+  const name=(await readdirNames(dir)).find(v=>v.startsWith('source-cancel-')&&v.endsWith('.json')&&v!=='source-cancel-actions.json');
+  const file=path.join(dir,name),receipt=JSON.parse(await readFile(file,'utf8'));mutate(receipt);await writeFile(file,JSON.stringify(receipt,null,2)+'\n');return {receipt,name};
+}
+async function readdirNames(dir){const {readdir}=await import('node:fs/promises');return readdir(dir);}
+async function editRetained(dir,predicate,mutate){
+  const lifecycle=JSON.parse(await readFile(path.join(dir,'service-lifecycle.json'),'utf8'));
+  for(const epoch of lifecycle.epochs){const file=path.join(dir,`worker-${epoch.epoch}.log`);const lines=(await readFile(file,'utf8')).split('\n').map(line=>{try{const value=JSON.parse(line);if(predicate(value)){mutate(value);return JSON.stringify(value);}return line;}catch{return line;}});await writeFile(file,lines.join('\n'));}
+}
+async function appendRetained(dir,event){
+  const lifecycle=JSON.parse(await readFile(path.join(dir,'service-lifecycle.json'),'utf8'));
+  const file=path.join(dir,`worker-${lifecycle.epochs.at(-1).epoch}.log`);await writeFile(file,(await readFile(file,'utf8'))+JSON.stringify(event)+'\n');
+}
+test('cold generation source-preparation cancellation binds retained partial bytes, joined teardown and lease release',async t=>{
+  const {f,fake,result,receiptName,dir}=await coldCancelFake(t);
+  assert.equal(result.evidence.proof_kind,'unit_fake');
+  assert.ok(receiptName&&receiptName.startsWith('source-cancel-'));
+  assert.equal(result.evidence.av,undefined);assert.equal(result.evidence.runtimeIdentity,undefined);assert.equal(result.evidence.metrics,undefined);
+  const verified=await verifyGenerationSourcePrepCancel(f.p,f.c,dir,{allowUnitFake:true,receiptName});
+  assert.equal(verified.checkpointSha256,f.digest);assert.equal(verified.sourceBytes,3*SOURCE_PREP_CHUNK_BYTES+4093);
+  assert.equal(verified.partialBytes,SOURCE_PREP_CHUNK_BYTES);assert.ok(verified.elapsedMs<30000);
+  assert.equal(result.evidence.runtimeBindings,'source-job-output.json');const sourceVerification=await verifyAPIBindings(f.p,f.c,dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true});assert.equal(sourceVerification.nativeClosures,0);assert.deepEqual(sourceVerification.jobs,[]);
+  const actualReceipt=JSON.parse(await readFile(path.join(dir,receiptName),'utf8'));assert.ok(Date.parse(actualReceipt.sourceAudit.auditedAt)>=Date.parse(actualReceipt.terminal.acknowledgedAt));assert.ok(actualReceipt.generationJob.payload.generationSetId,'actual queued canonical enrichment must not be mistaken for raw request bytes');
+  const wrongRole=structuredClone(f.c);for(const input of wrongRole.inputs)if(input.role==='checkpoint')input.role='component';await assert.rejects(verifyGenerationSourcePrepCancel(f.p,wrongRole,dir,{allowUnitFake:true,receiptName}),/checkpoint-role input/);
+  await assert.rejects(verifyGenerationSourcePrepCancel(f.p,f.c,dir,{receiptName}),/unit_fake/);
+  await assert.rejects(verifyGenerationSourcePrepCancel(f.p,f.c,dir,{allowUnitFake:true}),/receipt is required/);
+  // Free label/receipt dictionaries never certify the case.
+  const wrong=structuredClone(await JSON.parse(await readFile(path.join(dir,receiptName),'utf8')));wrong.observation={state:'passed'};
+  await writeFile(path.join(f.root,'free-receipt.json'),JSON.stringify(wrong));
+  await assert.rejects(verifyGenerationSourcePrepCancel(f.p,f.c,f.root,{allowUnitFake:true,receiptName:'free-receipt.json'}),/actual native artifact observer/);
+});
+test('cold generation source-preparation cancellation fails loudly on every substituted or missed field',async t=>{
+  const {f,receiptName,dir}=await coldCancelFake(t);
+  const reading=value=>value.event==='artifact_seal_hash_progress'&&value.state==='Reading';
+  const cases=[
+    ['missing observation',async d=>{await editReceipt(d,r=>delete r.observation);},/actual partial ColdContentRead observation required/],
+    ['zero bytes',async d=>{await editReceipt(d,r=>{r.observation.hashed_bytes=0;});await editRetained(d,reading,v=>{v.hashed_bytes=0;});},/zero|partial/],
+    ['memo acquisition',async d=>{await editReceipt(d,r=>{r.observation.acquisition='MemoryMemo';});await editRetained(d,reading,v=>{v.acquisition='MemoryMemo';});},/only a cold content read/],
+    ['full source bytes',async d=>{await editReceipt(d,r=>{r.observation.hashed_bytes=4*SOURCE_PREP_CHUNK_BYTES;r.observation.source_bytes=4*SOURCE_PREP_CHUNK_BYTES;});await editRetained(d,reading,v=>{v.hashed_bytes=4*SOURCE_PREP_CHUNK_BYTES;v.source_bytes=4*SOURCE_PREP_CHUNK_BYTES;});},/partial, not the full source/],
+    ['wrong job',async d=>{await editReceipt(d,r=>{r.jobId='other-job';});},/actual .*generation job/],
+    ['wrong path',async d=>{await editReceipt(d,r=>{r.observation.path=path.join(f.root,'not-owned');});},/actual observed source path|same observed owned source path/],
+    ['wrong source size',async d=>{await editReceipt(d,r=>{r.observation.source_bytes+=1;});},/source audit size|stat size/],
+    ['wrong planned source role',async d=>{await editReceipt(d,r=>{r.sourceAudit.sha256=semantic;});},/declared checkpoint source|verified checkpoint input/],
+    ['acquired source',async d=>{await appendRetained(d,{jobId:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).jobId,span:{jobId:'x',checkpointId:'c',phase:'source-and-normalization'},event:'artifact_seal_hash_progress',path:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).observation.path,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:3*SOURCE_PREP_CHUNK_BYTES+4093});},/fully Acquired/],
+    ['native load present',async d=>{const r=JSON.parse(await readFile(path.join(d,receiptName),'utf8'));await appendRetained(d,{event:'h3_import_prepared_load',jobId:r.jobId,seal_validated:true,cache_state:'Cold'});},/native load/],
+    ['copy started before cancel',async d=>{const r=JSON.parse(await readFile(path.join(d,receiptName),'utf8'));await appendRetained(d,{jobId:r.jobId,span:{jobId:r.jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'},event:'h3_normalization_copy_progress',state:'Writing',copied_payload_bytes:SOURCE_PREP_CHUNK_BYTES,total_payload_bytes:3*SOURCE_PREP_CHUNK_BYTES+4093});},/hashing window was missed|normalization copy began/],
+    ['missing joined marker',async d=>{await editReceipt(d,r=>{r.terminal.job.message='canceled';});},/joined-teardown/],
+    ['hard abandon',async d=>{await editReceipt(d,r=>{r.terminal.hardAbandoned=true;});},/hard-abandoned/],
+    ['over grace',async d=>{await editReceipt(d,r=>{r.terminal.elapsedMs=30000;});},/under the 30000ms/],
+    ['busy teardown',async d=>{await editReceipt(d,r=>{r.teardown.idle.worker.status='busy';});},/fresh owned worker Idle/],
+    ['refused removal',async d=>{await editReceipt(d,r=>{r.removal.response.removedManifestEntry=false;});},/refused model removal/],
+    ['removal before idle',async d=>{await editReceipt(d,r=>{r.removal.at='2000-01-01T00:00:00.000Z';});},/removal must follow/],
+  ];
+  for(const [name,mutate,pattern]of cases){
+    const copy=await copyCase(dir,name.replace(/[^a-z0-9]+/gi,'-'));
+    try{
+      await mutate(copy);
+      await assert.rejects(verifyGenerationSourcePrepCancel(f.p,f.c,copy,{allowUnitFake:true,contentReadback:true,receiptName}),pattern,name);
+      // A failed/missed cancellation still retains its actual receipt for forensic readback.
+      assert.ok((await readdirNames(copy)).some(v=>v.startsWith('source-cancel-')&&v!=='source-cancel-actions.json'),name);
+    }finally{await rm(copy,{recursive:true,force:true});}
+  }
+});
+test('cold generation-preparation cancellation cannot be classified passed while blocked or unexecuted',async()=>{
+  const pending=requiredCases().filter(c=>c.id.endsWith('.generation-source-prep-cancel'));
+  assert.deepEqual(pending.map(c=>c.backend),['mlx','cuda']);
+  for(const c of pending){
+    await assert.rejects(validateEvidence({},c,'/unit_fake_unread','test result: ok. 1 passed; 0 failed; 0 ignored;'));
+    await assert.rejects(validateEvidence({output:'/unit_fake_unread'},c,'/unit_fake_unread','test result: ok. 1 passed; 0 failed; 0 ignored;'));
+  }
 });
 test('review repair linked runtime accepts omitted ownership and refuses fictional enum before transport',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f),service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
@@ -236,6 +344,12 @@ test('review repair copied closure metadata cannot replace authentic retained wo
   const f=await fixture(t),fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);await writeFile(path.join(f.dir,'worker-1.log'),'');
   await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/authentic worker/);
 });
+test('dense precision witnesses inspect actual body tensor headers rather than source-format labels',async t=>{
+  const f=await fixture(t);Object.assign(f.c,requiredCases().find(c=>c.id==='mlx.generalization.dense-f32'));f.execution.model.sourceFormat='f32';
+  const header={__metadata__:{format:'pt'},'transformer_blocks.0.attn.to_q.weight':{dtype:'BF16',shape:[1,1],data_offsets:[0,2]},'transformer_blocks.0.adaln_proj.weight':{dtype:'F32',shape:[1,1],data_offsets:[2,6]}};const bytes=Buffer.from(JSON.stringify(header)),prefix=Buffer.alloc(8);prefix.writeBigUInt64LE(BigInt(bytes.length));await writeFile(f.input,Buffer.concat([prefix,bytes,Buffer.alloc(6)]));const digest=await hashFile(f.input);f.execution.model.sha256=digest;f.c.inputs.find(input=>input.role==='checkpoint').sha256=digest;
+  await assert.rejects(verifyDenseSourceDtypes(f.c,f.root),/actual source body precision differs/);
+  f.c.id='mlx.generalization.dense-bf16';f.execution.model.sourceFormat='bf16';const facts=await verifyDenseSourceDtypes(f.c,f.root);assert.equal(facts.expectedBodyDtype,'BF16');assert.equal(facts.bodyMatrices,1);assert.equal(facts.files[0].histogram.F32,1,'source-required non-body F32 AdaLN buffers must remain honestly recorded');
+});
 test('review repair request-bound AV validator runs on the real output-binding path',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f),decode=fake.deps.decode;fake.deps.decode=async file=>{const decoded=await decode(file);decoded.streams[0].nb_read_frames='1';return decoded;};
   await assert.rejects(executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps),/frames but the request resolved/);
@@ -248,7 +362,17 @@ test('review repair managed linked equivalence compares actual semantic assembly
   const changed=byJob.get(bundle.captures.linked_av0_done.id),original=structuredClone(changed.runtimeIdentity.quantization.observedAssembly);changed.runtimeIdentity.quantization.observedAssembly.components={different:'bytes'};
   await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,fake.deps.delta),/semantic component/);changed.runtimeIdentity.quantization.observedAssembly=original;
   await writeFile(path.join(f.dir,changed.media.av),'different linked output');await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,async(a,b)=>a.includes('output-0')&&b.includes('output-2')?0.1:0),/not equivalent/);
-  await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,async()=>0.1),/baseline noise/);
+  await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,async(a,b)=>a.includes('output-0')&&b.includes('output-1')||a.includes('output-2')&&b.includes('output-3')?0.1:0),/baseline noise/);
+});
+test('content identity uses real copied bytes under a different layout and actual API checksum refusal for different bytes',async t=>{
+  const f=await fixture(t),layout=path.join(f.root,'unrelated-layout');await mkdir(layout);const renamed=path.join(layout,'opaque.safetensors'),different=path.join(layout,'different.safetensors');await cp(f.input,renamed);const bytes=await readFile(f.input);bytes[bytes.length-1]^=1;await writeFile(different,bytes);const differentSHA=await hashFile(different);
+  const positive=structuredClone(f.execution);positive.model.sourcePath=renamed;positive.model.originalPath=f.input;positive.model.originalSha256=f.digest;
+  const negative=structuredClone(positive);negative.label='different_bytes';negative.model.modelId='imported_different_bytes';negative.model.sourcePath=different;negative.model.sha256=differentSHA;negative.identityControl={kind:'different-bytes-negative',expectedSourceSha256:f.digest};for(const subject of negative.licenseAuthority.subjects)if(subject.role==='source')subject.sha256=differentSHA;
+  const receipt=path.join(f.root,'identity-controls.json');await writeFile(receipt,JSON.stringify({kind:'h3-finetune-stage-identity-controls',status:'prepared-not-modelproof',proof_kind:'unit_fake',sourcePath:f.input,sourceExpectedSHA:f.digest,sourceActualSHA:f.digest,renamed:{path:renamed,size:bytes.length,actualSHA:f.digest},differentBytes:{path:different,size:bytes.length,actualSHA:differentSHA,expectedOriginalSHA:f.digest}}));
+  f.c.inputs.push({path:renamed,sha256:f.digest,role:'checkpoint'},{path:different,sha256:differentSHA,role:'checkpoint'},{path:receipt,sha256:await hashFile(receipt),role:'identity-control-fixture'});
+  await replaceScenario(f,requiredCases().find(c=>c.id==='mlx.generalization.renamed'),[positive,negative],{...f.parameters,identificationControlReceipt:receipt});const fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);const verified=await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true});
+  assert.equal(verified.identification.sameContentRecognized.sha256,f.digest);assert.equal(verified.identification.differentContentRefused.observedSha256,differentSHA);assert.equal(await hashFile(f.input),f.digest);
+  const source=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8'));source.captures.different_bytes_refused.status='completed';await writeFile(path.join(f.dir,'source-job-output.json'),JSON.stringify(source));await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/different bytes must not be accepted/);
 });
 test('review repair cache coverage rejects three cold runs and unchanged staged policy',async t=>{
   const f=await fixture(t),executions=['cold','warm','staged'].map(label=>({...structuredClone(f.execution),label,reuseInstalled:label!=='cold',...(label==='staged'?{memoryCap:{kind:'mlx-memory-gb',value:1}}:{})}));

@@ -12,7 +12,7 @@ const eq = (pointer, equals) => ({ pointer, equals });
 const hex = v => assert.match(v ?? '', /^[a-f0-9]{64}$/);
 const absoluteSourcePath = v => typeof v === 'string' && (path.posix.isAbsolute(v) || path.win32.isAbsolute(v));
 const knownModes = ['text_to_video', 'image_to_video', 'first_last_frame', 'reference_to_video'];
-const lifecycleApi = new Set(['managed-linked-equivalence', 'restart-replay', 'removal', 'cancel', 'interruption-retry', 'bounded-loading', 'cold-warm-staged']);
+const lifecycleApi = new Set(['managed-linked-equivalence', 'restart-replay', 'removal', 'cancel', 'interruption-retry', 'bounded-loading', 'cold-warm-staged', 'generation-source-prep-cancel']);
 const hasScenario = c => c.group !== 'numeric' && !c.id.endsWith('.generalization.existing-families') && (c.group !== 'lifecycle' || lifecycleApi.has(c.id.split('.').slice(2).join('.')));
 export const fixtureBindings = {
   generalization: {
@@ -107,7 +107,7 @@ export function concretePlan(swRoot, inferenceRoot, stageRoot) {
       const scenario = path.join(stageRoot, `${c.id}.scenario.json`);
       const transcript = path.join(stageRoot, `${c.id}.api.json`);
       const apiCommand = ['node', path.join(swRoot, 'scripts/h3-finetune-terminal-api.mjs'), scenario, transcript];
-      if(check==='generation-source-prep-cancel')return {...c,blockedPrerequisite:'Await actual native typed cold-read progress, job-correlated SW trace and detached preparation/lease-release cancellation acknowledgment; no completed seal/load may be fabricated.',commands:[['node',path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'generation-source-prep-cancel',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot]]};
+      if(check==='generation-source-prep-cancel')return {...c,scenario,transcript,commands:[[process.execPath,path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'generation-source-prep-cancel',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot]],note:'Managed install -> fresh owned Idle restart -> generation; cancel only after an actual partial ColdContentRead checkpoint, then bind the joined-teardown root message, raw trace, and owned resume to the declared source. Never a forged receipt or a completed generation.'};
       if (c.group === 'numeric') {
         const mechanism=check==='tensor-mapping'?'convrot':check;
         const native=nativeCommands(inferenceRoot,c.backend,mechanism), authority=caseBook.numeric[mechanism];
@@ -170,14 +170,15 @@ function validateExecution(e, c, allowUnitFake=false) {
   if (requiredMode) assert.equal(e.mode, requiredMode, 'case must exercise its actual API operation');
   if (check === 'ltx-add-select-generate') assert.equal(e.family, 'ltx', 'LTX parity must run LTX, not an H3 scenario with an LTX label');
   if (check === 'independent-finetune') {
-    assert.ok(e.model.lineage?.source && e.model.lineage?.revision, 'independently identified trained source lineage required');
+    assert.ok(e.model.lineage?.source && e.model.lineage?.revision, 'independently published compatible fine-tune/merge provenance required; no new training is implied');
     assert.ok(!caseBook.artifacts.some(a => a.expectedSha256 === e.model.sha256), 'renamed Singularity is not independent generalization');
   }
   const format = { 'native-single': 'native-single', 'sharded-diffusers': 'sharded-diffusers', 'dense-f16': 'f16', 'dense-bf16': 'bf16', 'dense-f32': 'f32' }[check];
   if (format) assert.equal(e.model.sourceFormat, format, 'case must use its actual staged source format, not merely its label');
   if (check === 'renamed') {
     assert.ok(e.model.originalPath && e.model.originalPath !== e.model.sourcePath, 'supply original and actual renamed staged path');
-    assert.equal(e.model.originalSha256, e.model.sha256, 'renaming must preserve actual contents');
+    if(e.identityControl?.kind==='different-bytes-negative'){assert.ok(!e.reuseInstalled&&e.family!=='ltx'&&e.model.sourceKind!=='directory','different-bytes checksum challenge must import an actual owned single file, never reuse or generate');hex(e.identityControl.expectedSourceSha256);assert.equal(e.identityControl.expectedSourceSha256,e.model.originalSha256);assert.notEqual(e.model.sha256,e.model.originalSha256,'negative control must actually have different bytes');}
+    else assert.equal(e.model.originalSha256, e.model.sha256, 'renaming must preserve actual contents');
   }
   const bases = { fl2va: 'minimax_h3', ref2va: 'minimax_h3_ref', hybrid: 'minimax_h3' };
   if (e.family !== 'ltx') {
@@ -224,6 +225,7 @@ function conditioning(check, assets) {
 }
 function assertCoverage(c, executions) {
   const check = c.id.split('.').slice(2).join('.');
+  if(check==='renamed')assert.ok(executions.length===2&&executions.filter(e=>e.identityControl?.kind==='different-bytes-negative').length===1,'renamed/content identity requires one actual copied source and one different-bytes refusal control');
   if (['turbo', 'lora', 'lokr'].includes(check)) {
     for (const cell of ['full', 'pruned', 'hybrid']) assert.ok(executions.some(e => (e.model.partition === 'hybrid' ? 'hybrid' : e.model.topology) === cell), `missing supported ${check}/${cell} cell`);
     if (check === 'turbo') for (const r of caseBook.sampling.turbo) {
@@ -278,6 +280,7 @@ export function buildScenario(c, p, executions) {
     }
     const importBody = { modelId: e.model.modelId, name: `sc26691 ${prefix}`, sourcePath: e.model.sourcePath, expectedSha256: e.model.sha256, baseModel: e.model.baseModel, licenseAcknowledged: e.licenseAuthority.acknowledged };
     if(e.importSource){assert.equal(e.importSource.kind,'huggingFace');assert.notEqual(e.ownershipMode,'linked','choose the actual managed HF or approved linked source, not contradictory locators');assert.match(e.importSource.revision??'',/^[a-f0-9]{40}$/);importBody.source=clone(e.importSource);delete importBody.sourcePath;if(c.artifact){assert.equal(e.importSource.repo,SOURCE.repo);assert.equal(e.importSource.revision,SOURCE.revision);assert.deepEqual(e.importSource.files,[c.artifact]);}}
+    if(e.identityControl?.kind==='different-bytes-negative'){assert.equal(check,'renamed');importBody.expectedSha256=e.identityControl.expectedSourceSha256;}
     if (e.model.sourceKind === 'directory') delete importBody.expectedSha256; // No invented directory digest; retain per-file closure in preparation plan.
     if (e.family !== 'ltx') importBody.minimaxH3Partition = e.model.partition;
     if (e.ownershipMode === 'linked') {
@@ -294,6 +297,9 @@ export function buildScenario(c, p, executions) {
     }
     if (!e.reuseInstalled && e.family!=='ltx') {
       steps.push({ id: `${prefix}_import`, method: 'POST', path: '/api/v1/models/import', body: importBody, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
+      if(e.identityControl?.kind==='different-bytes-negative'){
+        steps.push({id:`${prefix}_refused`,waitJob:cap(`${prefix}_import/id`),expectedJobStatus:'failed',assert:[eq('/status','failed'),eq('/payload/expectedSha256',e.identityControl.expectedSourceSha256),{pointer:'/error',includesText:'integrity check'},{pointer:'/error',includesText:e.model.sha256},{pointer:'/error',includesText:e.identityControl.expectedSourceSha256}]});continue;
+      }
       if (['cancel', 'interruption-retry'].includes(check)) {
         if(check==='interruption-retry')lifecycleActions.push({kind:'interrupt-import',beforeStep:`${prefix}_cancel`,jobCapture:`${prefix}_import/id`});
         steps.push({ id: `${prefix}_cancel`, method: 'POST', path: route('/api/v1/jobs/', cap(`${prefix}_import/id`), '/cancel'), expectedStatus: 200 });
@@ -333,6 +339,14 @@ export function buildScenario(c, p, executions) {
       };
       steps.push({ id, method: 'POST', path: '/api/v1/video/jobs', body, expectedStatus: 201,
         assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed), eq('/payload/mode', e.mode), eq('/payload/advanced/steps',s.steps), eq('/payload/width',s.width), eq('/payload/height',s.height), eq('/payload/fps',s.fps), eq('/payload/duration',s.duration)] });
+      if (check === 'generation-source-prep-cancel') {
+        // Cold memo: a fresh owned Idle restart AFTER installation, BEFORE generation. The
+        // generation is never waited to completion; the action cancels during preparation.
+        assert.equal(variantsToRun.length, 1, 'cold source-preparation cancellation accepts exactly one actual generation');
+        assert.ok(!e.reuseInstalled && e.family !== 'ltx' && e.ownershipMode!=='linked', 'a managed imported installation is required; linked/reused sources cannot prove cold preparation');
+        lifecycleActions.push({ kind: 'restart', beforeStep: id });
+        continue;
+      }
       steps.push({ id: `${id}_done`, waitJob: cap(`${id}/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
     }
     if (check === 'restart-replay') {
@@ -345,9 +359,21 @@ export function buildScenario(c, p, executions) {
     if (check === 'removal') steps.push({ id: `${prefix}_removed`, method: 'DELETE', path: `/api/v1/models/${encodeURIComponent(e.model.modelId)}?permanent=true`, expectedStatus: 200, assert: [eq('/id', e.model.modelId), eq('/removedManifestEntry', true)] });
     if (c.group === 'capability') comparisons.push({ label: prefix, baseline: `${prefix}_av0_done`, repeatedBaseline: `${prefix}_av1_done`, interventions: variantsToRun.slice(2).map((v, i) => ({ job: `${prefix}_av${i + 2}_done`, allowedChanges: [...new Set([...Object.keys(variants[0]),...Object.keys(v)])].filter(k=>JSON.stringify(variants[0][k])!==JSON.stringify(v[k])), stream: check === 'audio-reference' || JSON.stringify(v.referenceAudioAssetIds) !== JSON.stringify(variants[0].referenceAudioAssetIds) ? 'audio' : 'video' })), stream: check === 'audio-reference' ? 'audio' : 'video', thresholds: clone(p.sensitivity), command: ['node', 'scripts/h3-finetune-terminal.mjs', 'compare-control', 'BASELINE_AV_FROM_ACTUAL_JOB', 'REPEATED_AV_FROM_ACTUAL_JOB', 'INTERVENTION_AV_FROM_ACTUAL_JOB', check === 'audio-reference' ? 'audio' : 'video', String(p.sensitivity.minimumControlDelta), String(p.sensitivity.maximumBaselineDelta)], policy: 'Bind checkpoint/source closure + seed + complete sampling/config; decode both AV streams. Measure repeated-baseline RMSE B. Predeclare intervention threshold T and require intervention RMSE > max(T,3*B). If noise floor is unstable, acceptance is unresolved, not any-hash-difference success.' });
   }
+  if (check === 'generation-source-prep-cancel') {
+    assert.equal(executions.length, 1, 'one cold source-preparation attempt');
+    const prefix = executions[0].label, generation = `${prefix}_av0`;
+    assert.ok(lifecycleActions.some(a => a.kind === 'restart' && a.beforeStep === generation), 'fresh owned Idle restart required before the cold generation');
+    // The action itself performs the cooperative POST /cancel only after the actual partial
+    // ColdContentRead checkpoint, then awaits the joined-teardown root marker and verification.
+    lifecycleActions.push({ kind: 'source-cancel', beforeStep: `${prefix}_cancelled`, generationCapture: `${generation}/id`, modelCapture: `${prefix}_installed/result/modelId` });
+    steps.push({ id: `${prefix}_cancelled`, waitJob: cap(`${generation}/id`), expectedJobStatus: 'canceled', assert: [eq('/status', 'canceled')] });
+  }
   assert.equal(new Set(steps.map(s => s.id)).size, steps.length, 'execution labels must be unique');
+  const positiveIdentity=check==='renamed'?executions.find(e=>e.identityControl?.kind!=='different-bytes-negative'):undefined,negativeIdentity=check==='renamed'?executions.find(e=>e.identityControl?.kind==='different-bytes-negative'):undefined;
+  if(positiveIdentity)assert.ok(absoluteSourcePath(p.identificationControlReceipt),'actual staged identity-control receipt path required');
+  const identificationControl=positiveIdentity?{positive:positiveIdentity.label,negative:negativeIdentity.label,receipt:p.identificationControlReceipt,originalPath:positiveIdentity.model.originalPath,expectedSha256:positiveIdentity.model.sha256}:undefined;
   const ownershipEquivalence=check==='managed-linked-equivalence'?{managed:executions.find(e=>e.ownershipMode!=='linked').label,linked:executions.find(e=>e.ownershipMode==='linked').label,thresholds:clone(p.equivalence)}:undefined;
-  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons, lifecycleActions,...(check==='cold-warm-staged'?{cacheCoverage:{cold:'cold_av0_done',warm:'warm_av0_done',staged:'staged_av0_done'}}:{}),...(ownershipEquivalence?{ownershipEquivalence}:{}) };
+  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons, lifecycleActions,...(identificationControl?{identificationControl}:{}),...(check==='cold-warm-staged'?{cacheCoverage:{cold:'cold_av0_done',warm:'warm_av0_done',staged:'staged_av0_done'}}:{}),...(ownershipEquivalence?{ownershipEquivalence}:{}) };
 }
 // Deliberately not a run-case plan: no invented evidence.json or successful runtime metrics.
 export async function prepareCases(parameters, destination) {
@@ -363,7 +389,7 @@ export async function prepareCases(parameters, destination) {
   // Exclusive directory: no overwrite/recovery of another campaign candidate.
   await mkdir(destination);
   for (const c of requiredCases().filter(c => c.group === 'numeric')) await mkdir(path.join(destination, c.id));
-  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, licenseAuthority:e.licenseAuthority, ltxAdapter:e.ltxAdapter, historyBinding:e.historyBinding, importSource: e.importSource, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
+  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, licenseAuthority:e.licenseAuthority, ltxAdapter:e.ltxAdapter, identityControl:e.identityControl, historyBinding:e.historyBinding, importSource: e.importSource, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
   await writeFile(path.join(destination, 'case-plan.json'), JSON.stringify({ ...plan, cases, responsibleTask: 'sc-26691', sceneworks: parameters.sceneworks, inference: parameters.inference }, null, 2) + '\n', { flag: 'wx' });
   for (const [id, scenario] of scenarios) await writeFile(path.join(destination, `${id}.scenario.json`), JSON.stringify(scenario, null, 2) + '\n', { flag: 'wx' });
   return { cases: plan.cases.length, scenarios: scenarios.length, status: 'prepared-not-executed', unresolvedInterfaces: plan.unresolvedInterfaces };
@@ -392,6 +418,7 @@ export async function finalizeCampaignPlan(parameters, preparedRoot) {
         assert.ok(source.family==='ltx'?c.inputs.some(i=>i.role==='adapter'&&i.sha256===source.ltxAdapter.sha256):c.inputs.some(i=>i.role==='checkpoint'&&i.sha256===source.model.sha256),'stage each selected actual checkpoint/adapter closure');
         for(const component of [...(source.model.components??[]),...(source.adapters??[])])assert.ok(c.inputs.some(i=>i.sha256===component.sha256),'stage each actual bound component/adapter');
       }
+      if(c.id.endsWith('.renamed')){const spec=JSON.parse(await readFile(c.scenario,'utf8')).identificationControl;assert.ok(spec?.receipt);c.inputs.push({path:spec.receipt,sha256:await hashFile(spec.receipt),role:'identity-control-fixture'});}
       c.runtime={...cfg,scenario:c.scenario};c.command=['node',path.join(parameters.swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'api',filename,c.id,parameters.swRoot,parameters.inferenceRoot];
       const sensitivity=parameters.backends?.[c.backend]?.sensitivity??parameters.sensitivity;
       if(c.group==='capability'){c.minimumControlDelta=sensitivity.minimumControlDelta;c.controlStream=c.id.endsWith('.audio-reference')?'audio':'video';}

@@ -168,7 +168,7 @@ test('registered Candle entrypoint positively routes only explicit H3 selections
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
   const job=workflowJob(router,'h3-terminal'),selected=/^    if: (.+)$/m.exec(job)[1],authorization=/^      stationary_pair_authorized: (.+)$/m.exec(job)[1];
   assert.match(job,/uses: \.\/.github\/workflows\/h3-finetune-terminal\.yml/);assert.doesNotMatch(job,/uses:.*@main|registration_only|activation/);assert.match(callee,/workflow_call:/);
-  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
+  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-stage-mlx','h3-stage-cuda','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
   const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
   for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){
     assert.equal(choices.filter(v=>v===operation).length,1);
@@ -249,6 +249,16 @@ test('source UI proof is explicit hosted Chromium only, independent of model pin
   assert.match(job,/if: \$\{\{ always\(\) \}\}/);assert.match(job,/tee "\$SC26687_ARTIFACT_DIR\/browser-proof.log"/);
   const rootGroup=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1],inputs={starvector_terminal_operation:'h3-ui-proof'};
   assert.equal(workflowExpression(rootGroup,inputs),'h3-ui-hosted-unit_fake_101-1');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-ui-hosted-unit_fake_102-1');assert.equal(workflowExpression(rootGroup,inputs,{run_attempt:'2'}),'h3-ui-hosted-unit_fake_101-2');assert.equal(workflowExpression(cancel,inputs),false);
+});
+test('asset staging route is positive manual-only, cache-first and never a model campaign',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),job=workflowJob(router,'h3-stage'),selected=/^    if: (.+)$/m.exec(job)[1];
+  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());for(const value of ['h3-stage-mlx','h3-stage-cuda'])assert.equal(choices.filter(v=>v===value).length,1);
+  for(const operation of [undefined,'','unknown',...choices])for(const event of ['push','pull_request','merge_group','schedule','workflow_dispatch'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation},{event_name:event}),event==='workflow_dispatch'&&['h3-stage-mlx','h3-stage-cuda'].includes(operation));
+  const group=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1];for(const operation of ['h3-stage-mlx','h3-stage-cuda']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(group,inputs),'h3-assets-stage-unit_fake_101-1');assert.equal(workflowExpression(group,inputs,{run_id:'unit_fake_102'}),'h3-assets-stage-unit_fake_102-1');}
+  assert.match(job,/timeout-minutes: 240/);assert.ok(job.includes('ref: ${{ github.sha }}'));assert.ok(job.includes('H3_STAGE_SOURCE_SHA: ${{ github.sha }}'));assert.ok(job.includes('persist-credentials: false'));
+  assert.ok(job.indexOf('Probe exact builtin and community snapshots')<job.indexOf('Stage every explicitly selected asset'));for(const set of ['builtin-shards','builtin-ref-shards','community-shards-fl2va','community-shards-ref2va'])assert.ok(job.includes(set));
+  for(const token of ['runStage','inspect_only=true','h3-finetune-terminal-stage.mjs','expected-assets-not-integrity-proof.json','pyarrow==19.0.1','h3-finetune-terminal-speech.py','prepareReferenceFixtures','if-no-files-found: error','set -euo pipefail'])assert.ok(job.includes(token),token);
+  assert.match(job,/if: \$\{\{ always\(\) \}\}/);assert.doesNotMatch(job,/run-case|stationary_pair_authorized|cargo (?:test|build)|gpu.token|cudaDeviceEvidence|secrets: inherit/);
 });
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));

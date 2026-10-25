@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Drive existing app routes, never an alternate importer/provider. No service startup/download.
 import assert from 'node:assert/strict';
+import {isDeepStrictEqual} from 'node:util';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,13 @@ export function expand(value, captures) {
   if (Array.isArray(value)) return value.map(v => expand(v, captures));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expand(v, captures)]));
   return value;
+}
+export function assertRecordedAssertion({actual,expected,operator='equals'}){
+  if(operator==='contains'){
+    assert.ok(Array.isArray(actual)&&expected&&Object.keys(expected).length>0,'typed catalog membership required');assert.ok(actual.some(row=>Object.entries(expected).every(([key,value])=>isDeepStrictEqual(row?.[key],value))),'selected compatible catalog entry absent');
+  }else if(operator==='includesText'){
+    assert.ok(typeof actual==='string'&&typeof expected==='string'&&expected.length>0&&actual.includes(expected),'actual refusal did not contain the expected specific reason');
+  }else{assert.equal(operator,'equals','unknown assertion operator');assert.deepEqual(actual,expected);}
 }
 export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {} } = {}) {
   const base = new URL(s.baseUrl);
@@ -68,12 +76,9 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
       }
       captures[step.id] = result;
       for (const check of step.assert ?? []) {
-        const actual = pointer(result, check.pointer), expected = expand(check.contains ?? check.equals, captures);
-        if(Object.hasOwn(check,'contains')){
-          assert.ok(Array.isArray(actual) && expected && Object.keys(expected).length>0,'nonempty typed catalog selection required');
-          assert.ok(actual.some(row=>Object.entries(expected).every(([key,value])=>JSON.stringify(row?.[key])===JSON.stringify(value))),`assertion ${step.id}${check.pointer}: selected compatible adapter absent`);
-        }else assert.deepEqual(actual, expected, `assertion ${step.id}${check.pointer}`);
-        await record({ assertion: `${step.id}${check.pointer}`, actual, expected });
+        const actual = pointer(result, check.pointer),operator=Object.hasOwn(check,'contains')?'contains':Object.hasOwn(check,'includesText')?'includesText':'equals',expected=expand(check.contains??check.includesText??check.equals,captures);
+        assertRecordedAssertion({actual,expected,operator});
+        await record({ assertion: `${step.id}${check.pointer}`, actual, expected, operator });
       }
     }
     assert.ok(transcript.some(r => r.assertion), 'no observable assertions executed');
