@@ -129,7 +129,11 @@ test("existing default-branch workflow bridges every pre-merge terminal operatio
     const suffix = reusable ? `-${reusable}` : "";
     assert.match(bridge, new RegExp(`uses: \\.\\/.github/workflows/starvector-terminal${suffix}\\.yml`));
   }
-  assert.match(bridge, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-terminal-mlx, h3-terminal-cuda\]/);
+  const choices = bridge.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1].split(",").map((choice) => choice.trim());
+  assert.ok(choices, "the registered manual operation menu exists");
+  const legacy = ["standard", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b"];
+  assert.deepEqual(choices.filter((choice) => legacy.includes(choice)), legacy, "legacy choices retain presence and order without freezing other epics' modes");
+  assert.equal(new Set(choices).size, choices.length, "manual choices are unique");
   assert.match(bridge, /starvector-readiness:[\s\S]*?uses: \.\/.github\/workflows\/starvector-terminal-readiness\.yml[\s\S]*?with:[\s\S]*?permanent_pin: \$\{\{ inputs\.permanent_pin \}\}/);
 });
 

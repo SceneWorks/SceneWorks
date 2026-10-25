@@ -823,6 +823,7 @@ fn inputs<'a>(
     headroom_bytes: u64,
 ) -> VideoAdmissionInputs<'a> {
     VideoAdmissionInputs {
+        native_quant_request: None,
         model_id: "ltx_2_3",
         model_family: "ltx-video",
         route: "ltx_2_3",
@@ -1599,6 +1600,7 @@ fn encode_request(mode: &str, reference_count: u32) -> VideoEncodeRequest<'_> {
     VideoEncodeRequest {
         mode,
         reference_count,
+        native_conditioning_bound: false,
     }
 }
 
@@ -3031,6 +3033,7 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
 fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     let mut streamed = fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]);
     streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
+        native_quant: None,
         architecture: None,
         staged_weights: gen_core::StagedWeightSchedule::TwoStage,
         transformer_stream: Some(gen_core::StreamedWeightFacts {
@@ -5300,6 +5303,7 @@ fn the_memory_adapter_lists_every_worker_evidence_identity() {
         ENCODE_PROFILE_EVIDENCE_REVISION,
         UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION,
         "video-estimate-floor-v1",
+        "video-native-allocation-estimate-v1",
         "video-provider-conservative-decode-profile-v1",
     ] {
         assert!(
@@ -5663,4 +5667,1149 @@ fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
     assert!(admit_veda_host_workspace(&b, Some(host)).is_ok());
     assert!(admit_veda_host_workspace(&b, Some(host - 1)).is_err());
     assert!(admit_veda_host_workspace(&b, None).is_err());
+}
+
+// S10: synthetic facts exercise the real request -> stage prediction -> shared selector.
+// No model execution, real caches, device allocation or measured evidence.
+fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProviderContract {
+    use gen_core::h3_memory::{
+        NativeAllocationFacts, NativeBackend, NativeProjection, NativeTaskAllocation, RowDomain,
+    };
+    let realization = match lane {
+        VideoLane::Mlx => MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: false,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: false,
+            cache_eviction: true,
+        },
+        VideoLane::Candle => MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: false,
+            host_to_device_block_materialization: true,
+            block_materialization: MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    };
+    let mut contract =
+        fixture_contract_with_realization(6, 1, &[MemoryStrategy::StagedResidency], realization);
+    contract.provider_id = "minimax_h3".into();
+    contract.asset_facts.transformer_bytes = 4 * GIB;
+    contract.asset_facts.decoder_bytes = GIB;
+    contract.asset_facts.overlay_bytes = GIB / 4;
+    let projection = |base: &str, w4a8: bool, rows| NativeProjection {
+        base: base.into(),
+        descriptor_bytes: 0,
+        // Arithmetic-only projection facts: working storage must exceed the ordinary allowance
+        // so geometry/precision mutations are observable at the actual selector boundary.
+        input: 8192,
+        output: 65536,
+        rotation_group: 256,
+        activation_width: if w4a8 { 2 } else { activation_width },
+        w4a8,
+        bias_width: Some(4),
+        bias_dtype: Some(gen_core::weightsmeta::Dtype::F32),
+        rows,
+    };
+    contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
+        architecture: None,
+        staged_weights: gen_core::StagedWeightSchedule::ThreeStage,
+        transformer_stream: None,
+        decoder_workspace: None,
+        native_quant: Some(NativeAllocationFacts {
+            conditioning: None,
+            conditioning_stream: None,
+            conditioning_resident_bytes: GIB,
+            conditioning_load_bytes: GIB / 2,
+            video_decode_resident_bytes: GIB,
+            video_decode_load_bytes: 0,
+            audio_decode_resident_bytes: GIB / 2,
+            audio_decode_load_bytes: GIB / 4,
+            default_evaluations: 50,
+            backend: match lane {
+                VideoLane::Mlx => NativeBackend::Mlx { tile_columns: 512 },
+                VideoLane::Candle => NativeBackend::Candle {
+                    tile_rows: 512,
+                    workspace_bytes: 8 << 20,
+                },
+            },
+            tasks: vec![
+                NativeTaskAllocation {
+                    reference_task: false,
+                    patch_size: [1, 2, 2],
+                    window: None,
+                    constructor_bytes: 0,
+                    resident_bytes: 8 * GIB,
+                    evicted_bytes: 6 * GIB,
+                    table_bytes_per_timestep: GIB / 64,
+                    projections: vec![
+                        projection("blocks.0.adaln_proj.linear", false, RowDomain::Schedule),
+                        projection("blocks.0.attn.to_q", true, RowDomain::Packed),
+                    ],
+                },
+                // Source-pruned route: tables/operands already resident; no fictitious eviction.
+                NativeTaskAllocation {
+                    reference_task: true,
+                    patch_size: [1, 2, 2],
+                    window: None,
+                    constructor_bytes: 0,
+                    resident_bytes: 10 * GIB,
+                    evicted_bytes: 0,
+                    table_bytes_per_timestep: 0,
+                    projections: vec![
+                        projection(
+                            "token_refiner.blocks.0.attn.to_q",
+                            false,
+                            RowDomain::Conditioning,
+                        ),
+                        projection("blocks.0.attn.to_v", false, RowDomain::Packed),
+                    ],
+                },
+            ],
+        }),
+    });
+    assert!(
+        contract.conformance_errors().is_empty(),
+        "{:?}",
+        contract.conformance_errors()
+    );
+    contract
+}
+
+fn native_quant_request<'a>(conditioning: &'a [gen_core::Conditioning]) -> NativeQuantRequest<'a> {
+    NativeQuantRequest {
+        shape: gen_core::veda::workspace::Request {
+            veda: None,
+            // The real selector must replace this placeholder with each admitted geometry.
+            width: 32,
+            height: 32,
+            frames: 5,
+            count: 1,
+            prompt: "synthetic H3 prompt",
+            conditioning,
+            reference_image_short_edge: Some(256),
+        },
+        evaluations: Some(4),
+    }
+}
+
+fn native_rows_at(
+    request: NativeQuantRequest<'_>,
+    geometry: VideoAdmissionGeometry,
+    native: &gen_core::h3_memory::NativeAllocationFacts,
+) -> gen_core::h3_memory::NativeRows {
+    native
+        .request_rows(
+            gen_core::veda::workspace::Request {
+                width: geometry.width,
+                height: geometry.height,
+                frames: geometry.estimate_frames(),
+                count: geometry.batch,
+                ..request.shape
+            },
+            request
+                .evaluations
+                .map(|n| n as usize)
+                .unwrap_or(native.default_evaluations),
+        )
+        .unwrap()
+}
+
+#[test]
+fn native_quant_stage_bound_uses_selected_task_and_companions_once_on_both_backends() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let contract = native_quant_contract(lane, 2);
+        let native = contract
+            .phase_facts
+            .as_ref()
+            .unwrap()
+            .native_quant
+            .as_ref()
+            .unwrap();
+        let request = native_quant_request(&[]);
+        let geometry = geometry(124, VideoGeometryRole::Requested);
+        let rows = native_rows_at(request, geometry, native);
+        let dit = native
+            .precompute_peak_bytes(rows)
+            .max(native.denoise_peak_bytes(rows));
+        let ordinary = PhasePeaks {
+            conditioning_bytes: 7,
+            denoise_bytes: 11,
+            decode_bytes: 13,
+        };
+        for (strategy, companions) in [
+            (MemoryStrategy::Resident, GIB / 4),
+            (MemoryStrategy::StagedResidency, GIB / 4),
+        ] {
+            let actual = native_quant_phase_floor(
+                &contract,
+                &selection_for(strategy),
+                Some(request),
+                geometry,
+                ordinary,
+            )
+            .unwrap();
+            assert_eq!(actual.denoise_bytes, dit + companions);
+            assert_eq!(actual.conditioning_bytes, ordinary.conditioning_bytes);
+            assert_eq!(actual.decode_bytes, ordinary.decode_bytes);
+            assert_eq!(actual.peak_bytes(), dit + companions);
+        }
+        let ordinary = PhasePeaks {
+            conditioning_bytes: 100 * GIB,
+            denoise_bytes: 101 * GIB,
+            decode_bytes: 102 * GIB,
+        };
+        assert_eq!(
+            native_quant_phase_floor(
+                &contract,
+                &selection_for(MemoryStrategy::Resident),
+                Some(request),
+                geometry,
+                ordinary
+            )
+            .unwrap(),
+            ordinary
+        );
+    }
+}
+
+fn native_quant_selector<'a>(
+    contract: &'a MemoryProviderContract,
+    request: NativeQuantRequest<'a>,
+    lane: VideoLane,
+) -> LadderVideoSelector<'a> {
+    let mut selector = LadderVideoSelector::new(
+        VideoRequestIdentity {
+            model_id: "minimax_h3",
+            model_family: "minimax_h3",
+            route: "minimax_h3",
+            mode: "text_to_video",
+            reference_count: 0,
+            reference_shape: "none",
+            overlay: None,
+            fps: 24,
+            lane,
+            tier: tier(),
+            transformer_variant: None,
+            decoder: None,
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        },
+        contract,
+        budget(512.0),
+        GIB,
+        0,
+    );
+    selector.native_quant_request = Some(request);
+    selector.anchors = None;
+    selector.curves = None;
+    selector
+}
+
+#[test]
+fn native_quant_geometry_precision_and_schedule_reach_the_production_selector() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let narrow = native_quant_contract(lane, 2);
+        let wide = native_quant_contract(lane, 4);
+        let request = native_quant_request(&[]);
+        let geometry = geometry(124, VideoGeometryRole::Requested);
+        let mut selector = native_quant_selector(&narrow, request, lane);
+        let verdict = selector.select(geometry);
+        let VideoRungSelection::Selected { needed_gb, .. } = verdict else {
+            panic!("native estimator did not select: {verdict:?}")
+        };
+        let raw = selector.selections[0].predicted_peak_bytes;
+        let native = narrow
+            .phase_facts
+            .as_ref()
+            .unwrap()
+            .native_quant
+            .as_ref()
+            .unwrap();
+        let rows = native_rows_at(request, geometry, native);
+        let selection = selector.selections[0].selection;
+        let weights = video_floor_weights_bytes(
+            &selector,
+            geometry,
+            selection,
+            &narrow.engaged_composition(selection.strategy),
+        )
+        .unwrap();
+        let expected = weights
+            .saturating_add(GIB)
+            .max(
+                native
+                    .precompute_peak_bytes_windowed(rows, None)
+                    .unwrap()
+                    .saturating_add(GIB / 4),
+            )
+            .max(
+                native
+                    .denoise_peak_bytes_windowed(rows, None)
+                    .unwrap()
+                    .saturating_add(GIB / 4),
+            );
+        assert_eq!(
+            raw, expected,
+            "admitted geometry must replace the borrowed placeholder shape"
+        );
+        assert_eq!(
+            needed_gb,
+            crate::memory_strategy::peak_bytes_to_gb(
+                crate::memory_strategy::floor_admitted_peak_bytes(
+                    match lane {
+                        VideoLane::Mlx => MemoryBackend::Mlx,
+                        VideoLane::Candle => MemoryBackend::Candle,
+                    },
+                    raw,
+                    Some(raw.saturating_sub(weights)),
+                )
+            ),
+            "the existing policy margin is applied exactly once"
+        );
+        let mut larger = native_quant_selector(&narrow, request, lane);
+        assert!(matches!(
+            larger.select(VideoAdmissionGeometry {
+                width: 1344,
+                height: 768,
+                ..geometry
+            }),
+            VideoRungSelection::Selected { .. }
+        ));
+        assert!(
+            larger.selections[0].predicted_peak_bytes > raw,
+            "working buffers follow admitted geometry"
+        );
+        // Precision belongs to the selected source task, not an unselected partition. Candle
+        // can need less cast scratch at F32, so preserve its value rather than assuming monotonicity.
+        let references = vec![gen_core::Conditioning::Reference {
+            image: native_image(64, 32),
+            strength: None,
+        }];
+        let reference_request = native_quant_request(&references);
+        let price_precision = |contract: &MemoryProviderContract| {
+            let mut precise = native_quant_selector(contract, reference_request, lane);
+            precise.identity.mode = "reference_to_video";
+            precise.identity.reference_count = 1;
+            precise.identity.reference_shape = "image";
+            assert!(matches!(
+                precise.select(geometry),
+                VideoRungSelection::Selected { .. }
+            ));
+            precise.selections[0].predicted_peak_bytes
+        };
+        assert_ne!(
+            price_precision(&narrow),
+            price_precision(&wide),
+            "selected native source precision is not coerced to request tier"
+        );
+        let mut source_patch = narrow.clone();
+        for task in &mut source_patch
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap()
+            .tasks
+        {
+            task.patch_size = [1, 1, 1];
+        }
+        let mut patched = native_quant_selector(&source_patch, request, lane);
+        assert!(matches!(
+            patched.select(geometry),
+            VideoRungSelection::Selected { .. }
+        ));
+        assert!(
+            patched.selections[0].predicted_peak_bytes > raw,
+            "source patch geometry controls visual rows, not a stock variant label"
+        );
+        let mut more_steps = native_quant_selector(
+            &narrow,
+            NativeQuantRequest {
+                evaluations: Some(500),
+                ..request
+            },
+            lane,
+        );
+        assert!(matches!(
+            more_steps.select(geometry),
+            VideoRungSelection::Selected { .. }
+        ));
+        assert!(
+            more_steps.selections[0].predicted_peak_bytes > raw,
+            "distinct-timestep tables remain resident"
+        );
+    }
+}
+
+#[test]
+fn native_quant_separate_stages_fit_resident_and_staged_on_both_backends() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        for strategy in [MemoryStrategy::Resident, MemoryStrategy::StagedResidency] {
+            let mut contract = native_quant_contract(lane, 2);
+            let native = contract
+                .phase_facts
+                .as_mut()
+                .unwrap()
+                .native_quant
+                .as_mut()
+                .unwrap();
+            native.tasks.retain(|task| !task.reference_task);
+            let task = &mut native.tasks[0];
+            task.resident_bytes = 6 * GIB;
+            task.constructor_bytes = 9 * GIB;
+            task.evicted_bytes = 4 * GIB;
+            task.table_bytes_per_timestep = 0;
+            task.projections.clear();
+            native.video_decode_resident_bytes = 5 * GIB;
+            native.audio_decode_resident_bytes = 3 * GIB;
+            contract.asset_facts.conditioning_bytes = 7 * GIB;
+            contract.asset_facts.transformer_bytes = 6 * GIB;
+            contract.asset_facts.decoder_bytes = 8 * GIB;
+            contract.asset_facts.base_bytes = 21 * GIB;
+            contract.asset_facts.overlay_bytes = 0;
+            // Restrict the offered capability, not the prediction arithmetic: exercise each
+            // actual candidate through the production selector instead of a copied formula.
+            for cap in &mut contract.strategies {
+                cap.support = if cap.strategy == strategy {
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                };
+            }
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "{:?}",
+                contract.conformance_errors()
+            );
+            let raw_peak = 9 * GIB;
+            let stage_weights = 7 * GIB;
+            let admitted = crate::memory_strategy::floor_admitted_peak_bytes(
+                match lane {
+                    VideoLane::Mlx => MemoryBackend::Mlx,
+                    VideoLane::Candle => MemoryBackend::Candle,
+                },
+                raw_peak,
+                Some(raw_peak - stage_weights),
+            );
+            let host_bytes = admitted + GIB / 4;
+            let host_gb = crate::memory_strategy::peak_bytes_to_gb(host_bytes);
+            let mut selector = native_quant_selector(&contract, native_quant_request(&[]), lane);
+            selector.budget = budget(host_gb);
+            let verdict = selector.select(geometry(124, VideoGeometryRole::Requested));
+            assert!(matches!(verdict, VideoRungSelection::Selected { .. }), "separate native stages fit; their legacy sum does not: {lane:?} {strategy:?} {verdict:?}");
+            let selected = &selector.selections[0];
+            assert_eq!(selected.selection.strategy, strategy);
+            assert_eq!(selected.predicted_peak_bytes, 9 * GIB, "actual cold constructor exceeds the ordinary stage+activation maximum and must remain priced");
+            assert!(contract.asset_facts.base_bytes > host_bytes);
+            let mut legacy = contract.clone();
+            legacy.phase_facts.as_mut().unwrap().native_quant = None;
+            let mut legacy_selector =
+                native_quant_selector(&legacy, native_quant_request(&[]), lane);
+            legacy_selector.budget = budget(host_gb);
+            assert!(
+                matches!(
+                    legacy_selector.select(geometry(124, VideoGeometryRole::Requested)),
+                    VideoRungSelection::Reject { .. }
+                ),
+                "the same policy-derived budget cannot fit the legacy cross-stage sum"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_quant_unselected_task_changes_do_not_move_the_selected_request_budget() {
+    let references = vec![gen_core::Conditioning::Reference {
+        image: native_image(64, 32),
+        strength: None,
+    }];
+    let geometry = geometry(124, VideoGeometryRole::Requested);
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        for reference in [false, true] {
+            let contract = native_quant_contract(lane, 2);
+            let conditioning = if reference {
+                references.as_slice()
+            } else {
+                &[]
+            };
+            let request = native_quant_request(conditioning);
+            let estimate = |contract: &MemoryProviderContract| {
+                let mut selector = native_quant_selector(contract, request, lane);
+                if reference {
+                    selector.identity.mode = "reference_to_video";
+                    selector.identity.reference_count = 1;
+                    selector.identity.reference_shape = "image";
+                }
+                let verdict = selector.select(geometry);
+                let VideoRungSelection::Selected { needed_gb, .. } = verdict else {
+                    panic!("{verdict:?}")
+                };
+                (selector.selections[0].predicted_peak_bytes, needed_gb)
+            };
+            let baseline = estimate(&contract);
+            let mut changed = contract.clone();
+            let unselected = changed
+                .phase_facts
+                .as_mut()
+                .unwrap()
+                .native_quant
+                .as_mut()
+                .unwrap()
+                .tasks
+                .iter_mut()
+                .find(|task| task.reference_task != reference)
+                .unwrap();
+            unselected.resident_bytes = 64 * GIB;
+            unselected.constructor_bytes = 128 * GIB;
+            unselected.table_bytes_per_timestep = GIB;
+            unselected.patch_size = [2, 2, 2];
+            // Real provider asset facts summarize all loadable tasks; those summary maxima
+            // must not sneak an unselected partition back under the request-scoped native floor.
+            changed.asset_facts.transformer_bytes = 64 * GIB;
+            changed.asset_facts.base_bytes = 66 * GIB;
+            assert_eq!(estimate(&changed), baseline, "unselected task storage/constructor/cache/patch and aggregate maxima cannot price this request");
+        }
+    }
+}
+
+fn native_quant_window_contract() -> MemoryProviderContract {
+    use gen_core::h3_memory::{window::WindowAllocation, NativeProjection, RowDomain};
+    let mut contract = native_quant_contract(VideoLane::Mlx, 2);
+    let window_projection = |base: &str, rows| NativeProjection {
+        base: base.into(),
+        descriptor_bytes: 0,
+        input: 1024,
+        output: 2048,
+        rotation_group: 256,
+        activation_width: 2,
+        w4a8: false,
+        bias_width: Some(4),
+        bias_dtype: Some(gen_core::weightsmeta::Dtype::F32),
+        rows,
+    };
+    let mut projections = vec![window_projection(
+        "token_refiner.attn.to_q",
+        RowDomain::Conditioning,
+    )];
+    let mut inventory = vec![(String::from("token_refiner.attn.to_q.weight"), GIB)];
+    for block in 0..4 {
+        projections.push(window_projection(
+            &format!("transformer_blocks.{block}.attn.to_q"),
+            RowDomain::Packed,
+        ));
+        inventory.push((
+            format!("transformer_blocks.{block}.attn.to_q.weight"),
+            4 * GIB,
+        ));
+    }
+    let plan = WindowAllocation::from_resident_tensors(&inventory, &projections, 0, true).unwrap();
+    let native = contract
+        .phase_facts
+        .as_mut()
+        .unwrap()
+        .native_quant
+        .as_mut()
+        .unwrap();
+    let mut task = native.tasks[0].clone();
+    task.resident_bytes = 17 * GIB + 4 * 256 * 256;
+    task.evicted_bytes = 0;
+    task.table_bytes_per_timestep = 0;
+    task.projections = projections;
+    task.window = Some(plan);
+    native.tasks = vec![task];
+    native.conditioning_stream = Some(gen_core::StreamedWeightFacts {
+        resident_bytes: 2 * GIB,
+        stacks: vec![vec![2 * GIB; 7]],
+    });
+    contract.asset_facts.transformer_bytes = native.tasks[0].resident_bytes;
+    contract.asset_facts.conditioning_bytes = 16 * GIB;
+    contract.asset_facts.decoder_bytes = GIB;
+    contract.asset_facts.base_bytes = contract.asset_facts.transformer_bytes + 17 * GIB;
+    contract.asset_facts.overlay_bytes = 0;
+    contract.lifecycle.transformer_window_materialization = true;
+    let cap = contract
+        .strategies
+        .iter_mut()
+        .find(|cap| cap.strategy == MemoryStrategy::BoundedTransformerResidency)
+        .unwrap();
+    cap.support = MemoryStrategySupport::Implemented;
+    cap.parameters.transformer_window_sizes = vec![1];
+    cap.parameters.transformer_window_components = vec![gen_core::TransformerComponent::Both];
+    contract = with_load_shape(contract, LoadShape::DeferredMaterialization);
+    assert!(
+        contract.conformance_errors().is_empty(),
+        "{:?}",
+        contract.conformance_errors()
+    );
+    contract
+}
+
+#[test]
+fn native_quant_declared_window_scopes_reach_selector_and_reject_unsupported_choices() {
+    use gen_core::TransformerComponent::{Both, Dit, TextEncoder};
+    for (allowed, expected) in [
+        (vec![], None),
+        (vec![Dit], None),
+        (vec![TextEncoder], Some(TextEncoder)),
+        (vec![Both], Some(Both)),
+        (vec![Both, Dit], None),
+        (vec![Both, TextEncoder], Some(TextEncoder)),
+        (vec![Dit, TextEncoder, Both], Some(Both)),
+    ] {
+        let mut contract = native_quant_window_contract();
+        for capability in &mut contract.strategies {
+            capability.support =
+                if capability.strategy == MemoryStrategy::BoundedTransformerResidency {
+                    capability.parameters.transformer_window_components = allowed.clone();
+                    MemoryStrategySupport::Implemented
+                } else {
+                    MemoryStrategySupport::Missing
+                };
+        }
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+        let canonical = MemorySelection {
+            strategy: MemoryStrategy::BoundedTransformerResidency,
+            parameters: gen_core::MemoryStrategyParameters {
+                transformer_window_size: Some(1),
+                transformer_window_component: expected,
+                ..Default::default()
+            },
+            tier: tier(),
+        };
+        assert!(contract.validate_selection(&canonical).is_ok());
+        for requested in [Dit, TextEncoder, Both] {
+            let explicit = MemorySelection {
+                parameters: gen_core::MemoryStrategyParameters {
+                    transformer_window_component: Some(requested),
+                    ..canonical.parameters
+                },
+                ..canonical
+            };
+            let supported = if allowed.is_empty() {
+                requested == Dit
+            } else {
+                allowed.contains(&requested)
+            };
+            assert_eq!(
+                contract.validate_selection(&explicit).is_ok(),
+                supported,
+                "explicit scope must not be silently coerced: {allowed:?} {requested:?}"
+            );
+            assert_eq!(
+                explicit.parameters.transformer_window_component,
+                Some(requested)
+            );
+        }
+        let request = native_quant_request(&[]);
+        let geometry = geometry(124, VideoGeometryRole::Requested);
+        let mut selector = native_quant_selector(&contract, request, VideoLane::Mlx);
+        let engaged = contract.engaged_composition(canonical.strategy);
+        let weights = video_floor_weights_bytes(&selector, geometry, canonical, &engaged).unwrap();
+        let ordinary = weights.saturating_add(GIB);
+        let raw = native_quant_phase_floor(
+            &contract,
+            &canonical,
+            Some(request),
+            geometry,
+            PhasePeaks {
+                conditioning_bytes: ordinary,
+                denoise_bytes: ordinary,
+                decode_bytes: ordinary,
+            },
+        )
+        .unwrap()
+        .peak_bytes();
+        let admitted = crate::memory_strategy::floor_admitted_peak_bytes(
+            MemoryBackend::Mlx,
+            raw,
+            Some(raw.saturating_sub(weights)),
+        );
+        selector.budget = if allowed.len() == 3 {
+            budget(12.0)
+        } else {
+            budget(crate::memory_strategy::peak_bytes_to_gb(
+                admitted.saturating_add(GIB / 4),
+            ))
+        };
+        let verdict = selector.select(geometry);
+        assert!(
+            matches!(
+                verdict,
+                VideoRungSelection::Selected {
+                    rung: StrategyRung::BoundedTransformerResidency,
+                    ..
+                }
+            ),
+            "declared scope must reach the actual selector: {allowed:?} {verdict:?}"
+        );
+        assert_eq!(
+            selector.selections[0]
+                .selection
+                .parameters
+                .transformer_window_component,
+            expected
+        );
+        assert_eq!(selector.selections[0].predicted_peak_bytes, raw);
+        let nonwindowed = crate::mlx_fit_gate::estimate_floor_smallest_parameters(
+            &contract,
+            &[MemoryStrategy::Resident],
+        )
+        .unwrap();
+        assert_eq!(nonwindowed.transformer_window_component, None);
+        let mut fallback = contract.clone();
+        fallback.phase_facts.as_mut().unwrap().native_quant = None;
+        let unchanged =
+            crate::mlx_fit_gate::estimate_floor_smallest_parameters(&fallback, &engaged).unwrap();
+        assert_eq!(
+            unchanged.transformer_window_component, None,
+            "non-adopting providers keep legacy implicit scope behavior"
+        );
+        if allowed.len() == 3 {
+            let mut widest = 0;
+            for scope in [Dit, TextEncoder, Both] {
+                let scoped = MemorySelection {
+                    parameters: gen_core::MemoryStrategyParameters {
+                        transformer_window_component: Some(scope),
+                        ..canonical.parameters
+                    },
+                    ..canonical
+                };
+                let weights =
+                    video_floor_weights_bytes(&selector, geometry, scoped, &engaged).unwrap();
+                let ordinary = weights.saturating_add(GIB);
+                let raw = native_quant_phase_floor(
+                    &contract,
+                    &scoped,
+                    Some(request),
+                    geometry,
+                    PhasePeaks {
+                        conditioning_bytes: ordinary,
+                        denoise_bytes: ordinary,
+                        decode_bytes: ordinary,
+                    },
+                )
+                .unwrap()
+                .peak_bytes();
+                let needed = crate::memory_strategy::floor_admitted_peak_bytes(
+                    MemoryBackend::Mlx,
+                    raw,
+                    Some(raw.saturating_sub(weights)),
+                );
+                assert_eq!(
+                    needed <= 12 * GIB,
+                    scope == Both,
+                    "the tight mixed-scope budget genuinely requires Both"
+                );
+                widest = widest.max(needed);
+            }
+            let mut wide = native_quant_selector(&contract, request, VideoLane::Mlx);
+            wide.budget = budget(crate::memory_strategy::peak_bytes_to_gb(
+                widest.saturating_add(GIB / 4),
+            ));
+            assert!(matches!(
+                wide.select(geometry),
+                VideoRungSelection::Selected {
+                    rung: StrategyRung::BoundedTransformerResidency,
+                    ..
+                }
+            ));
+            // All scopes fit: retain the shared selector's highest-footprint-fit preference.
+            // Here that is TE-only (full 17 GiB DiT), not forced Both or enum-first Dit.
+            assert_eq!(
+                wide.selections[0].selection.parameters.window_component(),
+                TextEncoder
+            );
+            assert_eq!(
+                wide.selections[0]
+                    .selection
+                    .parameters
+                    .transformer_window_size,
+                Some(1)
+            );
+        }
+    }
+}
+
+#[test]
+fn native_quant_windowed_dit_and_conditioner_reach_rung_four_without_full_component_floor() {
+    let contract = native_quant_window_contract();
+    let request = native_quant_request(&[]);
+    let geometry = geometry(124, VideoGeometryRole::Requested);
+    let mut selector = native_quant_selector(&contract, request, VideoLane::Mlx);
+    selector.budget = budget(12.0);
+    let verdict = selector.select(geometry);
+    assert!(matches!(verdict, VideoRungSelection::Selected { rung: StrategyRung::BoundedTransformerResidency, .. }), "actual root/current-window and TE inventory must fit without charging full components: {verdict:?}");
+    let selected = &selector.selections[0];
+    assert_eq!(
+        selected.selection.parameters.transformer_window_size,
+        Some(1)
+    );
+    assert_eq!(
+        selected.selection.parameters.window_component(),
+        gen_core::TransformerComponent::Both
+    );
+    let native = contract
+        .phase_facts
+        .as_ref()
+        .unwrap()
+        .native_quant
+        .as_ref()
+        .unwrap();
+    let rows = request.rows_at(native, geometry).unwrap();
+    let weights = video_floor_weights_bytes(
+        &selector,
+        geometry,
+        selected.selection,
+        &contract.engaged_composition(selected.selection.strategy),
+    )
+    .unwrap();
+    let expected_weights = native
+        .resident_peak_bytes_windowed(rows, Some(1))
+        .unwrap()
+        .max(4 * GIB)
+        .max(GIB);
+    assert_eq!(
+        weights, expected_weights,
+        "ordinary raw floor consumes correlated native and TE residency without scratch"
+    );
+    let expected = weights
+        .saturating_add(GIB)
+        .max(
+            native
+                .precompute_peak_bytes_windowed(rows, Some(1))
+                .unwrap(),
+        )
+        .max(native.denoise_peak_bytes_windowed(rows, Some(1)).unwrap());
+    assert_eq!(selected.predicted_peak_bytes, expected);
+}
+
+fn native_quant_with_conditioning_contract(lane: VideoLane) -> MemoryProviderContract {
+    let mut contract = native_quant_contract(lane, 2);
+    let native = contract
+        .phase_facts
+        .as_mut()
+        .unwrap()
+        .native_quant
+        .as_mut()
+        .unwrap();
+    native.conditioning = Some(
+        gen_core::h3_conditioning_memory::H3ConditioningMemoryFacts {
+            unified_memory: lane == VideoLane::Mlx,
+            lazy_encode: lane == VideoLane::Mlx,
+            video_element_bytes: if lane == VideoLane::Mlx { 4 } else { 2 },
+            audio_decode_element_bytes: if lane == VideoLane::Mlx { 4 } else { 2 },
+            ..Default::default()
+        },
+    );
+    contract
+}
+
+fn native_image(width: u32, height: u32) -> gen_core::Image {
+    gen_core::Image {
+        width,
+        height,
+        pixels: vec![0; (width * height * 3) as usize],
+    }
+}
+
+fn native_audio(samples: usize) -> gen_core::AudioTrack {
+    gen_core::AudioTrack {
+        samples: vec![0.0; samples],
+        sample_rate: 32_000,
+        channels: 2,
+        stems: vec![],
+    }
+}
+
+#[test]
+fn native_quant_resolved_references_and_keyframes_price_real_encode_and_serial_decode() {
+    let keyframes = vec![gen_core::Conditioning::Keyframe {
+        image: native_image(320, 192),
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    let references = vec![
+        gen_core::Conditioning::MultiReference {
+            images: vec![native_image(64, 32)],
+        },
+        gen_core::Conditioning::ReferenceVideo {
+            frames: vec![native_image(64, 32); 13],
+            fps: 24.0,
+            audio: Some(native_audio(6_400)),
+        },
+        gen_core::Conditioning::ReferenceAudio {
+            audio: native_audio(12_800),
+            strength: None,
+        },
+    ];
+    let geometry = VideoAdmissionGeometry {
+        width: 320,
+        height: 192,
+        ..geometry(124, VideoGeometryRole::Requested)
+    };
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let contract = native_quant_with_conditioning_contract(lane);
+        let native = contract
+            .phase_facts
+            .as_ref()
+            .unwrap()
+            .native_quant
+            .as_ref()
+            .unwrap();
+        let facts = native.conditioning.as_ref().unwrap();
+        let empty = native_quant_request(&[]);
+        let empty_rows = native_rows_at(empty, geometry, native);
+        for (is_keyframe, conditioning) in
+            [(true, keyframes.as_slice()), (false, references.as_slice())]
+        {
+            let request = native_quant_request(conditioning);
+            let shape = gen_core::veda::workspace::Request {
+                width: geometry.width,
+                height: geometry.height,
+                frames: geometry.frames,
+                ..request.shape
+            };
+            let workspace = gen_core::h3_conditioning_memory::workspace(&shape, facts).unwrap();
+            assert!(
+                workspace.conditioning_bytes > 0,
+                "real references never classify as encodes-nothing"
+            );
+            let rows = native_rows_at(request, geometry, native);
+            assert!(rows.packed > empty_rows.packed);
+            assert!(rows.conditioning > empty_rows.conditioning);
+            let phases = native_quant_phase_floor(
+                &contract,
+                &selection_for(MemoryStrategy::Resident),
+                Some(request),
+                geometry,
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                phases.conditioning_bytes,
+                native.conditioning_resident_bytes + workspace.conditioning_bytes
+            );
+            assert_eq!(
+                phases.decode_bytes,
+                (native.video_decode_resident_bytes + workspace.video_decode_bytes)
+                    .max(native.audio_decode_resident_bytes + workspace.audio_decode_bytes),
+                "serial decoder components are maxed with their own workspaces, not summed"
+            );
+            let larger = VideoAdmissionGeometry {
+                width: 640,
+                height: 384,
+                ..geometry
+            };
+            let large_phases = native_quant_phase_floor(
+                &contract,
+                &selection_for(MemoryStrategy::Resident),
+                Some(request),
+                larger,
+                PhasePeaks {
+                    conditioning_bytes: 0,
+                    denoise_bytes: 0,
+                    decode_bytes: 0,
+                },
+            )
+            .unwrap();
+            assert!(large_phases.decode_bytes > phases.decode_bytes);
+            if is_keyframe {
+                assert!(
+                    large_phases.conditioning_bytes > phases.conditioning_bytes,
+                    "fitted keyframe encoding follows the admitted canvas"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn native_quant_constructor_peaks_are_not_summed_with_forward_workspace() {
+    let conditioning = vec![gen_core::Conditioning::Keyframe {
+        image: native_image(320, 192),
+        frame_idx: 0,
+        strength: 1.0,
+    }];
+    let request = native_quant_request(&conditioning);
+    let geometry = VideoAdmissionGeometry {
+        width: 320,
+        height: 192,
+        ..geometry(124, VideoGeometryRole::Requested)
+    };
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let mut contract = native_quant_with_conditioning_contract(lane);
+        let zero = PhasePeaks {
+            conditioning_bytes: 0,
+            denoise_bytes: 0,
+            decode_bytes: 0,
+        };
+        let baseline = native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            zero,
+        )
+        .unwrap();
+        let native = contract
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap();
+        native.conditioning_load_bytes = baseline.conditioning_bytes + GIB;
+        native.audio_decode_load_bytes = baseline.decode_bytes + GIB;
+        let constructor_conditioning = native.conditioning_load_bytes;
+        let constructor_decode = native.audio_decode_load_bytes;
+        let actual = native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            zero,
+        )
+        .unwrap();
+        assert_eq!(actual.conditioning_bytes, constructor_conditioning);
+        assert_eq!(actual.decode_bytes, constructor_decode);
+        let video_constructor = constructor_decode + GIB;
+        contract
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap()
+            .video_decode_load_bytes = video_constructor;
+        let video = native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            zero,
+        )
+        .unwrap();
+        assert_eq!(
+            video.decode_bytes, video_constructor,
+            "video cast constructors are a separate maximum, not forward co-residency"
+        );
+    }
+}
+
+#[test]
+fn native_quant_imported_identity_admits_without_measurements_and_rejects_invalid_geometry() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let contract = native_quant_with_conditioning_contract(lane);
+        let generator = fixture_generator(Some(contract));
+        let keyframes = vec![gen_core::Conditioning::Keyframe {
+            image: native_image(320, 192),
+            frame_idx: 0,
+            strength: 1.0,
+        }];
+        let make_request = || {
+            let mut request = inputs(124, budget(512.0), GIB);
+            request.model_id = "community-checkpoint-9f51";
+            request.model_family = "minimax_h3";
+            request.route = "minimax_h3";
+            request.lane = lane;
+            request.transformer_variant = None;
+            request.decoder = None;
+            request.width = 320;
+            request.height = 192;
+            request.mode = "image_to_video";
+            request.reference_count = 1;
+            request.reference_shape = "keyframe";
+            request.native_quant_request = Some(native_quant_request(&keyframes));
+            request
+        };
+        let request = make_request();
+        assert!(
+            !sceneworks_core::video_request::video_admission_surface(request.model_id, lane).routed
+        );
+        assert!(
+            packaged_video_evidence_covers_request(&generator, &request),
+            "typed allocation estimates are usable without a capture gate"
+        );
+        let outcome = admit_video_generation(&generator, request);
+        assert!(outcome.refusal.is_none(), "{:?}", outcome.refusal);
+        let context = outcome
+            .context
+            .expect("a real imported provider contract reaches admission");
+        assert!(context.evidence_revision.contains("estimate"));
+        assert_eq!(context.geometry.width, 320);
+        assert_eq!(context.geometry.frames, 124);
+        assert!(context.has_reference);
+        let mut invalid = make_request();
+        invalid.width = 321;
+        let refused = admit_video_generation(&generator, invalid);
+        assert!(
+            refused.refusal.is_some(),
+            "native source geometry validation cannot silently floor an off-grid canvas"
+        );
+        let untrusted = fixture_generator(None);
+        assert!(!packaged_video_evidence_covers_request(
+            &untrusted,
+            &make_request()
+        ));
+        assert_eq!(
+            admit_video_generation(&untrusted, make_request()),
+            VideoAdmissionOutcome::default()
+        );
+        let unprofiled = fixture_generator(Some(fixture_contract(6, 1, &[])));
+        assert!(!packaged_video_evidence_covers_request(
+            &unprofiled,
+            &make_request()
+        ));
+        assert_eq!(
+            admit_video_generation(&unprofiled, make_request()),
+            VideoAdmissionOutcome::default()
+        );
+        let mut off_lattice = make_request();
+        off_lattice.frames = 125;
+        assert!(admit_video_generation(&generator, off_lattice)
+            .refusal
+            .is_some());
+    }
+}
+
+#[test]
+fn native_quant_none_preserves_static_prediction_and_requires_no_request_geometry() {
+    let contract = fixture_contract(6, 1, &[]);
+    let ordinary = PhasePeaks {
+        conditioning_bytes: 7,
+        denoise_bytes: 11,
+        decode_bytes: 13,
+    };
+    assert_eq!(
+        native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            None,
+            geometry(124, VideoGeometryRole::Requested),
+            ordinary
+        )
+        .unwrap(),
+        ordinary
+    );
+    let generator = fixture_generator(Some(contract));
+    let mut request = inputs(124, budget(128.0), GIB);
+    request.model_id = "minimax_h3";
+    request.model_family = "minimax_h3";
+    request.route = "minimax_h3";
+    request.transformer_variant = None;
+    request.decoder = None;
+    assert!(!packaged_video_evidence_covers_request(
+        &generator, &request
+    ));
+    assert_eq!(
+        admit_video_generation(&generator, request),
+        VideoAdmissionOutcome::default()
+    );
 }

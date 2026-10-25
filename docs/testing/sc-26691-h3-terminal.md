@@ -13,7 +13,17 @@ The current `sceneworks-epic` terminal workflow supersedes older helper-PR and r
 
 Delivery metadata records `featureEndReview.scope: "epic-requirements-and-production-delta"` with the **actual reviewed** `sceneworks`/`inference` SHAs, zero unresolved findings and its review URL. Those pre-finalization SHAs need not equal the later campaign pair. When they differ, `lateDeltaReview` must have `scope: "late-pin-generated-repair-delta"`, `baseSceneworks`/`baseInference` equal to that combined review's pair, `sceneworks`/`inference` equal to the final campaign pair, zero unresolved findings and its focused-review URL. Do not relabel the earlier review as if it reviewed the final pin. These are recorded evidence links, not automatic publication/merge authorization or substitute reviews.
 
-S10's unmerged CPU proof route is not copied into this preparation branch. After its actual merge, preserve its semantic legacy-selection/order/uniqueness contracts and all CPU/import/terminal guards and queues in the combined router. Pending commits and native feature `1585120a63170b493789ffcaa97659b920a09960` are not an invented permanent source pair.
+This preparation integrates S10 from actual merged feature `23dfb4af75817e4483deb09ecdd956fa51ca763c`, preserving its hosted `h3-admission-proof` job, semantic legacy-selection/order/uniqueness contracts and all CPU/import/terminal guards and queues. The root Rust pin is currently 1.98.0; the terminal job reads the checked-out root pin, selects it through job-scoped `RUSTUP_TOOLCHAIN` (also forwarded to private children), and never changes the runner's global default. There is no S12 toolchain literal to drift on a later root bump. Pending commits and native feature `1585120a63170b493789ffcaa97659b920a09960` are not an invented permanent source pair.
+
+## Independent hosted source UI proof
+
+`h3-ui-proof` is a separate positive `workflow_dispatch` selection in the registered `server-candle-linux.yml`. It runs only on ephemeral `ubuntu-latest`, with a 20-minute timeout and its own non-canceling per-run/attempt root group. Unlike `h3-terminal-mlx/cuda`, it **does not require the permanent inference pin, inference-main ancestry or stationary real-model campaign authorization**. The coordinator may dispatch this source-only proof after publishing the reviewed candidate; this document does not itself dispatch it.
+
+The job checks out exact `github.sha`, checks hosted-CI identity and `HEAD == GITHUB_SHA` before dependency setup, installs the locked frontend plus exact `playwright@1.59.1` without rewriting its lockfile, installs Chromium, then runs `SC26687_HOSTED_BROWSER_PROOF=1 node apps/web/verify/hosted-browser/run-hosted-browser.mjs`. The driver serves the actual frontend through a closed task-owned Vite fixture API: unknown API paths must return 404, with no real backend forwarding, models, GPU, shared cache or user data. Local/developer/self-hosted startup is refused; local validation uses only its pure guard tests.
+
+The corrected browser handoff (`068eb22b` plus `fe669720`) requires per-run `HEAD == GITHUB_SHA == SC26687_EXPECTED_HEAD` and S8 ancestry, rather than freezing an old web-tree hash that its own verification files would invalidate. Its receipt retains the full actual web tree and a production-closure digest excluding only `apps/web/verify/`, `apps/web/verify-fixtures.mjs` and `apps/web/vite.verify.config.mjs`; all production changes remain visible. Environment/source/dependency/startup refusal writes `refusal.json` with every case failed/unexecuted; initialized owned browser/server resources are closed in `finally`.
+
+All five real-browser cases must execute and pass: Model Manager repair serialization, reimport panel/draft preservation, FL2VA/hybrid last-only selection, explicit-empty image-reference replay refusal, and video replay's exact imported-model reference. Screenshots, HTML, console/network logs, serialized requests, source/production-closure identities and tool/browser versions are evidence; missing/skipped cases cannot pass. The always-uploaded `browser-artifacts/sc26687` also retains exact source/input hashes and npm/Chromium/driver logs on failure. **No browser proof is claimed until the actual hosted run completes successfully.** This does not replace any of the eight real-artifact AV executions or other epic acceptance.
 
 ## Execution path
 
@@ -41,6 +51,8 @@ The existing entrypoint retains its ten standing dispatch keys and all old StarV
   "case_id": "mlx.artifact.0"
 }
 ```
+
+The terminal native job reuses the existing non-canceling device queues: `windows-candle-gpu-real-weights` for CUDA and `h3-import-proofs-nax-macos-2` for MLX. CUDA execution explicitly keeps `CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES=0` and product GPU zero. Before an API build/listener/load or native numerical execution, actual NVML inventory is ordered using S6's existing PCI/UUID helper and checked against the plan's requested UUID; NVML index zero is not assumed to be CUDA ordinal zero. No ordinary GPU-one route is changed.
 
 Backend is derived solely from the positive selector, not from ambiguous JSON/default StarVector fields. Authorization must be actual JSON boolean `true`; strings/numbers do not opt in. The root H3 group is unique per run/attempt and differs from the reusable job's group; standard ref-keyed and StarVector non-canceling groups remain unchanged. The sole optional inference-read token is mapped from the standing token names; no secret values were inspected.
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access } from 'node:fs/promises';
-import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
 import { hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -192,6 +192,19 @@ test('contrasts hold complete creative configuration and bind only the adapters 
 test('private environment isolates cache/config/credentials while preserving device restrictions',()=>{
   const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'unit_fake',backend:'mlx'},'task-generated-token');
   assert.equal(env.HF_HOME,path.join('/unit_fake_owned','hf'));assert.equal(env.SCENEWORKS_RUN_UTILITY_INPROCESS,'0');assert.ok(!Object.hasOwn(env,'HF_TOKEN'));assert.equal(env.HF_HUB_OFFLINE,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'task-generated-token');
+});
+test('root-selected compiler reaches private child environments without inheriting credentials',()=>{
+  const previous=process.env.RUSTUP_TOOLCHAIN;process.env.RUSTUP_TOOLCHAIN='9.8.7';
+  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'0',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
+  finally{if(previous===undefined)delete process.env.RUSTUP_TOOLCHAIN;else process.env.RUSTUP_TOOLCHAIN=previous;}
+});
+test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero using only fake inventory',async()=>{
+  const csv='0, GPU-unit_fake-high, 00000000:41:00.0, unit_fake_high, unit_fake_driver\n1, GPU-unit_fake-low, 00000000:01:00.0, unit_fake_low, unit_fake_driver\n';
+  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'0'},calls=[];
+  const exec=async(command,args)=>{calls.push([command,args]);return{stdout:csv};};
+  const value=await hardware('cuda','GPU-unit_fake-low',{env,exec});assert.equal(value.cuda.selectedPhysicalDevice.nvmlIndex,1);assert.equal(value.cuda.selectedPhysicalDevice.uuid,'GPU-unit_fake-low');assert.equal(calls[0][0],'nvidia-smi');assert.ok(calls[0][1].includes('--query-gpu=index,uuid,pci.bus_id,name,driver_version'));
+  await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env,exec}),/manual device zero/);
+  for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'1'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'}])await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env:bad,exec}),/manual CUDA proof/);
 });
 test('single author-declared hybrid does not require a fictional companion checkpoint',()=>{
   const c=requiredCases().find(v=>v.id==='mlx.capability.hybrid');

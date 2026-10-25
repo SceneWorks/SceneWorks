@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, compareControlMedia } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook } from './h3-finetune-terminal-cases.mjs';
+import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
@@ -50,13 +51,16 @@ export function authorized(p, c) {
   if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos-2'); }
   else assert.equal(process.platform,'win32');
 }
-export async function hardware(backend, deviceId) {
+export async function hardware(backend, deviceId, deps={}) {
+  const execute=deps.exec??exec;
   if (backend === 'mlx') {
-    const gpu = JSON.parse((await exec('system_profiler',['SPDisplaysDataType','-json'])).stdout).SPDisplaysDataType;
-    assert.ok(gpu?.length); return {device:gpu[0].sppci_model ?? gpu[0]._name,driver:`Apple Metal driver bundled with macOS ${(await exec('sw_vers',['-productVersion'])).stdout.trim()}`};
+    const gpu = JSON.parse((await execute('system_profiler',['SPDisplaysDataType','-json'])).stdout).SPDisplaysDataType;
+    assert.ok(gpu?.length); return {device:gpu[0].sppci_model ?? gpu[0]._name,driver:`Apple Metal driver bundled with macOS ${(await execute('sw_vers',['-productVersion'])).stdout.trim()}`};
   }
-  const lines=(await exec('nvidia-smi',['--query-gpu=uuid,name,driver_version','--format=csv,noheader'])).stdout.trim().split('\n').map(l=>l.split(',').map(x=>x.trim()));
-  const row=lines.find(r=>r[0]===deviceId); assert.ok(row,'actual requested CUDA device UUID required'); return {device:row[0]+' '+row[1],driver:row[2]};
+  const inventory=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'])).stdout;
+  const cuda=cudaDeviceEvidence(deps.env??process.env,inventory),row=cuda.selectedPhysicalDevice;
+  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual device zero');
+  return {device:row.uuid+' '+row.name,driver:row.driverVersion,cuda};
 }
 
 // A native test already performs the numerical comparison. Do not invent another flat-vector gate.
@@ -104,6 +108,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   const sourceHashes=[...(authority.kernelBlobs?.map(v=>v.sha256) ?? Object.values(authority.referenceSha256??{})),...(pinnedFixture.reference?.kernelBlobs??[]).map(v=>v.sha256)];
   if((n.mechanism??c.id.split('.').at(-1))==='convrot') for(const key of ['reference_helper','reference_cuda','reference_producer'])sourceHashes.push(pinnedFixture[key].sha256);
   for(const hash of sourceHashes)assert.ok(refs.some(v=>v.sha256===hash),'missing exact independently pinned external arithmetic blob');
+  const h=await (deps.hardware??hardware)(c.backend,c.runtime?.deviceId);
   const base=['cargo','test','--locked','--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',n.package,'--test','integration'];
   assert.equal(n.package,c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3');
   if(c.backend==='cuda') base.push('--features','cuda');
@@ -136,7 +141,6 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   validateComparisonProof(c,proof,logs.join('\n'),{allowUnitFake:fake});
   const files=['native-build.log','native-inventory.log',...runs.map(r=>r.log),...supporting.map(r=>r.log)];
   await save(path.join(dir,'native-comparison.json'),proof);
-  const h=await (deps.hardware??hardware)(c.backend,c.runtime?.deviceId);
   const e={status:'executed',proof_kind:proof.proof_kind,caseId:c.id,backend:c.backend,sceneworks:p.sceneworks,inference:p.inference,hardware:h,testInputSha256:fixtureInputs[0].sha256,files:[...files,'native-comparison.json'],nativeComparison:'native-comparison.json'};
   await save(path.join(dir,c.evidence),e);
   if(!fake) {await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,[p.output,swRoot,inferenceRoot]);}
@@ -181,7 +185,7 @@ async function listenerPid(port) {
 }
 export function privateEnvironment(runDir,runtime,token) {
   const env={}; // No inherited user HF settings/tokens, credentials, proxies or application roots.
-  for(const key of ['PATH','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TEMP','TMP','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','CUDA_DEVICE_ORDER','MLX_METAL_DEVICE_INDEX','SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','LD_LIBRARY_PATH','DYLD_LIBRARY_PATH']) if(process.env[key]!==undefined)env[key]=process.env[key];
+  for(const key of ['PATH','RUSTUP_TOOLCHAIN','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TEMP','TMP','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','CUDA_DEVICE_ORDER','MLX_METAL_DEVICE_INDEX','SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','LD_LIBRARY_PATH','DYLD_LIBRARY_PATH']) if(process.env[key]!==undefined)env[key]=process.env[key];
   Object.assign(env,{SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(runtime.port),SCENEWORKS_API_URL:`http://127.0.0.1:${runtime.port}`,SCENEWORKS_DATA_DIR:path.join(runDir,'data'),SCENEWORKS_CONFIG_DIR:path.join(runDir,'config'),SCENEWORKS_JOBS_DB_PATH:path.join(runDir,'data','cache','jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,SCENEWORKS_RUN_UTILITY_INPROCESS:'0',SCENEWORKS_UTILITY_WORKERS:'1',SCENEWORKS_WORKER_ID:`sc26691-${path.basename(runDir)}`,SCENEWORKS_GPU_ID:runtime.gpuId,SCENEWORKS_BACKEND_MLX_ENABLED:runtime.backend==='mlx'?'1':'0',SCENEWORKS_BACKEND_CANDLE_ENABLED:runtime.backend==='cuda'?'1':'0',SCENEWORKS_LOG_FORMAT:'json',SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS:'120',RUST_LOG:'info,sceneworks=debug',HF_HOME:path.join(runDir,'hf'),HF_HUB_CACHE:path.join(runDir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(runDir,'hf','hub'),TRANSFORMERS_CACHE:path.join(runDir,'hf','transformers'),XDG_CACHE_HOME:path.join(runDir,'cache'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'});
   return env;
 }
@@ -194,6 +198,10 @@ export class OwnedService {
     const r=this.c.runtime;
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
+    if(!this.fake && this.c.backend==='cuda') {
+      assert.equal(String(r.gpuId),'0','manual campaign must retain product GPU zero');
+      await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
+    }
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});
     this.runDir=path.join(services,this.c.id);await mkdir(this.runDir);this.owner=randomUUID();
     for(const d of ['config','data','data/cache','hf','hf/hub','cache']) await mkdir(path.join(this.runDir,d),{recursive:true});

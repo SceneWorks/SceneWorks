@@ -847,6 +847,10 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
         "a foreign basis cannot reuse the derivative/provider directory"
     );
     assert!(first.binding.source_bytes < first.binding.compute_bytes);
+    let shard = first
+        .output
+        .join("diffusion_pytorch_model-00001-of-00001.safetensors");
+    let headers = safetensors_path_tensor_headers(&shard).unwrap();
     #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     {
         use platform_runtime::providers::minimax_h3 as h3;
@@ -864,7 +868,84 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
         // final shift/scale, rank-eight coordinates, all retained at F32. This is a test of the
         // provider declaration, not a second worker estimator or a stock-geometry substitution.
         let retained = rows * (256 * (18 + 2) + 8) * 4;
-        let corrected = gen_core::safetensors_path_bytes(&first.output)
+        // Independent fixture inventory: file framing/descriptors are not resident tensors.
+        // The ordinary body norms and dense refiner materialize at BF16; native codes/scales/
+        // biases and pruned operands retain their source width before the pruning correction.
+        let (hidden, head, attention, ffn) = (256_usize, 128_usize, 256_usize, 256_usize);
+        let mut cast_shapes = vec![(
+            String::from("token_refiner.final_norm.weight"),
+            vec![hidden],
+        )];
+        for container in ["transformer_blocks.0", "token_refiner.refiner_blocks.0"] {
+            for norm in ["norm1", "norm2"] {
+                cast_shapes.push((format!("{container}.{norm}.weight"), vec![hidden]));
+            }
+            for norm in ["norm_q", "norm_k"] {
+                cast_shapes.push((format!("{container}.attn.{norm}.weight"), vec![head]));
+            }
+        }
+        for projection in ["to_q", "to_k", "to_v"] {
+            cast_shapes.push((
+                format!("token_refiner.refiner_blocks.0.attn.{projection}.weight"),
+                vec![attention, hidden],
+            ));
+        }
+        cast_shapes.extend([
+            (
+                String::from("token_refiner.refiner_blocks.0.attn.to_out.0.weight"),
+                vec![hidden, attention],
+            ),
+            (
+                String::from("token_refiner.refiner_blocks.0.ff.net.0.proj.weight"),
+                vec![2 * ffn, hidden],
+            ),
+            (
+                String::from("token_refiner.refiner_blocks.0.ff.net.2.weight"),
+                vec![hidden, ffn],
+            ),
+        ]);
+        let mut cast_savings = 0_u64;
+        for (name, shape) in cast_shapes {
+            let header = headers
+                .iter()
+                .find(|header| header.name == name)
+                .expect(&name);
+            assert_eq!(header.dtype, Dtype::F32, "{name}");
+            assert_eq!(header.shape, shape, "{name}");
+            let elements = shape.iter().product::<usize>() as u64;
+            assert_eq!(header.data_bytes, elements * 4, "{name}");
+            cast_savings += elements * (4 - 2);
+        }
+        let payload_bytes = headers
+            .iter()
+            .filter(|header| !header.name.ends_with(".comfy_quant"))
+            .map(|header| header.data_bytes)
+            .sum::<u64>();
+        let descriptors = gen_core::weightsmeta::read_safetensors_path_tensor_payloads(
+            &shard,
+            |header| header.name.ends_with(".comfy_quant"),
+            4096,
+        )
+        .unwrap();
+        let groups = descriptors
+            .values()
+            .map(|bytes| {
+                let descriptor: Value = serde_json::from_slice(bytes).unwrap();
+                assert_eq!(descriptor["format"], "int8_tensorwise");
+                assert_eq!(descriptor["convrot"], true);
+                descriptor["convrot_groupsize"].as_u64().unwrap()
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(groups, std::collections::BTreeSet::from([256]));
+        let rotations = groups.iter().map(|group| 4 * group * group).sum::<u64>();
+        // Candle owns one shared cuBLASLt workspace; MLX does not. Constructor overlap is
+        // a separate peak and must not be added to this steady resident inventory.
+        let backend_workspace = if cfg!(target_os = "macos") {
+            0
+        } else {
+            32 * 1024 * 1024
+        };
+        let corrected = payload_bytes - cast_savings + rotations + backend_workspace
             - first.binding.source_bytes
             + first.binding.compute_bytes
             + retained;
@@ -885,12 +966,6 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
             contract.conformance_errors()
         );
     }
-    let headers = safetensors_path_tensor_headers(
-        first
-            .output
-            .join("diffusion_pytorch_model-00001-of-00001.safetensors"),
-    )
-    .unwrap();
     for (key, dtype, shape) in [
         ("adaln_t_table", Dtype::F32, vec![1025, 8]),
         (

@@ -168,8 +168,10 @@ test('registered Candle entrypoint positively routes only explicit H3 selections
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
   const job=workflowJob(router,'h3-terminal'),selected=/^    if: (.+)$/m.exec(job)[1],authorization=/^      stationary_pair_authorized: (.+)$/m.exec(job)[1];
   assert.match(job,/uses: \.\/.github\/workflows\/h3-finetune-terminal\.yml/);assert.doesNotMatch(job,/uses:.*@main|registration_only|activation/);assert.match(callee,/workflow_call:/);
-  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
+  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
+  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
   for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){
+    assert.equal(choices.filter(v=>v===operation).length,1);
     const inputs={starvector_terminal_operation:operation,campaign_run_id:JSON.stringify({stationary_pair_authorized:true})};assert.equal(workflowExpression(selected,inputs),true);assert.equal(workflowExpression(authorization,inputs),true);
     for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(selected,inputs,{event_name:event}),false);
     const backend=/^      backend: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(backend,inputs),operation.endsWith('-mlx')?'mlx':'cuda');
@@ -190,7 +192,8 @@ test('H3 bridge preserves all standing dispatch keys, old flow selection and iso
   for(const operation of ['source','provision','readiness','campaign','diagnostic-candle-1b']){assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation}),'starvector-terminal-bridge');assert.equal(workflowExpression(cancel,{starvector_terminal_operation:operation}),false);assert.equal(workflowExpression(build,{starvector_terminal_operation:operation}),false);}
   for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(build,inputs),false);assert.notEqual(workflowExpression(rootGroup,inputs),workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102',run_attempt:'1'}));assert.match(workflowExpression(rootGroup,inputs),/^h3-terminal-bridge-/);}
   for(const operation of ['h3-import-mlx','h3-import-cuda','h3-import-both']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(build,inputs),false);assert.equal(workflowExpression(rootGroup,inputs),'h3-import-native-unit_fake_101');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-import-native-unit_fake_102');}
-  for(const operation of ['h3-import-mlx','h3-import-cuda','h3-import-both','h3-terminal-mlx','h3-terminal-cuda'])for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation},{event_name:event}),'starvector-terminal-bridge');
+  const cpuInputs={starvector_terminal_operation:'h3-admission-proof'};assert.equal(workflowExpression(rootGroup,cpuInputs),'h3-admission-cpu-unit_fake_101');assert.equal(workflowExpression(rootGroup,cpuInputs,{run_id:'unit_fake_102'}),'h3-admission-cpu-unit_fake_102');assert.equal(workflowExpression(cancel,cpuInputs),false);assert.equal(workflowExpression(build,cpuInputs),false);
+  for(const operation of ['h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal-mlx','h3-terminal-cuda'])for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation},{event_name:event}),'starvector-terminal-bridge');
   for(const operation of ['unknown','h3-import','h3-terminal']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(build,inputs),false);assert.equal(workflowExpression(rootGroup,inputs),'starvector-terminal-bridge');}
   for(const [name,file] of [['source-closure','starvector-terminal-source.yml'],['provision','starvector-terminal-provision.yml'],['readiness','starvector-terminal-readiness.yml'],['campaign','starvector-terminal.yml']])assert.ok(workflowJob(router,`starvector-${name}`).includes(`uses: ./.github/workflows/${file}`));
 });
@@ -200,6 +203,11 @@ test('H3 caller forwards only explicit request fields and the standing read toke
   assert.doesNotMatch(job,/runs-on:|run-case|cargo |permanent_pin|inference_revision|secrets: inherit/);
   assert.match(job,/SCENEWORKS_INFERENCE_READ_TOKEN: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| secrets\.INFERENCE_READ_TOKEN \}\}/);
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');assert.match(callee,/SCENEWORKS_INFERENCE_READ_TOKEN:\n        required: false/);assert.match(callee,/group: h3-finetune-terminal-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+});
+test('terminal reuses native device queues and binds manual CUDA zero without changing ordinary queues',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),job=workflowJob(workflow,'terminal');
+  const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx'}),'h3-import-proofs-nax-macos-2');assert.match(job,/cancel-in-progress: false/);
+  for(const [key,value]of [['CUDA_DEVICE_ORDER','PCI_BUS_ID'],['CUDA_VISIBLE_DEVICES','0'],['SCENEWORKS_GPU_ID','0']]){const expression=new RegExp(`^          ${key}: (.+)$`,'m').exec(job)[1];assert.equal(workflowExpression(expression,{backend:'cuda'}),value);}
 });
 test('actual reusable preflight rejects source-ref drift before product execution without a main activation prerequisite',async t=>{
   const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),code=/node --input-type=module -e '\n([\s\S]*?)\n          '/.exec(workflow)?.[1];assert.ok(code);
@@ -227,6 +235,20 @@ test('terminal compiler selection derives only the checked-out root pin without 
   }
   const prepare=workflow.slice(workflow.indexOf('      - name: Prepare the root-pinned compiler'),workflow.indexOf('      - name: Execute or reverify'));
   assert.match(prepare,/rustup toolchain install "\$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update/);assert.match(prepare,/rustup run "\$RUSTUP_TOOLCHAIN" rustc --version/);assert.doesNotMatch(prepare,/rustup (?:default|override)|1\.97\.1/);
+});
+test('source UI proof is explicit hosted Chromium only, independent of model pin and campaign authorization',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),job=workflowJob(router,'h3-ui-proof');
+  const {PLAYWRIGHT_VERSION}=await import('../apps/web/verify/hosted-browser/guard.mjs');assert.ok(job.includes(`playwright@${PLAYWRIGHT_VERSION}`));assert.match(job,/SC26687_EXPECTED_HEAD: \$\{\{ github.sha \}\}/);
+  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());assert.equal(choices.filter(v=>v==='h3-ui-proof').length,1);
+  const selected=/^    if: (.+)$/m.exec(job)[1];
+  for(const operation of [undefined,'','unknown',...choices])for(const event of ['push','pull_request','merge_group','schedule','workflow_dispatch'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation},{event_name:event}),event==='workflow_dispatch'&&operation==='h3-ui-proof');
+  for(const name of [...router.slice(router.indexOf('\njobs:')).matchAll(/^  ([a-z][\w-]*):$/gm)].map(m=>m[1]).filter(v=>v!=='h3-ui-proof'))assert.equal(workflowExpression(/^    if: (.+)$/m.exec(workflowJob(router,name))[1],{starvector_terminal_operation:'h3-ui-proof'}),false,`${name} refuses UI proof`);
+  assert.match(job,/runs-on: ubuntu-latest/);assert.match(job,/timeout-minutes: 20/);assert.match(job,/ref: \$\{\{ github.sha \}\}/);assert.match(job,/fetch-depth: 0/);assert.match(job,/persist-credentials: false/);
+  for(const text of ['test "$RUNNER_ENVIRONMENT" = github-hosted','test "$GITHUB_ACTIONS" = true','SC26687_HOSTED_BROWSER_PROOF: "1"','npm ci --prefix apps/web','playwright@1.59.1','npx --no-install playwright install --with-deps chromium','node apps/web/verify/hosted-browser/run-hosted-browser.mjs','set -euo pipefail','source-inputs.sha256','if-no-files-found: error'])assert.ok(job.includes(text),text);
+  assert.doesNotMatch(job,/playwright@[~^]|permanent_pin|stationary_pair_authorized|run-case|cargo |self-hosted|CUDA_VISIBLE_DEVICES|HF_HOME|secrets: inherit/);
+  assert.match(job,/if: \$\{\{ always\(\) \}\}/);assert.match(job,/tee "\$SC26687_ARTIFACT_DIR\/browser-proof.log"/);
+  const rootGroup=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1],inputs={starvector_terminal_operation:'h3-ui-proof'};
+  assert.equal(workflowExpression(rootGroup,inputs),'h3-ui-hosted-unit_fake_101-1');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-ui-hosted-unit_fake_102-1');assert.equal(workflowExpression(rootGroup,inputs,{run_attempt:'2'}),'h3-ui-hosted-unit_fake_101-2');assert.equal(workflowExpression(cancel,inputs),false);
 });
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));

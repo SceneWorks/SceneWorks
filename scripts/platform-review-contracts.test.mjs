@@ -26,6 +26,11 @@ async function source(path) {
 }
 
 const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
+function workflowOperations(workflow) {
+  const menu = workflow.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1];
+  assert.ok(menu, "the registered manual operation menu exists");
+  return menu.split(",").map((choice) => choice.trim());
+}
 function workflowExpression(block, field = "if") {
   const expression = block.match(new RegExp(`^ +${field}: \\$\\{\\{ (.+) \\}\\}$`, "m"))?.[1];
   assert.ok(expression, `workflow must retain an evaluable ${field}`);
@@ -53,6 +58,19 @@ function workflowStep(job, name) {
   return job.slice(at, next === -1 ? undefined : next);
 }
 
+function assertH3RootToolchainReader(job) {
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assert.match(reader, /id: h3_admission_toolchain/);
+  assert.ok(reader.includes('channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]'));
+  assert.ok(reader.includes('if not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", channel):'));
+  assert.match(reader, /open\(os\.environ\["GITHUB_OUTPUT"\], "a"\) as output:/);
+  assert.match(reader, /print\(f"channel=\{channel\}", file=output\)/);
+  assert.equal((reader.match(/^\s*channel\s*=/gm) ?? []).length, 1, "only the checkout TOML supplies the channel");
+  assert.doesNotMatch(reader, /\$\{\{\s*inputs\./);
+  assert.match(job, /toolchain: \$\{\{ steps\.h3_admission_toolchain\.outputs\.channel \}\}/);
+  assert.ok(job.indexOf(reader) < job.indexOf("uses: dtolnay/rust-toolchain@"), "the checkout pin is read before installing Rust");
+}
+
 test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
   const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
   assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
@@ -78,7 +96,7 @@ test("H3 model-level forwards stay out of ordinary CI and require positive manua
     const job = workflowJob(server, `h3-import-${backend}`);
     const expression = workflowExpression(job);
     for (const event of ["push", "pull_request", "merge_group", "workflow_dispatch"]) {
-      for (const operation of [undefined, "standard", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-terminal-mlx", "h3-terminal-cuda", "h3-import", "unknown"]) {
+      for (const operation of [undefined, "", "unknown-selector", ...workflowOperations(server)]) {
         assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
           event === "workflow_dispatch" && [`h3-import-${backend}`, "h3-import-both"].includes(operation));
       }
@@ -100,6 +118,68 @@ test("H3 model-level forwards stay out of ordinary CI and require positive manua
       assert.match(fixture, new RegExp(`#\\[ignore[^\\n]*\\]\\nfn ${bare}\\(`), `${bare} remains ignored in ordinary cargo test`);
     }
   }
+});
+
+test("H3 admission proof is a positively selected hosted CPU job with real Cargo evidence", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  const operations = workflowOperations(server);
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof"]) {
+    assert.equal(operations.filter((choice) => choice === operation).length, 1, `${operation} remains explicitly selectable`);
+  }
+  const job = workflowJob(server, "h3-admission-proof");
+  const expression = workflowExpression(job);
+  for (const event of ["push", "pull_request", "merge_group", "schedule", "workflow_dispatch"]) {
+    for (const operation of [undefined, "", "unknown-selector", ...operations]) {
+      assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+        event === "workflow_dispatch" && operation === "h3-admission-proof");
+    }
+  }
+  // The new CPU choice cannot accidentally enter any pre-existing GPU or StarVector job.
+  const jobs = [...server.slice(server.indexOf("\njobs:")).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)].map((match) => match[1]);
+  for (const name of jobs.filter((name) => name !== "h3-admission-proof")) {
+    for (const operation of ["h3-admission-proof", "unknown-selector"]) {
+      assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(server, name)), "workflow_dispatch", { starvector_terminal_operation: operation })), false, `${name} refuses ${operation}`);
+    }
+  }
+  assert.match(job, /runs-on: ubuntu-latest/);
+  assert.match(job, /CARGO_NET_OFFLINE: "true"/);
+  assert.match(job, /CARGO_BUILD_JOBS: "2"/);
+  assert.match(job, /python-version: "3\.12"/);
+  assertH3RootToolchainReader(job);
+  assert.match(job, /Swatinem\/rust-cache@[a-f0-9]{40}/);
+  assert.match(job, /persist-credentials: false/);
+  const fetch = workflowStep(job, "Fetch the pinned inference source, never model weights");
+  assert.match(fetch, /CARGO_NET_OFFLINE: "false"/);
+  assert.match(fetch, /cargo fetch --locked/);
+  const run = workflowStep(job, "Prove H3 admission baseline, assertion reds and restored greens on CPU");
+  assert.match(run, /set -euo pipefail/);
+  assert.match(run, /bwrap --unshare-net --unshare-pid --die-with-parent/);
+  assert.match(run, /--tmpfs "\$HOME\/\.cache\/huggingface"/);
+  assert.match(run, /--tmpfs "\$HOME\/SceneWorks\/data"/);
+  assert.match(run, /--dev \/dev/);
+  assert.match(run, /runuser --user "\$USER" --preserve-environment/);
+  assert.match(run, /python3 scripts\/ci\/h3_admission_mutation_proof\.py/);
+  assert.match(run, /--output-dir "\$H3_ADMISSION_EVIDENCE\/proof" --cfg default/);
+  assert.doesNotMatch(run, /unit_fake|--fake|runner=|CARGO_NET_OFFLINE.*false/);
+  assert.ok(job.indexOf(fetch) < job.indexOf(run));
+  assert.doesNotMatch(job, /self-hosted|windows-candle-gpu-real-weights|rw-llm|CUDA_COMPUTE_CAP|cuda-toolkit|--features backend-candle|--ignored|h3-import-native-proof/);
+  const upload = workflowStep(job, "Keep actual H3 CPU source, pin, assertions and restoration evidence");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /actions\/upload-artifact@[a-f0-9]{40}/);
+  assert.match(upload, /h3-admission-cpu-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+});
+
+test("H3 derived Rust selection cannot float, use another file or run after setup", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-admission-proof");
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assertH3RootToolchainReader(job);
+  for (const mutated of [
+    job.replace('Path("rust-toolchain.toml")', 'Path("other-toolchain.toml")'),
+    job.replace('if not re.fullmatch', 'if re.fullmatch'),
+    job.replace("${{ steps.h3_admission_toolchain.outputs.channel }}", '"stable"'),
+    job.replace(reader, "") + "\n" + reader,
+  ]) assert.throws(() => assertH3RootToolchainReader(mutated));
 });
 
 test("H3 native proof evidence refuses zero tests, ignored tests, wrong selection and failed commands", async () => {
@@ -153,6 +233,9 @@ test("H3 dispatch queues are unique per run and leave old StarVector and ordinar
     assert.equal(evaluate("workflow_dispatch", operation, 10), "h3-import-native-10");
     assert.equal(evaluate("workflow_dispatch", operation, 11), "h3-import-native-11");
   }
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 10), "h3-admission-cpu-10");
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 11), "h3-admission-cpu-11");
+  assert.equal(evaluate("push", "h3-admission-proof", 10), "starvector-terminal-bridge", "CPU dispatch isolation is positively manual, not a recurring event route");
 });
 
 test("H3 Candle proof clears an installed wrapper immediately after Rust runner preparation", async () => {
@@ -3273,6 +3356,12 @@ test("the Rust toolchain is pinned to one concrete version, everywhere", async (
     );
     for (const value of inputs) {
       inputsSeen += 1;
+      if (file === "server-candle-linux.yml" && value === "${{ steps.h3_admission_toolchain.outputs.channel }}") {
+        // This one manual CPU route reads the checkout pin directly, so a main toolchain sync
+        // cannot leave a stale literal. Other expressions/floating channels remain forbidden.
+        assertH3RootToolchainReader(workflowJob(workflow, "h3-admission-proof"));
+        continue;
+      }
       assert.equal(
         value,
         `"${pin}"`,

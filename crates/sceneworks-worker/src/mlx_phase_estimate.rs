@@ -262,6 +262,7 @@ mod tests {
             overlay_bytes: 0,
         };
         contract.phase_facts = Some(MemoryPhaseFacts {
+            native_quant: None,
             architecture: None,
             staged_weights: StagedWeightSchedule::ThreeStage,
             transformer_stream: Some(StreamedWeightFacts {

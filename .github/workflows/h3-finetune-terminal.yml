@@ -79,6 +79,9 @@ jobs:
   terminal:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.stationary_pair_authorized == true && (inputs.backend == 'mlx' || inputs.backend == 'cuda') }}
     runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-chroma"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
+    concurrency:
+      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos-2' }}
+      cancel-in-progress: false
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -129,7 +132,7 @@ jobs:
             const pins=[...(await readFile("rust-toolchain.toml","utf8")).matchAll(/^channel\s*=\s*"([^"]+)"\s*$/gm)];
             assert.equal(pins.length,1,"one root Rust channel is required");
             const pin=pins[0][1]; assert.match(pin,/^\d+\.\d+\.\d+$/);
-            await appendFile(process.env.GITHUB_ENV,`RUSTUP_TOOLCHAIN=${pin}\n`);
+            await appendFile(process.env.GITHUB_ENV,"RUSTUP_TOOLCHAIN="+pin+"\n");
             await appendFile(process.env.GITHUB_PATH,path.join(process.env.CARGO_HOME || path.join(os.homedir(),".cargo"),"bin")+"\n");
           '
       - name: Prepare the root-pinned compiler without changing the runner default
@@ -146,6 +149,9 @@ jobs:
           PLAN: ${{ inputs.plan_path }}
           CASE_ID: ${{ inputs.case_id }}
           H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
+          CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || '' }}
         run: node scripts/h3-finetune-terminal.mjs run-case "$PLAN" "$CASE_ID" "$GITHUB_WORKSPACE/sceneworks" "$GITHUB_WORKSPACE/inference"
       - name: Retain evidence including failure and resume identity
         if: always()

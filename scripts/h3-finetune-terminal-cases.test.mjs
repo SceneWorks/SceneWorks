@@ -192,6 +192,10 @@ test('assets carry executable CPU ffmpeg recipes and pinned public speech proven
   assert.match(caseBook.assets.voice.url, /5be91486e11a2d616f4ec5db8d3fd248585ac07a/);
   assert.match(caseBook.assets.voice.upstreamLicense, /CC-BY-4.0/); assert.match(caseBook.assets.tone.meaning, /NEVER voice/);
 });
+test('audio-reference mechanism retains explicit mono 32k public speech on each backend instead of avoiding mono packing',()=>{
+  const asset=caseBook.assets.voiceA;assert.equal(asset.command[0],'ffmpeg');assert.equal(asset.command[asset.command.indexOf('-ar')+1],'32000');assert.equal(asset.command[asset.command.indexOf('-ac')+1],'1');assert.deepEqual(asset.requiredMedia,{sample_rate:'32000',channels:1});assert.equal(asset.probeCommand[0],'ffprobe');assert.match(asset.meaning,/actual probe\/hash/);
+  for(const backend of ['mlx','cuda']){const scenario=buildScenario(named('capability','audio-reference',backend),params(),[execution()]);const jobs=submissions(scenario);assert.ok(jobs.some(s=>s.body.referenceAudioAssetIds?.includes('public-speech')));assert.ok(jobs.some(s=>s.body.referenceAudioAssetIds?.length===0));}
+});
 test('trained turbo recipes retain every variant and reject invented cheap steps/geometry', () => {
   const es = caseBook.sampling.turbo.map((r, i) => {
     const e = execution(i === 3 ? 'ref2va' : i === 2 ? 'hybrid' : 'fl2va', i === 1 ? 'pruned' : 'full'); e.label = `turbo${i}`;
