@@ -7,7 +7,7 @@ import {copyFile,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {VERSION,reviewVerdict,sha,digest} from './moss-edit-terminal.mjs';
-import {compareQualityRow,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,AMENDMENT_SHA256,FINAL_EXECUTION_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
+import {compareQualityRow,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,AMENDMENT_SHA256,UPSTREAM_SUITE_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
 
 const hash='a'.repeat(64),reviewHash='b'.repeat(64),upstreamHash='c'.repeat(64);
 const row={id:'quality-mlx-base-single',variant:'base',refs:['B'],anchors:['Bottle color','Bottle and orange placement']};
@@ -95,15 +95,15 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
     const executionToolingCapture=await put('execution-tooling-capture.json',JSON.stringify(capture));
     Object.assign(executionToolingCapture,{runId:'40214209083',artifactId:'12607298574',attempt:1});
     const finalPaths=Object.fromEntries(Object.entries(paths).map(([name,path])=>[name,`${toolingRoot}/${path}`]));
-    const finalIdentities=Object.fromEntries(Object.entries(paths).map(([name,path])=>{const bytes=execFileSync('git',['-C',sourceRoot,'show',`${FINAL_EXECUTION_TOOLING_SHA}:${path}`]);return[name,{byteLength:bytes.length,sha256:sha(bytes)}];}));
-    const finalCapture=await put('final-execution-tooling-capture.json',JSON.stringify({repair:{retryOrdinal:4,tooling:{head:FINAL_EXECUTION_TOOLING_SHA,source:{head:FINAL_EXECUTION_TOOLING_SHA,tree:execFileSync('git',['-C',sourceRoot,'rev-parse',`${FINAL_EXECUTION_TOOLING_SHA}^{tree}`],{encoding:'utf8'}).trim()},sourceRoot:toolingRoot,files:finalPaths,identities:finalIdentities}}}));
+    const finalIdentities=Object.fromEntries(Object.entries(paths).map(([name,path])=>{const bytes=execFileSync('git',['-C',sourceRoot,'show',`${verificationSha}:${path}`]);return[name,{byteLength:bytes.length,sha256:sha(bytes)}];}));
+    const finalCapture=await put('final-execution-tooling-capture.json',JSON.stringify({repair:{retryOrdinal:5,tooling:{head:verificationSha,source:{head:verificationSha,tree:execFileSync('git',['-C',sourceRoot,'rev-parse',`${verificationSha}^{tree}`],{encoding:'utf8'}).trim()},sourceRoot:toolingRoot,files:finalPaths,identities:finalIdentities}}}));
     Object.assign(finalCapture,{runId:'40200000003',artifactId:'12600000003',attempt:1});
     const frozen=JSON.parse(await readFile('/Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json'));
     const inputs=Object.fromEntries(frozen.assets.map(item=>[item.id,item]));
     const lock={sources:{sceneworks:{head:'42a8aff9852d01e0506df8afc466c0024b6eed8c'},inference:{head:'857f7a1996e3678a0773c3509ac0087522c19ce6'}}};
     const cells=['base-single','base-four','sft-single','sft-four'];
     const rows=['mlx','cuda'].flatMap(backend=>cells.map(cell=>({id:`quality-${backend}-${cell}`,variant:cell.split('-')[0],refs:cell.endsWith('four')?['B','L','P','G']:['B'],anchors:['actual anchor'],request:{prompt:frozen[cell.endsWith('four')?'four_case':'single_case'].prompt}})));
-    const upstream={},summary={toolingSha:FINAL_EXECUTION_TOOLING_SHA,qualityCasesManifestSha256:'af8ff343a598772bbe114164651b80225fc6f62b66ac4da26e5cb2071570ca57',outputs:[]};
+    const upstream={},summary={toolingSha:UPSTREAM_SUITE_TOOLING_SHA,qualityCasesManifestSha256:'af8ff343a598772bbe114164651b80225fc6f62b66ac4da26e5cb2071570ca57',outputs:[]};
     for(const cell of cells){
       const base=cell==='base-single',refs=cell.endsWith('four')?['B','L','P','G']:['B'];
       let image,diagnostic,authentication;
@@ -114,18 +114,19 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
         image=await put(`upstream-${cell}.png`,Buffer.from(`synthetic ${cell} image fixture`));
         const result={caseId:cell,variant:cell.split('-')[0],result:{width:cell.endsWith('four')?512:768,height:cell.endsWith('four')?768:512,seed:173,actual_steps:30,cfg:4,inference_shift:5,kv_cache:true,dit_quantization:'none',text_quantization:'none',prompt:frozen[cell.endsWith('four')?'four_case':'single_case'].prompt,negative_prompt:'',references:refs.map(id=>`/fixture/${id}.png`)},noiseSha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',noiseShape:cell.endsWith('four')?[1,128,48,32]:[1,128,32,48],noiseAllocations:1,wrapperSha256:hash,frozenFilesVerifiedAfterRun:24};
         diagnostic=await put(`upstream-${cell}.diagnostic.json`,JSON.stringify(result));
-        authentication=await put('suite-authentication.json',JSON.stringify({qualityCasesManifestSha256:summary.qualityCasesManifestSha256,priorPayloadManifestSha256:'269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df',toolingSha:FINAL_EXECUTION_TOOLING_SHA,nativeProductSha:lock.sources.sceneworks.head,nativeInferenceSha:lock.sources.inference.head,wrapperSha256:hash}));
+        authentication=await put('suite-authentication.json',JSON.stringify({qualityCasesManifestSha256:summary.qualityCasesManifestSha256,priorPayloadManifestSha256:'269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df',toolingSha:UPSTREAM_SUITE_TOOLING_SHA,nativeProductSha:lock.sources.sceneworks.head,nativeInferenceSha:lock.sources.inference.head,wrapperSha256:hash}));
         summary.outputs.push({caseId:cell,imageSha256:image.sha256,diagnosticSha256:diagnostic.sha256});
       }
-      upstream[cell]={cell,runId:base?'40191507328':'40200000001',artifactId:base?'12598132624':'12600000002',attempt:1,toolingSha:base?'d6af3f2623fff31cf000cfd5d79f23069b385d39':FINAL_EXECUTION_TOOLING_SHA,reviewer:'fixture reviewer',reviewedAt:'2026-10-25T00:00:00Z',image,diagnostic,authentication,noiseSha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',inputs:refs.map(id=>({id,sha256:inputs[id].sha256})),observation:`Observed ${cell} fixture`};
+      upstream[cell]={cell,runId:base?'40191507328':'40200000001',artifactId:base?'12598132624':'12600000002',attempt:1,toolingSha:base?'d6af3f2623fff31cf000cfd5d79f23069b385d39':UPSTREAM_SUITE_TOOLING_SHA,reviewer:'fixture reviewer',reviewedAt:'2026-10-25T00:00:00Z',image,diagnostic,authentication,noiseSha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',inputs:refs.map(id=>({id,sha256:inputs[id].sha256})),observation:`Observed ${cell} fixture`};
     }
     const suiteSummary=await put('upstream-suite-summary.json',JSON.stringify(summary));Object.assign(suiteSummary,{runId:'40200000001',artifactId:'12600000002',attempt:1});
     const comparison={version:'sc-26757-upstream-comparison/v1',amendmentSha256:AMENDMENT_SHA256,lockSha256:digest(lock),executionToolingCapture,finalExecutionToolingCapture:finalCapture,upstream,rows:rows.map(row=>({rowId:row.id})),suiteSummary};
     const path=resolve(root,'quality-upstream-comparison.json');await writeFile(path,JSON.stringify(comparison));
-    assert.deepEqual(await loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:FINAL_EXECUTION_TOOLING_SHA,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),comparison);
-    if(verificationSha!==FINAL_EXECUTION_TOOLING_SHA)await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/distinct actual final execution-tooling capture/);
+    assert.deepEqual(await loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),comparison);
+    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:UPSTREAM_SUITE_TOOLING_SHA,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/distinct actual final execution-tooling capture/);
+    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:4,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/distinct actual final execution-tooling capture/);
     [upstream['base-four'].image,upstream['sft-four'].image]=[upstream['sft-four'].image,upstream['base-four'].image];
     await writeFile(path,JSON.stringify(comparison));
-    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:FINAL_EXECUTION_TOOLING_SHA,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/actual three-case suite output/);
+    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/actual three-case suite output/);
   } finally {await rm(root,{recursive:true,force:true});}
 });

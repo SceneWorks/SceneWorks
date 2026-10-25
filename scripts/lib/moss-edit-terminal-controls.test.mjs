@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
-import {verifyReplayForm,waitForReplayForm,modelPicker} from './moss-edit-terminal-controls.mjs';
+import {verifyReplayForm,waitForModelCatalog,waitForReplayForm,modelPicker} from './moss-edit-terminal-controls.mjs';
 
 let chromium;
 try {({chromium}=await import('playwright'));} catch(error) {if(error.code!=='ERR_MODULE_NOT_FOUND')throw error;}
@@ -29,5 +29,24 @@ test('real browser waits for complete recipe hydration after Prompt is already r
     await modelPicker(page).selectOption('moss_image_base');
     await assert.rejects(()=>waitForReplayForm(page,expected,actions,300),/Model expected moss_image_sft, observed moss_image_base/);
     assert.equal(await modelPicker(page).inputValue(),'moss_image_base');
+  } finally {await browser.close();}
+});
+
+test('cold catalog gate must settle into the real model picker before recipe comparison',{skip:!chromium||!existsSync(chromium.executablePath())?'Playwright Chromium is unavailable on this host':false},async()=>{
+  const browser=await chromium.launch({headless:true,args:['--disable-gpu']});
+  try {
+    const page=await browser.newPage(),actions=[];
+    const gate='<section class="model-availability-gate"><div role="progressbar" aria-label="Initializing models" style="display:block;width:100px;height:10px"></div><p>Checking which models are installed and available on this machine.</p></section>';
+    await page.setContent(gate);
+    await page.evaluate(content=>setTimeout(()=>{document.body.innerHTML=content;},10250),html);
+    await waitForModelCatalog(page,actions,15000);
+    assert.ok(actions.at(-1).elapsedMs>=10000,'catalog wait did not cover the prior ten-second form timeout');
+    assert.equal(actions.at(-1).action,'observe-model-catalog-ready');
+    assert.equal(await modelPicker(page).inputValue(),'moss_image_base');
+    await page.setContent(gate);
+    await assert.rejects(()=>waitForModelCatalog(page,actions,250),/initializing=true; gate=.*Checking which models/);
+    assert.equal(await page.getByRole('progressbar',{name:'Initializing models'}).isVisible(),true);
+    await page.setContent('<section class="model-availability-gate"><h2>No supported model installed</h2></section>');
+    await assert.rejects(()=>waitForModelCatalog(page,actions,3000),/model catalog settled without an available Image Studio model/);
   } finally {await browser.close();}
 });

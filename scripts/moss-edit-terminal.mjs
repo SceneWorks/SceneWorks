@@ -661,7 +661,7 @@ async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
   const requireEvidence = async (name, check) => { try { await check(); } catch (error) { findings.push({ item: name, state: ['ENOENT','MOSS_AWAITING_RESOLUTION'].includes(error.code) ? 'AWAITING' : 'FAIL', reason: error.code === 'ENOENT' ? 'required evidence missing' : error.message }); } };
   let qualityComparison=null;
-  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:state.config.repair?.historicalExecutionToolingSha,executionToolingSha:state.config.repair?.executionToolingSha,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
+  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:state.config.repair?.historicalExecutionToolingSha,executionToolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:state.config.repair?.retryOrdinal,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
   let acceptedRecovery=false;
   if(state.config.repair)await requireEvidence('r16-original-checker-recovery',async()=>{acceptedRecovery=await validateRecoveryAdjudication(state);});
   for (const backend of ['mlx','cuda']) await requireEvidence(`dispatch-${backend}`,async () => {

@@ -11,6 +11,32 @@ const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export const labelledSelect = (scope, label) => scope.locator('label').filter({ hasText: new RegExp(`^${escapeRegExp(label)}`) }).locator('select');
 const tensorPicker=labelledSelect;
 export const modelPicker = page => page.locator('label.settings-field-model select');
+export async function waitForModelCatalog(page,actions,timeoutMs=120000) {
+  const started=Date.now(),deadline=started+timeoutMs,responses=[];
+  const onResponse=response=>{try {if(new URL(response.url()).pathname==='/api/v1/models')responses.push({status:response.status(),at:now()});}catch{}};
+  page.on('response',onResponse);
+  try {
+    let terminalSince=null;
+    while(Date.now()<deadline){
+      const initializing=await page.getByRole('progressbar',{name:'Initializing models'}).isVisible();
+      if(await modelPicker(page).isVisible()){
+        requireThat(!initializing,'model catalog gate remained over the form');
+        actions.push({at:now(),action:'observe-model-catalog-ready',elapsedMs:Date.now()-started,modelResponses:responses});
+        return;
+      }
+      const terminalGate=await page.locator('.model-availability-gate').isVisible()&&!initializing;
+      terminalSince=terminalGate?(terminalSince??Date.now()):null;
+      if(terminalSince!==null&&Date.now()-terminalSince>=1000)throw Error('model catalog settled without an available Image Studio model');
+      await page.waitForTimeout(Math.min(250,deadline-Date.now()));
+    }
+    throw Error('model catalog remained unsettled before the deadline');
+  } catch(error) {
+    const gate=page.getByRole('progressbar',{name:'Initializing models'});
+    const initializing=await gate.isVisible().catch(()=>false);
+    const gateText=initializing?await page.locator('.model-availability-gate').first().innerText().catch(()=>null):null;
+    throw Error(`image model catalog/form unavailable after ${Date.now()-started} ms; initializing=${initializing}; gate=${JSON.stringify(gateText)}; modelResponses=${JSON.stringify(responses)}; ${error.message}`);
+  } finally {page.off('response',onResponse);}
+}
 export async function advanced(page, actions) {
   const simple = page.locator('details.su-advanced');
   if (await simple.count()) { if (!(await simple.getAttribute('open') !== null)) await click(simple.locator('summary'), actions, 'Advanced disclosure'); return; }

@@ -3,7 +3,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, waitForReplayForm } from './lib/moss-edit-terminal-controls.mjs';
+import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, waitForModelCatalog, waitForReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 export { labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
@@ -170,7 +170,7 @@ async function historyReplay(page, row, route, origin, expected, actions) {
   await openAsset(page, origin.asset, actions);
   await checked(page.getByLabel('Keep seed', { exact: true }), true, actions, 'Keep seed');
   await click(page.getByRole('button', { name: 'Use this recipe', exact: true }), actions, 'Use this recipe');
-  if(row.action==='seeded-recipe')await waitForReplayForm(page,expected,actions);
+  if(row.action==='seeded-recipe'){await waitForModelCatalog(page,actions);await waitForReplayForm(page,expected,actions);}
   else {await waitValue(page,page.getByLabel('Prompt', { exact: true }),row.request.prompt);await advanced(page, actions);}
   // Read the form before any changes. A recipe copied from disk alone is not hydration proof.
   const prompt = await page.getByLabel('Prompt', { exact: true }).inputValue();
@@ -424,6 +424,9 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     const project = list?.find(item => item.id === state.binding.endpoint.projectId); requireThat(project?.name, 'bound original project missing from target API');
     await click(page.locator('.project-pill'), actions, 'Workspace picker');
     await click(page.getByRole('option').filter({ hasText: project.name }), actions, `Workspace ${project.name}`);
+    // Let the product's first model-availability sweep finish before leaving Image
+    // for Assets; navigation can abort the cold request while the studio is gated.
+    if(route.history&&row.action==='seeded-recipe')await waitForModelCatalog(page,actions);
     const uploaded = await json(resolve(state.root, `uploaded-${row.backend}.json`));
     const origin = route.originRowId ? await originFor(state, route.originRowId, route.sampleIndex, read) : null;
     let history, workflow;

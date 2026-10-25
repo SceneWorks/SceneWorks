@@ -201,7 +201,9 @@ test('both browser entrypoints use the fresh parent/leaf helper before importing
 
 test('production control extraction remains frozen and latent guards use the same tested labelled Engine control',async()=>{
   const driver=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8'),controller=await readFile(new URL('./moss-edit-terminal-actions.mjs',import.meta.url),'utf8'),controls=await readFile(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url),'utf8');
-  assert.match(driver,/import \{[^\n]*configure, waitForReplayForm \} from '\.\/lib\/moss-edit-terminal-controls.mjs'/);
+  assert.match(driver,/import \{[^\n]*configure, waitForModelCatalog, waitForReplayForm \} from '\.\/lib\/moss-edit-terminal-controls.mjs'/);
+  const capture=driver.slice(driver.indexOf('export async function captureUi('));
+  assert.ok(capture.indexOf("if(route.history&&row.action==='seeded-recipe')await waitForModelCatalog(page,actions)")<capture.indexOf('if (route.history) history = await historyReplay('),'cold catalog must settle before asset navigation can abort it');
   assert.match(controller,/browserControls:'lib\/moss-edit-terminal-controls.mjs'/);
   assert.match(driver,/await select\(labelledSelect\(page,'Engine'\), engine/);
   assert.doesNotMatch(controls,/\bfetch\s*\(|\.request\.|\.route\s*\(|node:|process\./);

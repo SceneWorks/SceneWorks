@@ -183,6 +183,14 @@ test('actual stopped H21 frontier is exactly the unsubmitted last MLX UI row',{s
   assert.equal(validateFailedUiCapture(capture,digest(lock),{rowId:'seeded-mlx-latents-replay'}),true);
   assert.equal(capture.imageJobPosts.length,0);assert.equal(capture.submissions.length,0);
 });
+test('actual stopped H23 catalog-gated retry still has no row 25 submission',{skip:!existsSync(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-4/failure.json'))},async()=>{
+  const evidence=resolve(stoppedH21,'evidence'),lock=await json(resolve(evidence,'protocol.lock.json')),plan=await json(resolve(evidence,'cases.json')),binding=await json(resolve(evidence,'bindings/mlx.json'));
+  const capture=await json(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-4/failure.json'));
+  assert.deepEqual((await retryRemainingRows(evidence,plan,digest(lock),digest(binding))).map(row=>row.id),['seeded-mlx-latents-replay']);
+  assert.equal(validateFailedUiCapture(capture,digest(lock),{rowId:'seeded-mlx-latents-replay'}),true);
+  assert.match(capture.error,/replay form did not stabilize[\s\S]*Steps/);
+  assert.equal(capture.imageJobPosts.length,0);assert.equal(capture.submissions.length,0);
+});
 test('known submitted canceled job resumes after eight verified rows without dispatching it again',async t=>{
   const root=await temporary('known-cancel'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));
   const rows=Array.from({length:25},(_,index)=>({id:index===8?'advanced-cancel-mlx':`row-${index}`,backend:'mlx',...(index===8?{expected:'canceled',transport:'rest',cancelAtDenoise:true}:{})})),plan={rows};
