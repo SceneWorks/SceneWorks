@@ -7,6 +7,7 @@ import { setInput } from "../../testUtils/dom.js";
 import {
   configDraftFromTarget,
   configValidation,
+  trainingConfigSnapshot,
   trainingTargetLicense,
 } from "../../training/trainingConfig.js";
 import { irisDepthTarget, irisJob, irisRestoreTarget, irisTarget } from "../../training/iris.testSupport.js";
@@ -1120,13 +1121,17 @@ describe("ConfigureJobPanel resolution buckets", () => {
       />,
     );
     expect(container.querySelector('[aria-label="MOSS target modules"]').value).toBe("q\nlayers.0.proj.ffn_up_gate");
-    const dimensions = container.querySelector('[aria-label="Bucket 1 dimensions"]');
-    expect(dimensions.value).toBe("768x1024");
-    act(() => setInput(dimensions, "1024x768"));
+    const width = container.querySelector('[aria-label="Bucket 1 width"]');
+    const height = container.querySelector('[aria-label="Bucket 1 height"]');
+    expect(width.value).toBe("768");
+    expect(height.value).toBe("1024");
+    act(() => setInput(width, "1024"));
+    act(() => setInput(height, "768"));
     act(() => [...editor().querySelectorAll("button")].find((button) => button.textContent === "Use square buckets").click());
     act(() => toggle().click());
     expect(calls).toEqual([
-      ["resolutionBuckets", [{ width: "1024", height: "768", repeats: "1" }]],
+      ["resolutionBuckets", [{ width: "1024", height: "1024", repeats: "1" }]],
+      ["resolutionBuckets", [{ width: "768", height: "768", repeats: "1" }]],
       ["resolutionBuckets", [{ resolution: "768", repeats: "1" }]],
       ["resolutionBuckets", null],
     ]);
@@ -1144,9 +1149,76 @@ describe("ConfigureJobPanel resolution buckets", () => {
     );
     act(() => toggle().click());
     expect(seedCalls).toEqual([["resolutionBuckets", [
-      { width: "512", height: "512", repeats: "1" },
-      { width: "768", height: "768", repeats: "1" },
+      { resolution: "512", repeats: "1" },
+      { resolution: "768", repeats: "1" },
     ]]]);
+  });
+
+  it("serializes the enabled MOSS toggle as the native legacy multi-resolution defaults", () => {
+    const moss = { ...bucketTarget, kernel: "moss_image_lora", limits: { ...bucketTarget.limits, resolutions: [256, 512, 768, 1024] } };
+    let current = { ...VALID_DRAFT };
+    mount(<ConfigureJobPanel {...baseProps({
+      showAdvancedConfig: true, selectedTarget: moss, configDraft: current,
+      updateConfigDraft: (key, value) => { current = { ...current, [key]: value }; },
+    })} />);
+    act(() => toggle().click());
+    const expected = [{ resolution: 256, repeats: 1 }, { resolution: 512, repeats: 1 }, { resolution: 768, repeats: 1 }, { resolution: 1024, repeats: 1 }];
+    const snapshot = trainingConfigSnapshot({ activeDataset: DATASET, configDraft: current, selectedTarget: moss });
+    expect(snapshot.config.advanced.resolutionBuckets).toEqual(expected);
+    const restored = configDraftFromTarget({ ...moss, defaults: snapshot.config }, DATASET, ["auto"]);
+    expect(trainingConfigSnapshot({ activeDataset: DATASET, configDraft: restored, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual(expected);
+    // Explicit conversion remains available without mixing row shapes.
+    mount(<ConfigureJobPanel {...baseProps({ showAdvancedConfig: true, selectedTarget: moss, configDraft: current,
+      updateConfigDraft: (key, value) => { current = { ...current, [key]: value }; },
+    })} />);
+    expect(container.textContent).toContain("equal-aspect ties use the first row");
+    act(() => [...editor().querySelectorAll("button")].find((button) => button.textContent === "Use width × height buckets").click());
+    expect(current.resolutionBuckets).toEqual(expected.map(({ resolution, repeats }) => ({ width: String(resolution), height: String(resolution), repeats: String(repeats) })));
+    expect(configValidation(current, { activeDataset: DATASET, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets")).toEqual([]);
+  });
+
+  it.each(["width", "height"])("preserves incremental %s edits and exposes malformed or fractional text without truncation", (field) => {
+    const moss = { ...bucketTarget, kernel: "moss_image_lora" };
+    let current = { ...VALID_DRAFT, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1" }] };
+    const render = () => mount(<ConfigureJobPanel {...baseProps({
+      showAdvancedConfig: true,
+      selectedTarget: moss,
+      configDraft: current,
+      configValidity: validityFor(current, { activeDataset: DATASET, selectedTarget: moss }),
+      updateConfigDraft: (key, value) => { current = { ...current, [key]: value }; },
+    })} />);
+    render();
+    const other = field === "width" ? "height" : "width";
+    const unchanged = current.resolutionBuckets[0][other];
+    for (const value of ["", "5", "51", "512", "768x1024x512", "768.0000000000000001", "1024"]) {
+      act(() => setInput(container.querySelector(`[aria-label="Bucket 1 ${field}"]`), value));
+      render();
+      expect(container.querySelector(`[aria-label="Bucket 1 ${field}"]`).value).toBe(value);
+      expect(current.resolutionBuckets[0][field]).toBe(value);
+      expect(current.resolutionBuckets[0][other]).toBe(unchanged);
+      const valid = ["512", "1024"].includes(value);
+      expect(editor().getAttribute("aria-invalid")).toBe(valid ? null : "true");
+      expect(container.querySelector(".training-config-actions .primary-action").disabled).toBe(!valid);
+      if (!valid) expect(container.textContent).toMatch(new RegExp(`Bucket 1: ${field}.*whole`, "i"));
+    }
+  });
+
+  it("keeps fractional repeat draft text visible and blocks training rather than rounding it", () => {
+    const moss = { ...bucketTarget, kernel: "moss_image_lora" };
+    let current = { ...VALID_DRAFT, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1" }] };
+    const render = () => mount(<ConfigureJobPanel {...baseProps({
+      showAdvancedConfig: true, selectedTarget: moss, configDraft: current,
+      configValidity: validityFor(current, { activeDataset: DATASET, selectedTarget: moss }),
+      updateConfigDraft: (key, value) => { current = { ...current, [key]: value }; },
+    })} />);
+    render();
+    act(() => setInput(container.querySelector('[aria-label="Bucket 1 repeats"]'), "1.0000000000000001"));
+    render();
+    expect(container.querySelector('[aria-label="Bucket 1 repeats"]').value).toBe("1.0000000000000001");
+    expect(editor().getAttribute("aria-invalid")).toBe("true");
+    expect(container.textContent).toContain("Bucket 1: repeats must be a whole number from 1 to 100");
+    expect(container.querySelector(".training-config-actions .primary-action").disabled).toBe(true);
+    expect(trainingConfigSnapshot({ activeDataset: DATASET, configDraft: current, selectedTarget: moss }).config.advanced.resolutionBuckets[0].repeats).toBeNull();
   });
 
   it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {

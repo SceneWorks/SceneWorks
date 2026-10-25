@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, EXPECTED_TESTS, ignoredSourceFacts,
+  BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, executeOwnedChild, EXPECTED_TESTS, ignoredSourceFacts,
   MOSS_PREFIX, ownedWindowsTree, parseArgs, parseTestList, planAuthenticatedCleanup,
   requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
   statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss,
@@ -45,25 +47,40 @@ const MLX_SELECTORS = { verification_profile: ["legacy", "facts-and-projections"
 const CANDLE_SELECTORS = { capability_facts_only: true, run_five_rung_reference: true, provision_snapshot: true, run_ltx_eros_acceptance: true, run_epic_20738_terminal_cuda: true, run_yue2_terminal_cuda: true, run_iris_worker_smoke: true };
 const Moss = (value) => ({ run_moss_native_validation: value });
 
-test("a moss dispatch runs exactly its own job in each registered workflow and no other", async () => {
+function assertBrowserConflictRejector(workflow) {
+  const block = jobBlock(workflow, "browser-fixture-artifact");
+  const guard = block.indexOf("- name: Reject conflicting browser fixture selectors before setup");
+  assert.ok(guard >= 0 && guard < block.indexOf("actions/checkout"));
+  assert.ok(guard < block.indexOf("dtolnay/rust-toolchain"));
+  const step = block.slice(guard).split(/\n      - /)[0];
+  assert.match(step, /RUN_MOSS_NATIVE_VALIDATION: \$\{\{ inputs\.run_moss_native_validation \}\}/);
+  assert.match(step, /\$\{!selector\}/);
+  assert.match(step, /echo "::error::browser-fixture-artifact cannot be combined with \$selector"\n\s+exit 1/);
+}
+
+test("a moss dispatch reaches only its guard and an explicit hosted browser conflict rejector", async () => {
   for (const [file, jobs, selectors, mossJob] of [
     [".github/workflows/macos-mlx.yml", MLX_JOBS, MLX_SELECTORS, "moss-native-api-mlx"],
     [".github/workflows/windows-candle.yml", CANDLE_JOBS, CANDLE_SELECTORS, "moss-native-api-candle"],
   ]) {
     const workflow = readFileSync(path.join(ROOT, file), "utf8");
+    if (file.includes("macos-mlx")) {
+      assertBrowserConflictRejector(workflow);
+      assert.throws(() => assertBrowserConflictRejector(workflow.replace("Reject conflicting browser fixture selectors before setup", "removed guard")));
+    }
     const expressions = Object.fromEntries(jobs.map((job) => [job, jobIf(jobBlock(workflow, job))]));
     // Pure moss shape: only the dedicated validation job runs.
     const profiles = file.includes("macos-mlx") ? ["legacy", "facts-and-projections", "consumer-assertions", "browser-fixture-artifact", "unknown"] : [undefined];
     for (const [job, expression] of Object.entries(expressions)) {
       for (const profile of profiles) {
         const inputs = { ...Moss(true), ...(file.includes("macos-mlx") ? { verification_profile: profile } : {}) };
-        const expected = job === mossJob;
+        const expected = job === mossJob || (job === "browser-fixture-artifact" && profile === "browser-fixture-artifact");
         assert.equal(evaluate(expression, "workflow_dispatch", inputs), expected,
-          `${file} ${job} must run only for the pure moss dispatch`);
+          `${file} ${job} must be the MOSS guard or an authenticated hosted conflict rejector`);
       }
     }
-    // Mixed shapes start ONLY the MOSS job, whose early input guard fails
-    // actionably before compiler setup; every unrelated job stays off.
+    // Mixed shapes reach early input rejection, never model work. The browser
+    // profile's hosted rejector also starts so conflicts cannot skip green.
     const mixed = [];
     for (const [selector, value] of Object.entries(selectors)) {
       // `legacy` with nothing else set IS the pure shape, so it is not a mixed selector.
@@ -74,7 +91,9 @@ test("a moss dispatch runs exactly its own job in each registered workflow and n
     mixed.push({ ...Moss(true), ...Object.fromEntries(Object.entries(selectors).flatMap(([key, value]) => [[key, Array.isArray(value) ? "consumer-assertions" : true]])) });
     for (const inputs of mixed) {
       for (const [job, expression] of Object.entries(expressions))
-        assert.equal(evaluate(expression, "workflow_dispatch", inputs), job === mossJob, `${file} mixed dispatch must reach only the early-failing MOSS job: ${job} ${JSON.stringify(inputs)}`);
+        assert.equal(evaluate(expression, "workflow_dispatch", inputs),
+          job === mossJob || (job === "browser-fixture-artifact" && inputs.verification_profile === "browser-fixture-artifact"),
+          `${file} mixed dispatch must reach only early-failing guards: ${job} ${JSON.stringify(inputs)}`);
     }
     // Ordinary triggers never reach the validation job.
     for (const event of ["push", "pull_request", "merge_group", "schedule"]) {
@@ -109,8 +128,9 @@ test("mixed inputs fail the actual early guards before any compiler setup", () =
   }
 });
 
-test("every pre-existing dispatch shape keeps its exact behaviour when the moss flag is false", async () => {
+test("valid dispatch shapes stay unchanged while browser conflicts reach explicit early rejection", async () => {
   const mlx = readFileSync(path.join(ROOT, ".github/workflows/macos-mlx.yml"), "utf8");
+  assertBrowserConflictRejector(mlx);
   const candle = readFileSync(path.join(ROOT, ".github/workflows/windows-candle.yml"), "utf8");
   const mlxIf = (job) => jobIf(jobBlock(mlx, job));
   const candleIf = (job) => jobIf(jobBlock(candle, job));
@@ -121,7 +141,7 @@ test("every pre-existing dispatch shape keeps its exact behaviour when the moss 
     [mlxIf("browser-fixture-artifact"), "workflow_dispatch", { ...Moss(false), verification_profile: "browser-fixture-artifact", run_memory_calibration: false, run_five_rung_reference: false, provision_qwen_snapshot: false, provision_z_image_snapshot: false }, true],
     [mlxIf("manual-verification"), "workflow_dispatch", { ...Moss(false), verification_profile: "consumer-assertions" }, true],
     [mlxIf("manual-verification"), "workflow_dispatch", { ...Moss(true), verification_profile: "consumer-assertions" }, false],
-    [mlxIf("browser-fixture-artifact"), "workflow_dispatch", { ...Moss(true), verification_profile: "browser-fixture-artifact", run_memory_calibration: false, run_five_rung_reference: false, provision_qwen_snapshot: false, provision_z_image_snapshot: false }, false],
+    [mlxIf("browser-fixture-artifact"), "workflow_dispatch", { ...Moss(true), verification_profile: "browser-fixture-artifact", run_memory_calibration: false, run_five_rung_reference: false, provision_qwen_snapshot: false, provision_z_image_snapshot: false }, true],
     [candleIf("candle-worker"), "workflow_dispatch", { ...Moss(false), capability_facts_only: true }, true],
     [candleIf("candle-worker"), "workflow_dispatch", { ...Moss(true), capability_facts_only: true }, false],
     [candleIf("yue2-terminal-cuda"), "workflow_dispatch", { ...Moss(false), run_yue2_terminal_cuda: true, capability_facts_only: false }, true],
@@ -503,6 +523,9 @@ test("Windows cleanup signals only re-authenticated owned identities", () => {
     "a live matching-birth descendant is selected while the live reused pid is excluded",
   );
   assert.deepEqual(planAuthenticatedCleanup(new Map(), identity, known, true).targets, []);
+  for (const unavailable of [null, undefined, {}]) {
+    assert.throws(() => planAuthenticatedCleanup(unavailable, identity, known, true), /cleanup planning process telemetry unavailable/);
+  }
   assert.deepEqual(planAuthenticatedCleanup(fresh, identity, known, false).targets, [101, 102]);
   assert.deepEqual(planAuthenticatedCleanup(fresh, { ...identity, birthMs: 20_000 }, known, true).targets, [101, 102], "a reused root pid is never a target");
   // Aggregate owned RSS on Windows sums exactly the authenticated tree, so the
@@ -517,3 +540,107 @@ test("Windows cleanup signals only re-authenticated owned identities", () => {
   assert.equal(sumWindowsOwnedRss(rssRows, { ...identity, path: "c:\\reused\\other.exe" }), null);
   assert.equal(sumWindowsOwnedRss(null, identity), null);
 });
+
+// Simulated CIM rows and EventEmitter children only: no host queries or kills.
+const WINDOWS_ROOT = { pid: 100, ppid: 1, birthMs: 10_000, path: "cargo.exe", rssBytes: 100 };
+const WINDOWS_PARENT = { pid: 101, ppid: 100, birthMs: 20_000, path: "rustc.exe", rssBytes: 200 };
+const WINDOWS_STALE = { pid: 102, ppid: 101, birthMs: 15_000, path: "unrelated-survivor.exe", rssBytes: 10_000 };
+const WINDOWS_CHILD = { pid: 103, ppid: 101, birthMs: 21_000, path: "link.exe", rssBytes: 300 };
+const windowsRows = (...rows) => new Map(rows.map((row) => [row.pid, { ...row }]));
+
+function windowsSupervisor({ planningMissing = false, verificationMissing = false, reused = false, output = "" } = {}) {
+  const live = windowsRows(WINDOWS_ROOT, WINDOWS_PARENT, WINDOWS_STALE, WINDOWS_CHILD);
+  const survivors = windowsRows(WINDOWS_PARENT, WINDOWS_STALE, WINDOWS_CHILD);
+  if (reused) survivors.set(103, { ...WINDOWS_CHILD, birthMs: 30_000 });
+  const killed = [], ownHandleKills = [];
+  let child, queries = 0;
+  return {
+    killed, ownHandleKills,
+    supervision: {
+      sampleMs: 0,
+      spawnChild: () => {
+        child = new EventEmitter();
+        Object.assign(child, { pid: 100, stdout: new PassThrough(), stderr: new PassThrough(), kill: (signal) => { ownHandleKills.push(signal); return true; } });
+        return child;
+      },
+      query: () => {
+        queries += 1;
+        if (queries === 1) return live;
+        if (queries === 2) {
+          child.stdout.emit("data", Buffer.from(output));
+          child.emit("close", 0, null);
+          return live;
+        }
+        if (queries === 3) return planningMissing ? null : survivors;
+        assert.equal(queries, 4, "exactly one fresh post-termination sample");
+        return verificationMissing ? null : survivors;
+      },
+      kill: (pid) => {
+        killed.push(pid);
+        survivors.delete(pid);
+        return 0;
+      },
+    },
+  };
+}
+
+test("Windows tree authenticates every immediate parent birth, not just the root birth", () => {
+  const rows = windowsRows(WINDOWS_ROOT, WINDOWS_PARENT, WINDOWS_STALE, WINDOWS_CHILD,
+    { pid: 104, ppid: 102, birthMs: 25_000, path: "unrelated-descendant", rssBytes: 20_000 });
+  const tree = ownedWindowsTree(rows, WINDOWS_ROOT);
+  assert.equal(tree.authenticated, true);
+  assert.deepEqual(tree.owned.map(({ pid }) => pid), [100, 101, 103]);
+  assert.equal(sumWindowsOwnedRss(rows, WINDOWS_ROOT), 600, "stale edge and its subtree are excluded from RSS too");
+  const known = new Map(tree.owned.filter(({ pid }) => pid !== 100).map(({ pid, birthMs }) => [pid, birthMs]));
+  assert.deepEqual(planAuthenticatedCleanup(rows, WINDOWS_ROOT, known, false).targets, [101, 103]);
+  // No clock-skew allowance: match the terminal supervisor's strict edge order.
+  rows.set(103, { ...WINDOWS_CHILD, birthMs: WINDOWS_PARENT.birthMs - 1 });
+  assert.deepEqual(ownedWindowsTree(rows, WINDOWS_ROOT).owned.map(({ pid }) => pid), [100, 101]);
+  rows.set(101, { ...WINDOWS_PARENT, birthMs: NaN });
+  assert.deepEqual(ownedWindowsTree(rows, WINDOWS_ROOT).owned.map(({ pid }) => pid), [100]);
+  assert.equal(ownedWindowsTree(rows, { ...WINDOWS_ROOT, birthMs: 9000 }).authenticated, false);
+});
+
+test("Windows supervisor never adopts or kills stale-edge survivors or reused descendant PIDs", async () => {
+  for (const reused of [false, true]) {
+    const mock = windowsSupervisor({ reused });
+    const state = {};
+    const log = path.join(mkdtempSync(path.join(os.tmpdir(), "moss-owned-mock-")), "command.log");
+    const result = await executeOwnedChild(ROOT, ["mock-only"], log, BOUNDS.caseMs, state, mock.supervision);
+    assert.equal(result.exit, 0);
+    assert.deepEqual(mock.killed, reused ? [101] : [101, 103]);
+    assert.deepEqual(mock.ownHandleKills, []);
+    assert.equal(state.cleanup.released, true);
+    assert.deepEqual(state.cleanup.unproven, []);
+    assert.notEqual(state.unsafe, true);
+  }
+});
+
+for (const phase of ["planning", "post-termination"]) {
+  test(`Windows ${phase} null telemetry is unsafe, never released, and blocks the next case`, async () => {
+    const mock = windowsSupervisor({ planningMissing: phase === "planning", verificationMissing: phase === "post-termination", output: GREEN(EXPECTED_TESTS[0]) });
+    const driver = mockDriver();
+    const mockedExecute = driver.execute;
+    let state;
+    driver.execute = async (root, args, log, limitMs, commandState) => {
+      if (args[0] === "cargo" || args.includes("--list")) return mockedExecute(root, args, log, limitMs, commandState);
+      driver.calls.push(args);
+      state = commandState;
+      return executeOwnedChild(root, args, log, limitMs, commandState, mock.supervision);
+    };
+    const { result, receipt, calls } = await pipeline({ backend: "candle", driver });
+    assert.equal(result.ok, false);
+    assert.equal(calls.length, 4, "compile + two lists + one attempted case, never a next command");
+    assert.equal(state.unsafe, true);
+    assert.equal(state.cleanup.released, false);
+    assert.match(state.cleanup.unproven.join(" "), /process telemetry unavailable/);
+    assert.deepEqual(mock.killed, phase === "planning" ? [] : [101, 103]);
+    assert.deepEqual(mock.ownHandleKills, []);
+    assert.equal(receipt.cases[0].ok, false);
+    assert.equal(receipt.cases[0].cleanup.released, false);
+    assert.match(receipt.cases[0].error, /unproven cleanup/);
+    assert.match(receipt.cases[0].rawOutput, /1 passed; 0 failed; 0 ignored/);
+    assert.deepEqual(receipt.cases.slice(1).map((entry) => [entry.attempted, entry.blocked, entry.ok]),
+      [[false, true, false], [false, true, false], [false, true, false]]);
+  });
+}

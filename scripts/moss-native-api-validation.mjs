@@ -214,18 +214,21 @@ export function killWindowsPid(pid) {
   return killed.error ? `error: ${killed.error.message}` : killed.status;
 }
 
-// Authenticated descendants of a live, identity-matching root. A descendant
-// cannot be born before its root (1s clock skew tolerance).
+// Authenticated descendants of a live, identity-matching root. As in the
+// terminal supervisor's observeOwned, every edge must use the CURRENT immediate
+// parent's birth: CIM can retain an old parent's PID after that PID is reused.
 export function ownedWindowsTree(rows, identity) {
-  if (!rows) return { authenticated: false, owned: [] };
+  if (!(rows instanceof Map) || !identity) return { authenticated: false, owned: [] };
   const root = rows.get(identity.pid);
-  if (!root || root.birthMs !== identity.birthMs || root.path !== identity.path) return { authenticated: false, owned: [] };
+  if (!root || !Number.isSafeInteger(root.birthMs) || root.birthMs !== identity.birthMs || root.path !== identity.path) return { authenticated: false, owned: [] };
   const owned = new Map([[identity.pid, 0]]);
   let changed = true;
   while (changed) {
     changed = false;
     for (const row of rows.values()) {
-      if (owned.has(row.pid) || !owned.has(row.ppid) || row.birthMs < identity.birthMs - 1000) continue;
+      if (owned.has(row.pid) || !owned.has(row.ppid)) continue;
+      const parent = rows.get(row.ppid);
+      if (!Number.isSafeInteger(row.birthMs) || row.birthMs < parent.birthMs) continue;
       owned.set(row.pid, owned.get(row.ppid) + 1);
       changed = true;
     }
@@ -237,22 +240,23 @@ export function ownedWindowsTree(rows, identity) {
 // pids whose CURRENT row still matches the birth we observed while the root was
 // alive may be signalled. Stale entries (exited or PID-reused) are dropped.
 export function planAuthenticatedCleanup(rows, identity, knownDescendants, rootAlive) {
+  if (!(rows instanceof Map)) throw new Error("cleanup planning process telemetry unavailable");
   const targets = [];
   for (const [pid, birthMs] of knownDescendants) {
-    const row = rows?.get(pid);
+    const row = rows.get(pid);
     if (row && row.birthMs === birthMs) targets.push(pid);
   }
-  const rootRow = rows?.get(identity.pid);
+  const rootRow = rows.get(identity.pid);
   if (rootAlive && rootRow && rootRow.birthMs === identity.birthMs && rootRow.path === identity.path) targets.push(identity.pid);
   return { targets: [...new Set(targets)] };
 }
 
 export async function executeOwnedChild(root, args, log, limitMs, state, supervision = {}) {
-  const { query = queryWindowsProcesses, kill = killWindowsPid, sampleMs = 1000, graceMs = 10_000 } = supervision;
+  const { query = queryWindowsProcesses, kill = killWindowsPid, spawnChild = spawn, sampleMs = 1000, graceMs = 10_000 } = supervision;
   const { openSync, closeSync, writeSync } = await import("node:fs");
   const fd = openSync(log, "w");
   const started = performance.now();
-  const child = spawn(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawnChild(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let closed = false, exit = null, failure = null, logOpen = true;
   const completion = new Promise((resolve) => {
     child.on("error", (error) => { failure ??= error.message; });
@@ -285,27 +289,31 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
     // Root only through Node's own child handle; descendants only by re-authenticated pid+birth.
     const killed = [], unproven = [];
     try {
+      if (!identity) throw new Error("owned child identity unavailable for cleanup");
+      const plan = planAuthenticatedCleanup(query(), identity, known, !closed);
       if (!closed) { try { child.kill("SIGKILL"); killed.push(`${child.pid} (own handle)`); } catch { unproven.push(child.pid); } }
-      if (identity) {
-        const plan = planAuthenticatedCleanup(query(), identity, known, !closed);
-        for (const pid of plan.targets) { const status = kill(pid); if (status === 0) killed.push(pid); else unproven.push(pid); }
-        const remaining = query();
-        for (const pid of plan.targets) {
-          const row = remaining?.get(pid);
-          const birth = pid === identity.pid ? identity.birthMs : known.get(pid);
-          if (row && row.birthMs === birth) unproven.push(pid);
-        }
-        if (unproven.length) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${JSON.stringify(unproven)}`; }
-      } else if (!closed) {
-        state.unsafe = true;
+      for (const pid of plan.targets) {
+        if (pid === identity.pid) continue; // The root is terminated only through its own child handle.
+        const status = kill(pid);
+        if (status === 0) killed.push(pid); else unproven.push(pid);
       }
+      const remaining = query();
+      if (!(remaining instanceof Map)) throw new Error("post-termination process telemetry unavailable");
+      // A missing sample is NOT an empty table. Prove release of every known
+      // identity, not merely targets that happened to appear in the kill plan.
+      for (const [pid, birth] of new Map([[identity.pid, identity.birthMs], ...known])) {
+        const row = remaining.get(pid);
+        if (row && row.birthMs === birth) unproven.push(pid);
+      }
+      if (unproven.length) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${JSON.stringify(unproven)}`; }
       if (!closed) await Promise.race([completion, delay(graceMs)]);
       if (!closed) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; owned child outlived the managed bound`; }
     } catch (error) {
       state.unsafe = true;
-      failure = `${failure ?? "owned child cleanup failed"}; ${error.message}`;
+      unproven.push(error.message);
+      failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${error.message}`;
     }
-    state.cleanup = { supervisor: "authenticated per-pid termination (own-handle root, pid+birth re-authenticated descendants; never bare taskkill /T)", killed, unproven };
+    state.cleanup = { supervisor: "authenticated per-pid termination (own-handle root, pid+birth re-authenticated descendants; never bare taskkill /T)", killed, unproven, released: !state.unsafe };
     logOpen = false;
     closeSync(fd);
   }

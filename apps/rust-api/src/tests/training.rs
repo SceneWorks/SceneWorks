@@ -1,6 +1,66 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
+/// No worker is dispatched and no model fixture is installed by this test.
+#[tokio::test]
+async fn moss_field_shapes_refuse_submission_before_queueing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"MOSS shape checks"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = project["id"].as_str().unwrap();
+    let targets = sceneworks_core::training::builtin_training_targets();
+    for target in targets
+        .targets
+        .iter()
+        .filter(|t| t.kernel == "moss_image_lora")
+    {
+        for network in ["lora", "lokr"] {
+            for dry_run in [false, true] {
+                for (field, invalid, remedy) in [
+                    ("cacheLatents", json!("false"), "true or false"),
+                    ("cacheTextEmbeddings", json!(0), "true or false"),
+                    ("loraTargetModules", json!([7]), "only strings"),
+                    (
+                        "modelOptions",
+                        json!({"vae_posterior":"sample"}),
+                        "posterior_mean_v1",
+                    ),
+                    ("decomposeFactor", json!(0), "-1 or a positive i32"),
+                ] {
+                    let mut config = serde_json::to_value(&target.defaults).unwrap();
+                    config["advanced"]["networkType"] = json!(network);
+                    config["advanced"][field] = invalid;
+                    let (status, error) = request(
+                        app.clone(),
+                        "POST",
+                        &format!("/api/v1/projects/{project_id}/training/jobs"),
+                        json!({
+                            "targetId":target.id, "datasetId":"ds_missing", "config":config,
+                            "outputName":"Rejected before allocation", "dryRun":dry_run
+                        }),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {error}");
+                    assert_eq!(error["code"], "training_field_error", "{error}");
+                    assert_eq!(error["context"]["field"], field, "{error}");
+                    assert!(error.to_string().contains(remedy), "{error}");
+                }
+            }
+        }
+    }
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
+}
+
 fn ltx_prepared_bundle_bytes(schema: &str) -> Vec<u8> {
     let mut header = serde_json::to_vec(&json!({
         "__metadata__": {

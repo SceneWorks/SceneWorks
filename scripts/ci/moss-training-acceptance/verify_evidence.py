@@ -447,7 +447,17 @@ def _artifact_references(value, location=()):
             yield from _artifact_references(item, location)
 
 
-def verify_record(record, root, manifest, expected_source):
+def verify_inspection_clock(completed_at, verification_time):
+    """An inspection must already have happened, not merely fit a future case window."""
+    at = timestamp(completed_at)
+    require(at <= finite(verification_time, "verification clock"),
+            "inspection completedAt is in the verification future")
+    return at
+
+
+def verify_record(record, root, manifest, expected_source, verification_time=None):
+    if verification_time is None:
+        verification_time = datetime.now(timezone.utc).timestamp()
     from jsonschema import Draft202012Validator, FormatChecker
     schema = read_json(Path(__file__).with_name("evidence.schema.json"))
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(record)
@@ -576,7 +586,7 @@ def verify_record(record, root, manifest, expected_source):
     verify_rss(cleanup, ceiling, started, ended)
     inspected = set()
     for inspection in record["inspections"]:
-        at = timestamp(inspection["completedAt"])
+        at = verify_inspection_clock(inspection["completedAt"], verification_time)
         require(started <= at <= started + manifest["limits"]["caseWallSeconds"], "inspection outside original case deadline")
         checked_artifact(root, inspection["reviewedArtifact"])
         inspected.add((inspection["reviewedArtifact"]["path"], inspection["reviewedArtifact"]["sha256"]))
@@ -693,7 +703,9 @@ def verify_workflow_provenance(receipt, capture_run, expected_attempt=None):
     return attempt
 
 
-def inspection_set(root):
+def inspection_set(root, verification_time=None):
+    if verification_time is None:
+        verification_time = datetime.now(timezone.utc).timestamp()
     encoded = os.environ.get("MOSS_INSPECTION_JSON")
     if encoded:
         document = json.loads(encoded, parse_constant=_invalid_constant, object_pairs_hook=_unique_object)
@@ -715,12 +727,17 @@ def inspection_set(root):
                 "unexpected/duplicate inspection cell")
         require(isinstance(case.get("inspections"), list) and len(case["inspections"]) >= 3,
                 "named per-case preview inspections missing")
+        for inspection in case["inspections"]:
+            verify_inspection_clock(inspection["completedAt"], verification_time)
         by_id[case["caseId"]] = case
     return capture_run, by_id
 
 
 def finalize(root, manifest_file, output_file):
     from jsonschema import Draft202012Validator
+    # One actual clock for the whole verification, before copying/hash work can
+    # let a future-dated declaration become current during a slow finalization.
+    verification_time = datetime.now(timezone.utc).timestamp()
     root, manifest_file, output_file = Path(root), Path(manifest_file), Path(output_file)
     require(digest(manifest_file) == MANIFEST_SHA256, "sealed manifest changed")
     manifest = read_json(manifest_file)
@@ -746,7 +763,7 @@ def finalize(root, manifest_file, output_file):
         for backend in ("mlx", "cuda"):
             shutil.copytree(root / f"{phase}-{backend}", destination / f"{phase}-{backend}")
             verify_bundle(destination, phase, backend, source)
-    capture_run, reviews = inspection_set(root)
+    capture_run, reviews = inspection_set(root, verification_time)
     attempt = None
     for _, receipt in bundles.values():
         attempt = verify_workflow_provenance(receipt, capture_run, attempt)
@@ -829,7 +846,7 @@ def finalize(root, manifest_file, output_file):
         require(record.get("recordKind") == "campaign-acceptance-evidence"
                 and record.get("isCampaignEvidence") is True, "fixture/foreign raw record rejected")
         record["acceptanceDisposition"] = "accepted"
-        audits = verify_record(record, destination, manifest, source)
+        audits = verify_record(record, destination, manifest, source, verification_time)
         evaluation = record["evaluationIdentity"]
         dataset = record["datasetIdentity"]["manifestSha256"]
         if common_evaluation is None:

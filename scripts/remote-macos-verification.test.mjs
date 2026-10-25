@@ -347,6 +347,30 @@ test("browser fixture artifact profile never queues the self-hosted manual verif
   );
 });
 
+test("browser fixture conflicts execute rejection before checkout or compiler setup instead of skipping green", () => {
+  const name = "browser-fixture-artifact", body = jobBody(name);
+  const step = /      - name: Reject conflicting browser fixture selectors before setup\n[\s\S]*?(?=\n      - )/.exec(body)?.[0];
+  assert.ok(step, "selected producer must have an independent early rejection step");
+  assert.ok(body.indexOf("Reject conflicting browser fixture selectors") < body.indexOf("actions/checkout"));
+  assert.ok(body.indexOf("Reject conflicting browser fixture selectors") < body.indexOf("dtolnay/rust-toolchain"));
+  const script = step.split("        run: |\n")[1].split("\n").map(line => line.startsWith("          ") ? line.slice(10) : line).join("\n");
+  const selectors = ["RUN_MEMORY_CALIBRATION", "RUN_FIVE_RUNG_REFERENCE", "PROVISION_QWEN_SNAPSHOT", "PROVISION_Z_IMAGE_SNAPSHOT", "RUN_MOSS_NATIVE_VALIDATION"];
+  const clean = Object.fromEntries(selectors.map(key => [key, "false"]));
+  assert.equal(condition(name, "workflow_dispatch", name), true);
+  assert.equal(spawnSync("bash", ["-c", script], { env: { ...process.env, ...clean }, encoding: "utf8" }).status, 0);
+  for (const selector of selectors) {
+    const inputs = { [selector.toLowerCase()]: true };
+    assert.equal(condition(name, "workflow_dispatch", name, "true", "success", base, REPOSITORY, inputs), true,
+      "a conflict must start rejection, not skip the only selected producer");
+    for (const legacy of ["changes", "macos-checks", "nax-worker"]) {
+      assert.equal(condition(legacy, "workflow_dispatch", name, "true", "success", base, REPOSITORY, inputs), false);
+    }
+    const result = spawnSync("bash", ["-c", script], { env: { ...process.env, ...clean, [selector]: "true" }, encoding: "utf8" });
+    assert.equal(result.status, 1, selector);
+    assert.match(result.stdout, new RegExp(`cannot be combined with ${selector}`));
+  }
+});
+
 test("fork manual verification never queues a self-hosted runner", () => {
   assert.equal(condition(JOB, "workflow_dispatch", "consumer-assertions", "true", "success", base, "fork/SceneWorks"), false);
 });

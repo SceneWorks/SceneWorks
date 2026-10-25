@@ -1017,11 +1017,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
-          "old": "let modules = modules.as_array().ok_or_else(|| {\n                WorkerError::InvalidPayload(\"MOSS loraTargetModules must be an array\".into())\n            })?;",
-          "new": "let empty = Vec::new();\n            let modules = modules.as_array().unwrap_or(&empty);",
-          "anchor": "fn validate_training_target_config("
+          "old": "let modules = modules\n            .as_array()\n            .ok_or_else(|| invalid(\"loraTargetModules\", \"must be an array\"))?;",
+          "new": "let empty = Vec::new();\n        let modules = modules.as_array().unwrap_or(&empty);",
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     },
@@ -1032,11 +1032,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
           "old": "modules.iter().any(|module| !module.is_string())",
           "new": "false",
-          "anchor": "fn validate_training_target_config("
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     },
@@ -1047,11 +1047,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
-          "old": "let factor = factor.as_i64().ok_or_else(|| {\n                WorkerError::InvalidPayload(\"MOSS decomposeFactor must be an integer\".into())\n            })?;",
+          "old": "let factor = factor\n            .as_i64()\n            .ok_or_else(|| invalid(\"decomposeFactor\", \"must be an integer\"))?;",
           "new": "let factor = factor.as_i64().unwrap_or(-1);",
-          "anchor": "fn validate_training_target_config("
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     },
@@ -1062,11 +1062,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
           "old": "factor <= 0 || i32::try_from(factor).is_err()",
           "new": "i32::try_from(factor).is_err()",
-          "anchor": "fn validate_training_target_config("
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     },
@@ -1077,11 +1077,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
           "old": "factor <= 0 || i32::try_from(factor).is_err()",
           "new": "factor <= 0",
-          "anchor": "fn validate_training_target_config("
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     },
@@ -1092,11 +1092,11 @@
       ],
       "patches": [
         {
-          "file": "crates/sceneworks-worker/src/training_jobs.rs",
+          "file": "crates/sceneworks-core/src/training.rs",
           "op": "replace",
           "old": "factor <= 0 || i32::try_from(factor).is_err()",
           "new": "factor <= 4 || i32::try_from(factor).is_err()",
-          "anchor": "fn validate_training_target_config("
+          "anchor": "fn validate_moss_training_field_shapes("
         }
       ]
     }
