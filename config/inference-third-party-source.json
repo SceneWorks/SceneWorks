@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference main revision 857f7a19 (epic sc-26752 required late-fix pin): 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. Native PR1343 merged a tree identical to reviewed and CI-tested 572edff0. The advance from 878f26ab changes only the production MOSS EDIT_REVISION from unavailable e19b6ab0 to accessible immutable 3be9c400, plus a CPU identity regression, captured public package metadata and compatibility documentation. All other bytes of the production MOSS edit contract module are identical (original SHA256 3885d96115f2a850a3156349a78f8bcd23aeeff6dc7bd657c887b4de6b56b147 maps to 670429a2a5b190b3186986dda8b8b2d6b67cea3b962007d84b32e75b9d2511a4). Weight SHA256 17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf and config SHA256 b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669 are unchanged. Dependency manifests and lockfiles, model/math/security semantics, LICENSE and NOTICE files are unchanged; existing numerical captures retain their original revisions and device identities and are not relabeled as reruns. The rescan adds or removes no provenance candidates or production crates. Existing Base/SFT, DMD, Supra2-IMG and other source-area dispositions remain preserved. Edit-adapter weights have no declared license; linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms. Existing FLUX.3 and other advisory compliance items remain open. Official inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "857f7a1996e3678a0773c3509ac0087522c19ce6",
-  "auditDigest": "3c52e679b45324a5214c0c6973455373e64af9e55ad30c15f6d8607eeadec8d9",
+  "_comment": "Audit inventory reviewed at inference main 2883eef0 (2883eef063d7380faeaf86bcdd8f7c19f8bb3aae) for epic sc-26752: 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. Protected PR1347 adds the reviewed MOSS Candle component drop-before-synchronization correction and its host regression tests; the required Windows supervisor readiness repair is test-only. The intervening H3 integration is included in the exact source rescan. Provider and anchor closures, provenance candidates, crate coverage and audit digest are derived from this pin; existing source-area dispositions and advisory licensing work remain preserved. The Mac MOSS source-applicability audit retains historical evidence at its original revisions and does not claim new binary, timing or memory measurements. MOSS edit-adapter weights still have no declared license; linked code and parent-weight licenses do not establish adapter-weight terms. This summary is a provenance review, not a new model measurement or a claim that existing advisory compliance items are closed.",
+  "inferenceRevision": "2883eef063d7380faeaf86bcdd8f7c19f8bb3aae",
+  "auditDigest": "893a97be53266c0a6b0b77bdca2d95e77febd2ab2fd992f6305e00c1e0249fe4",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "857f7a1996e3678a0773c3509ac0087522c19ce6",
+    "revision": "2883eef063d7380faeaf86bcdd8f7c19f8bb3aae",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "a31f7268f0f05840f8d27878dd622a59514f7217222b080d78794e189d5b9ae8"
+    "populationSha256": "51ae2f0c3c6184716e46238d2d64a5b491d34de72262e6af7a5b3f49470e6b1a"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "857f7a1996e3678a0773c3509ac0087522c19ce6",
+    "revision": "2883eef063d7380faeaf86bcdd8f7c19f8bb3aae",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
