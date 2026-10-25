@@ -47,7 +47,7 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{executionTooli
   requireThat(captureEntry?.file==='execution-tooling-capture.json'&&String(captureEntry.runId)==='40214209083'&&/^[1-9][0-9]*$/.test(String(captureEntry.artifactId))&&captureEntry.attempt===1&&/^[a-f0-9]{40}$/.test(executionToolingSha??'')&&verificationSourceRoot,'amended review requires actual H21 execution-tooling capture');
   const capture=await json(await identity(root,captureEntry));
   validateExecutionToolingCapture(capture,executionToolingSha,verificationSourceRoot);
-  requireThat(canonical(Object.keys(comparison.upstream??{}).sort())===canonical(CELLS)&&Array.isArray(comparison.rows)&&comparison.rows.length===8,'all four upstream cells and eight native comparisons required');
+  requireThat(canonical(Object.keys(comparison.upstream??{}).sort())===canonical([...CELLS].sort())&&Array.isArray(comparison.rows)&&comparison.rows.length===8,'all four upstream cells and eight native comparisons required');
   const qualityRows=rows.filter(row=>row.anchors);
   requireThat(qualityRows.length===8&&canonical(comparison.rows.map(r=>r.rowId).sort())===canonical(qualityRows.map(r=>r.id).sort()),'quality comparison omitted or duplicated native cell');
   let suite=null;
@@ -70,6 +70,14 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{executionTooli
     requireThat(canonical(entry.inputs?.map(item=>item.id))===canonical(expectedRefs)&&entry.inputs.every(item=>item.sha256===inputs[item.id]?.sha256),'upstream reference inputs differ from frozen ordered images');
     requireThat(result.result.references?.length===expectedRefs.length&&result.result.references.every((path,index)=>path.endsWith(`/${expectedRefs[index]}.png`))&&result.result.prompt===qualityRows.find(row=>row.variant===cell.split('-')[0]&&row.refs.length===expectedRefs.length).request.prompt&&result.result.negative_prompt==='','upstream prompt/reference order differs from frozen quality case');
     requireThat(image&&entry.observation&&entry.observation.trim(),'actual upstream image requires case-specific observed outcome');
+  }
+  const summaryEntry=comparison.suiteSummary;
+  requireThat(suite&&summaryEntry?.file==='upstream-suite-summary.json'&&String(summaryEntry.runId)===suite.runId&&String(summaryEntry.artifactId)===suite.artifactId&&summaryEntry.attempt===suite.attempt,'three-case suite summary missing actual artifact identity');
+  const summary=await json(await identity(root,summaryEntry));
+  requireThat(summary.toolingSha===suite.toolingSha&&summary.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&Array.isArray(summary.outputs)&&summary.outputs.length===3,'three-case suite result provenance changed');
+  for(const cell of CELLS.filter(name=>name!=='base-single')){
+    const output=summary.outputs.find(item=>item.caseId===cell),entry=comparison.upstream[cell];
+    requireThat(summary.outputs.filter(item=>item.caseId===cell).length===1&&output.imageSha256===entry.image.sha256&&output.diagnosticSha256===entry.diagnostic.sha256,'upstream image/diagnostic differs from actual three-case suite output');
   }
   return comparison;
 }
