@@ -8,23 +8,32 @@ import { deflateSync } from 'node:zlib';
 import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, Api } from './moss-edit-terminal.mjs';
 
 const execFile = promisify(callback);
+export const R16_ORIGINAL_INVENTORY_SHA256 = '6a42624ebf84ffd06d54b7e4f845a5214bb485c12c9cf6211e475963b9488a0e';
 export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha) {
-  requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&sourceSha===dispatchSha&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires the exact workflow source SHA and inference-main pin');
-  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind'];
+  requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&/^[a-f0-9]{40}$/.test(dispatchSha)&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires exact product/tooling/inference commits');
+  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt'];
   requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&required.every(key=>typeof value[key]==='string'&&value[key])&&Object.keys(value).every(key=>[...required,...optional].includes(key)&&typeof value[key]==='string'),'MOSS dispatch JSON has missing, unknown or non-string fields');
   requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.candidate_id)&&/^[a-f0-9]{64}$/.test(value.bundle_manifest_sha256),'MOSS dispatch candidate or manifest SHA is invalid');
-  requireThat(['upload','execute','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute or verify');
+  requireThat(['upload','execute','continue','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute, continue or verify');
   const empty=keys=>keys.every(key=>value[key]===undefined||value[key]==='');
+  const repair=value.phase==='continue'||(value.phase==='verify'&&value.tooling_sha);
+  requireThat(sourceSha===dispatchSha&&(!repair?empty(['tooling_sha','product_sha']):value.tooling_sha===dispatchSha&&/^[a-f0-9]{40}$/.test(value.product_sha??'')&&value.product_sha!==dispatchSha),'MOSS workflow commit must equal the exact product source or separately identify H17 product and H18 repair tooling');
   if(value.phase==='upload') {
     requireThat(['bundle','review'].includes(value.upload_kind)&&typeof value.upload_path==='string'&&value.upload_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.upload_path)===value.upload_path,'MOSS upload requires a canonical directory inside the owned epic run');
-    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id']),'MOSS upload cannot consume execution or prior artifact IDs');
+    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt']),'MOSS upload cannot consume execution or prior artifact IDs');
   } else {
     requireThat([value.bundle_run_id,value.bundle_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS execution/verify requires exact bundle IDs');
     requireThat(empty(['upload_path','upload_kind']),'MOSS execution/verify cannot upload host files');
-    if(value.phase==='verify')requireThat([value.execution_run_id,value.review_artifact_id,value.review_run_id??value.bundle_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS verify requires exact execution run, attempt and review artifact/run IDs');
-    else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id']),'MOSS execute cannot consume prior execution or review evidence');
+    if(value.phase==='verify') {
+      requireThat([value.execution_run_id,value.review_artifact_id,value.review_run_id??value.bundle_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS verify requires exact execution run, attempt and review artifact/run IDs');
+      requireThat(empty(['original_inventory_path','original_inventory_sha256'])&&(!repair?empty(['native_run_id','native_run_attempt']):[value.native_run_id,value.native_run_attempt].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS repaired verify requires original native run/attempt and no host inventory path');
+    } else if(value.phase==='continue') {
+      requireThat([value.execution_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??''))&&empty(['review_artifact_id','review_run_id','native_run_id','native_run_attempt']),'MOSS continuation requires one exact original execution attempt and no review/native override');
+      requireThat(typeof value.original_inventory_path==='string'&&value.original_inventory_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.original_inventory_path)===value.original_inventory_path&&value.original_inventory_sha256===R16_ORIGINAL_INVENTORY_SHA256,'MOSS continuation requires the exact sealed local original-evidence boundary');
+    } else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt']),'MOSS execute cannot consume prior execution or review evidence');
   }
-  return Object.fromEntries([...required,...optional].map(key=>[key,value[key]??(key==='execution_run_attempt'?'1':key==='review_run_id'&&value.phase==='verify'?value.bundle_run_id:'')]));
+  const legacy=optional.slice(0,8),repairFields=optional.slice(8);
+  return Object.fromEntries([...required,...legacy,...repairFields.filter(key=>value[key]!==undefined)].map(key=>[key,value[key]??(key==='execution_run_attempt'?'1':key==='review_run_id'&&value.phase==='verify'?value.bundle_run_id:'')]));
 }
 export const CUDA_UUID = 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe';
 export const CUDA_PCI = '00000000:C1:00.0';
@@ -40,6 +49,28 @@ export async function filesUnder(root) {
     const path=resolve(dir,name),info=await lstat(path);requireThat(!info.isSymbolicLink(),'campaign transport refuses symlinks/junctions');
     if(info.isDirectory())await visit(path);else {requireThat(info.isFile(),'campaign transport accepts regular files only');files.push({file:relative(root,path).split('\\').join('/'),...await fileIdentity(path)});}
   }};await visit(resolve(root));return files;
+}
+export async function assertOriginalEvidence(root,manifest,{exact=false}={}) {
+  requireThat(Array.isArray(manifest?.files)&&manifest.files.length>0&&new Set(manifest.files.map(item=>item.file)).size===manifest.files.length,'original evidence inventory has missing or duplicate paths');
+  if(exact)requireThat(canonical(await filesUnder(root))===canonical(manifest.files),'original evidence bytes/files changed before continuation');
+  else for(const item of manifest.files) {
+    const path=safePath(root,item.file),info=await lstat(path);
+    requireThat(info.isFile()&&!info.isSymbolicLink()&&canonical(await fileIdentity(path))===canonical({byteLength:item.byteLength,sha256:item.sha256}),`original evidence bytes changed: ${item.file}`);
+  }
+  return manifest.files.length;
+}
+export async function continuationRemainingRows(evidenceRoot,plan) {
+  const rows=plan.rows.filter(row=>row.backend==='mlx');
+  requireThat(rows.length===25&&rows[6]?.id==='advanced-mlx-sft','original MLX frozen row order changed');
+  for(const row of rows.slice(0,6))requireThat((await json(resolve(evidenceRoot,'rows',row.id,'receipt.json'))).execution==='VERIFIED',`original verified predecessor ${row.id} missing`);
+  const failed=await json(resolve(evidenceRoot,'rows/advanced-mlx-sft/failure.json'));
+  requireThat(failed.rowId==='advanced-mlx-sft'&&failed.message==='per-prompt negatives gained an unsupported broadcast field','original failed seventh row is not the reviewed checker defect');
+  for(const row of rows.slice(7)) {
+    for(const file of [`rows/${row.id}/receipt.json`,`rows/${row.id}/failure.json`,`attempts/mlx/${row.id}.start.json`]) {
+      try{await lstat(safePath(evidenceRoot,file));requireThat(false,`later row ${row.id} was already touched`);}catch(error){if(error.code!=='ENOENT')throw error;}
+    }
+  }
+  return rows.slice(7);
 }
 export async function sourceIdentity(config) {
   const sources={sceneworks:treeIdentity(config.sourceRoot),inference:treeIdentity(config.inferenceRoot)};
@@ -127,9 +158,12 @@ export async function sampler({backend,file,observe=()=>nativeDevice(backend),in
 export async function startStack(config,token) {
   requireThat(token&&config.workerId&&Number.isInteger(config.port),'native stack requires actual token/worker/port');
   await sourceIdentity(config);await nativeDevice(config.backend);await mkdir(resolve(config.stateRoot,'data'),{recursive:true,mode:0o700});await mkdir(resolve(config.stateRoot,'credentials'),{recursive:true,mode:0o700});
-  await cp(resolve(config.sourceRoot,'config'),resolve(config.stateRoot,'config'),{recursive:true,errorOnExist:true,force:false});
+  if(config.continuation) {
+    requireThat(config.backend==='mlx'&&config.continuation.name==='r16-checker-recovery'&&/^[a-f0-9]{40}$/.test(config.continuation.toolingSha??''),'only the reviewed stopped MLX continuation may reopen state');
+    requireThat((await filesUnder(resolve(config.stateRoot,'config'))).length>0,'original stopped stack configuration missing');
+  } else await cp(resolve(config.sourceRoot,'config'),resolve(config.stateRoot,'config'),{recursive:true,errorOnExist:true,force:false});
   const env=childEnvironment(config,token),children=[],handles=[];
-  const launch=async(name,extra)=>{const handle=await open(resolve(config.root,`${name}.log`),'wx',0o600);handles.push(handle);const child=spawn(config.apiBinary,[],{cwd:config.sourceRoot,env:{...env,...extra},stdio:[name.startsWith('worker')?'pipe':'ignore',handle.fd,handle.fd],windowsHide:true});child.once('error',error=>{child.startError=error;});children.push(child);return child;};
+  const launch=async(name,extra)=>{const handle=await open(resolve(config.root,`${name}${config.continuation?'-continuation':''}.log`),'wx',0o600);handles.push(handle);const child=spawn(config.apiBinary,[],{cwd:config.sourceRoot,env:{...env,...extra},stdio:[name.startsWith('worker')?'pipe':'ignore',handle.fd,handle.fd],windowsHide:true});child.once('error',error=>{child.startError=error;});children.push(child);return child;};
   const api=await launch('api',utilityWorkerEnvironment(config)),client=new Api(env.SCENEWORKS_API_URL,token);let worker=await launch('worker',standaloneWorkerEnvironment()),restarts=0;
   const stopOne=async(child,isWorker)=>{if(child.exitCode!==null||child.signalCode!==null)return;let timer;try {
     await new Promise((done,fail)=>{child.once('exit',done);timer=setTimeout(()=>fail(Error('owned native process did not stop; state transfer forbidden')),30000);if(process.platform==='win32'&&isWorker)child.stdin.end();else child.kill('SIGTERM');});
@@ -142,7 +176,7 @@ export async function startStack(config,token) {
     requireThat(worker.exitCode===null&&worker.signalCode===null&&!worker.startError,'owned worker exited unexpectedly; do not silently restart a failed campaign');
     const oldPid=worker.pid;await stopOne(worker,true);requireThat(worker.exitCode!==null||worker.signalCode!==null,'owned worker cache process still running');
     const oldExit={code:worker.exitCode,signal:worker.signalCode};
-    await sourceIdentity(config);await nativeDevice(config.backend);config.observationJournal=resolve(config.root,`journal-${++restarts}.jsonl`);
+    await sourceIdentity(config);await nativeDevice(config.backend);config.observationJournal=resolve(config.root,`journal-${config.continuation?'continuation-':''}${++restarts}.jsonl`);
     worker=await launch(`worker-restart-${restarts}`,{...standaloneWorkerEnvironment(),SCENEWORKS_MOSS_OBSERVATION_JOURNAL:config.observationJournal});
     return {reason,oldPid,oldExit,newPid:worker.pid,journal:config.observationJournal,source:await sourceIdentity(config),workerId:config.workerId,at:new Date().toISOString(),meaning:'actual idle owned worker process exited; its native resident caches cannot be reused by reentry'};
   };
@@ -157,7 +191,7 @@ export async function startStack(config,token) {
     const registered=ready?.gpuId===(config.backend==='cuda'?'1':'mlx')&&ready.status==='idle'&&utility;
     if(!registered)await save(resolve(config.root,'startup-readiness.json'),stackReadinessSnapshot({health:lastHealth,workers:lastWorkers,children,workerId:config.workerId,httpStatus:lastHttpStatus}));
     requireThat(registered,'actual native/CPU model_download workers never registered on their bound identities; inspect startup-readiness.json');
-    await save(resolve(config.root,'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString()});
+    await save(resolve(config.root,config.continuation?'stack-continuation.json':'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString(),...(config.continuation?{tooling:config.continuation.toolingSha}:{})});
     return {api:client,children,stop,restartIdleWorker,async restartWorker(canceledJobId){
       const job=await client.request(`/api/v1/jobs/${encodeURIComponent(canceledJobId)}`);
       requireThat(job.status==='canceled'&&job.workerId===config.workerId&&!(job.result?.assets?.length)&&job.result?.outputPublication?.state!=='pending','owned cancellation/publication is not drained; do not restart');

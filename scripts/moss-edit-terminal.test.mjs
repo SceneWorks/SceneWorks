@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor } from './moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,8 +10,9 @@ import { fileURLToPath } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { sourceIdentity } from './lib/moss-edit-terminal-actions.mjs';
+import { sourceIdentity, filesUnder } from './lib/moss-edit-terminal-actions.mjs';
 import { adapterRefusalState } from './moss-edit-terminal-actions.mjs';
+import { verifyUiRequestBinding } from './moss-edit-terminal-browser.mjs';
 
 globalThis.fetch = async () => { throw new Error('LIVE_API_FORBIDDEN_IN_PURE_TESTS'); };
 const contract = await json(fileURLToPath(new URL('./fixtures/moss-edit-product-contract-v2.json',import.meta.url)));
@@ -63,6 +64,16 @@ test('ordered duplicates and typed tensor identities survive materialization', (
 test('MCP maps only supported actual tool fields, preserving absent broadcast negative', () => {
   const request = { mode: 'edit_image', prompt: '', seed: null, advanced: { guidanceScale: 4, mossImageAdvanced: { negativePrompts: ['a','b'], output: 'latents' } } };
   const args = mcpArgs(request); assert.equal(args.seed, null); assert.equal(Object.hasOwn(args,'negativePrompt'), false); assert.deepEqual(args.mossImageAdvanced.negativePrompts,['a','b']);
+  assertRequestBinding(request,{...request,negativePrompt:''}); // API persistence normalizes the omitted field.
+  assert.throws(()=>assertRequestBinding(request,{...request,negativePrompt:'broadcast'}),/unsupported broadcast field/);
+  assert.throws(()=>assertRequestBinding(request,{...request,negativePrompt:null}),/unsupported broadcast field/);
+});
+test('continued UI replay uses the repaired normalized request checker',async()=>{
+  const expected={advanced:{mossImageAdvanced:{negativePrompts:['a','b']}},referenceAssetIds:['owned-input']},actual={...structuredClone(expected),negativePrompt:''};
+  verifyUiRequestBinding(expected,actual);
+  assert.throws(()=>verifyUiRequestBinding(expected,{...actual,negativePrompt:'broadcast'}),/unsupported broadcast field/);
+  const controller=await readFile(fileURLToPath(new URL('./moss-edit-terminal-actions.mjs',import.meta.url)),'utf8');
+  assert.match(controller,/repairTooling\?await import\(pathToFileURL\(resolve\(toolingRoot,'scripts\/moss-edit-terminal-browser\.mjs'\)\)\.href\)/);
 });
 test('manual job ID and terminal status cannot substitute actual persisted request', () => {
   assert.throws(() => assertRequestBinding({ seed: 173 }, { seed: 0 }));
@@ -102,6 +113,40 @@ test('portable evidence cannot escape the candidate directory', () => {
 });
 
 const temporary = label => mkdtemp(resolve(tmpdir(),`moss-terminal-${label}-`));
+test('R16 recovery adjudication binds original bytes, completed job and only the failed seventh attempt',async t=>{
+  const root=await temporary('recovery-adjudication');t.after(()=>rm(root,{recursive:true,force:true}));
+  for(let index=0;index<257;index++)await save(resolve(root,`old/${index}.json`),{index});
+  const original=await filesUnder(root),sourceSha='a'.repeat(40),inferenceSha='b'.repeat(40),toolingSha='c'.repeat(40),candidateId='actual-r16';
+  const manifest={version:1,actualRunId:'40198829729',attempt:1,sourceSha,inferenceSha,files:original};
+  await save(resolve(root,'continuation-original-inventory.json'),manifest);
+  const inventorySha256=(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256;
+  const lock={candidateId,sources:{sceneworks:{head:sourceSha},inference:{head:inferenceSha}}};
+  const state={root,lock,config:{repair:{name:'r16-checker-recovery',inventorySha256,tooling:{head:toolingSha}}}};
+  const id='advanced-mlx-sft',attempt=resolve(root,'attempts/mlx'),dir=resolve(root,'rows',id),message='per-prompt negatives gained an unsupported broadcast field';
+  const start={requestSha256:'d'.repeat(64)},job={id:'job_4ccba4f5dc5d78aa0991ca4df750cb65',payload:{input:1},result:{assets:[{id:'actual-latent'}]}};
+  const readback={...job,status:'completed'},rawEvidence=[{file:'old/0.json',...await fileIdentity(resolve(root,'old/0.json'))}];
+  const proof={state:'NO_ACTIVE_OWNED_JOB',attemptSha256:digest(start),lockSha256:digest(lock),jobs:[readback],rawEvidence};
+  await save(resolve(dir,'failure.json'),{message,jobId:job.id});
+  await save(resolve(attempt,`${id}.failure.json`),{message,jobId:job.id,attemptSha256:digest(start)});
+  await save(resolve(attempt,`${id}.start.json`),start);
+  await save(resolve(dir,'receipt.json'),{recoveredWithoutSubmission:true,jobId:job.id,jobSha256:digest(job)});
+  await save(resolve(dir,'terminal-job.json'),job);
+  await save(resolve(dir,'recovery-job-readback.json'),readback);
+  await save(resolve(attempt,`${id}.reconciliation.json`),proof);
+  await save(resolve(attempt,`${id}.resolution.json`),{state:'COORDINATOR_RECONCILED',attemptSha256:digest(start),proofSha256:digest(proof)});
+  await save(resolve(root,'recovery-adjudication.json'),{version:VERSION,name:'r16-checker-recovery',rowId:id,candidateId,sourceSha,inferenceSha,toolingSha,inventorySha256,lockSha256:digest(lock),originalRunId:manifest.actualRunId,originalAttempt:manifest.attempt,jobId:job.id,originalAttemptSha256:digest(start),requestSha256:start.requestSha256,reconciliationSha256:digest(proof),rawEvidence});
+  await assert.rejects(()=>validateRecoveryAdjudication(state),/original partial evidence\/candidate boundary changed/);
+  assert.equal(await validateRecoveryAdjudication(state,inventorySha256),true);
+  assert.equal(acceptedRecoveryFailure(true,'mlx',`${id}.failure.json`),true);
+  assert.equal(acceptedRecoveryFailure(true,'mlx','later-mlx.failure.json'),false);
+  assert.equal(acceptedRecoveryFailure(true,'cuda',`${id}.failure.json`),false);
+  assert.equal(acceptedRecoveryFailure(false,'mlx',`${id}.failure.json`),false);
+  await writeFile(resolve(dir,'recovery-job-readback.json'),JSON.stringify({...readback,id:'different-job'}));
+  await assert.rejects(()=>validateRecoveryAdjudication(state,inventorySha256),/authenticated completed-job reconciliation changed/);
+  await writeFile(resolve(dir,'recovery-job-readback.json'),JSON.stringify(readback)+'\n');
+  await writeFile(resolve(root,'old/0.json'),'changed original evidence');
+  await assert.rejects(()=>validateRecoveryAdjudication(state,inventorySha256),/original evidence bytes changed/);
+});
 function png(pixel, color = 2) {
   const chunk = (type,data) => {
     const body = Buffer.concat([Buffer.from(type),data]); let crc = 0xffffffff;

@@ -8,9 +8,9 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, continuationRemainingRows, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
-import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
+import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -118,6 +118,21 @@ test('native artifact arrangement accepts one source-bound artifact per backend 
   const root=await temporary('builds');for(const backend of ['mlx','cuda'])await save(resolve(root,`moss-native-${backend}-123-1/inventory.json`),{backend});await arrangeBuilds(root);assert.equal((await json(resolve(root,'cuda/inventory.json'))).backend,'cuda');
   const duplicate=await temporary('duplicate');for(const attempt of [1,2])await save(resolve(duplicate,`moss-native-mlx-123-${attempt}/inventory.json`),{backend:'mlx'});await assert.rejects(()=>arrangeBuilds(duplicate),/exactly one/);
 });
+test('continuation preserves original bytes and dispatches only untouched rows after the recovered job',async t=>{
+  const root=await temporary('continuation');t.after(()=>rm(root,{recursive:true,force:true}));
+  const rows=Array.from({length:25},(_,index)=>({id:index===6?'advanced-mlx-sft':`row-${index}`,backend:'mlx'})),plan={rows};
+  for(const row of rows.slice(0,6))await save(resolve(root,'rows',row.id,'receipt.json'),{execution:'VERIFIED',rowId:row.id});
+  await save(resolve(root,'rows/advanced-mlx-sft/failure.json'),{rowId:'advanced-mlx-sft',message:'per-prompt negatives gained an unsupported broadcast field'});
+  const manifest={files:await filesUnder(root)};assert.equal(await assertOriginalEvidence(root,manifest,{exact:true}),7);
+  assert.deepEqual((await continuationRemainingRows(root,plan)).map(row=>row.id),rows.slice(7).map(row=>row.id));
+  await save(resolve(root,'attempts/mlx/row-7.start.json'),{id:'row-7'});
+  await assert.rejects(()=>continuationRemainingRows(root,plan),/already touched/);
+  await assert.rejects(()=>assertOriginalEvidence(root,manifest,{exact:true}),/changed/);
+  await rm(resolve(root,'attempts'),{recursive:true});
+  await writeFile(resolve(root,'rows/row-0/receipt.json'),'changed prior receipt');
+  await assert.rejects(()=>assertOriginalEvidence(root,manifest),/original evidence bytes changed/);
+  await assert.rejects(()=>continuationRemainingRows(root,plan));
+});
 test('fixture aliases require real upload/readback IDs and preserve actual lexical nonfinite bytes',()=>{
   const bindings={campaignProject:'actual-project',foreign:{asset:{id:'actual-foreign-id'}}};
   const resolved=resolveGuardAliases({request:{assetId:'$fixture:foreign'},rawJson:'{"projectId":"$campaignProject","shift":NaN,"assetId":"$fixture:foreign"}'},bindings);
@@ -200,6 +215,15 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   const verify={...execute,phase:'verify',execution_run_id:'789',execution_run_attempt:'2',review_artifact_id:'987',review_run_id:'999'};assert.deepEqual(validate(verify),{...verify,upload_path:'',upload_kind:''});
   const upload={candidate_id:execute.candidate_id,bundle_manifest_sha256:execute.bundle_manifest_sha256,phase:'upload',upload_kind:'bundle',upload_path:'/Users/michael/.codex/epic-runs/sc-26752/sealed-final-inputs'};
   assert.equal(validate(upload).bundle_run_id,'');assert.equal(validate({...upload,upload_kind:'review'}).phase,'upload');
+  const tooling='c'.repeat(40),continuation={...execute,phase:'continue',tooling_sha:tooling,product_sha:identity.sourceSha,execution_run_id:'789',execution_run_attempt:'1',original_inventory_path:'/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/r16-original-partial-evidence-inventory.json',original_inventory_sha256:R16_ORIGINAL_INVENTORY_SHA256};
+  const repaired=value=>validateDispatchEnvelope(JSON.stringify(value),tooling,identity.inferenceSha,tooling);
+  assert.equal(repaired(continuation).tooling_sha,tooling);
+  assert.throws(()=>repaired({...continuation,tooling_sha:identity.sourceSha}),/separately identify H17 product/);
+  assert.throws(()=>repaired({...continuation,original_inventory_path:'/private/foreign'}),/sealed local original-evidence/);
+  assert.throws(()=>repaired({...continuation,original_inventory_sha256:'e'.repeat(64)}),/sealed local original-evidence/);
+  assert.throws(()=>repaired({...continuation,review_artifact_id:'999'}),/no review/);
+  assert.equal(repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha,native_run_id:'789',native_run_attempt:'1'}).native_run_id,'789');
+  assert.throws(()=>repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha}),/original native run/);
   for(const value of [null,[],{}, {...execute,extra:'unexpected'},{...execute,bundle_run_id:123},{...execute,bundle_artifact_id:'../other'},{...execute,candidate_id:'../other'},{...execute,bundle_manifest_sha256:'wrong'},{...execute,phase:'build'},{...execute,execution_run_id:'789'},{...verify,execution_run_id:''},{...verify,review_artifact_id:''},{...verify,execution_run_attempt:'0'}])assert.throws(()=>validate(value));
   assert.throws(()=>validateDispatchEnvelope('{',identity.sourceSha,identity.inferenceSha,identity.sourceSha));
   assert.throws(()=>validateDispatchEnvelope(JSON.stringify(execute),'feature/branch',identity.inferenceSha,identity.sourceSha));
@@ -212,7 +236,7 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   for(const backend of ['mlx','candle'])assert.ok(dispatcher.includes(`(inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == '${backend}'`));
   for(const profile of ['qwen-image-2-1-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights'])assert.ok(dispatcher.includes(`inputs.profile == '${profile}'`));
   assert.match(workflow,/workflow_call:/);assert.match(workflow,/SCENEWORKS_INFERENCE_READ_TOKEN:\s+required: false/);
-  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,4);
+  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,6);
   assert.match(workflow,/test "\$RUNNER_NAME" = nax-macos/);assert.match(workflow,/run-id: \$\{\{ inputs.review_run_id \|\| inputs.bundle_run_id \}\}/);
 });
 test('first bundle copies only exact fixed inputs, provenance and declared fixtures, then seals every byte',async()=>{
@@ -343,16 +367,26 @@ test('adapter refusal rejects shared symlink, hardlink and escaped parent projec
   }
 });
 
-async function privateHfFixture(t) {
+async function privateHfFixture(t,backend='mlx') {
   const base=await realpath(await temporary('private-handoff'));t.after(()=>rm(base,{recursive:true,force:true}));
-  const parent=resolve(base,'moss-sc-26752'),buildRoot=resolve(parent,'moss-build-123-1-mlx'),root=resolve(parent,'moss-execute-123-1-mlx');
+  const parent=resolve(base,'moss-sc-26752'),buildRoot=resolve(parent,`moss-build-123-1-${backend}`),root=resolve(parent,`moss-execute-123-1-${backend}`);
   await mkdir(buildRoot,{recursive:true});await mkdir(root);
-  const common={sourceRoot:resolve(base,'checkout/source'),candidateId:'candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),backend:'mlx',packageSource:resolve(base,'shared'),packageFiles:Array.from({length:43},(_,i)=>({file:`hub/model/file-${i}`,sha256:sha(`bytes-${i}`)}))};
+  const common={sourceRoot:resolve(base,'checkout/source'),candidateId:'candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),backend,packageSource:resolve(base,'shared'),packageFiles:Array.from({length:43},(_,i)=>({file:`hub/model/file-${i}`,sha256:sha(`bytes-${i}`)}))};
   const build={...common,root:buildRoot,hfHome:resolve(buildRoot,'hf')},run={...common,root,hfHome:resolve(root,'hf')};
   for(const [i,item] of common.packageFiles.entries()){await mkdir(resolve(build.hfHome,'hub/model'),{recursive:true});await writeFile(resolve(build.hfHome,item.file),`bytes-${i}`);}
   await save(resolve(buildRoot,'runtime.json'),build);const owner=await sealPrivateHf(build),installed={hfHome:build.hfHome,files:owner.files};
   return {base,build,run,installed,owner};
 }
+test('original stopped CUDA HF is adopted into a new run only from its sealed exact owner',async t=>{
+  const {base,build,run,installed}=await privateHfFixture(t,'cuda'),currentRoot=resolve(base,'moss-sc-26752/moss-execute-456-1-cuda');
+  await mkdir(currentRoot);const current={...run,root:currentRoot,hfHome:resolve(currentRoot,'hf')};
+  await assert.rejects(()=>adoptOriginalPrivateHf({...current,candidateId:'other'},installed,{},123,1),/another candidate\/source/);
+  assert.ok((await lstat(build.hfHome)).isDirectory());
+  const receipt=await adoptOriginalPrivateHf(current,installed,{sha256:sha('original native packages')},123,1);
+  assert.equal(receipt.operation,'same-volume-original-stopped-CUDA-HF-adoption');assert.equal(receipt.from,build.hfHome);assert.equal(receipt.to,current.hfHome);
+  assert.deepEqual(receipt.before,receipt.after);await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});
+  await assert.rejects(()=>adoptOriginalPrivateHf(current,installed,{},123,1),/already exists/);
+});
 test('all 43 installed packages transfer by rename, retaining original receipts and exclusive adapter ownership',async t=>{
   const {build,run,installed}=await privateHfFixture(t),original=await readFile(resolve(build.root,'hf-owner.json')),before=await lstat(resolve(build.hfHome,installed.files[0].file));
   const receipt=await transferPrivateHf(run,installed,{sha256:sha('original packages receipt'),byteLength:12});

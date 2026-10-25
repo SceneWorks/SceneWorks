@@ -58,6 +58,24 @@ export async function transferPrivateHf(config,installedInventory,inventoryIdent
   const receipt={...identity(config),operation:'same-volume-private-HF-ownership-transfer',from,to:config.hfHome,originalPackages:inventoryIdentity,originalOwner:await fileIdentity(resolve(fromRoot,'hf-owner.json')),before,after};
   await writeFile(resolve(config.root,'hf-transfer.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
+export async function adoptOriginalPrivateHf(config,installedInventory,inventoryIdentity,originalRunId,originalAttempt) {
+  owned(config,'execute');
+  requireThat(config.backend==='cuda'&&Number.isSafeInteger(originalRunId)&&originalRunId>0&&Number.isSafeInteger(originalAttempt)&&originalAttempt>0,'only the original stopped CUDA build HF may be adopted');
+  const from=resolve(installedInventory.hfHome),fromRoot=dirname(from);
+  requireThat(from===resolve(fromRoot,'hf')&&basename(fromRoot)===`moss-build-${originalRunId}-${originalAttempt}-cuda`,'original private CUDA build root escaped the approved durable namespace');
+  requireThat(canonical(installedInventory.files.map(({file,byteLength,sha256})=>({file,byteLength,sha256})))===canonical(config.packageFiles.map(({file,byteLength,sha256})=>({file,byteLength,sha256}))) || canonical(installedInventory.files.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256}))),'original installed CUDA package inventory differs from campaign');
+  await confined(config.root);requireThat(await absent(config.hfHome),'new private CUDA execution HF destination already exists');
+  const owner=await json(resolve(fromRoot,'hf-owner.json')),runtime=await json(resolve(fromRoot,'runtime.json'));
+  owned(runtime,'build');requireThat(allowedPrivateParent(dirname(fromRoot),runtime.sourceRoot)&&runtime.root===fromRoot&&runtime.hfHome===from&&owner.root===fromRoot&&owner.hfHome===from&&canonical(identity(runtime))===canonical(identity(config))&&canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,owner[key]])))===canonical(identity(config)),'original sealed CUDA HF belongs to another candidate/source');
+  requireThat(canonical(await fileIdentity(resolve(fromRoot,'runtime.json')))===canonical(owner.runtime),'original sealed CUDA runtime bytes changed');
+  requireThat((await lstat(from)).dev===(await lstat(config.root)).dev,'original private CUDA HF is not on the execution volume');
+  const before=await privateHfIntegrity({...config,hfHome:from});
+  requireThat(canonical(before)===canonical(owner.files)&&canonical(before)===canonical(installedInventory.files.map(({file,byteLength,sha256})=>({file,byteLength,sha256}))),'original sealed CUDA package bytes changed');
+  await rename(from,config.hfHome);
+  const after=await privateHfIntegrity(config);requireThat(canonical(after)===canonical(before),'same-volume CUDA ownership transfer changed package bytes');
+  const receipt={...identity(config),operation:'same-volume-original-stopped-CUDA-HF-adoption',from,to:config.hfHome,originalRunId,originalAttempt,originalPackages:inventoryIdentity,originalOwner:await fileIdentity(resolve(fromRoot,'hf-owner.json')),before,after};
+  await writeFile(resolve(config.root,'hf-transfer.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
+}
 export async function releasePrivateHf(config) {
   owned(config,'execute');const receipt=await json(resolve(config.root,'hf-transfer.json'));
   requireThat(receipt.to===config.hfHome&&canonical(identity(config))===canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,receipt[key]]))),'private HF cleanup ownership mismatch');

@@ -7,13 +7,13 @@ import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
+import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
-import { command, sourceIdentity, filesUnder, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID } from './lib/moss-edit-terminal-actions.mjs';
+import { command, sourceIdentity, filesUnder, assertOriginalEvidence, continuationRemainingRows, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
-import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, exportMossEnvironment, cargoTarget } from './lib/moss-private-hf.mjs';
+import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -279,8 +279,47 @@ export async function buildBackend(config) {
   await save(resolve(out,'inventory.json'),{backend:config.backend,sources,files});
   await save(resolve(out,'build.json'),{version:VERSION,backend:config.backend,sources,files,paths,device:await nativeDevice(config.backend)});
 }
+export async function rehydrateCudaPackages(config) {
+  requireThat(config.backend==='cuda'&&config.root===resolve(config.sourceRoot,'../..','moss-sc-26752',basename(config.root))&&/^moss-build-[0-9]+-[0-9]+-cuda$/.test(basename(config.root)),'CUDA rehydration requires a fresh exact owned build root');
+  const sources=await sourceIdentity(config),paths=buildPaths(config),inventory=validateArtifactInventory(await json(resolve(config.buildRoot,'cuda','inventory.json')),'cuda',sources);
+  for(const name of BACKEND_FILES)requireThat(canonical(await fileIdentity(paths[name]))===canonical(inventory.files[name]),`original H17 CUDA ${name} artifact changed`);
+  validatePackagePlan(config,JSON.parse(stripJsoncComments(await readFile(resolve(config.sourceRoot,'config/manifests/builtin.models.jsonc'),'utf8'))));
+  await provisionBrowser(config);
+  await isolatePackages(config,{omitAdapter:true});
+  config.apiBinary=paths.apiBinary;const token=randomBytes(32).toString('hex'),stack=await startStack(config,token);
+  try {
+    const project=await stack.api.request('/api/v1/projects',{method:'POST',body:{name:`MOSS continuation package install ${config.candidateId}`}});
+    const {capturePackageInstallUi}=await import(pathToFileURL(resolve(config.sourceRoot,'scripts/moss-edit-terminal-browser.mjs')).href);
+    await capturePackageInstallUi({apiUrl:`http://127.0.0.1:${config.port}`,projectId:project.id,captureRoot:resolve(config.root,'installation'),playwrightModule:config.playwrightModule,token,model:'moss_image_base',utilityWorkerId:`${config.workerId}-utility`});
+  }finally{await stack.stop();}
+  await materializePrivateAdapter(config);
+  const packages=[];for(const item of config.packageFiles) {
+    const actual=await fileIdentity(safePath(config.hfHome,item.file));requireThat(actual.sha256===item.sha256,'rehydrated package differs from frozen H17 weights');packages.push({...item,...actual});
+  }
+  await save(resolve(config.root,'packages.json'),{hfHome:config.hfHome,files:packages});
+  await sealPrivateHf(config);
+  await save(resolve(config.root,'rehydration.json'),{version:VERSION,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,candidateId:config.candidateId,originalNativeInventory:inventory,installation:await filesUnder(resolve(config.root,'installation')),packages:await fileIdentity(resolve(config.root,'packages.json'))});
+}
+export async function prepareContinuationCudaPackages(config,rehydrateConfig,originalRunId,originalAttempt) {
+  requireThat(config.backend==='cuda'&&rehydrateConfig.backend==='cuda'&&config.candidateId===rehydrateConfig.candidateId&&config.sourceSha===rehydrateConfig.sourceSha&&config.inferenceSha===rehydrateConfig.inferenceSha&&config.buildRoot===rehydrateConfig.buildRoot,'CUDA package preparation differs from the exact reviewed candidate/artifact');
+  const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,'cuda','inventory.json')),'cuda',await sourceIdentity(config));
+  const installedPath=resolve(config.buildRoot,'cuda','packages.json');requireThat(canonical(await fileIdentity(installedPath))===canonical(inventory.files.packages),'original native CUDA installed-package inventory changed');
+  const installed=await json(installedPath),from=installed.hfHome;
+  let mode;
+  try {await lstat(from);mode='original-sealed-HF';}
+  catch(error){if(error.code!=='ENOENT')throw error;mode='rehydrated-exact-packages';}
+  if(mode==='original-sealed-HF')await adoptOriginalPrivateHf(config,installed,inventory.files.packages,originalRunId,originalAttempt);
+  else {
+    await rehydrateCudaPackages(rehydrateConfig);
+    await transferPrivateHf(config,await json(resolve(rehydrateConfig.root,'packages.json')),inventory.files.packages);
+    await mkdir(resolve(config.root,'rehydration'),{mode:0o700});
+    await cp(resolve(rehydrateConfig.root,'rehydration.json'),resolve(config.root,'rehydration/rehydration.json'),{errorOnExist:true,force:false});
+    await cp(resolve(rehydrateConfig.root,'installation'),resolve(config.root,'rehydration/installation'),{recursive:true,errorOnExist:true,force:false});
+  }
+  await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode,originalRunId,originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json'))});
+}
 async function harness(config,args,label) {
-  await command(process.execPath,[resolve(config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${label}.log`)});
+  await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${config.toolingRoot||config.continuation?'continuation-':''}${label}.log`)});
 }
 function buildPaths(config) {
   const out=resolve(config.buildRoot,config.backend),binary=resolve(out,config.backend==='cuda'?'sceneworks-rust-api.exe':'sceneworks-rust-api');
@@ -312,15 +351,46 @@ async function deviceReceipt(config,state,label) {
     ...(config.backend==='cuda'?{cudaVisibleDevices:CUDA_UUID,sceneWorksGpuId:'1',postCompile:true}:{})};
   validateAdmission(receipt,state.lock,config.backend);const path=resolve(config.root,'devices',`${label}.json`);await save(path,receipt);return path;
 }
+export async function validateContinuation(config) {
+  const c=config.continuation;
+  requireThat(c?.name==='r16-checker-recovery'&&config.backend==='mlx'&&Number.isSafeInteger(c.originalRunId)&&c.originalRunId>0&&Number.isSafeInteger(c.originalAttempt)&&c.originalAttempt>0,'exact stopped MLX attempt required for checker recovery');
+  requireThat(config.root===resolve(MAC_MOSS_BASE,`moss-execute-${c.originalRunId}-${c.originalAttempt}-mlx`)&&config.hfHome===resolve(config.root,'hf')&&config.stateRoot===resolve(config.root,'state'),'continuation may only reopen its exact private original Mac execution root');
+  requireThat(c.toolingRoot&&/^[a-f0-9]{40}$/.test(c.toolingSha??'')&&treeIdentity(c.toolingRoot).head===c.toolingSha&&c.toolingSha!==config.sourceSha,'repair tooling must be a separate clean committed checkout');
+  const manifestIdentity=await fileIdentity(c.inventoryPath);requireThat(manifestIdentity.sha256===c.inventorySha256&&c.inventorySha256===R16_ORIGINAL_INVENTORY_SHA256,'original evidence boundary inventory differs from exact R16 dispatch');
+  const manifest=await json(c.inventoryPath),identity=await sourceIdentity(config),lock=await json(resolve(config.root,'evidence/protocol.lock.json'));
+  requireThat(manifest.version===1&&manifest.actualRunId===c.originalRunId&&manifest.attempt===c.originalAttempt&&manifest.sourceSha===config.sourceSha&&manifest.inferenceSha===config.inferenceSha&&manifest.actualEvidenceRoot===resolve(config.root,'evidence')&&Array.isArray(manifest.files)&&manifest.files.length===257,'original R16 evidence boundary/candidate differs');
+  requireThat(lock.sources.sceneworks.head===config.sourceSha&&lock.sources.inference.head===config.inferenceSha&&lock.candidateId===config.candidateId&&canonical(lock.sources)===canonical(identity),'original frozen candidate/product pair changed');
+  await assertOriginalEvidence(resolve(config.root,'evidence'),manifest,{exact:true});
+  const launch=await json(resolve(config.root,'launch.json')),binding=await json(resolve(config.root,'evidence/bindings/mlx.json')),plan=await json(resolve(config.root,'evidence/cases.json'));
+  requireThat(launch.candidateId===config.candidateId&&launch.evidenceRoot===resolve(config.root,'evidence')&&launch.localBackend==='mlx'&&binding.endpoint.projectId&&binding.endpoint.workerId===config.workerId&&binding.endpoint.apiUrl===`http://127.0.0.1:${config.port}`,'original launch/backend endpoint differs');
+  const rows=plan.rows.filter(row=>row.backend==='mlx'),remaining=await continuationRemainingRows(resolve(config.root,'evidence'),plan);
+  requireThat(!await optional(resolve(config.root,'continuation-start.json'))&&!await optional(resolve(config.root,'execution.json')),'original attempt already continued or completed');
+  const transfer=await json(resolve(config.root,'hf-transfer.json'));
+  requireThat(transfer.to===config.hfHome&&transfer.candidateId===config.candidateId&&transfer.sourceSha===config.sourceSha&&transfer.inferenceSha===config.inferenceSha&&canonical(await privateHfIntegrity(config))===canonical(transfer.after),'stopped private HF ownership or package bytes changed');
+  return {manifest,manifestIdentity,lock,binding,launch,rows,remaining};
+}
 export async function executeBackend(config) {
+  const continuing=Boolean(config.continuation);
+  const repairTooling=Boolean(config.toolingRoot||continuing);
+  const original=continuing?await validateContinuation(config):null;
   const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,config.backend,'inventory.json')),config.backend,await sourceIdentity(config));
   const installedPath=resolve(config.buildRoot,config.backend,'packages.json');requireThat(canonical(await fileIdentity(installedPath))===canonical(inventory.files.packages),'installed package inventory differs from source-bound native build');
-  await transferPrivateHf(config,await json(installedPath),inventory.files.packages);
+  if(!continuing&&config.preparedCudaPackages) {
+    const prepared=await json(resolve(config.root,'cuda-package-preparation.json')),transfer=await json(resolve(config.root,'hf-transfer.json'));
+    requireThat(config.backend==='cuda'&&prepared.candidateId===config.candidateId&&prepared.sourceSha===config.sourceSha&&prepared.inferenceSha===config.inferenceSha&&canonical(prepared.originalNativePackages)===canonical(inventory.files.packages)&&canonical(prepared.transfer)===canonical(await fileIdentity(resolve(config.root,'hf-transfer.json')))&&transfer.to===config.hfHome&&canonical(await privateHfIntegrity(config))===canonical(transfer.after),'prepared private CUDA packages changed before native execution');
+  } else if(!continuing)await transferPrivateHf(config,await json(installedPath),inventory.files.packages);
   await verifyBuild(config);const paths=buildPaths(config);config.apiBinary=paths.apiBinary;
   // Each execution phase is fresh. An interrupted phase retains immutable attempts;
   // do not start another stack and replay submissions under the same candidate.
-  requireThat(!await optional(resolve(config.root,'execution-start.json')),'execution already started; authoritative owned-job reconciliation is required before any continuation');
-  await save(resolve(config.root,'execution-start.json'),{version:VERSION,candidateId:config.candidateId,backend:config.backend,sources:await sourceIdentity(config),at:new Date().toISOString()});
+  if(continuing) {
+    config.projectId=original.binding.endpoint.projectId;
+    config.observationJournal=resolve(config.root,'journal-continuation.jsonl');
+    await save(resolve(config.root,'continuation-start.json'),{version:VERSION,name:config.continuation.name,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,toolingSha:config.continuation.toolingSha,inventorySha256:original.manifestIdentity.sha256,lockSha256:digest(original.lock),at:new Date().toISOString()});
+    await copyFile(config.continuation.inventoryPath,resolve(config.root,'evidence/continuation-original-inventory.json'),constants.COPYFILE_EXCL);
+  } else {
+    requireThat(!await optional(resolve(config.root,'execution-start.json')),'execution already started; authoritative owned-job reconciliation is required before any continuation');
+    await save(resolve(config.root,'execution-start.json'),{version:VERSION,candidateId:config.candidateId,backend:config.backend,sources:await sourceIdentity(config),at:new Date().toISOString()});
+  }
   const token=randomBytes(32).toString('hex');process.env.MOSS_EDIT_ACTIONS_TOKEN=token;
   if(config.backend==='cuda') {
     const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;await importState(config,config.handoffRoot);
@@ -328,7 +398,11 @@ export async function executeBackend(config) {
   }
   const stack=await startStack(config,token);let stopped=false;
   try {
-    if(config.backend==='mlx') {
+    if(continuing) {
+      config.guardRequests=await json(resolve(config.root,'evidence/resolved-guards.json'));
+      const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);
+      requireThat(project.id===config.projectId,'original owned project did not reopen from stopped state');
+    } else if(config.backend==='mlx') {
       const project=await stack.api.request('/api/v1/projects',{method:'POST',body:{name:`MOSS edit ${config.candidateId}`}});config.projectId=project.id;
       const original=await json(safePath(config.bundleRoot,config.inputManifest));
       for(const item of original.assets)item.path=safePath(config.bundleRoot,item.path);
@@ -345,30 +419,48 @@ export async function executeBackend(config) {
         requireThat(canonical(actual.payload)===canonical(origin.payload)&&canonical(actual.result)===canonical(origin.result),'cross-backend history handoff changed original authored job/result identities');
       }
     }
-    if(config.backend==='mlx')for(const backend of ['mlx','cuda']) {
+    if(config.backend==='mlx'&&!continuing)for(const backend of ['mlx','cuda']) {
       const toolchain=await json(resolve(config.buildRoot,backend,'toolchain.json'));requireThat(toolchain.installation?.files?.length,'actual installer capture missing from native artifact');
       for(const item of toolchain.installation.files)requireThat((await fileIdentity(safePath(resolve(config.buildRoot,backend,'installation'),item.file))).sha256===item.sha256,'native installer evidence bytes changed');
       await cp(resolve(config.buildRoot,backend,'installation'),resolve(config.root,'evidence/external',`raw-install-${backend}`),{recursive:true,errorOnExist:true,force:false});
       await cp(resolve(config.buildRoot,backend,'toolchain.json'),resolve(config.root,'evidence/external',`toolchain-${backend}.json`),{errorOnExist:true,force:false});
     }
-    const launch=await launcher(config,config.projectId),launchPath=resolve(config.root,'launch.json');await save(launchPath,launch);
-    if(config.backend==='mlx')await freeze(launchPath);else await bind(launchPath);
+    const toolingRoot=config.toolingRoot??config.continuation?.toolingRoot,toolingFiles=repairTooling?Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'}).map(([name,path])=>[name,resolve(toolingRoot,'scripts',path)])):null;
+    const tooling=repairTooling?{sourceRoot:toolingRoot,head:config.toolingSha??config.continuation.toolingSha,source:treeIdentity(toolingRoot),files:toolingFiles,identities:Object.fromEntries(await Promise.all(Object.entries(toolingFiles).map(async([name,path])=>[name,await fileIdentity(path)])))}:null;
+    const launch=continuing?{...original.launch,guardRequests:config.guardRequests,repair:{name:'r16-checker-recovery',originalRoot:config.root,inventorySha256:original.manifestIdentity.sha256,tooling}}:await launcher(config,config.projectId);
+    if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling};
+    const launchPath=resolve(config.root,continuing?'continuation-launch.json':'launch.json');await save(launchPath,launch);
+    if(!continuing) {if(config.backend==='mlx')await freeze(launchPath);else await bind(launchPath);}
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
       gpuId:state.binding.endpoint.workerGpuId,
       binarySha256:state.lock.artifacts[config.backend].files.workerBinary.sha256,producerSha256:toolchain.observationProducerSha256};
     await actualJournal(config,expectedJournal);
-    await harness(config,['upload',launchPath,config.backend,await deviceReceipt(config,state,'upload')],'upload');
+    if(!continuing)await harness(config,['upload',launchPath,config.backend,await deviceReceipt(config,state,'upload')],'upload');
     const samplerSha256=(await fileIdentity(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs'))).sha256;
+    const originalActions=repairTooling?await import(pathToFileURL(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs')).href):null;
+    if(continuing) {
+      await harness(config,['recover-completed',launchPath,'advanced-mlx-sft'],'recover-completed');
+      const id='advanced-mlx-sft',root=state.root,job=await json(resolve(root,'rows',id,'recovery-job-readback.json'));
+      const start=await json(resolve(root,'attempts/mlx',`${id}.start.json`));
+      const rawEvidence=await Promise.all([
+        `rows/${id}/failure.json`,`rows/${id}/terminal-job.json`,`rows/${id}/recovery-job-readback.json`,
+        `rows/${id}/receipt.json`,`attempts/mlx/${id}.failure.json`
+      ].map(async file=>({file,...await fileIdentity(safePath(root,file))})));
+      const proof={version:VERSION,lockSha256:digest(state.lock),attemptSha256:digest(start),coordinator:'source-bound continuation controller',backend:'mlx',observedAt:new Date().toISOString(),state:'NO_ACTIVE_OWNED_JOB',jobs:[job],rawEvidence};
+      await reconcileAttempt(root,'mlx',id,proof,digest(state.lock));
+      await save(resolve(root,'recovery-adjudication.json'),{version:VERSION,name:'r16-checker-recovery',rowId:id,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,candidateId:config.candidateId,toolingSha:config.continuation.toolingSha,inventorySha256:original.manifestIdentity.sha256,lockSha256:digest(state.lock),jobId:job.id,requestSha256:start.requestSha256,originalAttemptSha256:digest(start),reconciliationSha256:digest(proof),rawEvidence});
+    }
     for(const row of state.plan.rows.filter(row=>row.backend===config.backend)) {
+      if(continuing&&!original.remaining.some(item=>item.id===row.id))continue;
       await assertDispatchClear(state.root,config.backend);
-      await appendFile(resolve(config.root,'progress.jsonl'),`${JSON.stringify({rowId:row.id,phase:'before',at:new Date().toISOString()})}\n`,{mode:0o600});
-      const measurement=await sampler({backend:config.backend,file:resolve(config.root,'samples',`${row.id}.jsonl`)});
+      await appendFile(resolve(config.root,continuing?'progress-continuation.jsonl':'progress.jsonl'),`${JSON.stringify({rowId:row.id,phase:'before',at:new Date().toISOString()})}\n`,{mode:0o600});
+      const measurement=await (originalActions?.sampler??sampler)({backend:config.backend,file:resolve(config.root,'samples',`${row.id}.jsonl`)});
       let capture;
       try {
         const admission=await deviceReceipt(config,state,row.id);
         if(row.transport.startsWith('ui-')) {
           await harness(config,['ui-task',launchPath,row.id],`${row.id}-intent`);
-          const {captureUi}=await import('./moss-edit-terminal-browser.mjs');
+          const {captureUi}=repairTooling?await import(pathToFileURL(resolve(toolingRoot,'scripts/moss-edit-terminal-browser.mjs')).href):await import('./moss-edit-terminal-browser.mjs');
           capture=await captureUi({launchPath,rowId:row.id,captureRoot:resolve(config.root,'captures',row.id),playwrightModule:config.playwrightModule,token});
         }
         await harness(config,['run',launchPath,row.id,admission,...(capture?[capture]:[])],`${row.id}-run`);
@@ -383,9 +475,9 @@ export async function executeBackend(config) {
         const memory=await measurement.stop(receipt.jobId,samplerSha256),rawPath=resolve(state.root,'rows',row.id,'memory-raw.jsonl');
         await cp(resolve(config.root,'samples',`${row.id}.jsonl`),rawPath,{errorOnExist:true,force:false});memory.raw={file:'memory-raw.jsonl',...await fileIdentity(rawPath)};
         await save(resolve(state.root,'rows',row.id,'memory.json'),memory);
-        if(row.anchors)await retainQualityPairs(state,row);
+        if(row.anchors)await (originalActions?.retainQualityPairs??retainQualityPairs)(state,row);
         if(row.compareTo)await harness(config,['compare-cache',launchPath,row.id],`${row.id}-cache`);
-        await appendFile(resolve(config.root,'progress.jsonl'),`${JSON.stringify({rowId:row.id,phase:'verified',jobId:receipt.jobId,at:new Date().toISOString()})}\n`);
+        await appendFile(resolve(config.root,continuing?'progress-continuation.jsonl':'progress.jsonl'),`${JSON.stringify({rowId:row.id,phase:'verified',jobId:receipt.jobId,at:new Date().toISOString()})}\n`);
       }catch(error){await measurement.stop('UNRESOLVED',samplerSha256).catch(()=>{});throw error;}
     }
     for(const name of state.plan.requiredGuardCases) {
@@ -413,8 +505,8 @@ export async function executeBackend(config) {
     // Stop only the processes this controller spawned. No global census/ownership gate.
     await stack.stop();stopped=true;
     if(config.backend==='mlx')await exportState(config,resolve(config.root,'handoff'));
-    await releasePrivateHf(config);
-    await save(resolve(config.root,'execution.json'),{version:VERSION,lockSha256:digest(state.lock),backend:config.backend,renders:25,refusals:29,execution:'COMPLETE',acceptance:'AWAITING_ALL_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW'});
+    if(!continuing)await releasePrivateHf(config);
+    await save(resolve(config.root,continuing?'execution-continuation.json':'execution.json'),{version:VERSION,lockSha256:digest(state.lock),backend:config.backend,renders:25,refusals:29,execution:'COMPLETE',acceptance:'AWAITING_ALL_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW',...(continuing?{toolingSha:config.continuation.toolingSha,originalRunId:config.continuation.originalRunId}:{} )});
   }finally{if(!stopped)await stack.stop();delete process.env.MOSS_EDIT_ACTIONS_TOKEN;}
 }
 export async function finalize(config) {
@@ -424,7 +516,13 @@ export async function finalize(config) {
   await cp(config.priorEvidenceRoot,resolve(config.root,'evidence'),{recursive:true,errorOnExist:true,force:false});
   const root=resolve(config.root,'evidence'),binding=await json(resolve(root,'bindings',`${config.backend}.json`));
   config.guardRequests=await json(resolve(root,'resolved-guards.json'));
-  const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');await save(launchPath,launch);
+  const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');
+  if(config.toolingRoot) {
+    const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
+    const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
+    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling};
+  }
+  await save(launchPath,launch);
   for(const entry of await filesUnder(config.reviewRoot)) {
     const destination=safePath(root,entry.file);await mkdir(dirname(destination),{recursive:true});await cp(safePath(config.reviewRoot,entry.file),destination,{errorOnExist:true,force:false});
   }
@@ -443,6 +541,27 @@ export async function main(args=process.argv.slice(2)) {
     return configure(resolve(env.MOSS_BUNDLE,'campaign.json'),env.MOSS_SOURCE,env.MOSS_INFERENCE,env.MOSS_ROOT,env.MOSS_BACKEND,env.MOSS_BUILDS);
   }
   if(phase==='configure'&&rest.length===6)return configure(...rest);
+  if(phase==='continue-mlx'&&rest.length===7) {
+    const [runtime,toolingRoot,toolingSha,runId,attempt,inventoryPath,inventorySha256]=rest,config=await json(runtime);
+    config.continuation={name:'r16-checker-recovery',toolingRoot:resolve(toolingRoot),toolingSha,originalRunId:Number(runId),originalAttempt:Number(attempt),inventoryPath:resolve(inventoryPath),inventorySha256};
+    return executeBackend(config);
+  }
+  if(phase==='rehydrate-cuda'&&rest.length===1)return rehydrateCudaPackages(await json(rest[0]));
+  if(phase==='prepare-cuda-packages'&&rest.length===4) {
+    const [runtime,rehydrateRuntime,originalRunId,originalAttempt]=rest;
+    return prepareContinuationCudaPackages(await json(runtime),await json(rehydrateRuntime),Number(originalRunId),Number(originalAttempt));
+  }
+  if(phase==='continue-cuda'&&rest.length===3) {
+    const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime);
+    requireThat(treeIdentity(toolingRoot).head===toolingSha&&toolingSha!==config.sourceSha,'CUDA continuation tooling differs from exact clean repair commit');
+    config.toolingRoot=resolve(toolingRoot);config.toolingSha=toolingSha;config.preparedCudaPackages=true;
+    return executeBackend(config);
+  }
+  if(phase==='finalize-repair'&&rest.length===3) {
+    const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime);
+    requireThat(treeIdentity(toolingRoot).head===toolingSha&&toolingSha!==config.sourceSha,'retained verifier differs from exact clean repair commit');
+    config.toolingRoot=resolve(toolingRoot);config.toolingSha=toolingSha;return finalize(config);
+  }
   requireThat(rest.length===1,'Usage: bundle CAMPAIGN INPUT_MANIFEST FRESH_ROOT | inventory-review ROOT SOURCE INFERENCE CANDIDATE | validate-upload ROOT KIND SHA SOURCE INFERENCE CANDIDATE | validate-bundle ROOT SHA SOURCE INFERENCE CANDIDATE | configure BUNDLE SOURCE INFERENCE ROOT BACKEND BUILDS | configure-env | arrange-builds DOWNLOAD_ROOT | build CONFIG | provision-browser CONFIG | execute CONFIG | finalize CONFIG');
   const config=await json(rest[0]);
   if(phase==='build')return buildBackend(config);

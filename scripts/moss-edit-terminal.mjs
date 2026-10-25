@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 // Dedicated edit protocol. Never invoke the historical sc-26325/GPU0 harness.
+import { constants } from 'node:fs';
 import { readFile, mkdir, writeFile, copyFile, chmod, readdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
+import { assertOriginalEvidence, R16_ORIGINAL_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
 const encode = value => encodeURIComponent(value);
@@ -71,7 +73,14 @@ export async function prepare(inputPath, out) {
 async function load(configPath) {
   const config = await json(configPath), root = resolve(config.evidenceRoot);
   requireThat(config.version === VERSION, 'wrong launcher version');
-  requireThat(resolve(config.files.harness) === fileURLToPath(import.meta.url) && resolve(config.files.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)), 'local binding must identify the protocol source actually executing');
+  if (config.repair) {
+    requireThat(config.repair.name==='r16-checker-recovery'&&/^[a-f0-9]{64}$/.test(config.repair.inventorySha256??''),'only the original bounded R16 checker repair may relax relocated execution paths');
+    const tooling = config.repair.tooling;
+    requireThat(tooling?.sourceRoot && /^[a-f0-9]{40}$/.test(tooling.head ?? '') && canonical(treeIdentity(tooling.sourceRoot)) === canonical(tooling.source) && tooling.head === tooling.source.head, 'continuation tooling checkout changed');
+    requireThat(resolve(tooling.files?.harness) === fileURLToPath(import.meta.url) && resolve(tooling.files?.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)) && resolve(tooling.files?.browserDriver) === fileURLToPath(new URL('./moss-edit-terminal-browser.mjs',import.meta.url)) && resolve(tooling.files?.browserControls) === fileURLToPath(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url)), 'continuation did not execute its declared tooling');
+    for (const [name, path] of Object.entries(tooling.files)) requireThat(canonical(await fileIdentity(path)) === canonical(tooling.identities[name]), `continuation tooling ${name} changed`);
+    requireThat(resolve(config.files.harness) === resolve(config.sources.sceneworks,'scripts/moss-edit-terminal.mjs') && resolve(config.files.harnessLibrary) === resolve(config.sources.sceneworks,'scripts/lib/moss-edit-terminal.mjs'), 'continuation displaced frozen production protocol files');
+  } else requireThat(resolve(config.files.harness) === fileURLToPath(import.meta.url) && resolve(config.files.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)), 'local binding must identify the protocol source actually executing');
   return { config, root, plan: await json(config.plan) };
 }
 export function validateLexicalNonfinite(rawJson) {
@@ -138,8 +147,8 @@ export async function frozen(configPath, { retained = false } = {}) {
     requireThat((await fileIdentity(safePath(state.root,fixture.uploadedFile))).sha256===fixture.uploadedSha256&&(await fileIdentity(safePath(state.root,fixture.actualFile))).sha256===fixture.actualSha256,'retained actual guard fixture upload/readback bytes changed');
   }
   const binding = validateBinding(await json(resolve(state.root,'bindings',`${state.config.localBackend}.json`)),lock,state.config.localBackend);
-  if (retained) requireThat(canonical(state.config.backends[state.config.localBackend])===canonical(binding.endpoint),'retained verification cannot substitute original project/worker/API identities');
-  if (!retained) requireThat(canonical(executionBinding(state.config,lock,binding.files)) === canonical(binding),'local execution binding changed; never overwrite a binding');
+  if (retained || state.config.repair) requireThat(canonical(state.config.backends[state.config.localBackend])===canonical(binding.endpoint),'retained verification cannot substitute original project/worker/API identities');
+  if (!retained && !state.config.repair) requireThat(canonical(executionBinding(state.config,lock,binding.files)) === canonical(binding),'local execution binding changed; never overwrite a binding');
   // Read-only artifact verification may relocate retained bytes. Source/artifact
   // hashes and the original immutable execution bindings remain mandatory.
   return { ...state, lock, binding };
@@ -429,6 +438,38 @@ async function run(configPath, id, admissionPath, uiCapture) {
     throw error;
   } finally { if (transcript.length) await save(resolve(dest, 'mcp-transcript.json'), transcript); mcp?.close(); }
 }
+export async function recoverCompletedRow(configPath, id = 'advanced-mlx-sft') {
+  const state=await frozen(configPath),{config,root,lock}=state;
+  requireThat(config.repair?.name==='r16-checker-recovery'&&id==='advanced-mlx-sft'&&config.localBackend==='mlx','only the reviewed R16 completed SFT job may be recovered');
+  const row=state.plan.rows.find(item=>item.id===id),dest=resolve(root,'rows',id),attemptDir=resolve(root,'attempts','mlx');
+  requireThat(row?.transport==='mcp'&&row.output==='latents'&&row.backend==='mlx','recovery row contract changed');
+  const [failure,attemptFailure,start,request,retainedJob,admitted]=await Promise.all([
+    json(resolve(dest,'failure.json')),json(resolve(attemptDir,`${id}.failure.json`)),json(resolve(attemptDir,`${id}.start.json`)),
+    json(resolve(dest,'request.json')),json(resolve(dest,'terminal-job.json')),json(resolve(dest,'admission.json'))]);
+  const expected=await expectedRequest(state,row),message='per-prompt negatives gained an unsupported broadcast field';
+  requireThat(failure.version===VERSION&&failure.rowId===id&&failure.jobId===retainedJob.id&&failure.message===message&&attemptFailure.state==='UNRESOLVED'&&attemptFailure.jobId===retainedJob.id&&attemptFailure.message===message&&attemptFailure.attemptSha256===digest(start),'original checker failure or attempt identity changed');
+  requireThat(start.lockSha256===digest(lock)&&start.bindingSha256===digest(state.binding)&&start.requestSha256===digest(expected)&&digest(request)===digest(expected),'original failed attempt differs from frozen request/candidate');
+  requireThat(!(await readdir(dest)).includes('receipt.json'),'failed row already recovered; never resubmit or overwrite');
+  validateAdmission(admitted,lock,'mlx');assertRequestBinding(expected,request);
+  checkJob(row,request,retainedJob,state.binding.endpoint.workerGpuId);
+  requireThat(retainedJob.status==='completed'&&retainedJob.workerId===state.binding.endpoint.workerId,'failed checker did not leave a completed owned job');
+  const api=client(config,'mlx'),actual=await api.request(jobPath(retainedJob.id));
+  requireThat(actual.id===retainedJob.id&&actual.status==='completed'&&actual.workerId===retainedJob.workerId&&actual.projectId===retainedJob.projectId&&canonical(actual.payload)===canonical(retainedJob.payload)&&canonical(actual.result)===canonical(retainedJob.result),'authenticated completed job readback differs from original native result');
+  await save(resolve(dest,'recovery-job-readback.json'),actual);
+  const outputs=await retainOutputs(api,row,request,actual,dest,root);
+  const transcript=[],mcp=await mcpClient(config,'mlx',transcript);
+  try {await retainMcpResults(mcp,actual,outputs,dest,api);}finally{mcp.close();if(transcript.length)await save(resolve(dest,'mcp-recovery-transcript.json'),transcript);}
+  await save(resolve(dest,'metrics.json'),await api.request(`${jobPath(actual.id)}/metrics`));
+  const originalRaw=resolve(config.repair.originalRoot,'samples',`${id}.jsonl`),raw=(await readFile(originalRaw,'utf8')).trimEnd().split('\n').map(line=>JSON.parse(line));
+  requireThat(raw.length>=3&&raw[0].phase==='baseline'&&raw.at(-1).phase==='drain'&&raw.some(item=>item.phase==='active')&&raw.every(item=>item.device?.uuid===admitted.device.uuid&&item.raw),'original whole-device sampler trace incomplete or changed');
+  const rawPath=resolve(dest,'memory-raw.jsonl');await copyFile(originalRaw,rawPath,constants.COPYFILE_EXCL);
+  const samplerSha256=lock.files.actionLibrary.sha256,memory={version:VERSION,jobId:actual.id,samplerSha256,device:raw[0].device,samples:raw.map(({at,phase,usedBytes})=>({at,phase,usedBytes})),raw:{file:'memory-raw.jsonl',...await fileIdentity(rawPath)}};
+  memorySummary(memory,actual.id);await save(resolve(dest,'memory.json'),memory);
+  await verifyFrozenSources(config,lock);
+  const receipt={version:VERSION,lockSha256:digest(lock),bindingSha256:digest(state.binding),rowId:id,jobId:actual.id,backend:'mlx',device:admitted.device,execution:'VERIFIED',acceptance:'AWAITING_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW',started:start.startedAt,ended:new Date().toISOString(),outputs,semanticRequestSha256:digest(expected),requestSha256:digest(request),jobSha256:digest(retainedJob),admissionSha256:digest(admitted),recoveredWithoutSubmission:true};
+  await save(resolve(dest,'receipt.json'),receipt);
+  console.log(JSON.stringify({rowId:id,jobId:actual.id,execution:'VERIFIED',recoveredWithoutSubmission:true,outputs:outputs.map(item=>item.sha256)}));
+}
 export async function submitGuard(api,specification,request,path) {
   let submitted;const observation={};
   const upload=specification.upload,route=upload?`/api/v1/projects/${encode(request.projectId)}/assets`:'/api/v1/image/jobs';let body=request,before;
@@ -504,7 +545,8 @@ export async function measuredCacheComparison(state,row) {
   requests[1].advanced.mossImageEdit.use_kv_cache = true;
   requireThat(canonical(requests[0]) === canonical(requests[1]),'cache comparison differs in authored inputs beyond cache policy');
   requireThat(state.plan.cacheComparisonPolicy.implementationSha256 === state.lock.files.harnessLibrary.sha256,'cache implementation differs from frozen executing library');
-  return cacheComparison(state.plan.cacheComparisonPolicy,digest(state.lock),pair,buffers);
+  const comparison=state.config?.repair?(await import(pathToFileURL(state.config.files.harnessLibrary).href)).cacheComparison:cacheComparison;
+  return comparison(state.plan.cacheComparisonPolicy,digest(state.lock),pair,buffers);
 }
 async function compareCache(configPath,rowId) {
   const state = await frozen(configPath),row = state.plan.rows.find(r => r.id === rowId);
@@ -518,9 +560,26 @@ async function reconcile(configPath,backend,id,proofPath) {
   await reconcileAttempt(state.root,backend,id,await json(proofPath),digest(state.lock));
   console.log(JSON.stringify({backend,attempt:id,state:'RECONCILED_FOR_DISPATCH_ONLY',candidateAcceptance:'FAIL_RECORDED_ATTEMPT_PRESERVED'}));
 }
+export async function validateRecoveryAdjudication(state,expectedInventorySha256=R16_ORIGINAL_INVENTORY_SHA256) {
+    const repair=state.config.repair,manifestPath=resolve(state.root,'continuation-original-inventory.json'),manifest=await json(manifestPath),adjudication=await json(resolve(state.root,'recovery-adjudication.json'));
+    requireThat(repair.name==='r16-checker-recovery'&&repair.inventorySha256===expectedInventorySha256&&repair.inventorySha256===(await fileIdentity(manifestPath)).sha256&&manifest.version===1&&manifest.actualRunId===adjudication.originalRunId&&manifest.attempt===adjudication.originalAttempt&&manifest.sourceSha===state.lock.sources.sceneworks.head&&manifest.inferenceSha===state.lock.sources.inference.head&&manifest.files?.length===257,'original partial evidence/candidate boundary changed');
+    await assertOriginalEvidence(state.root,manifest);
+    requireThat(adjudication.version===VERSION&&adjudication.name==='r16-checker-recovery'&&adjudication.rowId==='advanced-mlx-sft'&&adjudication.candidateId===state.lock.candidateId&&adjudication.sourceSha===state.lock.sources.sceneworks.head&&adjudication.inferenceSha===state.lock.sources.inference.head&&adjudication.toolingSha===repair.tooling.head&&adjudication.inventorySha256===repair.inventorySha256&&adjudication.lockSha256===digest(state.lock),'checker adjudication substituted candidate/source/tooling');
+    const id='advanced-mlx-sft',dir=resolve(state.root,'rows',id),attempt=resolve(state.root,'attempts/mlx'),failure=await json(resolve(dir,'failure.json')),attemptFailure=await json(resolve(attempt,`${id}.failure.json`)),start=await json(resolve(attempt,`${id}.start.json`)),receipt=await json(resolve(dir,'receipt.json')),job=await json(resolve(dir,'terminal-job.json')),readback=await json(resolve(dir,'recovery-job-readback.json')),proof=await json(resolve(attempt,`${id}.reconciliation.json`)),resolution=await json(resolve(attempt,`${id}.resolution.json`));
+    requireThat(failure.message==='per-prompt negatives gained an unsupported broadcast field'&&attemptFailure.message===failure.message&&failure.jobId===job.id&&attemptFailure.jobId===job.id&&attemptFailure.attemptSha256===digest(start)&&receipt.recoveredWithoutSubmission===true&&receipt.jobId===job.id&&receipt.jobSha256===digest(job)&&adjudication.jobId===job.id&&adjudication.originalAttemptSha256===digest(start)&&adjudication.requestSha256===start.requestSha256,'recovery does not identify the exact original failed completed job');
+    requireThat(readback.id===job.id&&readback.status==='completed'&&canonical(readback.payload)===canonical(job.payload)&&canonical(readback.result)===canonical(job.result)&&proof.state==='NO_ACTIVE_OWNED_JOB'&&proof.attemptSha256===digest(start)&&proof.lockSha256===digest(state.lock)&&proof.jobs?.length===1&&canonical(proof.jobs[0])===canonical(readback)&&adjudication.reconciliationSha256===digest(proof)&&resolution.state==='COORDINATOR_RECONCILED'&&resolution.attemptSha256===digest(start)&&resolution.proofSha256===digest(proof),'authenticated completed-job reconciliation changed');
+    requireThat(proof.rawEvidence?.length>0&&canonical(adjudication.rawEvidence)===canonical(proof.rawEvidence),'adjudication raw evidence differs from reconciliation');
+    for(const entry of proof.rawEvidence)requireThat(canonical(await fileIdentity(safePath(state.root,entry.file)))===canonical({byteLength:entry.byteLength,sha256:entry.sha256}),'recovery raw evidence changed');
+    return true;
+}
+export function acceptedRecoveryFailure(acceptedRecovery,backend,name) {
+  return acceptedRecovery&&backend==='mlx'&&name==='advanced-mlx-sft.failure.json';
+}
 async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
   const requireEvidence = async (name, check) => { try { await check(); } catch (error) { findings.push({ item: name, state: ['ENOENT','MOSS_AWAITING_RESOLUTION'].includes(error.code) ? 'AWAITING' : 'FAIL', reason: error.code === 'ENOENT' ? 'required evidence missing' : error.message }); } };
+  let acceptedRecovery=false;
+  if(state.config.repair)await requireEvidence('r16-original-checker-recovery',async()=>{acceptedRecovery=await validateRecoveryAdjudication(state);});
   for (const backend of ['mlx','cuda']) await requireEvidence(`dispatch-${backend}`,async () => {
     const binding = validateBinding(await json(resolve(state.root,'bindings',`${backend}.json`)),state.lock,backend);
     const attempts = await readdir(resolve(state.root,'attempts',backend)).catch(error => {if(error.code === 'ENOENT')return[];throw error;});
@@ -528,13 +587,13 @@ async function verify(configPath, retained = false) {
       const start = await json(resolve(state.root,'attempts',backend,name));
       requireThat(start.lockSha256 === digest(state.lock) && start.bindingSha256 === digest(binding),'attempt belongs to another frozen candidate/backend binding');
     }
-    requireThat(!attempts.some(name => name.endsWith('.failure.json')),'recorded failed submission attempt remains failed even after safe reconciliation');
+    requireThat(!attempts.some(name => name.endsWith('.failure.json') && !acceptedRecoveryFailure(acceptedRecovery,backend,name)),'recorded failed submission attempt remains failed even after safe reconciliation');
     await assertDispatchClear(state.root,backend);
   });
   for (const row of state.plan.rows) await requireEvidence(row.id, async () => {
     const path = resolve(state.root, 'rows', row.id);
     const failure = await json(resolve(path,'failure.json')).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-    requireThat(!failure, 'recorded execution attempt failed or requires authoritative reconciliation; cannot accept this candidate');
+    requireThat(!failure || (acceptedRecovery&&row.id==='advanced-mlx-sft'), 'recorded execution attempt failed or requires authoritative reconciliation; cannot accept this candidate');
     const receipt = await json(resolve(path, 'receipt.json'));
     const binding = validateBinding(await json(resolve(state.root,'bindings',`${row.backend}.json`)),state.lock,row.backend);
     requireThat(receipt.version === VERSION && receipt.lockSha256 === digest(state.lock) && receipt.bindingSha256 === digest(binding) && receipt.execution === 'VERIFIED', 'row receipt not bound/verified');
@@ -645,6 +704,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'upload' && args.length === 3) return upload(...args);
   if (command === 'ui-task' && args.length === 2) return uiTask(...args);
   if (command === 'run' && [3, 4].includes(args.length)) return run(...args);
+  if (command === 'recover-completed' && args.length === 2) return recoverCompletedRow(...args);
   if (command === 'guard' && args.length === 4) return guard(...args);
   if (command === 'compare-cache' && args.length === 2) return compareCache(...args);
   if (command === 'reconcile' && args.length === 4) return reconcile(...args);

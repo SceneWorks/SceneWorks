@@ -393,7 +393,7 @@ jobs:
     uses: ./.github/workflows/moss-edit-terminal.yml
     secrets: inherit
     with:
-      source_sha: ${{ inputs.ref }}
+      source_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).product_sha || inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       candidate_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).candidate_id }}
       bundle_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).bundle_run_id }}
@@ -404,6 +404,11 @@ jobs:
       upload_kind: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).upload_kind }}
       execution_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).execution_run_id }}
       execution_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).execution_run_attempt }}
+      tooling_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).tooling_sha }}
+      original_inventory_path: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).original_inventory_path }}
+      original_inventory_sha256: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).original_inventory_sha256 }}
+      native_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).native_run_id }}
+      native_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).native_run_attempt }}
       review_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).review_artifact_id }}
       review_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).review_run_id }}
   qwen-app-lifecycle:

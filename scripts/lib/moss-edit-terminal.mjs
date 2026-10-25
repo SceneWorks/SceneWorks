@@ -312,7 +312,9 @@ export function replaceInputs(row, uploaded, projectId) {
 export function assertRequestBinding(expected, actual) {
   const matches = (wanted, observed) => wanted && typeof wanted === 'object' && !Array.isArray(wanted) ? observed && typeof observed === 'object' && Object.entries(wanted).every(([key, value]) => matches(value, observed[key])) : canonical(wanted) === canonical(observed);
   for (const [key, value] of Object.entries(expected)) requireThat(matches(value, actual[key]), `actual job changed frozen request field ${key}`);
-  if (expected.advanced?.mossImageAdvanced?.negativePrompts) requireThat(!Object.hasOwn(actual,'negativePrompt'), 'per-prompt negatives gained an unsupported broadcast field');
+  // The API persists an omitted broadcast prompt as "". Only a nonempty
+  // broadcast competes with the authored per-prompt negatives.
+  if (expected.advanced?.mossImageAdvanced?.negativePrompts) requireThat(!Object.hasOwn(actual,'negativePrompt') || actual.negativePrompt === '', 'per-prompt negatives gained an unsupported broadcast field');
   requireThat(!actual.advanced?.mossImageEditExecutionReport && !actual.advanced?.mossImageExecutionReport && actual.advanced?.mossImageSampleIndex === undefined, 'request imported an execution receipt/sample index');
 }
 // The Editor stages its unchanged working raster as a new project asset. Only this

@@ -7,6 +7,7 @@ import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelP
 export { labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
+export const verifyUiRequestBinding = (expected, actual) => assertRequestBinding(expected, actual);
 
 // Parents may be new on the first row; each capture leaf must remain exclusive.
 export async function createFreshCaptureDirectory(captureRoot) {
@@ -431,10 +432,10 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     if (route.shell === 'editor') {
       const actualId = network.request.referenceAssetIds?.[0], upload = observation.uploads.find(item => item.network.response?.id === actualId);
       requireThat(upload, 'Editor scratch upload was not observed');
-      const bound = structuredClone(expected); bound.referenceAssetIds = [actualId]; assertRequestBinding(bound, network.request);
+      const bound = structuredClone(expected); bound.referenceAssetIds = [actualId]; verifyUiRequestBinding(bound, network.request);
       const file = 'source-upload.png'; await writeFile(resolve(captureRoot,file), upload.bytes, { flag: 'wx', mode: 0o600 });
       sourceUpload = { inputId: 'B', file, sha256: sha(upload.bytes), observedAt: upload.network.observedAt, network: upload.network };
-    } else assertRequestBinding(expected, network.request);
+    } else verifyUiRequestBinding(expected, network.request);
     await waitFor(page, observation, () => {
       const jobs = observation.progress.filter(job => job.id === network.response.id);
       if (jobs.some(job => job.status === 'running')) return true;

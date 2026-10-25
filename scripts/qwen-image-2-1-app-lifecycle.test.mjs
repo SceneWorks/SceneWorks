@@ -165,8 +165,8 @@ function assertDispatcherIsolation(workflow) {
   assert.match(mossDispatch, /validateDispatchEnvelope\(process\.env\.MOSS_DISPATCH,process\.env\.MOSS_SOURCE_SHA,process\.env\.MOSS_INFERENCE_SHA,process\.env\.GITHUB_SHA\)/);
   assert.match(mossDispatch, /dispatch: \$\{\{ steps.validate.outputs.dispatch \}\}/);
   assert.match(mossTerminal, /needs: moss-dispatch/);
-  assert.match(mossTerminal, /uses: \.\/\.github\/workflows\/moss-edit-terminal.yml[\s\S]*?with:\n      source_sha: \$\{\{ inputs.ref \}\}\n      inference_sha: \$\{\{ inputs.inference_sha \}\}/);
-  for (const field of ["candidate_id", "bundle_run_id", "bundle_artifact_id", "bundle_manifest_sha256", "phase", "upload_path", "upload_kind", "execution_run_id", "execution_run_attempt", "review_artifact_id", "review_run_id"]) {
+  assert.match(mossTerminal, /uses: \.\/\.github\/workflows\/moss-edit-terminal.yml[\s\S]*?with:\n      source_sha: \$\{\{ fromJSON\(needs\.moss-dispatch\.outputs\.dispatch\)\.product_sha \|\| inputs\.ref \}\}\n      inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  for (const field of ["candidate_id", "bundle_run_id", "bundle_artifact_id", "bundle_manifest_sha256", "phase", "upload_path", "upload_kind", "execution_run_id", "execution_run_attempt", "tooling_sha", "original_inventory_path", "original_inventory_sha256", "native_run_id", "native_run_attempt", "review_artifact_id", "review_run_id"]) {
     assert.ok(mossTerminal.includes(`${field}: \${{ fromJSON(needs.moss-dispatch.outputs.dispatch).${field} }}`), `${field} must come from the validated dispatch`);
   }
   const phases = ["upload", "execute", "upload-probe", "execute-probe"];
@@ -215,7 +215,7 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
     workflow.replace("validateDispatchEnvelope(process.env.MOSS_DISPATCH", "JSON.parse(process.env.MOSS_DISPATCH"),
     workflow.replace("steps.validate.outputs.dispatch", "inputs.moss_terminal"),
     workflow.replace(mossTerminal, mossTerminal.replace("needs: moss-dispatch", "needs: qwen-app-lifecycle")),
-    workflow.replace(mossTerminal, mossTerminal.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}")),
+    workflow.replace(mossTerminal, mossTerminal.replace("source_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).product_sha || inputs.ref }}", "source_sha: ${{ github.ref }}")),
     workflow.replace(mossTerminal, mossTerminal.replace("inference_sha: ${{ inputs.inference_sha }}", "inference_sha: main")),
     workflow.replace("phase: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).phase }}", "phase: execute"),
   );
