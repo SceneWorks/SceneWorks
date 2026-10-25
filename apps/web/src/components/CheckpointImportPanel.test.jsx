@@ -199,6 +199,30 @@ describe("CheckpointImportPanel", () => {
     });
   });
 
+  it("submits managed repair with the stable existing ID and retains the exact failed attempt", async () => {
+    const onImportModel = vi.fn().mockRejectedValueOnce(new Error("source unavailable"))
+      .mockResolvedValueOnce({ payload: { modelId: "existing-h3" } });
+    await render({ onImportModel, models: [
+      { id: "minimax_h3_ref", name: "Reference base", family: "minimax-h3", type: "video" },
+    ], repairRequest: { model: { id: "existing-h3", name: "Existing H3", type: "video", family: "minimax-h3",
+      importedSource: { ownershipMode: "managed", baseModel: "minimax_h3_ref", declaredPartition: "ref2va" } } } });
+    expect(status()).toContain("Repairing existing-h3");
+    await click(buttonNamed("URL"));
+    await type(labelled("Source URL"), "https://example.test/new.safetensors");
+    await type(labelled("Name"), "Edited name");
+    await click(buttonNamed("Repair selected model"));
+    expect(onImportModel).toHaveBeenCalledTimes(1);
+    const expected = { ownershipMode: "managed", type: "video", family: "minimax-h3", name: "Edited name",
+      baseModel: "minimax_h3_ref", minimaxH3Partition: "ref2va", modelId: "existing-h3", repairModelId: "existing-h3",
+      source: { kind: "url", url: "https://example.test/new.safetensors" } };
+    expect(onImportModel).toHaveBeenLastCalledWith(expected);
+    expect(importStatus()).toContain("source unavailable");
+    await type(labelled("Name"), "Unsubmitted edit");
+    await click(buttonNamed("Try again"));
+    expect(onImportModel).toHaveBeenNthCalledWith(2, expected);
+    expect(importStatus()).toContain("Import queued for existing-h3");
+  });
+
   const h3Models = [
     { id: "minimax_h3", name: "MiniMax-H3", family: "minimax-h3", type: "video" },
     { id: "minimax_h3_ref", name: "MiniMax-H3 References", family: "minimax-h3", type: "video" },

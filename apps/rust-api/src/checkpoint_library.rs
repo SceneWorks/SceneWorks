@@ -391,7 +391,112 @@ pub(crate) async fn rescan_library_checkpoint(
         return Err(ApiError::bad_request("A checkpoint path is required."));
     }
     let store = open_store(&state);
-    let compiled = blocking(move || store.compile_linked(&root_id, &relative_path)).await?;
+    let checkpoint_id =
+        sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root_id, &relative_path);
+    let models = crate::models::model_catalog(&state).await?;
+    let h3_entries: Vec<_> = models
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+                == Some(checkpoint_id.as_str())
+                && sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(entry)
+        })
+        .cloned()
+        .collect();
+    let mut context = std::collections::BTreeMap::new();
+    if let Some(entry) = h3_entries.first() {
+        // Rescan is the explicit authority to accept current component CONTENT, not to silently
+        // reinterpret trained task semantics from a mutated catalog or a fresh load seal.
+        let mut declaration =
+            sceneworks_core::model_artifacts::provenance::import_declaration_context(entry)
+                .map_err(ApiError::bad_request)?;
+        if let Ok(record) = store.record(&checkpoint_id) {
+            let old = store
+                .plan(&checkpoint_id, &record.plan.plan_id)
+                .map_err(plan_error_to_api_error)?;
+            record
+                .validate_loaded_plan(&old)
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+            if let Some(config) = old.context.get("transformerConfig") {
+                declaration.insert("transformerConfig".into(), config.clone());
+            }
+            if let Some(previous) = old
+                .context
+                .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            {
+                for (path, key) in [
+                    ("/baseLineage/baseModel", "baseModel"),
+                    (
+                        "/declaredSemantics/minimaxH3Partition",
+                        "minimaxH3Partition",
+                    ),
+                ] {
+                    if previous
+                        .pointer(path)
+                        .is_some_and(|bound| entry.get(key) != Some(bound))
+                    {
+                        return Err(ApiError::bad_request("Rescan cannot change a checkpoint's declared task/base; explicitly reimport with the new declaration"));
+                    }
+                }
+            }
+        }
+        for alias in &h3_entries[1..] {
+            if sceneworks_core::model_artifacts::provenance::import_declaration_context(alias)
+                .map_err(ApiError::bad_request)?
+                .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+                != declaration
+                    .get(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            {
+                return Err(ApiError::bad_request(
+                    "Linked checkpoint aliases disagree about their component/task declaration",
+                ));
+            }
+        }
+        let data_dir = state.settings.data_dir.clone();
+        let entry = entry.clone();
+        struct CancelCapture(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for CancelCapture {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let guard = CancelCapture(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        let canceled = guard.0.clone();
+        let closure = tokio::task::spawn_blocking(move || {
+            sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
+                &data_dir,
+                &entry,
+                &|| {
+                    if canceled.load(std::sync::atomic::Ordering::Acquire) {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "rescan component binding canceled",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        })
+        .await
+        .map_err(task_failed)?
+        .map_err(ApiError::bad_request)?;
+        declaration
+            .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+            .expect("declaration context")["componentClosure"] = closure;
+        context = declaration;
+    }
+    let compiled = blocking(move || {
+        if context.is_empty() {
+            store.compile_linked(&root_id, &relative_path)
+        } else {
+            store.compile_linked_with_context(&root_id, &relative_path, context)
+        }
+    })
+    .await?;
     // A rescan explicitly accepts the new bytes, not a new task declaration. Rebind every model
     // referencing this checkpoint using its existing compatible base/partition, or refuse it.
     // Otherwise the store reports Ready while generation permanently rejects the old assembly.
@@ -407,6 +512,8 @@ pub(crate) async fn rescan_library_checkpoint(
                 continue;
             }
             if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(object) {
+                sceneworks_core::model_artifacts::provenance::validate_entry_declaration(&compiled.plan, object)
+                    .map_err(ApiError::bad_request)?;
                 let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
                     &compiled.plan, object,
                 ).map_err(ApiError::bad_request)?;

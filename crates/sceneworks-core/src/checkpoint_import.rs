@@ -489,6 +489,10 @@ pub struct ManagedProvenanceV1 {
     /// The host whose stored credential authorized the fetch. The credential itself is never
     /// recorded; this is only the fact that one was used, and against which host.
     pub credential_host: Option<String>,
+    /// Server-owned ingest transaction. Physical ownership/recovery authority only: semantic
+    /// layer identity excludes provenance, so managed/linked content equivalence is unchanged.
+    pub import_job_id: Option<String>,
+    pub import_commitment: Option<String>,
 }
 
 impl Serialize for ManagedProvenanceV1 {
@@ -500,6 +504,8 @@ impl Serialize for ManagedProvenanceV1 {
             ("versionId", &self.version_id),
             ("fileId", &self.file_id),
             ("credentialHost", &self.credential_host),
+            ("importJobId", &self.import_job_id),
+            ("importCommitment", &self.import_commitment),
         ];
         let present = optional.iter().filter(|(_, value)| value.is_some()).count();
         let mut state = serializer.serialize_struct("ManagedProvenanceV1", 1 + present)?;
@@ -529,6 +535,10 @@ impl<'de> Deserialize<'de> for ManagedProvenanceV1 {
             file_id: Option<String>,
             #[serde(default)]
             credential_host: Option<String>,
+            #[serde(default)]
+            import_job_id: Option<String>,
+            #[serde(default)]
+            import_commitment: Option<String>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let provenance = Self {
@@ -538,6 +548,8 @@ impl<'de> Deserialize<'de> for ManagedProvenanceV1 {
             version_id: wire.version_id,
             file_id: wire.file_id,
             credential_host: wire.credential_host,
+            import_job_id: wire.import_job_id,
+            import_commitment: wire.import_commitment,
         };
         provenance.validate().map_err(D::Error::custom)?;
         Ok(provenance)
@@ -569,6 +581,27 @@ impl ManagedProvenanceV1 {
         }
         if let Some(url) = &self.url {
             validate_secret_free_url(url)?;
+        }
+        match (&self.import_job_id, &self.import_commitment) {
+            (None, None) => {}
+            (Some(job), Some(commitment)) => {
+                validate_nonempty(job, "managed import job ID")?;
+                let digest = commitment
+                    .strip_prefix("sha256:")
+                    .ok_or_else(|| invalid("invalid managed import commitment"))?;
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid("invalid managed import commitment"));
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "managed import transaction requires job ID and commitment together",
+                ))
+            }
         }
         Ok(())
     }
@@ -1143,10 +1176,10 @@ impl ImportPlanV1 {
         // Optional for historical plans. Once present this authority has the same structural
         // contract as the published context schema, while all unrelated loader context remains open.
         if let Some(declaration) = self.context.get("modelDeclaration") {
-            if declaration
+            if !declaration
                 .get("schemaVersion")
                 .and_then(serde_json::Value::as_f64)
-                != Some(1.0)
+                .is_some_and(|version| version == 1.0 || version == 2.0)
                 || !declaration
                     .get("baseLineage")
                     .is_some_and(serde_json::Value::is_object)
@@ -1159,6 +1192,14 @@ impl ImportPlanV1 {
                     .is_some_and(|components| components.iter().all(serde_json::Value::is_object))
             {
                 return Err(invalid("invalid immutable model declaration"));
+            }
+            if declaration
+                .get("schemaVersion")
+                .and_then(serde_json::Value::as_f64)
+                == Some(2.0)
+            {
+                crate::model_artifacts::provenance::validate_h3_component_declaration(declaration)
+                    .map_err(invalid)?;
             }
         }
         Ok(())

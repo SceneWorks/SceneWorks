@@ -149,11 +149,13 @@ export function CheckpointImportPanel({
     baseModel: "",
     minimaxH3Partition: "",
   });
+  const [repairModelId, setRepairModelId] = useState(null);
   const consumedRepairRequest = useRef(null);
   useEffect(() => {
     const model = repairRequest?.model;
     if (!model || model.importedSource?.ownershipMode !== "managed" || consumedRepairRequest.current === repairRequest) return;
     consumedRepairRequest.current = repairRequest;
+    setRepairModelId(model.id);
     setOpen(true);
     setOwnership(OWNERSHIP_MANAGED);
     // Only seed an untouched declaration. The source chooser and any existing draft stay the
@@ -423,7 +425,10 @@ export function CheckpointImportPanel({
       setImportMessage({ ...NEUTRAL, tone: "error", text: problem });
       return;
     }
-    return submit({ body: managedImportBody(managed), file: managed.kind === "upload" ? managed.file : null });
+    return submit({
+      body: { ...managedImportBody(managed), ...(repairModelId ? { repairModelId, modelId: repairModelId } : {}) },
+      file: managed.kind === "upload" ? managed.file : null,
+    });
   }
 
   const managedSource = MANAGED_SOURCES.find((source) => source.kind === managed.kind) ?? MANAGED_SOURCES[0];
@@ -454,7 +459,7 @@ export function CheckpointImportPanel({
                 aria-checked={ownership === choice.id}
                 className={ownership === choice.id ? "checkpoint-ownership-choice active" : "checkpoint-ownership-choice"}
                 key={choice.id}
-                onClick={() => setOwnership(choice.id)}
+                onClick={() => { setOwnership(choice.id); if (choice.id === OWNERSHIP_LINKED) setRepairModelId(null); }}
                 role="radio"
                 type="button"
               >
@@ -771,6 +776,10 @@ export function CheckpointImportPanel({
   function renderManaged() {
     return (
       <form aria-label="Add to SceneWorks" className="checkpoint-managed" onSubmit={submitManaged}>
+        {repairModelId ? <div role="status">
+          Repairing {repairModelId}. This keeps the selected model ID. The original installation stays protected until the replacement is validated and published.
+          <button type="button" disabled={importBusy} onClick={() => setRepairModelId(null)}>Cancel repair</button>
+        </div> : null}
         <div aria-label="Where the checkpoint comes from" className="segmented-control compact-segment" role="radiogroup">
           {MANAGED_SOURCES.map((source) => (
             <button
@@ -929,7 +938,7 @@ export function CheckpointImportPanel({
             />
           </label>
           <button disabled={importBusy} type="submit">
-            {importBusy ? "Queueing…" : "Queue Import"}
+            {importBusy ? "Queueing…" : repairModelId ? "Repair selected model" : "Queue Import"}
           </button>
         </div>
         {/* Only speaks when the caller actually read the keychain (`credentials` is an array).

@@ -243,8 +243,9 @@ mod models;
 use models::{
     create_conditional_components_download_jobs, create_model_convert_job,
     create_model_download_job, create_model_import_job, delete_model, delete_model_variant,
-    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry,
-    resolve_selected_image_text_encoder, ModelCatalogCache, ModelSizeCache,
+    list_models, model_catalog, model_is_installed, repair_model_import_job,
+    resolve_model_manifest_entry, resolve_selected_image_text_encoder, ModelCatalogCache,
+    ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -2219,6 +2220,11 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/models/import",
             post(create_model_import_job)
+                .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/models/{model_id}/repair",
+            post(repair_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         // Resolved-model hot cache (sc-19711). The GET is UI-polled, so it is deliberately one

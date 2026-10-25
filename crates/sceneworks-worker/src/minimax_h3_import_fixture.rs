@@ -11,7 +11,7 @@ use runtime_macos as platform_runtime;
 use serde_json::{json, Map, Value};
 
 /// Write a safetensors file declaring `entries` (one element each) filled with `fill`.
-pub(crate) fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
+pub fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8) {
     let mut header = Map::new();
     let mut offset = 0_u64;
     for (name, dtype) in entries {
@@ -36,7 +36,7 @@ pub(crate) fn write_safetensors(path: &Path, entries: &[(&str, &str)], fill: u8)
 
 /// A dense H3 transformer component directory at `dir`: the `MiniMaxH3Transformer3DModel` config
 /// beside exactly one `diffusion_pytorch_model.safetensors`.
-pub(crate) fn write_minimax_h3_dit_dir(dir: &Path) {
+pub fn write_minimax_h3_dit_dir(dir: &Path) {
     let config = h3_fixture_config();
     let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
         .shapes()
@@ -65,7 +65,7 @@ pub(crate) fn write_minimax_h3_dit_dir(dir: &Path) {
     std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
 }
 
-pub(crate) fn h3_fixture_config() -> Value {
+pub fn h3_fixture_config() -> Value {
     let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
     for (key, value) in [
         ("num_layers", 1),
@@ -95,12 +95,13 @@ pub(crate) fn h3_fixture_config() -> Value {
     )),
     allow(dead_code)
 )]
-pub(crate) struct ManagedMiniMaxH3Import {
-    pub(crate) entry: Map<String, Value>,
-    pub(crate) install_dir: PathBuf,
-    pub(crate) checkpoint_id: String,
-    pub(crate) plan_id: String,
-    pub(crate) semantic_digest: String,
+pub struct ManagedMiniMaxH3Import {
+    pub entry: Map<String, Value>,
+    pub install_dir: PathBuf,
+    pub checkpoint_id: String,
+    pub plan_id: String,
+    pub semantic_digest: String,
+    _cache_root: Option<sceneworks_core::hf_home::test_support::CacheRootGuard>,
 }
 
 /// Commit a managed H3 DiT import into `data_dir` through the REAL transactional ingest and build
@@ -113,14 +114,11 @@ pub(crate) struct ManagedMiniMaxH3Import {
     )),
     allow(dead_code)
 )]
-pub(crate) fn stage_managed_minimax_h3_import(
-    data_dir: &Path,
-    model_id: &str,
-) -> ManagedMiniMaxH3Import {
+pub fn stage_managed_minimax_h3_import(data_dir: &Path, model_id: &str) -> ManagedMiniMaxH3Import {
     stage_managed_minimax_h3_import_layout(data_dir, model_id, "dense")
 }
 
-pub(crate) fn stage_managed_minimax_h3_import_layout(
+pub fn stage_managed_minimax_h3_import_layout(
     data_dir: &Path,
     model_id: &str,
     layout: &str,
@@ -128,12 +126,17 @@ pub(crate) fn stage_managed_minimax_h3_import_layout(
     stage_managed_minimax_h3_import_source(data_dir, model_id, layout, "fl2va")
 }
 
-pub(crate) fn stage_managed_minimax_h3_import_source(
+pub fn stage_managed_minimax_h3_import_source(
     data_dir: &Path,
     model_id: &str,
     layout: &str,
     partition: &str,
 ) -> ManagedMiniMaxH3Import {
+    let cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new_if_unregistered(
+        data_dir.to_owned(),
+        data_dir.join("cache/fixture-hub"),
+    );
+    stage_component_snapshots(data_dir);
     let source = data_dir.join("models/incoming").join(model_id);
     write_minimax_h3_dit_dir(&source);
     let mut files = vec![
@@ -364,8 +367,23 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
             .stage_copy_file(&source.join(file), file)
             .expect("stages");
     }
+    let declaration = json!({"family":"minimax-h3","baseModel":if partition == "ref2va" {"minimax_h3_ref"} else {"minimax_h3"},
+        "minimaxH3Partition":partition,"importComponentTier":"q4","downloads":component_downloads("q4",partition)});
+    let mut context = sceneworks_core::model_artifacts::provenance::import_declaration_context(
+        declaration.as_object().unwrap(),
+    )
+    .unwrap();
+    context
+        .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+        .unwrap()["componentClosure"] =
+        sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
+            data_dir,
+            declaration.as_object().unwrap(),
+            &|| Ok(()),
+        )
+        .unwrap();
     let install = ingest
-        .finalize(
+        .finalize_with_context(
             if matches!(
                 layout,
                 "native" | "convrot" | "pruned" | "pruned-other" | "w4a8"
@@ -377,6 +395,7 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
                 "diffusion_pytorch_model.safetensors"
             },
             None,
+            context,
         )
         .expect("a supported H3 DiT commits");
     let semantic_digest = install.compiled.record.plan.semantic_digest.clone();
@@ -416,13 +435,61 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
         checkpoint_id: install.checkpoint_id.clone(),
         plan_id: install.compiled.plan.plan_id.clone(),
         semantic_digest,
+        _cache_root: cache_root,
     }
 }
 
-pub(crate) const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
-pub(crate) const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
+pub const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
+pub const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
 
-pub(crate) fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
+/// Populate only synthetic source-library snapshots selected by the fixture's private data root.
+/// Callers retain their scoped CacheRootGuard; this helper never reads network or model payloads.
+pub fn stage_component_snapshots(data_dir: &Path) {
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    assert!(
+        library.root().starts_with(data_dir.parent().unwrap()),
+        "fixture component snapshots require a private data-root cache guard"
+    );
+    let base = library
+        .repository_root("MiniMaxAI/MiniMax-H3")
+        .unwrap()
+        .join("snapshots")
+        .join(SHARED_REVISION);
+    let tiers = library
+        .repository_root("SceneWorks/minimax-h3-mlx")
+        .unwrap()
+        .join("snapshots")
+        .join(TIER_REVISION);
+    fn copy_missing(source: &Path, target: &Path) {
+        std::fs::create_dir_all(target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let destination = target.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_missing(&entry.path(), &destination);
+            } else if !destination.exists() {
+                std::fs::copy(entry.path(), destination).unwrap();
+            }
+        }
+    }
+    let scratch = data_dir.join("cache/synthetic-component-staging");
+    let scratch_base = scratch.join("base");
+    let scratch_tiers = scratch.join("tiers");
+    for tier in ["q4", "q8", "bf16"] {
+        let encoder = if tier == "bf16" {
+            scratch_base.join("text_encoder")
+        } else {
+            scratch_tiers.join(tier).join("text_encoder")
+        };
+        write_shared_configs(&scratch_base, &encoder);
+        write_companion(&scratch_tiers.join(tier).join("transformer_ref"));
+        write_companion(&scratch_tiers.join(tier).join("transformer"));
+    }
+    copy_missing(&scratch_base, &base);
+    copy_missing(&scratch_tiers, &tiers);
+}
+
+pub fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
     let mut rows = Vec::new();
     for (id, dir) in [
         ("tokenizer", "tokenizer"),
@@ -450,8 +517,7 @@ pub(crate) fn component_downloads(tier: &str, partition: &str) -> Vec<Value> {
     rows
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-pub(crate) fn write_companion(dir: &Path) {
+pub fn write_companion(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("config.json"), "{}").unwrap();
     write_safetensors(&dir.join("fixture.safetensors"), &[("weight", "F16")], 0x2a);
@@ -463,7 +529,7 @@ pub(crate) fn write_companion(dir: &Path) {
 }
 
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
+pub fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
     for (repo, revision, source) in [
         ("models--MiniMaxAI--MiniMax-H3", SHARED_REVISION, base),
         ("models--SceneWorks--minimax-h3-mlx", TIER_REVISION, tiers),
@@ -489,9 +555,55 @@ pub(crate) fn install_fixture_snapshots(hub: &Path, tiers: &Path, base: &Path) {
     }
 }
 
+/// Portable constructor metadata for import-only CPU tests; no native provider is linked here.
+#[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+pub fn write_shared_configs(root: &Path, encoder: &Path) {
+    let put = |path: PathBuf, value: Value| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, value.to_string()).unwrap();
+    };
+    put(
+        encoder.join("config.json"),
+        json!({"text_config":{"hidden_size":5120}}),
+    );
+    put(
+        encoder.join("model.safetensors.index.json"),
+        json!({"weight_map":{"weight":"fixture.safetensors"}}),
+    );
+    write_safetensors(
+        &encoder.join("fixture.safetensors"),
+        &[("weight", "F16")],
+        0x2a,
+    );
+    for (dir, channels) in [("vae", 24), ("audio_vae", 32)] {
+        put(
+            root.join(dir).join("config.json"),
+            json!({"latent_channels":channels}),
+        );
+        write_safetensors(
+            &root.join(dir).join("fixture.safetensors"),
+            &[("weight", "F16")],
+            0x2b,
+        );
+    }
+    put(
+        root.join("tokenizer/tokenizer.json"),
+        json!({"model":{"type":"BPE","vocab":{},"merges":[]}}),
+    );
+    put(root.join("tokenizer/tokenizer_config.json"), json!({}));
+    for name in ["config.json", "metadata.json"] {
+        put(root.join("FL2VA/audio_vae").join(name), json!({}));
+    }
+    std::fs::write(
+        root.join("FL2VA/audio_vae/config.yaml"),
+        "model_config: {}\n",
+    )
+    .unwrap();
+}
+
 /// Constructor documents at fixture scale; no model weights, downloads, or tensor runtime.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-pub(crate) fn write_shared_configs(root: &Path, encoder: &Path) {
+pub fn write_shared_configs(root: &Path, encoder: &Path) {
     let put = |path: PathBuf, value: Value| {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, value.to_string()).unwrap();
@@ -759,6 +871,7 @@ fn convrot_import_native_cuda_projection_smoke() {
     }
 }
 
+#[cfg(test)]
 struct PrunedManagedArtifact {
     imported: ManagedMiniMaxH3Import,
     binding: sceneworks_core::minimax_h3_codec::H3PruningBinding,
@@ -766,6 +879,7 @@ struct PrunedManagedArtifact {
     _lease: sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheLease,
 }
 
+#[cfg(test)]
 fn stage_sealed_pruned_artifact(
     data_dir: &Path,
     model_id: &str,
@@ -1012,7 +1126,7 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
     );
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn pruned_import_oracle() -> Value {
     serde_json::from_str(include_str!(
         "../tests/fixtures/minimax_h3_pruned_import.json"
@@ -1020,7 +1134,7 @@ fn pruned_import_oracle() -> Value {
     .unwrap()
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn fixture_floats(value: &Value) -> Vec<f32> {
     value
         .as_array()
@@ -1030,7 +1144,7 @@ fn fixture_floats(value: &Value) -> Vec<f32> {
         .collect()
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn assert_pruned_numeric(actual: &[f32], expected: &[f32], tolerance: f32, label: &str) {
     assert_eq!(actual.len(), expected.len(), "{label}");
     for (index, (&got, &want)) in actual.iter().zip(expected).enumerate() {
@@ -1045,7 +1159,7 @@ fn assert_pruned_numeric(actual: &[f32], expected: &[f32], tolerance: f32, label
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 fn assert_pruned_period(actual: &[f32], case: &Value, rows: usize, tolerance: f32, label: &str) {
     assert_eq!(actual.len(), rows, "{label}");
     let period = fixture_floats(&case["projection_period"]);

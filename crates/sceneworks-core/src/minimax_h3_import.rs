@@ -194,6 +194,9 @@ pub struct MiniMaxH3ImportAssembly {
     pub source_encoding: Option<String>,
     /// Complete source table/basis identity and source/compute precision geometry, when pruned.
     pub pruning: Option<crate::minimax_h3_codec::H3PruningBinding>,
+    /// Exact resident revisions and bytes, frozen by the existing import compiler. None is a
+    /// historical unknown, never permission to adopt the current cache at generation time.
+    pub component_closure: Option<Value>,
 }
 
 impl MiniMaxH3ImportAssembly {
@@ -287,6 +290,11 @@ impl MiniMaxH3ImportAssembly {
             descriptor_layer_ids,
             source_encoding,
             pruning,
+            component_closure: plan
+                .context
+                .get(crate::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+                .and_then(|declaration| declaration.get("componentClosure"))
+                .cloned(),
         })
     }
 
@@ -327,6 +335,9 @@ impl MiniMaxH3ImportAssembly {
             "partition": self.partition.as_str(),
             "components": components,
         });
+        if let Some(closure) = &self.component_closure {
+            binding["componentClosure"] = closure.clone();
+        }
         if let Some(encoding) = &self.source_encoding {
             binding["sourceEncoding"] = json!(encoding);
         }

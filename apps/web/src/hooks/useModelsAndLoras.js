@@ -228,7 +228,7 @@ export function useModelsAndLoras({
 
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
-    const { file, ...metadata } = payload;
+    const { file, repairModelId, ...metadata } = payload;
     // Fine-tune component acquisition is the selected base's ordinary download workflow. Reuse
     // consent taken on its existing model card, for both JSON/link and multipart/upload requests.
     const base = models.find((model) => model.id === metadata.baseModel);
@@ -263,7 +263,8 @@ export function useModelsAndLoras({
     } else {
       body = JSON.stringify(metadata);
     }
-    const job = await apiFetch("/api/v1/models/import", token, {
+    const endpoint = repairModelId ? `/api/v1/models/${encodeURIComponent(repairModelId)}/repair` : "/api/v1/models/import";
+    const job = await apiFetch(endpoint, token, {
       method: "POST",
       body,
     });

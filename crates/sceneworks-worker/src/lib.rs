@@ -2769,8 +2769,8 @@ mod iris_test_weights;
 
 // Synthetic dense MiniMax-H3 DiT import fixtures shared by the import-job and video-arm tests
 // (sc-26680).
-#[cfg(test)]
-mod minimax_h3_import_fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub mod minimax_h3_import_fixture;
 
 // NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
 // The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations

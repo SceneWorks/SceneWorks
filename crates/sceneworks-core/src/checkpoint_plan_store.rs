@@ -1218,6 +1218,7 @@ pub fn source_file_sha256_with_check(
     loop {
         checkpoint(hashed_bytes)?;
         let read = file.read(&mut buffer)?;
+        check()?;
         if read == 0 {
             break;
         }
