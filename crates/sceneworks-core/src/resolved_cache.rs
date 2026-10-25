@@ -2100,13 +2100,27 @@ impl ResolvedCacheReservation {
         let (entry, bundle) = match preparation {
             Ok(paths) => paths,
             Err(error) => {
-                self.discard()?;
+                // Teardown is best-effort on the refusal path: the original refusal is the
+                // caller's answer, and a cleanup problem must never replace it.
+                let staging_path = self.staging_path.display().to_string();
+                if let Err(teardown) = self.discard_refused() {
+                    tracing::warn!(
+                        staging_path = %staging_path,
+                        error = %teardown,
+                        "refused publication could not tear down its staging tree"
+                    );
+                }
                 return Err(error);
             }
         };
         publish_rename(&self.staging_path, &bundle)?;
         if let Err(error) = sync_dir(&entry) {
-            self.discard_unpublished_bundle()?;
+            if let Err(teardown) = self.discard_unpublished_bundle() {
+                tracing::warn!(
+                    error = %teardown,
+                    "published-bundle rollback failed after directory sync failure"
+                );
+            }
             return Err(error);
         }
         artifact.location = ArtifactLocation::ResolvedLocal { root: bundle };
@@ -2161,7 +2175,16 @@ impl ResolvedCacheReservation {
         match prepared {
             Ok(artifact) => self.publish_staged_with_check(artifact, check),
             Err(error) => {
-                self.discard()?;
+                // A refused measured publication keeps its original refusal as the answer; a
+                // staging tree holding a linked entry is left untouched rather than removed.
+                let staging_path = self.staging_path.display().to_string();
+                if let Err(teardown) = self.discard_refused() {
+                    tracing::warn!(
+                        staging_path = %staging_path,
+                        error = %teardown,
+                        "refused produced publication could not tear down its staging tree"
+                    );
+                }
                 Err(error)
             }
         }
@@ -2179,20 +2202,38 @@ impl ResolvedCacheReservation {
         Ok(())
     }
 
+    /// Refusal-path teardown for a publication this store will not publish. Unlike
+    /// [`Self::discard`], a staging tree that is not entirely regular files and directories is
+    /// LEFT INTACT: the refusal exists precisely because the tree holds a shape this store must
+    /// not touch (a link into data it does not own), and removal must never follow or delete it.
+    /// The entry is still recorded interrupted, so nothing partial is ever served and the next
+    /// reservation attempt starts from a controlled state.
+    fn discard_refused(mut self) -> Result<(), ResolvedCacheError> {
+        if self.staging_path.exists() && validate_regular_tree(&self.staging_path).is_ok() {
+            let staging_root = self.store.root().join("staging");
+            remove_managed_tree(&self.staging_path, &staging_root)?;
+        }
+        self.mark_interrupted()?;
+        Ok(())
+    }
+
     /// Roll back only a bundle renamed by this still-owned, unpublished transaction.
-    /// Source/library paths and another owner's reservation can never enter this cleanup.
-    fn discard_unpublished_bundle(self) -> Result<(), ResolvedCacheError> {
+    /// Source/library paths and another owner's reservation can never enter this cleanup, and a
+    /// bundle that is no longer an entirely regular tree is left in place rather than removed.
+    fn discard_unpublished_bundle(mut self) -> Result<(), ResolvedCacheError> {
         {
             let _metadata_lock = self.store.lock_metadata(&self.digest)?;
             let metadata = self.store.read_metadata_locked(&self.digest)?;
             self.verify_ownership(&metadata)?;
             let bundle = self.bundle_path()?;
-            if std::fs::symlink_metadata(&bundle).is_ok() {
+            if std::fs::symlink_metadata(&bundle).is_ok() && validate_regular_tree(&bundle).is_ok()
+            {
                 let entry = self.store.entry_path(&self.cache_key)?;
                 remove_managed_tree(&bundle, &entry)?;
             }
         }
-        self.discard()
+        self.mark_interrupted()?;
+        Ok(())
     }
 
     /// Marks only this still-owned reservation interrupted. The private reservation/session
@@ -2259,7 +2300,12 @@ impl ResolvedCacheReservation {
             Ok(bytes) => bytes,
             Err(error) => {
                 if cleanup_unpublished {
-                    self.discard_unpublished_bundle()?;
+                    if let Err(teardown) = self.discard_unpublished_bundle() {
+                        tracing::warn!(
+                            error = %teardown,
+                            "unpublished bundle rollback failed during completion validation"
+                        );
+                    }
                 }
                 return Err(error);
             }
