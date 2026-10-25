@@ -3358,6 +3358,7 @@ fn import_source_supported(source: &FsPath) -> Result<Option<String>, ApiError> 
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
     request: AxumRequest,

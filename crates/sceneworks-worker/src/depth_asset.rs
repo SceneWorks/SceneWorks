@@ -128,10 +128,18 @@ mod tests {
                 .unwrap()
                 .expect("a depth asset yields a control image");
         assert_eq!((control.width, control.height), (4, 2));
-        let gray: Vec<u8> = control.pixels.chunks_exact(3).map(|p| p[0]).collect();
+        let gray: Vec<u8> = control
+            .pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|p| p[0])
+            .collect();
         assert!(control
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .all(|p| p[0] == p[1] && p[1] == p[2]));
         assert_eq!(gray[0], 255, "nearest is brightest");
         assert_eq!(gray[3], 0, "farthest is darkest");
