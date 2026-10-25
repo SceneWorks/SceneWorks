@@ -434,6 +434,7 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,6);
   const cudaContinuation=workflow.match(/^  continue-cuda:\n([\s\S]*?)(?=^  verify-retained:)/m)?.[1];
   assert.ok(cudaContinuation);assert.doesNotMatch(cudaContinuation,/shell:\s*bash/);
+  assert.match(cudaContinuation,/name: Validate bundle and configure private execution\/build roots\s+shell: powershell/);
   assert.match(cudaContinuation,/\$env:MOSS_REHYDRATE_ROOT/);assert.match(cudaContinuation,/\$LASTEXITCODE -ne 0/);
   assert.match(cudaContinuation,/if: inputs\.phase == 'continue-cuda'[\s\S]*?artifact-ids: \$\{\{ inputs\.mlx_artifact_id \}\}/);
   assert.match(workflow,/supplement-mlx-handoff:[\s\S]*?stage-completed-mlx-handoff[\s\S]*?include-hidden-files: true/);

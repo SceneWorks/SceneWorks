@@ -649,7 +649,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ env.MOSS_BUNDLE }}
       - name: Validate bundle and configure private execution/build roots
-        shell: pwsh
+        shell: powershell
         run: |
           node tooling/scripts/moss-edit-terminal-actions.mjs configure-env
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
