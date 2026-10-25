@@ -363,15 +363,37 @@ async function harness(config,args,label) {
   const prefix=config.continuation?.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:config.toolingRoot||config.continuation?'continuation-':'';
   await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
 }
+export function compareCrossBackendHistoryJob(origin,actual) {
+  const f32Bits=value=>{
+    const bytes=new DataView(new ArrayBuffer(4));
+    bytes.setFloat32(0,value,false);
+    return bytes.getUint32(0,false);
+  };
+  const jobIdentityEqual=actual.id===origin.id&&actual.projectId===origin.projectId&&actual.type===origin.type&&actual.status===origin.status;
+  const payloadEqual=canonical(actual.payload)===canonical(origin.payload),strictResultEqual=canonical(actual.result)===canonical(origin.result);
+  const left=origin.result?.assets?.[0]?.recipe?.rawAdapterSettings?.mossImageEditExecutionReport?.base?.sampling;
+  const right=actual.result?.assets?.[0]?.recipe?.rawAdapterSettings?.mossImageEditExecutionReport?.base?.sampling;
+  const expected=left?.sigmas,observed=right?.sigmas;
+  const shape=origin.result?.assets?.length===1&&actual.result?.assets?.length===1&&left?.kind==='euler'&&right?.kind==='euler'&&Array.isArray(expected)&&Array.isArray(observed)&&Number.isInteger(origin.payload?.advanced?.steps)&&expected.length===31&&expected.length===origin.payload.advanced.steps+1&&observed.length===expected.length;
+  const sigmaF32Equivalent=Boolean(shape&&expected.every((value,index)=>Number.isFinite(value)&&Number.isFinite(observed[index])&&Number.isFinite(Math.fround(value))&&Number.isFinite(Math.fround(observed[index]))&&f32Bits(value)===f32Bits(observed[index])));
+  const sigmaDifferingIndices=sigmaF32Equivalent?expected.flatMap((value,index)=>Object.is(value,observed[index])?[]:[index]):[];
+  let normalizedResultEqual=false;
+  if(sigmaF32Equivalent) {
+    const normalized=structuredClone(actual.result);
+    normalized.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas=[...expected];
+    normalizedResultEqual=canonical(normalized)===canonical(origin.result);
+  }
+  return {jobIdentityEqual,payloadEqual,resultEqual:strictResultEqual,sigmaF32Equivalent,sigmaDifferingIndices,normalizedResultEqual,typedResultEqual:sigmaF32Equivalent&&normalizedResultEqual};
+}
 export async function authenticateCrossBackendHistory(api,evidenceRoot) {
   const comparisons=[];
   for(const rowId of ['quality-mlx-base-four','quality-mlx-sft-single']) {
     const path=resolve(evidenceRoot,'rows',rowId,'terminal-job.json'),origin=await json(path);
     const actual=await api.request(`/api/v1/jobs/${encodeURIComponent(origin.id)}`);
-    comparisons.push({rowId,originFile:await fileIdentity(path),actual,payloadEqual:canonical(actual.payload)===canonical(origin.payload),resultEqual:canonical(actual.result)===canonical(origin.result)});
+    comparisons.push({rowId,originFile:await fileIdentity(path),actual,...compareCrossBackendHistoryJob(origin,actual)});
   }
   await save(resolve(evidenceRoot,'external/cross-backend-history-readback.json'),{version:VERSION,name:'cross-backend-history-before-first-cuda-dispatch',comparisons});
-  requireThat(comparisons.every(item=>item.payloadEqual&&item.resultEqual),'cross-backend history handoff changed original authored job/result identities');
+  requireThat(comparisons.every(item=>item.jobIdentityEqual&&item.payloadEqual&&item.typedResultEqual),'cross-backend history handoff changed original authored job/result identities');
   return comparisons;
 }
 function buildPaths(config) {

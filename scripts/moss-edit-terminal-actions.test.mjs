@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -462,14 +462,32 @@ test('completed Mac hidden handoff supplement merges exact absent metadata and r
 test('cross-backend history saves both actual GET bodies before rejecting any changed authored field',async()=>{
   const root=await temporary('history-readback');
   try {
-    const rows=['quality-mlx-base-four','quality-mlx-sft-single'],originals=rows.map((rowId,index)=>({id:`job_${index}`,payload:{prompt:rowId,orderedReferences:[1,2,3,4]},result:{assetIds:[`asset_${index}`]}}));
+    const rows=['quality-mlx-base-four','quality-mlx-sft-single'],originals=rows.map((rowId,index)=>({id:`job_${index}`,payload:{prompt:rowId,orderedReferences:[1,2,3,4],advanced:{steps:30}},result:{assets:[{sha256:`asset_${index}`,recipe:{rawAdapterSettings:{mossImageEditExecutionReport:{base:{sampling:{kind:'euler',sigmas:Array.from({length:31},(_,i)=>Math.fround(1-i/30))}}}}}}]}}));
     for(let index=0;index<rows.length;index++)await save(resolve(root,'rows',rows[index],'terminal-job.json'),originals[index]);
     const routes=[],api={request:async route=>{routes.push(route);const index=Number(route.slice(-1));return {...originals[index],payload:index===0?{...originals[index].payload,prompt:'changed on readback'}:originals[index].payload};}};
     await assert.rejects(()=>authenticateCrossBackendHistory(api,root),/cross-backend history handoff changed/);
     const retained=await json(resolve(root,'external/cross-backend-history-readback.json'));
     assert.deepEqual(routes,['/api/v1/jobs/job_0','/api/v1/jobs/job_1']);
-    assert.equal(retained.comparisons.length,2);assert.equal(retained.comparisons[0].actual.payload.prompt,'changed on readback');assert.equal(retained.comparisons[0].payloadEqual,false);assert.equal(retained.comparisons[0].resultEqual,true);assert.equal(retained.comparisons[1].payloadEqual,true);
+    assert.equal(retained.comparisons.length,2);assert.equal(retained.comparisons[0].actual.payload.prompt,'changed on readback');assert.equal(retained.comparisons[0].payloadEqual,false);assert.equal(retained.comparisons[0].resultEqual,true);assert.equal(retained.comparisons[0].typedResultEqual,true);assert.equal(retained.comparisons[1].payloadEqual,true);
   } finally {await rm(root,{recursive:true,force:true});}
+});
+test('cross-backend history accepts only identical FP32 Euler sigma bits with every other authored field exact',()=>{
+  const macSigmas=Array.from({length:31},(_,index)=>Math.fround(1-index/30));
+  macSigmas[1]=0.9929999709129333;
+  const origin={id:'job_actual',projectId:'project_actual',type:'image_generation',status:'completed',payload:{prompt:'actual',advanced:{steps:30}},result:{assets:[{sha256:'asset-output-sha',recipe:{rawAdapterSettings:{mossImageEditExecutionReport:{base:{sampling:{kind:'euler',sigmas:macSigmas},resolved:{shift:5}}}}}}]}};
+  const actual=structuredClone(origin);
+  actual.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas[1]=0.9929999709129332;
+  const comparison=compareCrossBackendHistoryJob(origin,actual);
+  assert.equal(comparison.resultEqual,false);assert.equal(comparison.sigmaF32Equivalent,true);assert.deepEqual(comparison.sigmaDifferingIndices,[1]);assert.equal(comparison.typedResultEqual,true);
+  const changed=mutate=>{const copy=structuredClone(actual);mutate(copy);return compareCrossBackendHistoryJob(origin,copy);};
+  const bytes=new DataView(new ArrayBuffer(4));bytes.setFloat32(0,actual.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas[1],false);bytes.setUint32(0,bytes.getUint32(0,false)+1,false);
+  assert.equal(changed(job=>{job.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas[1]=bytes.getFloat32(0,false);}).typedResultEqual,false);
+  assert.equal(changed(job=>{job.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas.pop();}).typedResultEqual,false);
+  assert.equal(changed(job=>{job.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas[0]=-0;}).typedResultEqual,false);
+  assert.equal(changed(job=>{job.result.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.resolved.shift=5+Number.EPSILON*4;}).typedResultEqual,false);
+  assert.equal(changed(job=>{job.result.assets[0].sha256='changed-output-sha';}).typedResultEqual,false);
+  assert.equal(changed(job=>{job.payload.prompt='changed-prompt';}).payloadEqual,false);
+  assert.equal(changed(job=>{job.id='changed-job';}).jobIdentityEqual,false);
 });
 test('first bundle copies only exact fixed inputs, provenance and declared fixtures, then seals every byte',async()=>{
   const root=await temporary('first-bundle'),input=resolve(root,'original.png'),receipt=resolve(root,'source.json'),numeric=resolve(root,'numeric.json'),fixture=resolve(root,'guard.npy');
