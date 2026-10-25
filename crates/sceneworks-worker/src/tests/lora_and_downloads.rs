@@ -2752,6 +2752,17 @@ async fn h3_import_registration_requires_exact_task_compatibility() {
     }
 }
 
+fn write_sdxl_negative_source(path: &std::path::Path) {
+    crate::minimax_h3_import_fixture::write_safetensors(path,&[
+        ("model.diffusion_model.input_blocks.7.0.out_layers.3.weight","F16"),
+        ("model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight","F16"),
+        ("conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight","F16"),
+        ("conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight","F16"),
+        ("first_stage_model.encoder.conv_in.weight","F16"),
+        ("first_stage_model.decoder.conv_out.weight","F16"),
+    ],0x31);
+}
+
 #[tokio::test]
 async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_path() {
     let _env = isolate_hf_cache();
@@ -2763,14 +2774,7 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
                 &format!("foreign_{kind}_{declaration_on_entry}"),
             )
             .await;
-            crate::minimax_h3_import_fixture::write_safetensors(&fixture.source, &[
-                ("model.diffusion_model.input_blocks.7.0.out_layers.3.weight", "F16"),
-                ("model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight", "F16"),
-                ("conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight", "F16"),
-                ("conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight", "F16"),
-                ("first_stage_model.encoder.conv_in.weight", "F16"),
-                ("first_stage_model.decoder.conv_out.weight", "F16"),
-            ], 0x31);
+            write_sdxl_negative_source(&fixture.source);
             let original = std::fs::read(&fixture.source).unwrap();
             let mut job = fixture.job(None);
             job.payload.remove("family");
@@ -2793,13 +2797,15 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
                 let root = store
                     .approve_root(fixture.source.parent().unwrap())
                     .unwrap();
-                let compiled = store
-                    .compile_linked(&root.root_id, "kreamania.safetensors")
-                    .unwrap();
-                assert_eq!(
-                    compiled.plan.family, "sdxl",
-                    "the negative control must contain a supported, different architecture"
-                );
+                // Prove the negative control from bounded content evidence, not by publishing a
+                // runnable SDXL plan that the refused H3 alias would then be expected to destroy.
+                let sceneworks_core::base_weights::BaseWeightDetection::Recognized(verdict) =
+                    sceneworks_core::base_weights::detect_base_weight_file(&fixture.source).unwrap()
+                    else { panic!("negative source must have a recognized family"); };
+                assert_eq!(verdict.family.as_deref(),Some("sdxl"),
+                    "the negative control must contain a supported, different architecture");
+                let checkpoint_id = sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root.root_id,"kreamania.safetensors");
+                assert!(store.record(&checkpoint_id).is_err(),"preflight starts without a published target plan");
                 job.payload.remove("sourcePath");
                 job.payload
                     .insert("ownershipMode".to_owned(), json!("linked"));
@@ -2809,7 +2815,7 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
                     "linkedRelativePath".to_owned(),
                     json!("kreamania.safetensors"),
                 );
-                Some(compiled.checkpoint_id)
+                Some(checkpoint_id)
             } else {
                 None
             };
@@ -2831,7 +2837,9 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
             .await;
             assert!(posts.lock().unwrap().iter().any(|post| post.get("status").and_then(Value::as_str) == Some("failed") && post.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("family-mismatch") && error.contains("sdxl"))), "must fail for source compatibility, not for incidental setup: {kind}, entry={declaration_on_entry}");
             fixture.assert_nothing_installed(kind);
+            assert!(!posts.lock().unwrap().iter().any(|post|post["status"]=="completed"),"family refusal cannot report completion");
             if let Some(id) = linked_id {
+                assert!(store.record(&id).is_err(),"family preflight must not create a target plan");
                 assert!(
                     store.resolve(&id).is_err(),
                     "refused linked plan must not remain ready"
@@ -2844,6 +2852,44 @@ async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_pat
             );
         }
     }
+}
+
+#[tokio::test]
+async fn linked_family_preflight_refuses_before_components_without_invalidating_an_existing_owner() {
+    let _env = isolate_hf_cache();
+    let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
+    let fixture = managed_import_fixture_with_id(url,"refused_h3_alias").await;
+    write_sdxl_negative_source(&fixture.source);
+    let original = std::fs::read(&fixture.source).unwrap();
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+    let root = store.approve_root(fixture.source.parent().unwrap()).unwrap();
+    let compiled = store.compile_linked(&root.root_id,"kreamania.safetensors").unwrap();
+    assert_eq!(compiled.plan.family,"sdxl");
+    let owner = json!({"id":"existing_sdxl_owner","family":"sdxl","type":"image",
+        "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"kreamania.safetensors"},
+        "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}});
+    std::fs::write(&fixture.manifest_path,json!({"schemaVersion":1,"models":[owner]}).to_string()).unwrap();
+    let manifest_before = std::fs::read(&fixture.manifest_path).unwrap();
+    let inventory_before = store.inventory().unwrap();
+    let mut job = fixture.job(None);
+    job.payload.remove("sourcePath");
+    job.payload.insert("linkedRootId".into(),json!(root.root_id));
+    job.payload.insert("linkedRelativePath".into(),json!("kreamania.safetensors"));
+    let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+    entry.remove("family");
+    entry.insert("baseModel".into(),json!("minimax_h3"));
+    entry.insert("minimaxH3Partition".into(),json!("fl2va"));
+    // No resident/config rows: source mismatch must be conclusive BEFORE any component work.
+    super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+    let updates = posts.lock().unwrap();
+    assert!(updates.iter().any(|update| update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains("family-mismatch") && error.contains("sdxl"))),"{updates:?}");
+    assert!(!updates.iter().any(|update|update["status"]=="completed"));
+    assert!(fixture.manifest_entry().is_none(),"refused alias must not publish a model selection");
+    assert_eq!(std::fs::read(&fixture.manifest_path).unwrap(),manifest_before);
+    assert_eq!(store.inventory().unwrap(),inventory_before,"no new persisted plan or invalidation of another owner");
+    assert_eq!(store.plan(&compiled.checkpoint_id,&compiled.plan.plan_id).unwrap(),compiled.plan);
+    assert_eq!(std::fs::read(&fixture.source).unwrap(),original);
+    assert!(store.resolve(&compiled.checkpoint_id).is_ok(),"the existing linked SDXL owner remains ready");
 }
 
 #[tokio::test]
@@ -2976,7 +3022,7 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
         serde_json::from_slice(&std::fs::read(seed.path().join("config.json")).unwrap()).unwrap();
     config["rope_theta"] = json!(123456.0);
     config["provider_extension"] = json!({"trained_schedule":[0.125,0.75],"precision":"bf16"});
-    let (hf_url, _) = spawn_tree_stub_with_bodies(vec![
+    let (hf_url, posts) = spawn_tree_stub_with_bodies(vec![
         ("community.safetensors".into(), original.clone()),
         (
             "bf16/transformer/config.json".into(),
@@ -2996,8 +3042,14 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
             .join("models/incoming/community.safetensors");
         std::fs::write(&source, &original).unwrap();
         let mut job = h3_import_job(&fixture, &source);
-        job.payload["manifestEntry"]["downloads"] = json!([{"provider":"huggingface","repo":"fixture/base-config","revision":"1111111111111111111111111111111111111111","files":["bf16/transformer/config.json"],"coRequisite":true,"componentId":"import_transformer_config","variant":"bf16"}]);
+        // Match the typed API: complete resident assembly PLUS the optional config-only row.
+        // Replacing residents with the config row correctly fails the immutable closure capture.
+        let residents = crate::minimax_h3_import_fixture::component_downloads("bf16","fl2va");
+        let mut downloads = residents.clone();
+        downloads.push(json!({"provider":"huggingface","repo":"fixture/base-config","revision":"1111111111111111111111111111111111111111","files":["bf16/transformer/config.json"],"coRequisite":true,"componentId":"import_transformer_config","variant":"bf16"}));
+        job.payload["manifestEntry"]["downloads"] = json!(downloads);
         job.payload["manifestEntry"]["importComponentTier"] = json!("bf16");
+        posts.lock().unwrap().clear();
         let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
             &fixture.settings.data_dir,
         );
@@ -3046,9 +3098,14 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
         )
         .await
         .unwrap();
+        {
+            let updates = posts.lock().unwrap();
+            assert!(!updates.iter().any(|update|update["status"]=="failed"),"{transport}: failure was reported, not successful publication: {updates:?}");
+            assert!(updates.iter().any(|update|update["status"]=="completed"),"{transport}: successful import must emit completed progress: {updates:?}");
+        }
         let entry = fixture
             .manifest_entry()
-            .unwrap_or_else(|| panic!("{transport} was not published"));
+            .unwrap_or_else(|| panic!("{transport} was not published; progress={:?}",posts.lock().unwrap()));
         let restarted = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
             &fixture.settings.data_dir,
         );
@@ -3060,11 +3117,10 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
             resolved.plan.context["transformerConfig"]["provenance"]["revision"],
             "1111111111111111111111111111111111111111"
         );
-        assert_eq!(
-            entry["downloads"],
-            json!([]),
-            "config-only provisioning is not a resident component"
-        );
+        assert_eq!(entry["downloads"],json!(residents),"the complete resident assembly remains bound after config-only provisioning");
+        assert!(entry["downloads"].as_array().unwrap().iter().all(|row|
+            row.get("componentId").and_then(Value::as_str)!=Some("import_transformer_config")),
+            "config-only provisioning is not a resident component");
         let digest = resolved.plan.semantic_digest().unwrap();
         if let Some(expected) = &semantic {
             assert_eq!(&digest, expected, "{transport}");
@@ -3072,6 +3128,35 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
             semantic = Some(digest);
         }
         assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+}
+
+#[tokio::test]
+async fn h3_import_reports_missing_or_unresolvable_residents_without_publication() {
+    let _env = isolate_hf_cache();
+    let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
+    for missing in [false,true] {
+        let fixture = managed_import_fixture_with_id(url.clone(),&format!("missing_h3_residents_{missing}")).await;
+        let source = fixture.settings.data_dir.join("models/incoming/real-h3-headers");
+        crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+        let original = std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap();
+        let mut job = h3_import_job(&fixture,&source);
+        job.payload["manifestEntry"]["downloads"] = if missing {
+            json!([{"provider":"huggingface","repo":"fixture/unavailable-components","revision":"1".repeat(40),
+                "coRequisite":true,"variant":"q4","componentId":"text_encoder","subdir":"q4/text_encoder","files":["q4/text_encoder/model.safetensors"]}])
+        } else {
+            json!([{"provider":"huggingface","repo":"fixture/config-only","revision":"1".repeat(40),
+                "coRequisite":true,"variant":"q4","componentId":"import_transformer_config","files":["transformer/config.json"]}])
+        };
+        posts.lock().unwrap().clear();
+        // Ok means the failure report was accepted, NOT that the import completed/published.
+        super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+        let updates = posts.lock().unwrap();
+        let reason = if missing {"component unavailable"} else {"component closure is missing"};
+        assert!(updates.iter().any(|update|update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains(reason))),"{updates:?}");
+        assert!(!updates.iter().any(|update|update["status"]=="completed"),"incomplete authority must never report completion");
+        fixture.assert_nothing_installed(reason);
+        assert_eq!(std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap(),original);
     }
 }
 

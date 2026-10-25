@@ -5823,7 +5823,7 @@ fn minimax_h3_source_family_error(payload: &JsonObject, detected: Option<&str>) 
         if let Err(reason) =
             sceneworks_core::minimax_h3_import::validate_declared_source_family(entry, detected)
         {
-            return Some(format!("[checkpoint-plan:family-mismatch] {reason}"));
+            return Some(format!("[checkpoint-plan:family-mismatch] {reason}. Choose a checkpoint compatible with the declared family, or correct the import declaration."));
         }
     }
     None
@@ -6107,6 +6107,80 @@ async fn run_linked_checkpoint_import_job(
                 .ok(),
         )
         .map(|(root, parts)| root.join(parts));
+    let declares_h3 = [
+        Some(&job.payload),
+        job.payload.get("manifestEntry").and_then(Value::as_object),
+    ]
+    .into_iter()
+    .flatten()
+    .any(sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family);
+    if declares_h3 {
+        // Header-only, confined discovery precedes config/component work. This query never
+        // publishes or invalidates a plan; an existing linked owner's state stays untouched.
+        let probe_store = store.clone();
+        let probe_root = root_id.to_owned();
+        let probe_relative = relative_path.to_owned();
+        let task = tokio::task::spawn_blocking(move || {
+            use sceneworks_core::checkpoint_inspector::{
+                discover_checkpoint, discovered_checkpoint_family, CheckpointInspectionRequestV1,
+            };
+            let root = probe_store
+                .resolve_root(&probe_root)
+                .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+            let checkpoint_id = sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(
+                &probe_root,
+                &probe_relative,
+            );
+            let request = CheckpointInspectionRequestV1::linked(
+                &checkpoint_id,
+                root,
+                &probe_relative,
+                &probe_root,
+            )
+            .map_err(WorkerError::InvalidPayload)?;
+            let discovery = discover_checkpoint(&request);
+            discovered_checkpoint_family(&request, &discovery).map_err(|diagnostics| {
+                WorkerError::InvalidPayload(
+                    sceneworks_core::checkpoint_plan_store::CheckpointPlanError::UnrunnableSource {
+                        checkpoint_id,
+                        diagnostics,
+                    }
+                    .to_string(),
+                )
+            })
+        });
+        let detected = heartbeat_while_blocking(
+            api,
+            settings,
+            &job.id,
+            "linked source family discovery",
+            task,
+        )
+        .await;
+        match detected {
+            Ok(Some(family)) => {
+                if let Some(reason) = minimax_h3_source_family_error(&job.payload, Some(&family)) {
+                    return fail_job(
+                        api,
+                        &job.id,
+                        "Linked checkpoint import failed.",
+                        Some(reason),
+                    )
+                    .await;
+                }
+            }
+            Ok(None) => {} // Unknown/ambiguous evidence is still the full compiler's decision.
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Linked checkpoint import failed.",
+                    Some(error.to_string()),
+                )
+                .await
+            }
+        }
+    }
     let context = match import_plan_context(
         api,
         settings,
