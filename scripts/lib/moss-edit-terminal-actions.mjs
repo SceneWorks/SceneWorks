@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile, readdir, lstat, cp, open } from 'node:fs/promises';
 import { resolve, relative, dirname, basename, isAbsolute } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, validateAdmission, assertRequestBinding, isDenoiseStep, Api } from './moss-edit-terminal.mjs';
+import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, validateAdmission, assertRequestBinding, replaceInputs, isDenoiseStep, Api } from './moss-edit-terminal.mjs';
 
 const execFile = promisify(callback);
 const optionalJson = path => json(path).catch(error => { if(error.code==='ENOENT')return null;throw error; });
@@ -148,6 +148,38 @@ export async function reconcileParserRefusal(evidenceRoot,plan,lockSha256,bindin
   await save(resolve(attempt,`guard-${name}.reconciliation.json`),proof);
   await save(resolve(attempt,`guard-${name}.resolution.json`),{version:VERSION,state:'SOURCE_PARSER_REFUSAL',attemptSha256:frontier.attemptSha256,proofSha256:digest(proof)});
   return frontier;
+}
+export async function correctedDmdRequest(evidenceRoot,backend,specification,lockSha256,bindingSha256) {
+  requireThat(['mlx','cuda'].includes(backend)&&specification.expectedStatus===400&&canonical(specification.errorIncludes)===canonical(['MOSS edit requires ordinary Base/SFT, full-layer CFG, and no SLG'])&&canonical(specification.refs)===canonical(['B']),'only the frozen edit+DMD refusal may use the proven ordinary DMD configuration');
+  const rowId=`ordinary-${backend}-unmerged-bf16`,dir=resolve(evidenceRoot,'rows',rowId);
+  const [source,receipt,job,uploaded]=await Promise.all([json(resolve(dir,'request.json')),json(resolve(dir,'receipt.json')),json(resolve(dir,'terminal-job.json')),json(resolve(evidenceRoot,`uploaded-${backend}.json`))]);
+  requireThat(receipt.rowId===rowId&&receipt.backend===backend&&receipt.execution==='VERIFIED'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256&&receipt.requestSha256===digest(source)&&receipt.jobSha256===digest(job)&&receipt.outputs?.length===1&&job.id===receipt.jobId&&job.status==='completed'&&source.mode==='text_to_image'&&source.model==='moss_image_sft'&&canonical(source.advanced)===canonical({steps:2,mossImage:{acceleration:'unmerged_bf16'}})&&source.projectId===uploaded.B?.projectId&&uploaded.B?.id,'ordinary native DMD positive control or ordered B asset changed');
+  const frozen=replaceInputs({request:specification.request,refs:specification.refs},uploaded,source.projectId);
+  requireThat(frozen.mode==='edit_image'&&frozen.model===source.model&&frozen.referenceAssetIds?.length===1&&frozen.referenceAssetIds[0]===uploaded.B.id&&frozen.advanced?.mossImageEdit,'frozen edit+DMD target/request changed');
+  const request={...source,mode:'edit_image',referenceAssetIds:[uploaded.B.id],advanced:{...source.advanced,mossImageEdit:frozen.advanced.mossImageEdit}};
+  return {request,correction:{version:VERSION,name:'edit-dmd-positive-control-correction',backend,frozenGuardSha256:digest(specification),frozenRequestSha256:digest(frozen),positiveRowId:rowId,positiveRequestSha256:digest(source),positiveReceiptSha256:digest(receipt),positiveJobSha256:digest(job),referenceAssetId:uploaded.B.id,changedFields:['mode','referenceAssetIds','advanced.mossImageEdit'],correctedRequestSha256:digest(request)}};
+}
+export async function postDmdGuardFrontier(evidenceRoot,plan,lockSha256,bindingSha256,guards,{allowLater=false}={}) {
+  const lexical=await postRowsGuardFrontier(evidenceRoot,plan,lockSha256,bindingSha256,guards['training-shift-nonfinite'],{allowLater:true});
+  const names=plan.requiredGuardCases,name='edit-dmd';requireThat(names.length===29&&names[21]===name&&lexical.guardStartIndex===18,'frozen DMD guard frontier changed');
+  for(const prior of names.slice(18,21)) {
+    const dir=resolve(evidenceRoot,'guards',`mlx-${prior}${prior==='training-shift-nonfinite'?'-retry-7':''}`),receipt=await json(resolve(dir,'receipt.json')),proof=await json(resolve(dir,'no-provider-load.json'));
+    requireThat(receipt.case===prior&&receipt.backend==='mlx'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256&&proof.case===prior&&proof.backend==='mlx'&&proof.lockSha256===lockSha256&&proof.requestSha256===receipt.requestSha256&&proof.method==='source-bound-moss-boundaries/v1',`completed MLX guard ${prior} changed`);
+  }
+  const corrected=await correctedDmdRequest(evidenceRoot,'mlx',guards[name],lockSha256,bindingSha256),dir=resolve(evidenceRoot,'guards',`mlx-${name}`),attempt=resolve(evidenceRoot,'attempts/mlx');
+  const [request,response,admission,start,failure]=await Promise.all([json(resolve(dir,'request.json')),json(resolve(dir,'response.json')),json(resolve(dir,'admission.json')),json(resolve(attempt,`guard-${name}.start.json`)),json(resolve(attempt,`guard-${name}.failure.json`))]);
+  const detail=JSON.parse(response.body)?.detail;
+  requireThat(canonical(request)===canonical(replaceInputs({request:guards[name].request,refs:guards[name].refs},await json(resolve(evidenceRoot,'uploaded-mlx.json')),corrected.request.projectId))&&response.status===400&&response.transportError===null&&response.http?.status===400&&response.http.body===response.body&&response.http.sha256===sha(response.body)&&response.http.byteLength===Buffer.byteLength(response.body)&&detail==='advanced.mossImage: unsupported: MOSS-Image: DMD uses fixed step codes, no Euler, layer skipping or SLG'&&start.id===`guard-${name}`&&start.backend==='mlx'&&start.lockSha256===lockSha256&&start.bindingSha256===bindingSha256&&start.requestSha256===digest(request)&&admission.lockSha256===lockSha256&&failure.attemptSha256===digest(start)&&failure.state==='UNRESOLVED'&&failure.jobId===null&&failure.httpStatus===400&&failure.message==='product API returned HTTP 400','original edit+DMD early general refusal or failed attempt changed');
+  for(const file of [`guards/mlx-${name}/receipt.json`,`guards/mlx-${name}/no-provider-load.json`,`attempts/mlx/dispatch.lock`])requireThat(!await optionalJson(resolve(evidenceRoot,file)),`failed edit+DMD guard already produced an acceptance receipt: ${file}`);
+  const resolution=await optionalJson(resolve(attempt,`guard-${name}.resolution.json`)),proof=await optionalJson(resolve(attempt,`guard-${name}.reconciliation.json`));
+  if(allowLater)requireThat(resolution?.state==='SOURCE_GUARD_INPUT_CORRECTION'&&resolution.attemptSha256===digest(start)&&proof?.version===VERSION&&proof.kind==='source-guard-input-correction-before-dispatch'&&proof.backend==='mlx'&&proof.case===name&&proof.lockSha256===lockSha256&&proof.bindingSha256===bindingSha256&&proof.attemptSha256===digest(start)&&proof.failureSha256===digest(failure)&&proof.requestSha256===digest(request)&&proof.responseSha256===(await fileIdentity(resolve(dir,'response.json'))).sha256&&proof.correctedRequestSha256===digest(corrected.request)&&proof.jobId===null&&resolution.proofSha256===digest(proof),'historical edit+DMD guard was not explicitly reconciled');
+  else requireThat(!resolution&&!proof,'failed edit+DMD guard was already reconciled');
+  if(!allowLater)for(const later of names.slice(22))requireThat(!await optionalJson(resolve(attempt,`guard-${later}.start.json`)),`later guard ${later} was already touched`);
+  return {name,guardStartIndex:21,attemptSha256:digest(start),failureSha256:digest(failure),responseSha256:(await fileIdentity(resolve(dir,'response.json'))).sha256,requestSha256:digest(request),correctedRequestSha256:digest(corrected.request),positiveRowId:corrected.correction.positiveRowId,positiveReceiptSha256:corrected.correction.positiveReceiptSha256};
+}
+export async function reconcileDmdInputCorrection(evidenceRoot,plan,lockSha256,bindingSha256,guards) {
+  const frontier=await postDmdGuardFrontier(evidenceRoot,plan,lockSha256,bindingSha256,guards),attempt=resolve(evidenceRoot,'attempts/mlx'),name=frontier.name,proof={version:VERSION,kind:'source-guard-input-correction-before-dispatch',backend:'mlx',case:name,lockSha256,bindingSha256,attemptSha256:frontier.attemptSha256,failureSha256:frontier.failureSha256,requestSha256:frontier.requestSha256,responseSha256:frontier.responseSha256,correctedRequestSha256:frontier.correctedRequestSha256,jobId:null};
+  await save(resolve(attempt,`guard-${name}.reconciliation.json`),proof);await save(resolve(attempt,`guard-${name}.resolution.json`),{version:VERSION,state:'SOURCE_GUARD_INPUT_CORRECTION',attemptSha256:frontier.attemptSha256,proofSha256:digest(proof)});return frontier;
 }
 export async function submittedCanceledRemainingRows(evidenceRoot,plan,lockSha256,bindingSha256,checkpoint,root) {
   const rows=plan.rows.filter(row=>row.backend==='mlx');
