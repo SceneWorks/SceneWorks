@@ -185,7 +185,9 @@ class H3AdmissionMutationProofTests(unittest.TestCase):
                 self.assertEqual((self.root / proof.SOURCE).read_bytes(), REAL_SOURCE)
 
     def test_discovery_is_dynamic_but_empty_duplicates_and_missing_mechanisms_refuse(self):
-        for label, names in [("empty", []), ("missing", [proof.STAGES]), ("duplicate", NAMES + [NAMES[0]])]:
+        for label, names in [("empty", []), ("missing", [proof.STAGES]),
+                             ("missing-scope", sorted(proof.REQUIRED - {proof.SCOPES})),
+                             ("duplicate", NAMES + [NAMES[0]])]:
             with self.subTest(label=label):
                 self.output = self.base / ("artifacts-" + label)
                 receipt, fake = self.execute(names=names)

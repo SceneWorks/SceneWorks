@@ -596,6 +596,9 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
 /// `crates/sceneworks-worker/src/video_admission.rs:1716-1720` — the selected candidate carries the
 /// packaged curve's id, else the resolved decode profile's revision, else this token.
 const WORKER_ESTIMATE_FLOOR_EVIDENCE: &str = "video-estimate-floor-v1";
+/// Another unsealed analytical estimate in the worker's global video vocabulary (H3-only
+/// today), not a measured record or a provider-authenticated admission receipt.
+const WORKER_NATIVE_ALLOCATION_EVIDENCE: &str = "video-native-allocation-estimate-v1";
 
 /// The decode-profile revisions the same site can carry instead (`video_admission.rs`
 /// `packaged_video_decode_profile`: selected carrier, planner-budgeted, conservative single pass).
@@ -637,7 +640,10 @@ fn engine_receipt_token(arm: Arm) -> &'static str {
 /// promoted for this provider. The curve list is READ from the shipped bundle rather than assumed
 /// empty, so a future promoted Wan or SCAIL-2 curve enters this vocabulary automatically.
 fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {
-    let mut identities = vec![WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned()];
+    let mut identities = vec![
+        WORKER_ESTIMATE_FLOOR_EVIDENCE.to_owned(),
+        WORKER_NATIVE_ALLOCATION_EVIDENCE.to_owned(),
+    ];
     identities.extend(
         WORKER_DECODE_PROFILE_EVIDENCE
             .iter()
@@ -1570,6 +1576,11 @@ mod tests {
                 "{}: the estimate floor is the identity the worker carries when no curve or \
                  decode profile priced the candidate; it must stay in the vocabulary",
                 arm.provider
+            );
+            assert!(
+                worker_context_evidence_identities(arm)
+                    .contains(&WORKER_NATIVE_ALLOCATION_EVIDENCE.to_owned()),
+                "the native analytical estimate stays unsealed in the worker vocabulary"
             );
             for profile in WORKER_DECODE_PROFILE_EVIDENCE
                 .iter()

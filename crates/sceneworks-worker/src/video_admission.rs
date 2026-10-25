@@ -1967,6 +1967,7 @@ fn anchor_derived_phase_peaks<'a>(
 /// There is deliberately no binding-phase flip band here. Each phase has its own fitted law and the
 /// scalar is the max over those three evaluations at this exact geometry, so a phase crossing is a
 /// result of the measured curves rather than an extrapolation away from one scalar anchor.
+#[cfg(test)]
 fn fitted_or_floor_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1978,6 +1979,34 @@ fn fitted_or_floor_phase_peaks<'a>(
     Option<&'a str>,
     Option<&'static str>,
 ) {
+    fitted_or_floor_phase_peaks_for_selection(
+        selector,
+        geometry,
+        MemorySelection {
+            strategy,
+            parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
+                selector.contract,
+                engaged,
+            )
+            .unwrap_or_default(),
+            tier: selector.identity.tier,
+        },
+        engaged,
+    )
+}
+
+fn fitted_or_floor_phase_peaks_for_selection<'a>(
+    selector: &LadderVideoSelector<'a>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    engaged: &[MemoryStrategy],
+) -> (
+    PhasePeaks,
+    CandidateBasis,
+    Option<&'a str>,
+    Option<&'static str>,
+) {
+    let strategy = selection.strategy;
     let fitted = selector
         .curves
         .zip(selector.contract.calibration.as_ref())
@@ -2044,15 +2073,6 @@ fn fitted_or_floor_phase_peaks<'a>(
             None,
         );
     }
-    let selection = MemorySelection {
-        strategy,
-        parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
-            selector.contract,
-            engaged,
-        )
-        .unwrap_or_default(),
-        tier: selector.identity.tier,
-    };
     let (floor, profile_revision) =
         profiled_floor_phase_peaks(selector, geometry, selection, engaged);
     (floor, CandidateBasis::EstimateFloor, None, profile_revision)
@@ -2073,6 +2093,61 @@ fn video_memory_geometry(geometry: VideoAdmissionGeometry, reference_count: u32)
     }
 }
 
+/// Native floor synthesis prices the finite declared scope domain rather than silently falling
+/// back to Dit. The existing selector retains its highest-footprint-fit performance preference
+/// and its minimum-demand refusal; no bounds or margins are changed here.
+fn video_estimate_selections(
+    contract: &MemoryProviderContract,
+    tier: MemoryNumericTier,
+) -> Vec<MemorySelection> {
+    let native = contract
+        .phase_facts
+        .as_ref()
+        .and_then(|phase| phase.native_quant.as_ref())
+        .is_some();
+    let mut selections = Vec::new();
+    for strategy in MemoryStrategy::ALL {
+        let engaged = contract.engaged_composition(strategy);
+        let Some(parameters) =
+            crate::mlx_fit_gate::estimate_floor_smallest_parameters(contract, &engaged)
+        else {
+            continue;
+        };
+        let mut scopes = if native && strategy == MemoryStrategy::BoundedTransformerResidency {
+            contract
+                .capability(strategy)
+                .map(|capability| capability.parameters.transformer_window_components.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if scopes.is_empty() {
+            selections.push(MemorySelection {
+                strategy,
+                parameters,
+                tier,
+            });
+        } else {
+            // max_by keeps the last equal candidate: keep the legacy cheapest scope on exact
+            // footprint ties, while unequal footprints are graded by existing selector policy.
+            scopes.sort_by_key(|scope| std::cmp::Reverse(*scope));
+            for scope in scopes {
+                selections.push(MemorySelection {
+                    strategy,
+                    parameters: gen_core::MemoryStrategyParameters {
+                        transformer_window_component: (scope
+                            != gen_core::TransformerComponent::Dit)
+                            .then_some(scope),
+                        ..parameters
+                    },
+                    tier,
+                });
+            }
+        }
+    }
+    selections
+}
+
 impl VideoStrategySelector for LadderVideoSelector<'_> {
     fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection {
         let memory_geometry = video_memory_geometry(geometry, self.identity.reference_count);
@@ -2083,7 +2158,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             .as_ref()
             .map(|identity| identity.fingerprint.as_str());
 
-        // One exact-fitted-or-floor candidate per rung the provider's OWN contract can execute. A rung
+        // Exact-fitted-or-floor candidates for the provider's OWN executable rungs/scopes. A rung
         // the provider has not wired is never offered — predicting a saving the provider will
         // silently ignore is how a staged prediction turns into a SIGKILL
         // (`mlx_fit_gate::engine_supports_sequential`'s rationale, applied through the contract).
@@ -2103,22 +2178,13 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         // `a_rung_whose_prerequisite_is_unmet_is_not_offered` pins that the shared exclusion is in
         // force on the video lane, rather than assuming it.
         let mut synthesized = Vec::new();
-        for strategy in MemoryStrategy::ALL {
+        for selection in video_estimate_selections(self.contract, self.identity.tier) {
+            let strategy = selection.strategy;
             let engaged = self.contract.engaged_composition(strategy);
-            let Some(parameters) =
-                crate::mlx_fit_gate::estimate_floor_smallest_parameters(self.contract, &engaged)
-            else {
-                continue;
-            };
-            let selection = MemorySelection {
-                strategy,
-                parameters,
-                tier: self.identity.tier,
-            };
             // Phase-resolved for as long as possible: the scalar is taken only here, where
             // gen-core's evidence type forces one.
             let (phase_peaks, basis, curve_id, profile_revision) =
-                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
+                fitted_or_floor_phase_peaks_for_selection(self, geometry, selection, &engaged);
             let phase_peaks = match native_quant_phase_floor(
                 self.contract,
                 &selection,
@@ -2264,11 +2330,11 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     // binds is a geometry property and flips inside one model's envelope.
                     binding_phase = ?synthesized
                         .iter()
-                        .find(|(candidate, ..)| candidate.strategy == selection.strategy)
+                        .find(|(candidate, ..)| *candidate == selection)
                         .map(|(_, _, peaks, ..)| peaks.binding_phase()),
                     curve_id = synthesized
                         .iter()
-                        .find(|(candidate, ..)| candidate.strategy == selection.strategy)
+                        .find(|(candidate, ..)| *candidate == selection)
                         .and_then(|(_, _, _, _, curve_id, _, _)| *curve_id)
                         .unwrap_or("none"),
                     needed_gb,
