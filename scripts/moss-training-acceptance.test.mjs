@@ -4,12 +4,14 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'nod
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { deflateSync } from 'node:zlib';
+import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, remainingCaseMs, run } from './moss-training-acceptance.mjs';
+import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
-const entries=()=>[...testsFor('capture'),...testsFor('cross-load'),PREFLIGHT].map(name=>({name,kind:'test'}));
+const entries=(backend='mlx')=>[...testsFor('capture',backend),...testsFor('cross-load',backend),PREFLIGHT].map(name=>({name,kind:'test'}));
 const goodOutput=exact=>`running 1 test\ntest ${exact} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n`;
 
 test('sealed manifest hash and fixed bounds are source contracts',()=>{
@@ -65,13 +67,13 @@ test('owned tree never adopts PID-reused descendant',()=>{
 });
 test('bundle binds every member, rejects changed/additional bytes and source mismatches',t=>{
  const dir=fixture(t);writeFileSync(path.join(dir,'raw.log'),'native bytes');
- const r={ok:true,phase:'capture',backend:'mlx',source,members:artifactMembers(dir)};
+ const r={ok:true,phase:'capture',backend:'mlx',source,cases:CELLS.map(c=>({caseId:`mlx/${c}`,executionPassed:true})),members:artifactMembers(dir)};
  writeFileSync(path.join(dir,'driver.json'),JSON.stringify(r));assert.equal(verifyBundle(dir,source,'capture','mlx').ok,true);
  assert.throws(()=>verifyBundle(dir,{...source,inferencePin:'f'.repeat(40)},'capture','mlx'),/source mismatch/);
  writeFileSync(path.join(dir,'raw.log'),'changed');assert.throws(()=>verifyBundle(dir,source,'capture','mlx'),/members/);
 });
 
-function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsafe=false}={}) {
+function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsafe=false,previews=false,backend='mlx'}={}) {
  const output=fixture(t);let executions=0;
  const execute=async(_root,command,log,_limit,state,{env})=>{
   executions++;state.cleanup={released:!unsafe};
@@ -79,12 +81,15 @@ function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsa
   if(command[0]==='rustc')text='rustc 1.97.1 (SCHEMA_TEST_ONLY)\nhost: aarch64-apple-darwin\n';
   else if(command[0]==='cargo' && command[1]==='-V')text='cargo 1.97.1 (SCHEMA_TEST_ONLY)\n';
   else if(command[0]==='cargo')text=JSON.stringify({reason:'compiler-artifact',executable:'/mock/api',target:{name:'sceneworks_rust_api',kind:['lib']}});
-  else if(command.includes('--list'))text=entries().map(e=>`${e.name}: test`).join('\n');
+  else if(command.includes('--list'))text=entries(backend).map(e=>`${e.name}: test`).join('\n');
   else if(command[1]===PREFLIGHT){writeFileSync(env.MOSS_ACCEPTANCE_DEVICE_PREFLIGHT,'{}');text=goodOutput(PREFLIGHT);}
-  else {state.rssFirstBytes=missingRss?undefined:10;state.rssPeakBytes=20;text=badCounts?'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out':goodOutput(command[1]);if(!missingEvidence)writeFileSync(path.join(env.MOSS_ACCEPTANCE_OUTPUT,'evidence.json'),JSON.stringify({raw:'NOT ACCEPTANCE EVIDENCE'}));}
+  else {state.rssFirstBytes=missingRss?undefined:10;state.rssPeakBytes=20;text=badCounts?'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out':goodOutput(command[1]);if(!missingEvidence) {
+   const raw=previews?mockPreviewEvidence(env.MOSS_ACCEPTANCE_OUTPUT,env.MOSS_ACCEPTANCE_CASE_ID):{raw:'NOT ACCEPTANCE EVIDENCE'};
+   writeFileSync(path.join(env.MOSS_ACCEPTANCE_OUTPUT,'evidence.json'),JSON.stringify(raw));
+  }}
   writeFileSync(log,text);return {exit:0,output:text};
  };
- return {options:{root,output,backend:'mlx',phase:'capture',manifest:path.join(root,'scripts/ci/moss-training-acceptance/campaign.json'),testPlatform:true,env:{GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/SCHEMA_TEST_ONLY',GITHUB_SHA:source.workflowSource,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',GITHUB_JOB:'SCHEMA_TEST_ONLY'},sourceProvider:()=>source,execute,statExecutable:()=>true,executableDigest:()=> 'f'.repeat(64),preflightValidator:()=>100},count:()=>executions};
+ return {options:{root,output,backend,phase:'capture',manifest:path.join(root,'scripts/ci/moss-training-acceptance/campaign.json'),testPlatform:true,env:{GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/SCHEMA_TEST_ONLY',GITHUB_SHA:source.workflowSource,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',GITHUB_JOB:'SCHEMA_TEST_ONLY'},sourceProvider:()=>source,execute,statExecutable:()=>true,executableDigest:()=> 'f'.repeat(64),preflightValidator:()=>100},count:()=>executions};
 }
 test('mock capture performs sequential exact native tests and stores raw evidence without asserting learning',async t=>{
  const m=mockRun(t);const r=await run(m.options);assert.equal(r.ok,true);assert.equal(r.cases.length,4);assert.ok(r.cases.every(c=>c.executionPassed));assert.equal(m.count(),13);assert.equal(r.toolchain.binarySha256,'f'.repeat(64));assert.match(r.toolchain.rustc,/SCHEMA_TEST_ONLY/);assert.equal(r.workflow.runId,'123');
@@ -109,4 +114,159 @@ test('workflow is reusable only, read-only, guarded uploads, exclusive dispatche
  const dispatcher=readFileSync(path.join(root,'.github/workflows/memory-catalog-campaign.yml'),'utf8');
  for(const job of ['qwen-app-lifecycle','iris-mlx-real-weights','mlx','candle'])assert.match(dispatcher,new RegExp(`  ${job}:\\n    if: \\$\\{\\{ !inputs.run_moss_training_acceptance`));
  assert.match(dispatcher,/default: unspecified/);assert.match(dispatcher,/needs: moss-selector-preflight/);
+});
+
+// Generated mock PNGs only: no SDK, native command, model or GPU is used.
+function mockPng(value=0) {
+ const crc32=b=>{let c=0xffffffff;for(const v of b){c^=v;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;};
+ const chunk=(kind,data)=>{const type=Buffer.from(kind),out=Buffer.alloc(data.length+12);out.writeUInt32BE(data.length);type.copy(out,4);data.copy(out,8);out.writeUInt32BE(crc32(Buffer.concat([type,data])),out.length-4);return out;};
+ const header=Buffer.alloc(13);header.writeUInt32BE(256);header.writeUInt32BE(256,4);header[8]=8;header[9]=2;
+ const rows=Buffer.alloc(256*(256*3+1),value);for(let y=0;y<256;y++)rows[y*(256*3+1)]=0;
+ return Buffer.concat([Buffer.from('89504e470d0a1a0a','hex'),chunk('IHDR',header),chunk('IDAT',deflateSync(rows)),chunk('IEND',Buffer.alloc(0))]);
+}
+function mockPreviewEvidence(directory,caseId) {
+ const images={};
+ for(const [i,role] of ['before-untrained','after-trained','disable-control'].entries()) {
+  const bytes=mockPng(i),name=`${role}.png`;writeFileSync(path.join(directory,name),bytes);
+  images[role]={artifact:{path:name,sha256:digest(bytes)}};
+ }
+ return {caseId,raw:{images}};
+}
+function reviewArgs(m,cell='base-lora') {
+ return {preview:path.join(m.options.output,'previews',cell,'index.json'),output:path.join(m.options.output,'..',path.basename(m.options.output)+'-inspections.json'),reviewer:'schema-test reviewer',findings:{'before-untrained':['observed mock baseline'],'after-trained':['observed mock trained view'],'disable-control':['observed mock disabled view']}};
+}
+test('Windows actual round-trip UTC format is canonical Z in both job starts, never +00:00',()=>{
+ const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
+ // Actual .NET o-format contracts for the same instant, including seven digits.
+ const offset='2026-10-25T14:12:09.1234567+00:00',utc='2026-10-25T14:12:09.1234567Z';
+ const rustUtc=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+ assert.equal(rustUtc.test(offset),false);assert.equal(rustUtc.test(utc),true);assert.equal(Date.parse(offset),Date.parse(utc));
+ for(const job of ['capture','cross-load']) {
+  const section=workflow.split(`  ${job}:\n`)[1].split(/^  [a-z][a-z-]+:\n/m)[0];
+  assert.match(section,/MOSS_CROSS_LOAD_JOB_STARTED_AT=' \+ \[DateTimeOffset\]::UtcNow\.UtcDateTime\.ToString\('o'\)/);
+  assert.doesNotMatch(section,/UtcNow\.ToString\('o'\)/);
+ }
+});
+test('both CUDA phases preserve established PCI device 1 exclusion and explicit Windows preparation workspace',()=>{
+ const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
+ const authoritative=readFileSync(path.join(root,'.github/workflows/windows-candle.yml'),'utf8');
+ assert.match(authoritative,/group: windows-candle-gpu-real-weights\n      cancel-in-progress: false/);
+ assert.match(authoritative,/CUDA_DEVICE_ORDER: PCI_BUS_ID\n      CUDA_VISIBLE_DEVICES: "1"/);
+ for(const job of ['capture','cross-load']) {
+  const section=workflow.split(`  ${job}:\n`)[1].split(/^  [a-z][a-z-]+:\n/m)[0];
+  assert.match(section,/matrix\.backend == 'cuda' && 'windows-candle-gpu-real-weights' \|\| format\('moss-training-\{0\}-\{1\}-\{2\}-mlx', github\.run_id, github\.run_attempt, github\.job\)/);
+  assert.match(section,/cancel-in-progress: false/);assert.match(section,/CUDA_DEVICE_ORDER: PCI_BUS_ID/);
+  assert.match(section,/CUDA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '1' \|\| '' \}\}/);
+  assert.match(section,/NVIDIA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '1' \|\| '' \}\}/);
+  assert.match(section,/prepare-rust-runner\n        if: \$\{\{ matrix\.backend == 'cuda' \}\}\n        with:\n          workspace-directory: sceneworks-source/);
+ }
+});
+test('live preview notices use native shells and byte-identical message content',()=>{
+ const action=readFileSync(path.join(root,'.github/actions/moss-capture-cell/action.yml'),'utf8');
+ const check=text=>{
+  const mlx=text.split('    - name: Announce immediately accessible live preview inspection artifact\n')[1]?.split('    - name:')[0];
+  const cuda=text.split('    - name: Announce immediately accessible live preview inspection artifact on Windows\n')[1];
+  assert.ok(mlx&&cuda);assert.match(mlx,/inputs.backend == 'mlx'[\s\S]*shell: bash/);assert.match(cuda,/inputs.backend == 'cuda'[\s\S]*shell: powershell/);
+  const instruction=section=>/^        PREVIEW_INSTRUCTION: (.+)$/m.exec(section)?.[1];
+  assert.ok(instruction(mlx));assert.equal(instruction(mlx),instruction(cuda));
+  const values=['base/lora','https://example.invalid/owned-artifact',instruction(mlx)];let index=0;
+  const unix=/printf '([^']+)'/.exec(mlx)?.[1].replace(/\\n$/,'').replace(/%s/g,()=>values[index++]);
+  const windows=/Write-Output \('([^']+)' -f/.exec(cuda)?.[1].replace(/\{([0-9]+)\}/g,(_,n)=>values[Number(n)]);
+  assert.ok(unix&&windows);assert.deepEqual(Buffer.from(unix),Buffer.from(windows));
+ };
+ check(action);
+ assert.throws(()=>check(action.replace('shell: powershell','shell: bash')));
+ assert.throws(()=>check(action.replace('PREVIEW_INSTRUCTION: download now','PREVIEW_INSTRUCTION: wait until capture completes')));
+});
+test('Windows birth guards reject stale root PID and each stale ParentProcessId edge',()=>{
+ const row=(pid,ppid,birthMs,rssBytes=1)=>({pid,ppid,birthMs,birth:String(birthMs),executable:`mock-${pid}`,rssBytes});
+ const rows=new Map([[process.pid,row(process.pid,0,100)],[42,row(42,process.pid,200,10)],[43,row(43,42,150,1000)],[44,row(44,42,300,20)],[45,row(45,44,250,1000)],[46,row(46,44,400,0)]]);
+ const known=new Map(),observed=observeOwned(rows,known,42);
+ assert.equal(observed.rss,30);assert.deepEqual(observed.live.map(r=>r.pid).sort((a,b)=>a-b),[42,44,46]);assert.equal(known.has(43),false);assert.equal(known.has(45),false);
+ rows.set(42,row(42,process.pid,50));assert.throws(()=>observeOwned(rows,new Map(),42),/root birth/);
+ rows.set(42,row(42,process.pid,200));delete rows.get(44).birthMs;assert.throws(()=>observeOwned(rows,new Map(),42),/birth telemetry/);
+});
+test('sequential capture publishes each cell live, reuses preparation, and preserves complete backend receipt',async t=>{
+ for(const backend of ['mlx','cuda']) {
+ const m=mockRun(t,{previews:true,backend});let originalClock,firstMembers;
+ for(const [i,cell] of CELLS.entries()) {
+  const r=await run({...m.options,'capture-cell':cell});
+  assert.equal(r.failures.length,0);assert.equal(r.cellComplete,true);assert.equal(r.ok,i===3);assert.equal(r.cases.length,i+1);assert.equal(m.count(),5+2*(i+1));assert.equal(r.commands.length,5+2*(i+1));
+  if(i===0){originalClock=r.preparationStartedAt;firstMembers=r.members;}assert.equal(r.preparationStartedAt,originalClock);
+  const index=JSON.parse(readFileSync(path.join(m.options.output,'previews',cell.replace('/','-'),'index.json')));
+  assert.equal(index.caseId,`${backend}/${cell}`);assert.equal(index.workflow.runId,'123');assert.deepEqual(index.source,source);
+  assert.equal(index.caseStartedAt,r.cases[i].caseStartedAt);assert.equal(index.caseDeadlineAt,r.cases[i].caseDeadlineAt);assert.equal(Date.parse(index.caseDeadlineAt)-Date.parse(index.caseStartedAt),BOUNDS.case);assert.equal(index.images.length,3);
+  for(const image of index.images) {
+   const bytes=readFileSync(path.join(m.options.output,'previews',cell.replace('/','-'),image.file));assert.equal(digest(bytes),image.reviewedArtifact.sha256);assert.deepEqual(decodePreviewPng(bytes),image.decoded);assert.ok(image.reviewedArtifact.path.startsWith(`capture-${backend}/${cell}/`));
+  }
+  if(i<3)assert.throws(()=>verifyBundle(m.options.output,source,'capture',backend),/incomplete/);
+ }
+ const final=verifyBundle(m.options.output,source,'capture',backend);for(const member of firstMembers)assert.deepEqual(final.members.find(x=>x.path===member.path),member);
+ assert.equal(final.commands.filter(c=>c.log==='compile.log').length,1);assert.ok(final.members.some(m=>m.path==='base/lora/evidence.json'));
+ }
+});
+test('continuation rejects skipped, repeated, invalid and noncapture selectors without commands',async t=>{
+ const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count();
+ await assert.rejects(run({...m.options,'capture-cell':CELLS[2]}),/exact closed case prefix/);await assert.rejects(run({...m.options,'capture-cell':CELLS[0]}),/new\/empty/);
+ await assert.rejects(run({...m.options,phase:'cross-load','capture-cell':CELLS[1]}),/invalid capture-cell/);await assert.rejects(run({...m.options,'capture-cell':'extra'}),/invalid capture-cell/);assert.equal(m.count(),before);
+ const args=['--phase','capture','--backend','mlx','--root','/source','--output','/output','--manifest','/manifest'];assert.equal(parseArgs([...args,'--capture-cell',CELLS[0]])['capture-cell'],CELLS[0]);assert.throws(()=>parseArgs([...args,'--capture-cell','base/extra']),/exact capture cell/);
+});
+test('continuation authenticates every old member against changed, missing or added bytes',async t=>{
+ for(const mutation of ['changed','missing','extra']) {
+  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count();
+  if(mutation==='missing')rmSync(path.join(m.options.output,'rustc-version.log'));else writeFileSync(path.join(m.options.output,mutation==='extra'?'stale.log':'rustc-version.log'),'untrusted');
+  await assert.rejects(run({...m.options,'capture-cell':CELLS[1]}),/members changed/);assert.equal(m.count(),before);
+ }
+});
+test('continuation rejects changed source, run, attempt, job, binary and original preparation budget',async t=>{
+ for(const variant of ['source','run','attempt','job','binary','prep']) {
+  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count(),options={...m.options,'capture-cell':CELLS[1]};
+  if(variant==='source')options.sourceProvider=()=>({...source,inferencePin:'f'.repeat(40)});
+  if(variant==='run')options.env={...options.env,GITHUB_RUN_ID:'124'};if(variant==='attempt')options.env={...options.env,GITHUB_RUN_ATTEMPT:'2'};if(variant==='job')options.env={...options.env,GITHUB_JOB:'other'};if(variant==='binary')options.executableDigest=()=> '0'.repeat(64);
+  if(variant==='prep'){const file=path.join(options.output,'driver.json'),prior=JSON.parse(readFileSync(file));prior.preparationStartedAt=new Date(Date.parse(prior.preparationFinishedAt)-BOUNDS.build-1).toISOString();writeFileSync(file,JSON.stringify(prior));}
+  const r=await run(options);assert.equal(r.ok,false);assert.equal(r.cellComplete,false);assert.equal(r.cases.length,1);assert.equal(m.count(),before);assert.match(r.failures.join(),/source proof|run\/attempt\/job|binary changed|preparation deadline/);
+ }
+});
+test('failed, cancelled and interrupted prior capture cells cannot continue or pass peer verification',async t=>{
+ const m=mockRun(t,{previews:true,missingRss:true}),r=await run({...m.options,'capture-cell':CELLS[0]});assert.equal(r.ok,false);assert.equal(r.cellComplete,false);const before=m.count();
+ await assert.rejects(run({...m.options,'capture-cell':CELLS[1]}),/not cleanly closed/);assert.equal(m.count(),before);
+ const cancelled=mockRun(t,{previews:true}),execute=cancelled.options.execute;
+ cancelled.options.execute=async(...args)=>{const result=await execute(...args);if(args[1][1]===testsFor('capture')[0])args[4].cancelled=true;return result;};
+ const cancelledReceipt=await run({...cancelled.options,'capture-cell':CELLS[0]});assert.equal(cancelledReceipt.ok,false);assert.equal(cancelledReceipt.cases[0].executionPassed,undefined);await assert.rejects(run({...cancelled.options,'capture-cell':CELLS[1]}),/not cleanly closed/);
+ const clean=mockRun(t,{previews:true});await run({...clean.options,'capture-cell':CELLS[0]});const file=path.join(clean.options.output,'driver.json'),prior=JSON.parse(readFileSync(file));prior.failures.push('signal interruption');writeFileSync(file,JSON.stringify(prior));await assert.rejects(run({...clean.options,'capture-cell':CELLS[1]}),/not cleanly closed/);
+});
+test('peer verification requires all four exact ordered completed cells even when receipt claims ok',t=>{
+ const dir=fixture(t);writeFileSync(path.join(dir,'raw.log'),'mock bytes');const full=CELLS.map(cell=>({caseId:`mlx/${cell}`,executionPassed:true}));
+ for(const cases of [full.slice(0,1),full.slice(0,3),[full[1],full[0],...full.slice(2)],full.map((c,i)=>i===3?{...c,executionPassed:false}:c)]) {
+  writeFileSync(path.join(dir,'driver.json'),JSON.stringify({phase:'capture',backend:'mlx',ok:true,source,cases,members:artifactMembers(dir).filter(m=>m.path!=='driver.json')}));assert.throws(()=>verifyBundle(dir,source,'capture','mlx'),/all four/);
+ }
+});
+test('preview publication fails closed on missing, changed or undecodable PNGs',async t=>{
+ for(const variant of ['missing','hash','decode']) {
+  const m=mockRun(t,{previews:true}),execute=m.options.execute;
+  m.options.execute=async(...args)=>{const result=await execute(...args),env=args[5].env;if(args[1][1]===testsFor('capture')[0]){const rawFile=path.join(env.MOSS_ACCEPTANCE_OUTPUT,'evidence.json'),raw=JSON.parse(readFileSync(rawFile)),image=path.join(env.MOSS_ACCEPTANCE_OUTPUT,raw.raw.images['after-trained'].artifact.path);if(variant==='missing')rmSync(image);else{writeFileSync(image,'not PNG');if(variant==='decode')raw.raw.images['after-trained'].artifact.sha256=digest(Buffer.from('not PNG'));}writeFileSync(rawFile,JSON.stringify(raw));}return result;};
+  const r=await run({...m.options,'capture-cell':CELLS[0]});assert.equal(r.ok,false);assert.equal(r.cellComplete,false);assert.equal(r.cases.length,1);await assert.rejects(run({...m.options,'capture-cell':CELLS[1]}),/not cleanly closed/);
+ }
+ const png=mockPng();assert.equal(decodePreviewPng(png).width,256);png[50]^=1;assert.throws(()=>decodePreviewPng(png),/CRC/);
+});
+test('inspection records actual Date.now and finalizer hashes, appending partial JSON during capture',async t=>{
+ const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const args=reviewArgs(m),before=Date.now(),document=recordInspection(args),after=Date.now();t.after(()=>rmSync(args.output,{force:true}));
+ assert.equal(document.cases.length,1);assert.equal(document.captureRunId,'123');assert.equal(document.attempt,1);assert.equal(m.count(),7);
+ for(const inspection of document.cases[0].inspections){assert.ok(Date.parse(inspection.completedAt)>=before && Date.parse(inspection.completedAt)<=after);assert.equal(inspection.withinCaseDeadline,true);assert.equal(digest(readFileSync(path.join(m.options.output,...inspection.reviewedArtifact.path.split('/').slice(1)))),inspection.reviewedArtifact.sha256);}
+ await run({...m.options,'capture-cell':CELLS[1]});const appended=recordInspection({...args,preview:reviewArgs(m,'base-lokr').preview});assert.equal(appended.cases.length,2);assert.deepEqual(appended.cases[0],document.cases[0]);assert.throws(()=>recordInspection(args),/already recorded/);
+});
+test('inspection rejects timestamp overrides, expired or extended deadlines, empty findings and cross-run carry',async t=>{
+ const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const args=reviewArgs(m),original=readFileSync(args.preview),index=JSON.parse(original);t.after(()=>rmSync(args.output,{force:true}));
+ assert.throws(()=>parseInspectionArgs(['--timestamp','2026-01-01']),/no timestamp override/);
+ writeFileSync(args.preview,JSON.stringify({...index,caseStartedAt:new Date(Date.now()-BOUNDS.case-100).toISOString(),caseDeadlineAt:new Date(Date.now()-100).toISOString()}));assert.throws(()=>recordInspection(args),/deadline/);
+ writeFileSync(args.preview,JSON.stringify({...index,caseDeadlineAt:new Date(Date.parse(index.caseDeadlineAt)+1).toISOString()}));assert.throws(()=>recordInspection(args),/deadline/);
+ writeFileSync(args.preview,original);assert.throws(()=>recordInspection({...args,findings:{...args.findings,'after-trained':[]}}),/findings/);recordInspection(args);
+ await run({...m.options,'capture-cell':CELLS[1]});const second=reviewArgs(m,'base-lokr'),secondIndex=JSON.parse(readFileSync(second.preview));writeFileSync(second.preview,JSON.stringify({...secondIndex,workflow:{...secondIndex.workflow,runId:'999'}}));assert.throws(()=>recordInspection({...args,preview:second.preview}),/another source\/run\/attempt/);
+ writeFileSync(second.preview,JSON.stringify(secondIndex));writeFileSync(path.join(path.dirname(second.preview),'after-trained.png'),'changed');assert.throws(()=>recordInspection({...args,preview:second.preview}),/PNG hash/);
+});
+test('workflow publishes each cell before continuing, retains backend bundle layout, and fails on upload errors',()=>{
+ const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8'),capture=workflow.split('  capture:\n')[1].split('  cross-load:\n')[0];let previous=-1;
+ for(const cell of CELLS){const start=capture.indexOf(`      - name: Capture and publish ${cell} before continuing`);assert.ok(start>previous);previous=start;const step=capture.slice(start).split('\n      - ')[0];assert.match(step,/uses: \.\/sceneworks-source\/\.github\/actions\/moss-capture-cell/);assert.ok(step.includes(`cell: ${cell}\n`));assert.ok(step.includes(`preview-name: ${cell.replace('/','-')}\n`));assert.match(step,/output: .*\/capture-\$\{\{ matrix.backend \}\}/);}
+ assert.ok(capture.indexOf('name: Preserve raw logs')>previous);assert.match(capture,/name: capture-\$\{\{ matrix.backend \}\}/);
+ const composite=readFileSync(path.join(root,'.github/actions/moss-capture-cell/action.yml'),'utf8');assert.ok(composite.indexOf('node scripts/moss-training-acceptance.mjs')<composite.indexOf('uses: actions/upload-artifact@'));assert.match(composite,/--capture-cell/);assert.match(composite,/steps.preview.outputs.artifact-url/);assert.match(composite,/::notice title=MOSS live preview inspection/);assert.match(composite,/if-no-files-found: error/);assert.doesNotMatch(composite,/continue-on-error|always\(\)|timestamp|deadline.*override/);assert.match(composite,/path: \$\{\{ inputs.output \}\}\/previews\/\$\{\{ inputs.preview-name \}\}\//);
 });

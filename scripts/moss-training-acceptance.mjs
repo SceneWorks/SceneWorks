@@ -2,9 +2,10 @@
 // Dispatch-only, offline terminal campaign. This is NOT the bounded CPU fixture driver.
 // Native code owns training/evaluation observations; this driver never manufactures evidence.
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, writeFileSync, writeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
+import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { digest, parseTestResult, executeCpuCommand } from './moss-consumer-assertions.mjs';
 import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executeOwnedChild } from './moss-native-api-validation.mjs';
@@ -29,7 +30,7 @@ export function parseArgs(argv) {
   const o = {};
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.slice(2);
-    assert(argv[i]?.startsWith('--') && argv[i + 1] && ['phase','root','output','backend','manifest','peer-artifacts'].includes(key) && !Object.hasOwn(o, key), 'expected unique known --option value pairs');
+    assert(argv[i]?.startsWith('--') && argv[i + 1] && ['phase','root','output','backend','manifest','peer-artifacts','capture-cell'].includes(key) && !Object.hasOwn(o, key), 'expected unique known --option value pairs');
     o[key] = argv[i + 1];
   }
   for (const key of ['phase','root','output','backend','manifest']) assert(o[key], `--${key} is required`);
@@ -38,6 +39,7 @@ export function parseArgs(argv) {
   for (const key of ['root','output','manifest','peer-artifacts']) if (o[key]) o[key] = path.resolve(o[key]);
   assert(!inside(o.root, o.output), 'output must be outside source checkout');
   if (o.phase !== 'capture') assert(o['peer-artifacts'], '--peer-artifacts required for cross-load/finalize');
+  if (o['capture-cell']) assert(o.phase === 'capture' && CELLS.includes(o['capture-cell']), 'capture-cell must select an exact capture cell');
   return o;
 }
 function inside(root, file) { const r = path.relative(root, file); return r === '' || (!r.startsWith(`..${path.sep}`) && r !== '..' && !path.isAbsolute(r)); }
@@ -66,6 +68,7 @@ export function verifyBundle(dir, source, phase, backend) {
   const receipt = json(path.join(dir, 'driver.json'));
   assert(receipt.ok && receipt.phase === phase && receipt.backend === backend, `incomplete ${backend}/${phase} bundle`);
   for (const key of ['workflowSource','inferencePin','manifestSha256','cargoLockSha256','driverSha256','workflowSha256']) assert(receipt.source[key] === source[key], `peer source mismatch: ${key}`);
+  assert(receipt.cases?.length === CELLS.length && receipt.cases.every((c,i) => c.executionPassed && c.caseId === `${phase === 'cross-load' ? (backend === 'mlx' ? 'cuda' : 'mlx') : backend}/${CELLS[i]}`), 'all four exact completed cells required');
   const actual = artifactMembers(dir).filter(m => m.path !== 'driver.json');
   assert(JSON.stringify(actual) === JSON.stringify(receipt.members), 'artifact members changed, missing or added');
   return receipt;
@@ -152,7 +155,14 @@ const matches = (a,b) => a && b && a.birth === b.birth && a.executable === b.exe
 export function observeOwned(rows, known, rootPid) {
   assert(rows instanceof Map, 'owned process telemetry unavailable');
   const root = rows.get(rootPid);
-  if (!known.has(rootPid)) { assert(root && root.ppid === process.pid && root.birth && root.executable, 'initial owned root identity unavailable'); known.set(rootPid, root); }
+  if (!known.has(rootPid)) {
+    assert(root && root.ppid === process.pid && root.birth && root.executable, 'initial owned root identity unavailable');
+    if(Object.hasOwn(root,'birthMs')) {
+      const parent=rows.get(process.pid);
+      assert(Number.isFinite(root.birthMs) && Number.isFinite(parent?.birthMs) && root.birthMs>=parent.birthMs, 'initial Windows root birth not authenticated against owned parent');
+    }
+    known.set(rootPid, root);
+  }
   // An exec preserves birth but changes executable; retain the authenticated live
   // identity instead of mistaking it for an exited process. A reused birth is
   // never adopted. No signal is sent by this cooperative supervisor.
@@ -164,6 +174,12 @@ export function observeOwned(rows, known, rootPid) {
   let changed = true;
   while (changed) { changed = false; for (const row of rows.values()) if (!live.has(row.pid) && live.has(row.ppid)) {
     assert(row.birth && row.executable, 'descendant identity missing');
+    const parent=live.get(row.ppid);
+    // CIM's stale ParentProcessId is not an authenticated edge after PID reuse.
+    if (Object.hasOwn(row,'birthMs') || Object.hasOwn(parent,'birthMs')) {
+      assert(Number.isFinite(row.birthMs) && Number.isFinite(parent.birthMs), 'Windows birth telemetry missing');
+      if (row.birthMs < parent.birthMs) continue;
+    }
     if (known.has(row.pid)) assert(matches(row,known.get(row.pid)), 'owned descendant PID reused');
     known.set(row.pid,row); live.set(row.pid,row); changed = true;
   } }
@@ -219,6 +235,61 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
   } finally { logOpen=false; closeSync(fd); }
 }
 
+// Decode the actual bounded native PNG payload, not a filename or header-only proof.
+export function decodePreviewPng(bytes) {
+  assert(bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex')), 'preview is not PNG');
+  let offset=8, channels=null, ended=false; const data=[];
+  const crc32=b=>{let c=0xffffffff;for(const v of b){c^=v;for(let i=0;i<8;i++)c=(c>>>1)^((c&1)?0xedb88320:0);}return (c^0xffffffff)>>>0;};
+  while(offset<bytes.length) {
+    assert(offset+12<=bytes.length,'truncated PNG chunk');
+    const n=bytes.readUInt32BE(offset),end=offset+12+n;
+    assert(end<=bytes.length,'truncated PNG data');
+    const type=bytes.toString('ascii',offset+4,offset+8),chunk=bytes.subarray(offset+8,end-4);
+    assert(crc32(bytes.subarray(offset+4,end-4))===bytes.readUInt32BE(end-4),'PNG CRC mismatch');
+    if(offset===8) {
+      assert(type==='IHDR' && n===13 && chunk.readUInt32BE(0)===256 && chunk.readUInt32BE(4)===256 && chunk[8]===8 && chunk[10]===0 && chunk[11]===0 && chunk[12]===0,'preview must be decoded 256x256 noninterlaced 8-bit PNG');
+      channels=({0:1,2:3,4:2,6:4})[chunk[9]];assert(channels,'unsupported PNG color type');
+    } else if(type==='IDAT') data.push(chunk);
+    else if(type==='IEND') {assert(n===0 && end===bytes.length,'invalid PNG end');ended=true;break;}
+    else assert(type!=='IHDR' && (type.charCodeAt(0)&32 || type==='PLTE'),'unsupported critical PNG chunk');
+    offset=end;
+  }
+  assert(ended && data.length,'incomplete PNG');
+  const stride=256*channels,raw=inflateSync(Buffer.concat(data),{maxOutputLength:256*(stride+1)});
+  assert(raw.length===256*(stride+1),'decoded PNG dimensions mismatch');
+  const pixels=Buffer.alloc(256*stride);
+  for(let y=0;y<256;y++) {
+    const filter=raw[y*(stride+1)];assert(filter<=4,'invalid PNG filter');
+    for(let x=0;x<stride;x++) {
+      const a=x>=channels?pixels[y*stride+x-channels]:0,b=y?pixels[(y-1)*stride+x]:0,c=y&&x>=channels?pixels[(y-1)*stride+x-channels]:0;
+      const p=a+b-c,pa=Math.abs(p-a),pb=Math.abs(p-b),pc=Math.abs(p-c);
+      const prediction=[0,a,b,Math.floor((a+b)/2),pa<=pb&&pa<=pc?a:pb<=pc?b:c][filter];
+      pixels[y*stride+x]=(raw[y*(stride+1)+1+x]+prediction)&255;
+    }
+  }
+  return {width:256,height:256,pixelSha256:digest(pixels)};
+}
+
+export function publishPreview(output,receipt,entry,cell) {
+  remainingCaseMs(entry.caseStartedAt);
+  const caseRoot=path.join(output,...cell.split('/')),raw=json(path.join(caseRoot,'evidence.json'));
+  assert(raw.caseId===entry.caseId,'preview native case mismatch');
+  const directory=path.join(output,'previews',cell.replace('/','-'));mkdirSync(directory,{recursive:true});
+  const images=[];
+  for(const role of ['before-untrained','after-trained','disable-control']) {
+    const reference=raw.raw?.images?.[role]?.artifact;
+    assert(reference && typeof reference.path==='string' && !reference.path.includes('\\') && !reference.path.includes(':') && !reference.path.split('/').includes('..') && !path.isAbsolute(reference.path),'unsafe preview reference');
+    const file=path.resolve(caseRoot,reference.path);
+    assert(inside(caseRoot,file) && fileDigest(file)===reference.sha256,'preview bytes differ from native hash');
+    const decoded=decodePreviewPng(readFileSync(file)),name=`${role}.png`;
+    copyFileSync(file,path.join(directory,name),2); // COPYFILE_EXCL: never replace a published preview.
+    images.push({role,file:name,decoded,reviewedArtifact:{path:`capture-${receipt.backend}/${cell}/${reference.path}`,sha256:reference.sha256}});
+  }
+  const index={manifestSha256:MANIFEST_SHA256,source:receipt.source,workflow:receipt.workflow,caseId:entry.caseId,caseStartedAt:entry.caseStartedAt,caseDeadlineAt:entry.caseDeadlineAt,publishedAt:new Date().toISOString(),images};
+  remainingCaseMs(entry.caseStartedAt);
+  store(path.join(directory,'index.json'),index);
+}
+
 export function remainingCaseMs(startedAt, now = Date.now()) {
   const start=Date.parse(startedAt);
   assert(Number.isFinite(start) && start <= now, 'invalid/future original caseStartedAt');
@@ -241,9 +312,23 @@ export async function executeCommand(root, args, log, limitMs, state, supervisio
 
 export async function run(options) {
   const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflight,sourceProvider=sourceFacts }=options;
-  assert(!existsSync(output) || readdirSync(output).length===0,'output must be new/empty; never carry prior campaign evidence');
-  mkdirSync(output,{recursive:true});
-  const receipt={ phase,backend,ok:false,source:null,commands:[],cases:[],failures:[] };
+  const cellIndex=options['capture-cell'] === undefined ? null : CELLS.indexOf(options['capture-cell']);
+  assert(cellIndex === null || (phase === 'capture' && cellIndex >= 0), 'invalid capture-cell selector');
+  const continuing=cellIndex !== null && cellIndex > 0;
+  let receipt;
+  if (continuing) {
+    receipt=json(path.join(output,'driver.json'));
+    assert(receipt.phase===phase && receipt.backend===backend && !receipt.ok && receipt.cellComplete===true && receipt.failures.length===0, 'prior capture not cleanly closed');
+    assert(receipt.cases.length===cellIndex && receipt.cases.every((c,i)=>c.executionPassed && c.caseId===`${backend}/${CELLS[i]}` && c.test===testsFor('capture',backend)[i] && c.rawEvidence===`${CELLS[i]}/evidence.json`), 'continuation requires exact closed case prefix');
+    assert(receipt.commands.length===5+2*cellIndex && receipt.commands.every(c=>c.exitCode===0 && c.supervision?.cleanup?.released && !c.supervision.cancelled && !c.supervision.unsafe), 'prior capture commands not cleanly closed');
+    assert(JSON.stringify(artifactMembers(output).filter(m=>m.path!=='driver.json'))===JSON.stringify(receipt.members), 'prior capture members changed, missing or added');
+  } else {
+    assert(!existsSync(output) || readdirSync(output).length===0,'output must be new/empty; never carry prior campaign evidence');
+    mkdirSync(output,{recursive:true});
+    receipt={ phase,backend,ok:false,source:null,commands:[],cases:[],failures:[] };
+  }
+  const priorMembers=continuing?receipt.members:[];
+  receipt.cellComplete=false;
   let active=null, interrupted=false;
   const cancel=()=>{interrupted=true;if(active)active.cancelled=true;};
   process.on('SIGINT',cancel);process.on('SIGTERM',cancel);
@@ -255,7 +340,9 @@ export async function run(options) {
     finally {entry.finishedAt=new Date().toISOString();entry.supervision=state;active=null;}
   };
   try {
-    receipt.source=sourceProvider(root,manifest,env,inspect);
+    const currentSource=sourceProvider(root,manifest,env,inspect);
+    if(continuing) assert(JSON.stringify(receipt.source)===JSON.stringify(currentSource), 'continuation source proof changed');
+    receipt.source=currentSource;
     const source=receipt.source;
     if(phase==='finalize') {
       const peers=options['peer-artifacts'];
@@ -294,12 +381,24 @@ export async function run(options) {
         for(const b of ['mlx','cuda']) verifyBundle(path.join(peers,`capture-${b}`),source,'capture',b);
         baseEnv.MOSS_ACCEPTANCE_PEER_ARTIFACTS=peers;
       }
-      const buildStart=Date.now();
-      receipt.workflow={ref:env.GITHUB_REF,sha:env.GITHUB_SHA,fileSha256:source.workflowSha256,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,jobId:env.GITHUB_JOB};
-      for(const [key,value] of Object.entries(receipt.workflow)) assert(typeof value==='string' && value.length>0,`missing actual workflow provenance: ${key}`);
-      assert(/^[1-9][0-9]*$/.test(receipt.workflow.attempt),'invalid actual workflow attempt');
-      receipt.workflow.attempt=Number(receipt.workflow.attempt);
-      assert(Number.isSafeInteger(receipt.workflow.attempt),'workflow attempt exceeds integer range');
+      const buildStart=continuing?Date.parse(receipt.preparationStartedAt):Date.now();
+      assert(Number.isFinite(buildStart) && buildStart<=Date.now(), 'invalid original preparation clock');
+      receipt.preparationStartedAt=new Date(buildStart).toISOString();
+      const workflow={ref:env.GITHUB_REF,sha:env.GITHUB_SHA,fileSha256:source.workflowSha256,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,jobId:env.GITHUB_JOB};
+      for(const [key,value] of Object.entries(workflow)) assert(typeof value==='string' && value.length>0,`missing actual workflow provenance: ${key}`);
+      assert(/^[1-9][0-9]*$/.test(workflow.attempt),'invalid actual workflow attempt');
+      workflow.attempt=Number(workflow.attempt);
+      assert(Number.isSafeInteger(workflow.attempt),'workflow attempt exceeds integer range');
+      if(continuing) assert(JSON.stringify(receipt.workflow)===JSON.stringify(workflow), 'continuation run/attempt/job changed');
+      receipt.workflow=workflow;
+      let executable;
+      if(continuing) {
+        executable=receipt.executable.path;
+        assert((options.executableDigest?options.executableDigest(executable):fileDigest(executable))===receipt.executable.sha256, 'continuation binary changed');
+        assert(JSON.stringify(receipt.discovery)===JSON.stringify([...testsFor('capture',backend),...testsFor('cross-load',backend),PREFLIGHT].sort()), 'continuation discovery changed');
+        const preparedAt=Date.parse(receipt.preparationFinishedAt);
+        assert(preparedAt>=buildStart && preparedAt<=Date.now() && preparedAt-buildStart<=BOUNDS.build, 'original preparation deadline exceeded');
+      } else {
       const preparationRemaining=()=>Math.min(BOUNDS.build-(Date.now()-buildStart),phase==='cross-load'?remainingCaseMs(crossLoadStartedAt):BOUNDS.build);
       const rustc=await command(['rustc','-Vv'],'rustc-version',Math.min(BOUNDS.list,preparationRemaining()));
       const cargo=await command(['cargo','-V'],'cargo-version',Math.min(BOUNDS.list,preparationRemaining()));
@@ -307,14 +406,16 @@ export async function run(options) {
       assert(host && /^rustc \S+/m.test(rustc.result.output) && /^cargo \S+/m.test(cargo.result.output),'actual Rust/Cargo toolchain observations missing');
       receipt.toolchain={rustc:rustc.result.output.trim(),cargo:cargo.result.output.trim(),target:env.CARGO_BUILD_TARGET||host,nativeRuntime:`inference-source/${source.inferencePin}`};
       const compile=await command(['cargo','test','--locked','-p','sceneworks-rust-api','--lib',...(backend==='cuda'?['--features','backend-candle']:[]),'--no-run','--message-format=json'],'compile',preparationRemaining());
-      const executable=selectLibTestExecutable(compile.result.output,options.statExecutable);
+      executable=selectLibTestExecutable(compile.result.output,options.statExecutable);
       receipt.executable={path:executable,sha256:options.executableDigest?options.executableDigest(executable):fileDigest(executable)};
       receipt.toolchain.binarySha256=receipt.executable.sha256;
       const all=await command([executable,'--list'],'list',Math.min(BOUNDS.list,preparationRemaining()));
       const ignored=await command([executable,'--ignored','--list'],'ignored-list',Math.min(BOUNDS.list,preparationRemaining()));
       receipt.discovery=checkDiscovery(parseTestList(all.result.output),parseTestList(ignored.result.output),backend);
       assert(Date.now()-buildStart<=BOUNDS.build,'build preparation deadline exceeded');
-      for(let i=0;i<CELLS.length;i++) {
+      receipt.preparationFinishedAt=new Date().toISOString();
+      }
+      for(let i=cellIndex??0;i<(cellIndex===null?CELLS.length:cellIndex+1);i++) {
         const cell=CELLS[i], test=testsFor(phase,backend)[i];
         const caseStartedAt=phase==='capture'?new Date().toISOString():crossLoadStartedAt;
         const caseOutput=path.join(output,...cell.split('/'));mkdirSync(caseOutput,{recursive:true});
@@ -329,18 +430,21 @@ export async function run(options) {
         assert(state.rssFirstBytes>0&&state.rssPeakBytes<=capBytes,'missing/breached aggregate RSS observation');
         assert(existsSync(path.join(caseOutput,'evidence.json')),'native case evidence missing (test counts are not learning evidence)');
         remainingCaseMs(caseStartedAt);entry.executionPassed=true;
+        if(cellIndex!==null) publishPreview(output,receipt,entry,cell);
       }
-      receipt.ok=true; // Capture/cross-load execution only; NEVER an acceptance attestation.
+      receipt.cellComplete=true;
+      receipt.ok=receipt.cases.length===CELLS.length; // Capture/cross-load execution only; NEVER an acceptance attestation.
     }
   } catch(e) {receipt.failures.push(e.message);}
   finally {
     process.off('SIGINT',cancel);process.off('SIGTERM',cancel);
     if(interrupted){receipt.ok=false;receipt.failures.push('signal interruption');}
+    for(const member of priorMembers) if(!existsSync(path.join(output,member.path)) || fileDigest(path.join(output,member.path))!==member.sha256) {receipt.ok=false;receipt.cellComplete=false;receipt.failures.push('immutable prior raw file changed');}
     receipt.members=artifactMembers(output).filter(m=>m.path!=='driver.json');
     store(path.join(output,'driver.json'),receipt);
   }
   return receipt;
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
-  try {const receipt=await run(parseArgs(process.argv.slice(2)));if(!receipt.ok)console.error(receipt.failures.join('\n'));process.exitCode=receipt.ok?0:1;}catch(e){console.error(e.message);process.exitCode=1;}
+  try {const receipt=await run(parseArgs(process.argv.slice(2)));const success=receipt.ok || (receipt.cellComplete && receipt.failures.length===0);if(!success)console.error(receipt.failures.join('\n'));process.exitCode=success?0:1;}catch(e){console.error(e.message);process.exitCode=1;}
 }

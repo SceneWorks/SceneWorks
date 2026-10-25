@@ -1,5 +1,6 @@
 # Reusable only, reached exclusively from the manual memory-catalog dispatcher.
-# No publication, weight download, automatic PR/main trigger or global resource queue.
+# No model publication, weight download, or automatic PR/main trigger.
+# CUDA joins the existing physical-device exclusion; MLX remains independent.
 name: MOSS training terminal acceptance
 on:
   workflow_call:
@@ -48,7 +49,15 @@ jobs:
             os: windows
     runs-on: ${{ matrix.backend == 'mlx' && fromJSON(format('["self-hosted","macOS","ARM64","{0}"]', inputs.moss_runner_label)) || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 390
+    concurrency:
+      group: ${{ matrix.backend == 'cuda' && 'windows-candle-gpu-real-weights' || format('moss-training-{0}-{1}-{2}-mlx', github.run_id, github.run_attempt, github.job) }}
+      cancel-in-progress: false
     env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      # Production registration reads NVIDIA_VISIBLE_DEVICES; keep its physical
+      # claim aligned with logical cuda:0, then require the measured UUID match.
+      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
       MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
       MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
       MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
@@ -74,7 +83,7 @@ jobs:
       - name: Record Windows lane job start before checkout or preparation
         if: ${{ matrix.backend == 'cuda' }}
         shell: powershell
-        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.ToString('o'))
+        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.UtcDateTime.ToString('o'))
         working-directory: ${{ github.workspace }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,6 +105,8 @@ jobs:
           node-version: 22
       - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
         if: ${{ matrix.backend == 'cuda' }}
+        with:
+          workspace-directory: sceneworks-source
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         if: ${{ matrix.backend == 'mlx' }}
         with:
@@ -109,22 +120,38 @@ jobs:
         with:
           name: moss-dataset
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
-      - name: Guarded capture MLX
-        if: ${{ matrix.backend == 'mlx' }}
-        env:
-          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
-        shell: bash
-        run: node scripts/moss-training-acceptance.mjs --phase capture --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json
-      - name: Guarded capture CUDA with native compiler environment
-        if: ${{ matrix.backend == 'cuda' }}
-        env:
-          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          if errorlevel 1 exit /b %errorlevel%
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts/moss-training-acceptance.mjs --phase capture --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json
+      - name: Capture and publish base/lora before continuing
+        uses: ./sceneworks-source/.github/actions/moss-capture-cell
+        with:
+          backend: ${{ matrix.backend }}
+          cell: base/lora
+          preview-name: base-lora
+          output: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}
+          dataset: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Capture and publish base/lokr before continuing
+        uses: ./sceneworks-source/.github/actions/moss-capture-cell
+        with:
+          backend: ${{ matrix.backend }}
+          cell: base/lokr
+          preview-name: base-lokr
+          output: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}
+          dataset: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Capture and publish sft/lora before continuing
+        uses: ./sceneworks-source/.github/actions/moss-capture-cell
+        with:
+          backend: ${{ matrix.backend }}
+          cell: sft/lora
+          preview-name: sft-lora
+          output: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}
+          dataset: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Capture and publish sft/lokr before continuing
+        uses: ./sceneworks-source/.github/actions/moss-capture-cell
+        with:
+          backend: ${{ matrix.backend }}
+          cell: sft/lokr
+          preview-name: sft-lokr
+          output: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}
+          dataset: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
       - name: Preserve raw logs, native records, exports, previews and supervision even on failure
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -146,7 +173,15 @@ jobs:
             os: windows
     runs-on: ${{ matrix.backend == 'mlx' && fromJSON(format('["self-hosted","macOS","ARM64","{0}"]', inputs.moss_runner_label)) || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 390
+    concurrency:
+      group: ${{ matrix.backend == 'cuda' && 'windows-candle-gpu-real-weights' || format('moss-training-{0}-{1}-{2}-mlx', github.run_id, github.run_attempt, github.job) }}
+      cancel-in-progress: false
     env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      # Production registration reads NVIDIA_VISIBLE_DEVICES; keep its physical
+      # claim aligned with logical cuda:0, then require the measured UUID match.
+      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
       MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
       MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
       MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
@@ -172,7 +207,7 @@ jobs:
       - name: Record Windows lane job start before checkout or preparation
         if: ${{ matrix.backend == 'cuda' }}
         shell: powershell
-        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.ToString('o'))
+        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.UtcDateTime.ToString('o'))
         working-directory: ${{ github.workspace }}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,6 +229,8 @@ jobs:
           node-version: 22
       - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
         if: ${{ matrix.backend == 'cuda' }}
+        with:
+          workspace-directory: sceneworks-source
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         if: ${{ matrix.backend == 'mlx' }}
         with:

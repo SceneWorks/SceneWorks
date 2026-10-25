@@ -11,7 +11,7 @@ use sceneworks_core::training::TrainingPlan;
 mod acceptance_progress;
 pub use acceptance_progress::{
     acceptance_api_cancel_controller, acceptance_progress_snapshot, observe_acceptance_trainer,
-    AcceptanceProgressLedger, AcceptanceProgressObservation,
+    request_acceptance_api_cancel, AcceptanceProgressLedger, AcceptanceProgressObservation,
 };
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -52,14 +52,6 @@ pub fn prepare_selected_adapters(
     let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
     let (specs, pins) = crate::image_jobs::prepared_adapter_selection_for_test(&request, settings)?;
     Ok(PreparedAdapterSelection { specs, pins })
-}
-
-/// Execute a claimed image job through the unchanged production handler. This
-/// deliberately does not substitute a generator, mapper, adapter resolver or
-/// completion path; native acceptance must exercise the same code as a worker.
-pub async fn run_image_job(settings: &Settings, job: &JobSnapshot) -> WorkerResult<()> {
-    let api = ApiClient::new(settings);
-    crate::image_jobs::run_image_generate_job(&api, settings, job).await
 }
 
 /// Register through the real startup-health/discovery/registry chain. No fake
@@ -105,10 +97,11 @@ pub async fn register_real_acceptance_worker(
 /// routing, terminal reconciliation and metrics. Unit return is NOT success:
 /// callers must read and validate the actual API terminal job snapshot.
 pub async fn run_acceptance_utility_job(settings: &Settings, job: JobSnapshot) {
+    let api = ApiClient::new(settings);
     crate::run_utility_job(
-        &ApiClient::new(settings),
+        &api,
         settings,
-        &reqwest::Client::new(),
+        api.http_client(),
         job,
         gen_core::CancelFlag::new(),
     )
@@ -264,7 +257,7 @@ pub fn real_moss_trainer_with_probe(
             "nativePlan":plan, "weightsLoaded":false,
             "observationSchema":moss_acceptance_observation_schema()
         });
-        return Ok((Box::new(trainer), metadata));
+        Ok((Box::new(trainer), metadata))
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
@@ -331,7 +324,7 @@ pub fn real_moss_trainer_with_probe(
             "nativePlan":plan, "weightsLoaded":false,
             "observationSchema":moss_acceptance_observation_schema()
         });
-        return Ok((Box::new(trainer), metadata));
+        Ok((Box::new(trainer), metadata))
     }
     #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
     {

@@ -231,25 +231,8 @@ impl gen_core::Trainer for ObservedTrainer {
     }
 }
 
-/// Poll a test-owned cancellation request or the durable checkpoint wait, then
-/// invoke the REAL cancellation endpoint. This never calls CancelFlag::cancel.
-/// The case owner must continue driving/joining execution after an error; do not
-/// drop a live native task or force-kill its process to satisfy a wall clock.
-pub async fn acceptance_api_cancel_controller(
-    settings: &Settings,
-    job_id: &str,
-    ledger: AcceptanceProgressLedger,
-    stop: Arc<AtomicBool>,
-    cancel_file: Option<PathBuf>,
-    deadline: Instant,
-) -> gen_core::Result<()> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() || remaining > Duration::from_secs(3600) {
-        return Err(unsupported(
-            "acceptance controller requires the remaining frozen case deadline",
-        ));
-    }
-    if settings.access_token.is_some() {
+fn validate_acceptance_cancel_target(settings: &Settings, job_id: &str) -> gen_core::Result<()> {
+    if settings.access_token.is_some() || !settings.credentials.is_empty() {
         return Err(unsupported(
             "acceptance controller refuses persisted credentials",
         ));
@@ -266,7 +249,56 @@ pub async fn acceptance_api_cancel_controller(
             "acceptance cancellation requires the isolated loopback API",
         ));
     }
-    let client = reqwest::Client::new();
+    Ok(())
+}
+
+/// The real owned-API cancellation actor. Reuse the existing confined API
+/// transport and bound both request and JSON decoding by the caller's deadline.
+/// Its decoded reply is not a manufactured raw HTTP status observation.
+pub async fn request_acceptance_api_cancel(
+    settings: &Settings,
+    job_id: &str,
+    deadline: Instant,
+) -> gen_core::Result<serde_json::Value> {
+    validate_acceptance_cancel_target(settings, job_id)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() || remaining > Duration::from_secs(3600) {
+        return Err(unsupported(
+            "acceptance cancellation requires a bounded remaining deadline",
+        ));
+    }
+    let api = crate::api_client::ApiClient::new(settings);
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        api.post_json::<_, serde_json::Value>(
+            &format!("/api/v1/jobs/{job_id}/cancel"),
+            &serde_json::json!({}),
+        ),
+    )
+    .await
+    .map_err(|_| unsupported("real API cancel exceeded the remaining deadline"))?
+    .map_err(|error| unsupported(format!("real API cancel failed: {error}")))
+}
+
+/// Poll a test-owned cancellation request or the durable checkpoint wait, then
+/// invoke the REAL cancellation endpoint. This never calls CancelFlag::cancel.
+/// The case owner must continue driving/joining execution after an error; do not
+/// drop a live native task or force-kill its process to satisfy a wall clock.
+pub async fn acceptance_api_cancel_controller(
+    settings: &Settings,
+    job_id: &str,
+    ledger: AcceptanceProgressLedger,
+    stop: Arc<AtomicBool>,
+    cancel_file: Option<PathBuf>,
+    deadline: Instant,
+) -> gen_core::Result<()> {
+    validate_acceptance_cancel_target(settings, job_id)?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() || remaining > Duration::from_secs(3600) {
+        return Err(unsupported(
+            "acceptance controller requires the remaining frozen case deadline",
+        ));
+    }
     let mut sent = false;
     while !stop.load(Ordering::Acquire) {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -298,34 +330,143 @@ pub async fn acceptance_api_cancel_controller(
             false
         };
         if !sent && (waiting || external) {
-            let response = client
-                .post(format!(
-                    "{}/api/v1/jobs/{job_id}/cancel",
-                    settings.api_url.trim_end_matches('/')
-                ))
-                .timeout(remaining)
-                .json(&serde_json::json!({}))
-                .send()
-                .await
-                .map_err(|error| unsupported(format!("real API cancel failed: {error}")))?;
-            let status = response.status();
-            let body = response
-                .text()
-                .await
-                .map_err(|error| unsupported(error.to_string()))?;
+            let body = request_acceptance_api_cancel(settings, job_id, deadline).await?;
             let at = unix_ms()?;
+            // ApiClient returns only a successful decoded reply. The actual raw
+            // HTTP status/body remains in the owned worker-http middleware record.
             lock_until(&ledger, deadline)?.api_cancel = Some(serde_json::json!({
-                "requestedUnixMs":at, "httpStatus":status.as_u16(), "response":body,
+                "requestedUnixMs":at, "response":body,
                 "stimulus":if external { "owned-external-cancel-request" } else { "durable-checkpoint-20" }
             }));
-            if !status.is_success() {
-                return Err(unsupported(format!(
-                    "real API cancel refused with {status}"
-                )));
-            }
             sent = true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        extract::{Path, State},
+        response::Response,
+        routing::post,
+        Router,
+    };
+
+    async fn cancellation_stub(
+        slow_body: bool,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        async fn cancel(Path(job): Path<String>, State(slow): State<bool>) -> Response {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "id":job, "cancelRequested":true, "fixtureLabel":"CONTROL-PLANE TEST ONLY"
+            }))
+            .unwrap();
+            let stream = futures_util::stream::once(async move {
+                if slow {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Ok::<_, std::convert::Infallible>(bytes)
+            });
+            Response::builder()
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from_stream(stream))
+                .unwrap()
+        }
+        let app = Router::new()
+            .route("/api/v1/jobs/:job/cancel", post(cancel))
+            .with_state(slow_body);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        (format!("http://{address}"), stop, server)
+    }
+
+    #[tokio::test]
+    async fn cancel_request_reuses_api_transport_and_keeps_the_actual_decoded_reply() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, stop, server) = cancellation_stub(false).await;
+        let mut settings = Settings::for_test(temp.path().to_path_buf());
+        settings.api_url = url;
+        let reply = request_acceptance_api_cancel(
+            &settings,
+            "job-control-test",
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply["id"], "job-control-test");
+        assert_eq!(reply["cancelRequested"], true);
+        assert_eq!(reply["fixtureLabel"], "CONTROL-PLANE TEST ONLY");
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_request_deadline_covers_response_body_decoding() {
+        let temp = tempfile::tempdir().unwrap();
+        let (url, stop, server) = cancellation_stub(true).await;
+        let mut settings = Settings::for_test(temp.path().to_path_buf());
+        settings.api_url = url;
+        let error = request_acceptance_api_cancel(
+            &settings,
+            "job-control-test",
+            Instant::now() + Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("remaining deadline"), "{error}");
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_request_rejects_credentials_foreign_targets_and_expired_bounds() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().to_path_buf());
+        settings.access_token = Some("CONTROL-PLANE TEST ONLY".into());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        assert!(
+            request_acceptance_api_cancel(&settings, "job-control-test", deadline)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("persisted credentials")
+        );
+        settings.access_token = None;
+        for target in [
+            "https://127.0.0.1",
+            "http://foreign.invalid",
+            "http://user:password@127.0.0.1",
+        ] {
+            settings.api_url = target.into();
+            assert!(
+                request_acceptance_api_cancel(&settings, "job-control-test", deadline)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("isolated loopback")
+            );
+        }
+        settings.api_url = "http://127.0.0.1:1".into();
+        assert!(
+            request_acceptance_api_cancel(&settings, "job-control-test", Instant::now())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("bounded remaining deadline")
+        );
+    }
 }

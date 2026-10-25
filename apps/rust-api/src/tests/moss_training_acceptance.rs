@@ -817,13 +817,15 @@ async fn cancel_controller(
     if result.is_err() {
         // A controller failure/deadline is never acceptance success. Still send
         // a real API cancellation before waiting for the owned execution to join.
-        // This is teardown, not the checkpoint-20 acceptance stimulus.
-        let response = reqwest::Client::new()
-            .post(format!("{}/api/v1/jobs/{job}/cancel", worker.api_url))
-            .timeout(Duration::from_secs(10))
-            .json(&Value::Null)
-            .send()
-            .await;
+        // This is the existing bounded ten-second error-only teardown, not an
+        // extension of the accepted case deadline or checkpoint-20 stimulus.
+        // The shared API transport also rejects unsuccessful HTTP status codes.
+        let response = native::request_acceptance_api_cancel(
+            worker,
+            job,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await;
         if let Err(error) = response {
             return Err(gen_core::Error::Unsupported(format!("acceptance controller failed and API teardown cancellation could not be delivered: {error}; original={result:?}")));
         }
@@ -1394,7 +1396,7 @@ async fn training_library_adapter(
         "training library parent/method/source mismatch",
     )?;
     require(
-        output == PathBuf::from(text(&run.receipt, "final_native_path")?)
+        output.as_path() == Path::new(text(&run.receipt, "final_native_path")?)
             && file_sha(&output)?
                 == file_sha(Path::new(text(&run.receipt, "final_adapter_path")?))?,
         "actual library completion is not the final native-produced adapter",
@@ -2095,7 +2097,7 @@ async fn body(
             old_snapshot["tokenObservedCanceled"] == true
                 && new_snapshot["tokenObservedCanceled"] == false
                 && old_snapshot["tokenId"] != new_snapshot["tokenId"]
-                && fresh.request.config.resume == false,
+                && !fresh.request.config.resume,
             "fresh run reused/cleared the original cancellation token or resumed old state",
         )?;
         require(
@@ -2290,6 +2292,10 @@ async fn run(parent: &str, method: &str, source_backend: &str, cross: bool, pref
     let mut case = Case::admitted(parent, method, source_backend, cross, preflight)
         .unwrap_or_else(|e| panic!("MOSS manual admission refused before model construction: {e}"));
     case.persist().expect("initial owned failure record");
+    // Match production startup before constructing isolated settings. Explicit
+    // HF cache overrides remain authoritative; the env-less case uses the OS
+    // shared cache rather than the temporary application's empty private cache.
+    let _ = sceneworks_core::hf_home::ensure_default_huggingface_home();
     // App state is outside the uploadable evidence tree. Shared real HF snapshots
     // are read in place by normal source resolution; no model is copied/staged.
     let temp = tempfile::tempdir().expect("owned isolated app state");

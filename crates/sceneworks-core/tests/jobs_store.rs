@@ -8525,7 +8525,10 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                             utilization: None,
                             status_reason: None,
                         }) {
-                            errors.lock().unwrap().push(error.to_string());
+                            errors.lock().unwrap().push(format!(
+                                "heartbeat_worker worker={worker_id} job={}: {error:?}",
+                                job.id
+                            ));
                         }
                         // Free the worker so it keeps claiming and the queue drains.
                         if let Err(error) = store.update_job_progress(
@@ -8544,11 +8547,17 @@ fn concurrent_claims_never_lock_and_stay_exactly_once() {
                                 worker_id: Some(worker_id.clone()),
                             },
                         ) {
-                            errors.lock().unwrap().push(error.to_string());
+                            errors.lock().unwrap().push(format!(
+                                "update_job_progress worker={worker_id} job={}: {error:?}",
+                                job.id
+                            ));
                         }
                     }
                     Ok(None) => thread::sleep(Duration::from_millis(1)),
-                    Err(error) => errors.lock().unwrap().push(error.to_string()),
+                    Err(error) => errors
+                        .lock()
+                        .unwrap()
+                        .push(format!("claim_next_job worker={worker_id}: {error:?}")),
                 }
             }
         }));

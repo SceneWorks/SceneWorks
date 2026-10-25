@@ -18,6 +18,37 @@ use sceneworks_worker::test_support::gen_core;
 use std::collections::BTreeSet;
 
 #[test]
+fn manual_cache_startup_uses_production_shared_default_before_isolated_settings() {
+    let source = include_str!("moss_training_acceptance.rs");
+    let run = source.split_once("async fn run(").unwrap().1;
+    assert!(
+        run.find("ensure_default_huggingface_home()").unwrap()
+            < run.find("test_settings(&temp)").unwrap()
+    );
+    let shared = std::path::PathBuf::from("SCHEMA_TEST_ONLY/shared-huggingface");
+    assert_eq!(
+        sceneworks_core::hf_home::default_huggingface_home(None, None, None, Some(shared.clone())),
+        Some(shared.clone())
+    );
+    for overrides in [
+        (Some("selected-hub"), None, None),
+        (None, Some("selected-legacy-hub"), None),
+        (None, None, Some("selected-home")),
+    ] {
+        assert_eq!(
+            sceneworks_core::hf_home::default_huggingface_home(
+                overrides.0,
+                overrides.1,
+                overrides.2,
+                Some(shared.clone())
+            ),
+            None,
+            "an explicit approved cache root must not be replaced"
+        );
+    }
+}
+
+#[test]
 fn weight_preflight_uses_complete_production_component_map_without_model_execution() {
     for parent in ["base", "sft"] {
         let files = selected_weight_files(parent).unwrap();
