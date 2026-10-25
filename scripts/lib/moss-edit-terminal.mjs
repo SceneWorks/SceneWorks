@@ -349,10 +349,10 @@ export function checkJob(row, request, job, workerGpuId = row.backend === 'cuda'
   // generation events use mlx/candle. Only the native report proves execution_device.
   requireThat(typeof workerGpuId === 'string' && workerGpuId && (row.backend !== 'cuda' || workerGpuId === '1') && [row.backend === 'cuda' ? 'candle' : 'mlx', workerGpuId].includes(job.backend), 'queue backend label differs from the frozen worker launch contract');
   requireThat(job.status === row.expected, `expected ${row.expected}, got ${job.status}`);
-  requireThat(job.result?.outputPublication?.state !== 'pending', 'output publication still pending');
+  requireThat(job.status !== 'completed' || job.result?.outputPublication?.state !== 'pending', 'completed output publication still pending');
   const assets = job.result?.assets ?? [];
   requireThat(assets.length === row.outputCount, 'canonical published output count mismatch');
-  if (row.expected !== 'completed') { requireThat(!job.result?.mossImageEditExecutionReport && !JSON.stringify(job.result).includes('mossImageEditExecutionReport'), 'canceled/error job published an execution report'); return; }
+  if (row.expected !== 'completed') { requireThat(!(job.result?.assetWrites?.length)&&!job.result?.mossImageEditExecutionReport && !JSON.stringify(job.result).includes('mossImageEditExecutionReport'), 'canceled/error job published assets or an execution report'); return; }
   requireThat(job.workerId && job.startedAt && job.completedAt, 'no actual worker execution timestamps/identity');
   requireThat(new Set(assets.map(a => a.id)).size === assets.length && assets.every(a => a.id), 'duplicate/missing published asset IDs');
 }
@@ -449,7 +449,7 @@ export async function failAttempt(ticket,error,jobId=null) {
 export async function reconcileAttempt(root,backend,id,proof,lockSha256) {
   const directory = resolve(root,'attempts',backend), start = await json(resolve(directory,`${id}.start.json`)), failure = await optionalJson(resolve(directory,`${id}.failure.json`));
   requireThat(proof.version === VERSION && proof.lockSha256 === lockSha256 && proof.attemptSha256 === digest(start) && proof.coordinator && proof.backend === backend && proof.observedAt && Date.parse(proof.observedAt) >= Date.parse(start.startedAt) && proof.state === 'NO_ACTIVE_OWNED_JOB' && proof.rawEvidence?.length && Array.isArray(proof.jobs), 'invalid authoritative attempt reconciliation');
-  requireThat(proof.jobs.every(job => job.id && ['completed','failed','canceled','interrupted'].includes(job.status) && job.result?.outputPublication?.state !== 'pending'), 'reconciliation still has an active/unpublished job');
+  requireThat(proof.jobs.every(job => job.id && ['completed','failed','canceled','interrupted'].includes(job.status) && (job.status !== 'completed' || job.result?.outputPublication?.state !== 'pending')), 'reconciliation still has an active/unpublished completed job');
   if (failure?.jobId) requireThat(proof.jobs.some(j => j.id === failure.jobId),'known unresolved job was not reconciled');
   else requireThat(proof.authoritativeSearch?.requestSha256 === start.requestSha256 && proof.authoritativeSearch.since === start.startedAt && proof.authoritativeSearch.complete === true,'unknown submission requires complete actual request/time-bound authoritative search');
   for (const item of proof.rawEvidence) requireThat((await fileIdentity(safePath(root,item.file))).sha256 === item.sha256,'reconciliation raw evidence changed');

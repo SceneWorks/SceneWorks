@@ -5,9 +5,10 @@ import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile, readdir, lstat, cp, open } from 'node:fs/promises';
 import { resolve, relative, dirname, basename, isAbsolute } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, Api } from './moss-edit-terminal.mjs';
+import { VERSION, sha, digest, canonical, requireThat, save, json, safePath, decodeRgbPng, fileIdentity, treeIdentity, validateInferencePins, validateAdmission, assertRequestBinding, isDenoiseStep, Api } from './moss-edit-terminal.mjs';
 
 const execFile = promisify(callback);
+const optionalJson = path => json(path).catch(error => { if(error.code==='ENOENT')return null;throw error; });
 export const R16_ORIGINAL_INVENTORY_SHA256 = '6a42624ebf84ffd06d54b7e4f845a5214bb485c12c9cf6211e475963b9488a0e';
 export const H18_RETRY_TOOLING_SHA = '82c534d50b72c1a5984514b90548002da212d735';
 export const H18_RETRY_RUN_ID = 40208210890;
@@ -68,7 +69,7 @@ export async function assertOriginalEvidence(root,manifest,{exact=false}={}) {
 }
 export async function assertH18CheckpointFiles(root,checkpoint,{retained=false,archiveTag='h18'}={}) {
   const tails=checkpoint.appendOnlyTails;
-  requireThat(Array.isArray(checkpoint.files)&&checkpoint.files.length>=300&&new Set(checkpoint.files.map(item=>item.file)).size===checkpoint.files.length&&Array.isArray(tails)&&new Set(tails.map(item=>item.file)).size===tails.length&&tails.length<=2&&tails.every(item=>archiveTag==='h18'?['api-continuation.log','journal-continuation.jsonl'].includes(item.file):/^(?:api-continuation-retry(?:-[2-9][0-9]*)?\.log|journal-continuation-retry(?:-[2-9][0-9]*)?\.jsonl)$/.test(item.file))&&(archiveTag!=='h18'||canonical(tails.map(item=>item.file).sort())===canonical(['api-continuation.log','journal-continuation.jsonl'])),'prior artifact inventory or exact post-upload append-only logs changed');
+  requireThat(Array.isArray(checkpoint.files)&&checkpoint.files.length>=300&&new Set(checkpoint.files.map(item=>item.file)).size===checkpoint.files.length&&Array.isArray(tails)&&new Set(tails.map(item=>item.file)).size===tails.length&&tails.length<=3&&tails.every(item=>archiveTag==='h18'?['api-continuation.log','journal-continuation.jsonl'].includes(item.file):/^(?:api-continuation-retry(?:-[2-9][0-9]*)?\.log|journal-continuation-retry(?:-[2-9][0-9]*)?\.jsonl|samples\/[a-z0-9-]+-retry-[2-9][0-9]*\.jsonl)$/.test(item.file))&&(archiveTag!=='h18'||canonical(tails.map(item=>item.file).sort())===canonical(['api-continuation.log','journal-continuation.jsonl'])),'prior artifact inventory or exact post-upload append-only logs changed');
   for(const item of checkpoint.files) {
     const tail=tails.find(entry=>entry.file===item.file);
     const relativeFile=retained?(item.file==='evidence/attempts/mlx/dispatch.lock'?`continuation-${archiveTag}-dispatch.lock`:item.file.startsWith('evidence/')?item.file.slice('evidence/'.length):`continuation-${archiveTag}-root/${item.file}`):item.file;
@@ -104,6 +105,31 @@ export async function retryRemainingRows(evidenceRoot,plan,lockSha256) {
     try{await lstat(safePath(evidenceRoot,file));requireThat(false,`unsubmitted row ${row.id} already changed`);}catch(error){if(error.code!=='ENOENT')throw error;}
   }
   return rows.slice(7);
+}
+export async function submittedCanceledRemainingRows(evidenceRoot,plan,lockSha256,bindingSha256,checkpoint,root) {
+  const rows=plan.rows.filter(row=>row.backend==='mlx');
+  requireThat(rows.length===25,'frozen MLX row count changed');
+  let index=0;
+  while(index<rows.length&&await optionalJson(resolve(evidenceRoot,'rows',rows[index].id,'receipt.json'))) {
+    requireThat((await json(resolve(evidenceRoot,'rows',rows[index].id,'receipt.json'))).execution==='VERIFIED',`prior row ${rows[index].id} lacks a verified receipt`);
+    index++;
+  }
+  const row=rows[index];
+  requireThat(index>=8&&row?.expected==='canceled'&&row.transport==='rest'&&row.cancelAtDenoise===true,'only a known submitted terminal cancellation may be adopted');
+  const dir=resolve(evidenceRoot,'rows',row.id),attempt=resolve(evidenceRoot,'attempts/mlx'),start=await json(resolve(attempt,`${row.id}.start.json`));
+  const [request,submitted,admitted,observed,response]=await Promise.all(['request.json','submission.json','admission.json','cancel-observation.json','cancel-response.json'].map(name=>json(resolve(dir,name))));
+  requireThat(start.id===row.id&&start.backend==='mlx'&&start.lockSha256===lockSha256&&start.bindingSha256===bindingSha256&&start.requestSha256===digest(request)&&await readFile(resolve(attempt,'dispatch.lock'),'utf8')===row.id&&submitted?.id&&submitted.status==='queued'&&submitted.projectId===request.projectId,'canceled attempt lacks the exact known submitted REST request/lock');
+  assertRequestBinding(request,submitted.payload);
+  validateAdmission(admitted,await json(resolve(evidenceRoot,'protocol.lock.json')),'mlx');
+  requireThat(observed.id===submitted.id&&observed.status==='running'&&isDenoiseStep(observed)&&response.id===submitted.id&&response.cancelRequested===true&&response.projectId===request.projectId&&response.workerId===observed.workerId&&Date.parse(response.updatedAt)>=Date.parse(observed.updatedAt),'original denoise cancellation and native acknowledgement differ');
+  for(const file of [`rows/${row.id}/receipt.json`,`rows/${row.id}/failure.json`,`attempts/mlx/${row.id}.failure.json`,`attempts/mlx/${row.id}.resolution.json`])requireThat(!await optionalJson(resolve(evidenceRoot,file)),`submitted cancellation ${row.id} was already resolved/failed`);
+  for(const later of rows.slice(index+1))for(const file of [`rows/${later.id}/receipt.json`,`rows/${later.id}/failure.json`,`attempts/mlx/${later.id}.start.json`])requireThat(!await optionalJson(resolve(evidenceRoot,file)),`later row ${later.id} was already touched`);
+  const samples=checkpoint.files.filter(item=>new RegExp(`^samples/${row.id}-retry-[2-9][0-9]*\\.jsonl$`).test(item.file));
+  requireThat(samples.length===1,'original submitted cancellation raw sample is not sealed in the failed artifact');
+  const sampleFile=samples[0].file;
+  const lines=(await readFile(safePath(root,sampleFile),'utf8')).trimEnd().split('\n').map(line=>JSON.parse(line));
+  requireThat(lines.length>=3&&lines[0].phase==='baseline'&&lines.at(-1).phase==='drain'&&lines.some(item=>item.phase==='active'&&Date.parse(item.at)>=Date.parse(submitted.startedAt??submitted.createdAt)&&Date.parse(item.at)<=Date.parse(response.updatedAt))&&lines.every(item=>item.device?.uuid===admitted.device.uuid&&item.raw),'original whole-device canceled-job trace is incomplete or changed');
+  return {remaining:rows.slice(index+1),recovery:{rowId:row.id,jobId:submitted.id,requestSha256:digest(request),submissionSha256:digest(submitted),attemptSha256:digest(start),sampleFile}};
 }
 export function validateFailedUiCapture(capture,lockSha256,{historical=null}={}) {
   const oldSelector=historical==='h18'&&capture.error?.includes('strict mode violation')&&capture.error.includes('Download portable workflow (.json)');
@@ -238,7 +264,7 @@ export async function startStack(config,token) {
     await save(resolve(config.root,config.continuation?`stack${continuationSuffix}.json`:'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString(),...(config.continuation?{tooling:config.continuation.toolingSha}:{})});
     return {api:client,children,stop,restartIdleWorker,async restartWorker(canceledJobId){
       const job=await client.request(`/api/v1/jobs/${encodeURIComponent(canceledJobId)}`);
-      requireThat(job.status==='canceled'&&job.workerId===config.workerId&&!(job.result?.assets?.length)&&job.result?.outputPublication?.state!=='pending','owned cancellation/publication is not drained; do not restart');
+    requireThat(job.status==='canceled'&&job.workerId===config.workerId&&!(job.result?.assets?.length)&&!(job.result?.assetWrites?.length),'owned cancellation is not drained; do not restart');
       return {canceledJobId,...await restartIdleWorker('canceled-job-reentry')};
     }};
   }catch(error){await stop();throw error;}

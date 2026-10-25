@@ -8,7 +8,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
@@ -156,6 +156,28 @@ test('H18 pre-POST UI failure retries the exact unresolved intent once and keeps
   assert.deepEqual(await filesUnder(resolve(evidence,'rows')),original.filter(item=>item.file.startsWith('rows/')).map(item=>({...item,file:item.file.slice(5)})));
   await assertDispatchClear(evidence,'mlx');await assert.rejects(()=>retryRemainingRows(evidence,plan,lockSha256));
   assert.equal((await json(resolve(evidence,'attempts/mlx/advanced-mlx-sft-replay.resolution.json'))).jobId,'one-retried-ui-job');
+});
+test('known submitted canceled job resumes after eight verified rows without dispatching it again',async t=>{
+  const root=await temporary('known-cancel'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));
+  const rows=Array.from({length:25},(_,index)=>({id:index===8?'advanced-cancel-mlx':`row-${index}`,backend:'mlx',...(index===8?{expected:'canceled',transport:'rest',cancelAtDenoise:true}:{})})),plan={rows};
+  for(const row of rows.slice(0,8))await save(resolve(evidence,'rows',row.id,'receipt.json'),{execution:'VERIFIED'});
+  const lock={candidateId:'fixture'},lockSha256=digest(lock),bindingSha256=sha('binding'),id=rows[8].id,dir=resolve(evidence,'rows',id),attempt=resolve(evidence,'attempts/mlx'),request={mode:'edit_image',projectId:'owned-project'},jobId='owned-canceled-job';
+  await save(resolve(evidence,'protocol.lock.json'),lock);await save(resolve(attempt,`${id}.start.json`),{id,backend:'mlx',lockSha256,bindingSha256,requestSha256:digest(request)});await writeFile(resolve(attempt,'dispatch.lock'),id);
+  await save(resolve(dir,'request.json'),request);await save(resolve(dir,'submission.json'),{id:jobId,status:'queued',projectId:request.projectId,payload:request,createdAt:'2026-10-25T16:33:21Z'});
+  await save(resolve(dir,'admission.json'),{version:VERSION,lockSha256,backend:'mlx',device:{uuid:'owned-apple',pciOrRegistryId:'owned-apple',name:'Apple Silicon',platform:'apple-silicon'}});
+  await save(resolve(dir,'cancel-observation.json'),{id:jobId,status:'running',stage:'generating',progress:0.25,message:'Image 1/4 — step 1/4.',workerId:'owned-worker',updatedAt:'2026-10-25T16:33:22Z'});
+  await save(resolve(dir,'cancel-response.json'),{id:jobId,cancelRequested:true,workerId:'owned-worker',projectId:request.projectId,updatedAt:'2026-10-25T16:33:23Z'});
+  const sampleFile=`samples/${id}-retry-2.jsonl`,samples=[{phase:'baseline',at:'2026-10-25T16:33:20Z'},{phase:'active',at:'2026-10-25T16:33:22Z'},{phase:'drain',at:'2026-10-25T16:33:24Z'}].map(item=>({...item,usedBytes:1,device:{uuid:'owned-apple'},raw:{actual:'fixture'}}));
+  await mkdir(resolve(root,'samples'));await writeFile(resolve(root,sampleFile),samples.map(item=>JSON.stringify(item)).join('\n')+'\n');
+  const checkpoint={files:[{file:sampleFile,...await fileIdentity(resolve(root,sampleFile))}],appendOnlyTails:[]};
+  const result=await submittedCanceledRemainingRows(evidence,plan,lockSha256,bindingSha256,checkpoint,root);
+  assert.equal(result.recovery.jobId,jobId);assert.equal(result.remaining[0].id,rows[9].id);assert.equal(result.remaining.length,16);
+  const oldResponse=await json(resolve(dir,'cancel-response.json'));
+  await writeFile(resolve(dir,'cancel-response.json'),JSON.stringify({...oldResponse,id:'foreign-job'}));
+  await assert.rejects(()=>submittedCanceledRemainingRows(evidence,plan,lockSha256,bindingSha256,checkpoint,root),/cancellation/);
+  await writeFile(resolve(dir,'cancel-response.json'),JSON.stringify(oldResponse));
+  await save(resolve(evidence,'rows',rows[9].id,'receipt.json'),{execution:'VERIFIED'});
+  await assert.rejects(()=>submittedCanceledRemainingRows(evidence,plan,lockSha256,bindingSha256,checkpoint,root),/later row/);
 });
 test('H18 checkpoint permits only two sealed post-upload log prefixes and archives disappearing mutex',async t=>{
   const root=await temporary('checkpoint'),retained=await temporary('retained');t.after(()=>rm(root,{recursive:true,force:true}));t.after(()=>rm(retained,{recursive:true,force:true}));

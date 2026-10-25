@@ -310,7 +310,7 @@ export async function waitJob(api, row, id, dest, timeoutMs, initial = []) {
         await save(resolve(dest, 'cancel-observation.json'), job);
         await save(resolve(dest, 'cancel-response.json'), await api.request(`${jobPath(id)}/cancel`, { method: 'POST', body: {} })); canceled = true;
       }
-      if (['completed', 'failed', 'canceled', 'interrupted'].includes(job.status) && job.result?.outputPublication?.state !== 'pending') {
+      if (['completed', 'failed', 'canceled', 'interrupted'].includes(job.status) && (job.status !== 'completed' || job.result?.outputPublication?.state !== 'pending')) {
         if (row.cancelAtDenoise) requireThat(canceled, 'job ended before observed-denoise cancellation');
         return job;
       }
@@ -472,6 +472,43 @@ export async function recoverCompletedRow(configPath, id = 'advanced-mlx-sft') {
   await save(resolve(dest,'receipt.json'),receipt);
   console.log(JSON.stringify({rowId:id,jobId:actual.id,execution:'VERIFIED',recoveredWithoutSubmission:true,outputs:outputs.map(item=>item.sha256)}));
 }
+export async function readCanceledJob(api,row,request,submission,observed,response,binding) {
+  const job=await api.request(jobPath(submission.id));
+  requireThat(job.id===submission.id&&job.projectId===request.projectId&&job.workerId===binding.endpoint.workerId&&job.status==='canceled'&&Date.parse(job.canceledAt)>=Date.parse(response.updatedAt)&&canonical(job.payload)===canonical(submission.payload),'authenticated terminal canceled job differs from the known submitted job');
+  checkJob(row,request,job,binding.endpoint.workerGpuId);
+  requireThat((job.result?.assetWrites??[]).length===0&&(job.result?.assets??[]).length===0,'canceled native job wrote an output asset');
+  return {job,metrics:await api.request(`${jobPath(job.id)}/metrics`)};
+}
+export async function recoverCanceledRow(configPath,id) {
+  const state=await frozen(configPath),{config,root,lock}=state,ordinal=config.repair?.retryOrdinal;
+  requireThat(Number.isSafeInteger(ordinal)&&ordinal>=2&&config.localBackend==='mlx','only a chained source-bound MLX cancellation may be recovered');
+  const record=await json(resolve(root,`continuation-retry-${ordinal}.json`)),recovery=record.submittedRecovery;
+  requireThat(recovery?.rowId===id&&record.toolingSha===config.repair.tooling.head,'known submitted cancellation is not bound to current repair tooling');
+  const row=state.plan.rows.find(item=>item.id===id),dest=resolve(root,'rows',id),attempt=resolve(root,'attempts/mlx'),start=await json(resolve(attempt,`${id}.start.json`));
+  requireThat(row?.transport==='rest'&&row.expected==='canceled'&&row.cancelAtDenoise===true&&await readFile(resolve(attempt,'dispatch.lock'),'utf8')===id,'only the original unresolved REST cancellation may be recovered');
+  const [request,submission,admitted,observed,response]=await Promise.all(['request.json','submission.json','admission.json','cancel-observation.json','cancel-response.json'].map(name=>json(resolve(dest,name))));
+  const expected=await expectedRequest(state,row);
+  requireThat(recovery.jobId===submission.id&&recovery.requestSha256===digest(request)&&recovery.submissionSha256===digest(submission)&&recovery.attemptSha256===digest(start)&&start.requestSha256===digest(expected)&&start.bindingSha256===digest(state.binding)&&start.lockSha256===digest(lock)&&digest(request)===digest(expected),'retained canceled submission/request/attempt changed');
+  validateAdmission(admitted,lock,'mlx');assertRequestBinding(expected,submission.payload);
+  requireThat(observed.id===submission.id&&isDenoiseStep(observed)&&response.id===submission.id&&response.cancelRequested===true&&response.workerId===observed.workerId&&Date.parse(response.updatedAt)>=Date.parse(observed.updatedAt),'actual denoise cancellation record changed');
+  const {job,metrics}=await readCanceledJob(client(config,'mlx'),row,request,submission,observed,response,state.binding);
+  const samplePath=safePath(config.repair.originalRoot,recovery.sampleFile),checkpoint=await json(resolve(root,`continuation-prior-${ordinal}-inventory.json`)),tail=checkpoint.appendOnlyTails?.find(item=>item.file===recovery.sampleFile),sampleBytes=await readFile(samplePath);
+  const sealed=checkpoint.files.find(item=>item.file===recovery.sampleFile);
+  requireThat((tail?tail.stoppedByteLength===sampleBytes.length&&tail.stoppedSha256===sha(sampleBytes):sealed?.byteLength===sampleBytes.length&&sealed.sha256===sha(sampleBytes)),'original canceled whole-device trace changed');
+  const raw=sampleBytes.toString('utf8').trimEnd().split('\n').map(line=>JSON.parse(line));
+  const memory={version:VERSION,jobId:job.id,samplerSha256:lock.files.actionLibrary.sha256,device:raw[0]?.device,samples:raw.map(({at,phase,usedBytes})=>({at,phase,usedBytes}))};
+  memorySummary(memory,job.id);
+  requireThat(raw.every(item=>item.device?.uuid===admitted.device.uuid&&item.raw)&&Date.parse(raw[0].at)<=Date.parse(job.startedAt)&&Date.parse(raw.at(-1).at)>=Date.parse(job.canceledAt)&&raw.some(item=>item.phase==='active'&&Date.parse(item.at)>=Date.parse(job.startedAt)&&Date.parse(item.at)<=Date.parse(job.canceledAt)),'original whole-device samples do not bracket the canceled native execution');
+  for(const file of ['terminal-job.json','receipt.json','failure.json','memory.json','memory-raw.jsonl'])requireThat(!(await readdir(dest)).includes(file),'canceled row already materialized; never resubmit or overwrite');
+  await verifyFrozenSources(config,lock);
+  const rawPath=resolve(dest,'memory-raw.jsonl');await copyFile(samplePath,rawPath,constants.COPYFILE_EXCL);memory.raw={file:'memory-raw.jsonl',...await fileIdentity(rawPath)};
+  await save(resolve(dest,'recovery-job-readback.json'),job);await save(resolve(dest,'terminal-job.json'),job);await save(resolve(dest,'metrics.json'),metrics);await save(resolve(dest,'memory.json'),memory);
+  const proof={version:VERSION,rowId:id,jobId:job.id,lockSha256:digest(lock),attemptSha256:digest(start),requestSha256:digest(request),submissionSha256:digest(submission),admissionSha256:digest(admitted),cancelObservationSha256:digest(observed),cancelResponseSha256:digest(response),checkpointInventorySha256:record.checkpointInventorySha256,jobSha256:digest(job),rawSample:memory.raw,source:'authenticated original native terminal cancellation; no new submission or cancel request'};
+  await save(resolve(dest,'canceled-recovery.json'),proof);
+  await save(resolve(dest,'receipt.json'),{version:VERSION,lockSha256:digest(lock),bindingSha256:digest(state.binding),rowId:id,jobId:job.id,backend:'mlx',device:admitted.device,execution:'VERIFIED',acceptance:'AWAITING_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW',started:start.startedAt,ended:new Date().toISOString(),outputs:[],semanticRequestSha256:digest(expected),requestSha256:digest(request),jobSha256:digest(job),admissionSha256:digest(admitted),recoveredWithoutSubmission:true,recoveryProofSha256:digest(proof)});
+  await resolveAttempt({directory:attempt,mutex:resolve(attempt,'dispatch.lock'),id,start},'TERMINAL_VERIFIED',{jobId:job.id,recoveredWithoutSubmission:true,proofSha256:digest(proof)});
+  return proof;
+}
 export async function submitGuard(api,specification,request,path) {
   let submitted;const observation={};
   const upload=specification.upload,route=upload?`/api/v1/projects/${encode(request.projectId)}/assets`:'/api/v1/image/jobs';let body=request,before;
@@ -580,10 +617,20 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
         const current=await json(resolve(state.root,`continuation-retry-${ordinal}.json`)),priorPath=resolve(state.root,`continuation-prior-${ordinal}-inventory.json`),prior=await json(priorPath);
         requireThat(current.ordinal===ordinal&&current.name===retry.name&&current.previousToolingSha===previous.toolingSha&&current.toolingSha!==(previous.toolingSha)&&current.originalRunId===retry.originalRunId&&current.originalAttempt===retry.originalAttempt&&current.candidateId===retry.candidateId&&current.sourceSha===retry.sourceSha&&current.inferenceSha===retry.inferenceSha&&current.originalInventorySha256===repair.inventorySha256&&current.lockSha256===digest(state.lock)&&current.uiAttemptSha256===digest(start)&&current.checkpointInventorySha256===(await fileIdentity(priorPath)).sha256&&prior.version===1&&prior.actualRunId===current.failedRunId&&prior.attempt===current.failedAttempt&&prior.artifactId===current.failedArtifactId&&prior.toolingSha===previous.toolingSha&&prior.productSha===retry.sourceSha&&prior.originalRunId===retry.originalRunId&&prior.originalAttempt===retry.originalAttempt&&prior.files?.length>=300,'chained failed-attempt artifact or tooling identity changed');
         const heldLock=await fileIdentity(resolve(state.root,`continuation-prior-${ordinal}-dispatch.lock`));
-        requireThat(heldLock.sha256===current.dispatchLockSha256&&prior.files.find(item=>item.file==='evidence/attempts/mlx/dispatch.lock')?.sha256===heldLock.sha256,'chained original UI intent mutex changed');
+        requireThat(heldLock.sha256===current.dispatchLockSha256&&prior.files.find(item=>item.file==='evidence/attempts/mlx/dispatch.lock')?.sha256===heldLock.sha256,'chained original submission mutex changed');
         await assertH18CheckpointFiles(state.root,prior,{retained:true,archiveTag:`prior-${ordinal}`});
-        const oldCapture=await json(resolve(state.root,`continuation-prior-${ordinal}-root/captures/advanced-mlx-sft-replay${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`));
-        validateFailedUiCapture(oldCapture,digest(state.lock),{historical:ordinal===2?'h19':null});
+        if(current.submittedRecovery) {
+          const known=current.submittedRecovery,id=known.rowId,row=state.plan.rows.find(item=>item.id===id),dir=resolve(state.root,'rows',id),attempt=resolve(state.root,'attempts/mlx');
+          requireThat(row?.expected==='canceled'&&row.transport==='rest'&&row.cancelAtDenoise===true&&prior.files.some(item=>item.file===`evidence/rows/${id}/submission.json`)&&!prior.files.some(item=>[`evidence/rows/${id}/receipt.json`,`evidence/rows/${id}/terminal-job.json`,`evidence/attempts/mlx/${id}.resolution.json`].includes(item.file)),'recovered cancellation was not a single unresolved submitted job');
+          const [submitted,request,admitted,observed,response,origin,job,readback,receipt,proof,resolution]=await Promise.all([
+            json(resolve(dir,'submission.json')),json(resolve(dir,'request.json')),json(resolve(dir,'admission.json')),json(resolve(dir,'cancel-observation.json')),json(resolve(dir,'cancel-response.json')),json(resolve(attempt,`${id}.start.json`)),json(resolve(dir,'terminal-job.json')),json(resolve(dir,'recovery-job-readback.json')),json(resolve(dir,'receipt.json')),json(resolve(dir,'canceled-recovery.json')),json(resolve(attempt,`${id}.resolution.json`))]);
+          requireThat(known.jobId===submitted.id&&known.requestSha256===digest(request)&&known.submissionSha256===digest(submitted)&&known.attemptSha256===digest(origin)&&origin.requestSha256===digest(request)&&origin.lockSha256===digest(state.lock)&&observed.id===submitted.id&&isDenoiseStep(observed)&&response.id===submitted.id&&response.cancelRequested===true&&job.id===submitted.id&&job.status==='canceled'&&canonical(job)===canonical(readback)&&job.workerId===observed.workerId&&!(job.result?.assets?.length)&&!(job.result?.assetWrites?.length)&&receipt.recoveredWithoutSubmission===true&&receipt.jobId===job.id&&receipt.jobSha256===digest(job)&&receipt.admissionSha256===digest(admitted)&&receipt.recoveryProofSha256===digest(proof)&&proof.jobSha256===digest(job)&&proof.attemptSha256===digest(origin)&&proof.submissionSha256===digest(submitted)&&proof.cancelObservationSha256===digest(observed)&&proof.cancelResponseSha256===digest(response)&&proof.checkpointInventorySha256===current.checkpointInventorySha256&&resolution.state==='TERMINAL_VERIFIED'&&resolution.attemptSha256===digest(origin)&&resolution.jobId===job.id&&resolution.recoveredWithoutSubmission===true&&resolution.proofSha256===digest(proof),'authenticated canceled-job recovery/adjudication changed');
+          const sample=prior.appendOnlyTails?.find(item=>item.file===known.sampleFile),sealed=prior.files.find(item=>item.file===known.sampleFile),memory=await json(resolve(dir,'memory.json'));
+          requireThat((sample?sample.stoppedSha256===memory.raw?.sha256&&sample.stoppedByteLength===memory.raw.byteLength:sealed?.sha256===memory.raw?.sha256&&sealed.byteLength===memory.raw.byteLength)&&(await fileIdentity(resolve(dir,'memory-raw.jsonl'))).sha256===memory.raw.sha256,'original canceled-job whole-device sample changed');
+        } else {
+          const oldCapture=await json(resolve(state.root,`continuation-prior-${ordinal}-root/captures/advanced-mlx-sft-replay${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`));
+          validateFailedUiCapture(oldCapture,digest(state.lock),{historical:ordinal===2?'h19':null});
+        }
         previous=current;
       }
       requireThat(previous.toolingSha===repair.tooling.head&&!(await readdir(state.root)).some(name=>/^continuation-retry-[0-9]+\.json$/.test(name)&&Number(name.slice('continuation-retry-'.length,-'.json'.length))>(repair.retryOrdinal??1)),'final tooling or chained retry count changed');
@@ -729,6 +776,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'ui-task' && args.length === 2) return uiTask(...args);
   if (command === 'run' && [3, 4].includes(args.length)) return run(...args);
   if (command === 'recover-completed' && args.length === 2) return recoverCompletedRow(...args);
+  if (command === 'recover-canceled' && args.length === 2) return recoverCanceledRow(...args);
   if (command === 'guard' && args.length === 4) return guard(...args);
   if (command === 'compare-cache' && args.length === 2) return compareCache(...args);
   if (command === 'reconcile' && args.length === 4) return reconcile(...args);

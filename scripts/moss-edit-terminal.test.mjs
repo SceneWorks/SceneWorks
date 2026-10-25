@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -165,6 +165,26 @@ test('source contract Step observations discriminate actual nonterminal denoise 
   const job=await waitJob(api,{cancelAtDenoise:true},'owned-job',directory,4000);
   assert.equal(job.status,'canceled');assert.deepEqual(calls.map(c=>c.path),['/api/v1/jobs/owned-job','/api/v1/jobs/owned-job/cancel','/api/v1/jobs/owned-job']);
   assert.equal((await json(resolve(directory,'cancel-observation.json'))).message,'Image 1/1 — step 1/4.');
+});
+test('terminal cancellation with synthetic publication pending is accepted only with zero outputs; completed still waits',async()=>{
+  const root=await temporary('cancel-publication');
+  const request={mode:'edit_image',projectId:'owned-project'},canceled={id:'owned-job',projectId:request.projectId,payload:request,backend:'mlx',status:'canceled',result:{assets:[],assetWrites:[],outputPublication:{state:'pending'}}};
+  const api={request:async(path,options)=>{assert.equal(options?.method??'GET','GET');assert.equal(path,'/api/v1/jobs/owned-job');return canceled;}};
+  assert.equal((await waitJob(api,{},'owned-job',root,1000)).status,'canceled');
+  checkJob({backend:'mlx',expected:'canceled',outputCount:0},request,canceled);
+  assert.throws(()=>checkJob({backend:'mlx',expected:'canceled',outputCount:0},request,{...canceled,result:{...canceled.result,assetWrites:[{id:'unpublished-write'}]}}));
+  let reads=0;const completed={...canceled,status:'completed',result:{assets:[],outputPublication:{state:'pending'}}};
+  const finished=await waitJob({request:async(path,options)=>{assert.equal(options?.method??'GET','GET');reads++;return reads===1?completed:{...completed,result:{assets:[],outputPublication:{state:'ready'}}};}}, {},'owned-job',resolve(root,'completed'),3000);
+  assert.equal(reads,2);assert.equal(finished.result.outputPublication.state,'ready');
+  await rm(root,{recursive:true,force:true});
+});
+test('known canceled-job recovery authenticates readback with GET only and rejects another job or output',async()=>{
+  const request={mode:'edit_image',projectId:'owned-project'},submission={id:'owned-job',payload:request},observed={id:'owned-job',workerId:'owned-worker'},response={updatedAt:'2026-10-25T16:36:36Z'},binding={endpoint:{workerId:'owned-worker',workerGpuId:'mlx'}};
+  const row={backend:'mlx',expected:'canceled',outputCount:0},job={id:'owned-job',projectId:request.projectId,payload:request,backend:'mlx',status:'canceled',workerId:'owned-worker',canceledAt:'2026-10-25T16:36:37Z',result:{assets:[],assetWrites:[],outputPublication:{state:'pending'}}};
+  const calls=[],api={request:async(path,options)=>{assert.equal(options?.method??'GET','GET');calls.push(path);return path.endsWith('/metrics')?{jobId:job.id}:job;}};
+  assert.equal((await readCanceledJob(api,row,request,submission,observed,response,binding)).job.id,job.id);
+  assert.deepEqual(calls,['/api/v1/jobs/owned-job','/api/v1/jobs/owned-job/metrics']);
+  for(const bad of [{...job,id:'another-job'},{...job,result:{...job.result,assetWrites:[{id:'unpublished'}]}},{...job,status:'running'}])await assert.rejects(()=>readCanceledJob({request:async()=>bad},row,request,submission,observed,response,binding));
 });
 test('actual source MCP companion shape matches canonical asset IDs regardless of block/summary order', () => {
   const tensor={dtype:'float32',shape:[1,128,4,4],byteLength:8192};

@@ -9,7 +9,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
-import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
@@ -395,12 +395,20 @@ export async function validateContinuation(config) {
       await assertH18CheckpointFiles(config.root,checkpoint);
     }
     await assertOriginalEvidence(resolve(config.root,'evidence'),manifest);
-    const historical=await json(resolve(config.root,'continuation-start.json')),adjudication=await json(resolve(config.root,'evidence/recovery-adjudication.json')),capture=await json(resolve(config.root,capturePath));
+    const historical=await json(resolve(config.root,'continuation-start.json')),adjudication=await json(resolve(config.root,'evidence/recovery-adjudication.json'));
     requireThat(historical.toolingSha===H18_RETRY_TOOLING_SHA&&historical.inventorySha256===R16_ORIGINAL_INVENTORY_SHA256&&historical.lockSha256===digest(lock)&&adjudication.toolingSha===H18_RETRY_TOOLING_SHA&&adjudication.jobId==='job_4ccba4f5dc5d78aa0991ca4df750cb65'&&adjudication.lockSha256===digest(lock),'H18 completed-job recovery/adjudication changed');
-    validateFailedUiCapture(capture,digest(lock),{historical:!chained?'h18':ordinal===2?'h19':null});
-    remaining=await retryRemainingRows(resolve(config.root,'evidence'),plan,digest(lock));
+    let pending;for(const row of rows)if(!await optional(resolve(config.root,'evidence/rows',row.id,'receipt.json'))){pending=row;break;}
+    let capture=null,recovery=null;
+    if(chained&&pending?.expected==='canceled'&&await optional(resolve(config.root,'evidence/rows',pending.id,'submission.json'))) {
+      const submitted=await submittedCanceledRemainingRows(resolve(config.root,'evidence'),plan,digest(lock),digest(binding),checkpoint,config.root);
+      remaining=submitted.remaining;recovery=submitted.recovery;
+    } else {
+      capture=await json(resolve(config.root,capturePath));
+      validateFailedUiCapture(capture,digest(lock),{historical:!chained?'h18':ordinal===2?'h19':null});
+      remaining=await retryRemainingRows(resolve(config.root,'evidence'),plan,digest(lock));
+    }
     requireThat(!await optional(resolve(config.root,ordinal===1?'continuation-retry-start.json':`continuation-retry-${ordinal}-start.json`))&&!await optional(resolve(config.root,'execution-continuation.json')),'continuation retry already started or completed');
-    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,ordinal,previousToolingSha};
+    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,recovery,ordinal,previousToolingSha};
   } else {
     await assertOriginalEvidence(resolve(config.root,'evidence'),manifest,{exact:true});
     remaining=await continuationRemainingRows(resolve(config.root,'evidence'),plan);
@@ -437,7 +445,7 @@ export async function executeBackend(config) {
         await mkdir(dirname(destination),{recursive:true,mode:0o700});
         await copyFile(safePath(config.root,item.file),destination,constants.COPYFILE_EXCL);
       }
-      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256,uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),at:new Date().toISOString()};
+      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256,uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),...(original.retry.recovery?{submittedRecovery:original.retry.recovery}:{}),at:new Date().toISOString()};
       const file=original.retry.ordinal===1?'continuation-retry.json':`continuation-${retrySuffix}.json`;
       await save(resolve(config.root,original.retry.ordinal===1?'continuation-retry-start.json':`continuation-${retrySuffix}-start.json`),retryStart);
       await save(resolve(config.root,'evidence',file),retryStart);
@@ -508,6 +516,18 @@ export async function executeBackend(config) {
       const proof={version:VERSION,lockSha256:digest(state.lock),attemptSha256:digest(start),coordinator:'source-bound continuation controller',backend:'mlx',observedAt:new Date().toISOString(),state:'NO_ACTIVE_OWNED_JOB',jobs:[job],rawEvidence};
       await reconcileAttempt(root,'mlx',id,proof,digest(state.lock));
       await save(resolve(root,'recovery-adjudication.json'),{version:VERSION,name:'r16-checker-recovery',rowId:id,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,candidateId:config.candidateId,toolingSha:config.continuation.toolingSha,inventorySha256:original.manifestIdentity.sha256,lockSha256:digest(state.lock),jobId:job.id,requestSha256:start.requestSha256,originalAttemptSha256:digest(start),reconciliationSha256:digest(proof),rawEvidence});
+    }
+    if(original?.retry?.recovery) {
+      const id=original.retry.recovery.rowId;
+      await harness(config,['recover-canceled',launchPath,id],`${id}-recover`);
+      const receipt=await json(resolve(state.root,'rows',id,'receipt.json'));
+      requireThat(receipt.jobId===original.retry.recovery.jobId&&receipt.recoveredWithoutSubmission===true,'known canceled job was not recovered without submission');
+      const restarted=await stack.restartWorker(receipt.jobId);await actualJournal(config,expectedJournal);
+      const proofFile=resolve(config.root,'cleanup',`${id}.json`);await save(proofFile,restarted);
+      const target=state.plan.rows.find(item=>item.action==='retry'&&item.replayOf===id);
+      requireThat(target,'recovered cancellation has no allocated retry row');
+      const saved=resolve(state.root,'external',`cleanup-${id}.json`);await cp(proofFile,saved,{errorOnExist:true,force:false});
+      await save(resolve(state.root,'external',`cleanup-before-${target.id}.json`),{version:VERSION,lockSha256:digest(state.lock),canceledJobId:receipt.jobId,verdict:'PASS',observer:'source-bound owned-worker process-exit/restart',files:[{file:`external/cleanup-${id}.json`,...await fileIdentity(saved)}]});
     }
     for(const row of state.plan.rows.filter(row=>row.backend===config.backend)) {
       const disposition=continuing?continuationRowDisposition(row,original.remaining,{retry:Boolean(original.retry)}):{run:true,reuseUiIntent:false};
