@@ -6,6 +6,28 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// Marker carried across the stringly core boundary when a native checked pin observes the
+/// cooperative cancellation. The worker maps it back to its typed Canceled error, so a cancel that
+/// trips inside the native hash loop surfaces as the job's own cancellation, never as drift.
+pub const H3_PREPARATION_CANCELED_MARKER: &str =
+    "[h3-preparation-canceled] checkpoint preparation canceled";
+
+/// Forward the native artifact-seal observer's typed work record into the ACTIVE job span
+/// (`h3_import_preparation` / `h3_import_component_acquisition`). Every value is the native
+/// layer's own observation — acquisition kind, state, real hashed bytes and declared size — never
+/// re-derived or estimated; memo acquisitions report zero hashed bytes by contract.
+pub fn observe_artifact_seal_progress(progress: &gen_core::runtime::ArtifactSealProgress) {
+    tracing::info!(
+        event = "artifact_seal_hash_progress",
+        path = %progress.loader_path.display(),
+        acquisition = ?progress.acquisition,
+        state = ?progress.state,
+        hashed_bytes = progress.hashed_bytes,
+        source_bytes = progress.source_bytes,
+        "Actual native artifact-seal acquisition work"
+    );
+}
+
 /// Authority retained from plan resolution, including exact normalized derivative hashes when
 /// applicable. Reacquiring a seal later must never authorize replacement of this checkpoint.
 #[derive(Clone, Debug)]
@@ -165,9 +187,26 @@ impl PreparedH3Load {
         let files = paths
             .into_iter()
             .map(|path| {
-                check().map_err(|error| error.to_string())?;
-                let pin = PinnedWeightsFile::pin(path).map_err(|error| error.to_string())?;
-                check().map_err(|error| error.to_string())?;
+                // Native-main late consumer delta: the typed checked pin carries the SW-side
+                // cooperative cancellation and reports the native layer's OWN actual acquisition
+                // work (acquisition kind, state, real hashed/source bytes) into the active job
+                // span. An Interrupted check is the typed native cancellation; other io errors
+                // keep their typed cause.
+                let pin = PinnedWeightsFile::pin_with_progress(
+                    path,
+                    move || match check() {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                            Err(gen_core::Error::Canceled)
+                        }
+                        Err(error) => Err(gen_core::Error::Io(error)),
+                    },
+                    |progress| observe_artifact_seal_progress(progress),
+                )
+                .map_err(|error| match error {
+                    gen_core::Error::Canceled => H3_PREPARATION_CANCELED_MARKER.to_owned(),
+                    other => other.to_string(),
+                })?;
                 Ok::<_, String>(pin)
             })
             .collect::<Result<Vec<_>, _>>()?;

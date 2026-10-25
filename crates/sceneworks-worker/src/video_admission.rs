@@ -1494,16 +1494,34 @@ fn native_quant_phase_floor(
     } else {
         None
     };
+    // Native-main late consumer delta: when the source declares per-task adapter profiles, the
+    // steady overlay is the SELECTED task's installed adapter residency — the native phase
+    // methods already price the TOTAL install high-water (install peak minus resident, plus the
+    // scoped forward scratch), so it is never added on top here. The route-independent global
+    // overlay remains only as the legacy None-profile fallback.
+    let selected_adapter_resident = native.adapter_resident_bytes(rows);
+    let steady_overlay = if selected_adapter_resident > 0 {
+        selected_adapter_resident
+    } else {
+        facts.overlay_bytes
+    };
     // The source-owned window plan correlates root/refiner, current window, shared native
     // storage and retained tables. A full-component native floor would erase a valid rung 4.
     let native_denoise = native
         .precompute_peak_bytes_windowed(rows, window)?
         .max(native.denoise_peak_bytes_windowed(rows, window)?)
         .saturating_add(unclassified)
-        .saturating_add(facts.overlay_bytes);
+        .saturating_add(steady_overlay);
     ordinary.denoise_bytes = ordinary.denoise_bytes.max(native_denoise);
     if let Some(conditioning) = &native.conditioning {
-        let workspace = gen_core::h3_conditioning_memory::workspace(&shape, conditioning)?;
+        // Native-main late consumer delta: packed row counts follow the SELECTED partition's own
+        // patch geometry, never the stock [1, 2, 2]. A source whose selected partition disagrees
+        // with this request's geometry is surfaced here rather than priced at wrong rows.
+        let workspace = gen_core::h3_conditioning_memory::workspace_with_patch(
+            &shape,
+            conditioning,
+            native.selected_patch(shape)?,
+        )?;
         if workspace.conditioning_bytes > 0 {
             // TE/vision have been released before reference VAE/audio encoding. Their existing
             // prediction remains a separate maximum, never an invented co-resident weight sum.
@@ -1605,11 +1623,20 @@ fn video_floor_weights_bytes(
             .saturating_sub(facts.conditioning_bytes)
             .saturating_sub(facts.transformer_bytes)
             .saturating_sub(facts.decoder_bytes);
+        // Same selected-task adapter rule as the phase floor: a declared profile's steady
+        // residency replaces the route-independent global overlay; install high-water is priced
+        // inside the native windowed peak, never added on top of it.
+        let selected_adapter_resident = native.adapter_resident_bytes(rows);
+        let steady_overlay = if selected_adapter_resident > 0 {
+            selected_adapter_resident
+        } else {
+            facts.overlay_bytes
+        };
         return Ok(conditioning
             .max(encode)
             .max(native.video_decode_resident_bytes)
             .max(native.audio_decode_resident_bytes)
-            .max(dit.saturating_add(facts.overlay_bytes))
+            .max(dit.saturating_add(steady_overlay))
             .saturating_add(unclassified));
     }
     Ok(if selector.backend() == MemoryBackend::Mlx {
