@@ -9,8 +9,8 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
-import { sealPrivateHf, transferPrivateHf, releasePrivateHf } from './lib/moss-private-hf.mjs';
-import { lstat, realpath } from 'node:fs/promises';
+import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment } from './lib/moss-private-hf.mjs';
+import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
@@ -386,4 +386,57 @@ test('same-volume private handoff follows original authenticated listener path w
   const {base,run,build,installed}=await privateHfFixture(t),oldOwner=await readFile(resolve(build.root,'hf-owner.json'));
   const current={...run,sourceRoot:resolve(base,'other-listener/checkout/source'),root:resolve(base,'other-listener/moss-sc-26752/moss-execute-123-1-mlx'),hfHome:resolve(base,'other-listener/moss-sc-26752/moss-execute-123-1-mlx/hf')};
   await mkdir(current.root,{recursive:true});const receipt=await transferPrivateHf(current,installed,{});assert.equal(receipt.from,build.hfHome);assert.equal(receipt.to,current.hfHome);assert.deepEqual(await readFile(resolve(build.root,'hf-owner.json')),oldOwner);await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});
+});
+
+async function installerPointerFixture(t) {
+  const fixture=await privateHfFixture(t),config=fixture.build,revision='3be9c40037e1b89b17aa85ff6f8ee805872aa558',repo='hub/models--chinoll--Moss-Image-Edit',prefix=`${repo}/snapshots/${revision}`;
+  config.editAdapterFiles=[`${prefix}/adapter_config.json`,`${prefix}/adapter_model.safetensors`];
+  const originals=[];
+  for(const [i,file] of config.editAdapterFiles.entries()) {
+    const bytes=Buffer.from(`installer-owned-${i}`),blob=resolve(config.hfHome,repo,'blobs',i?'a'.repeat(64):'b'.repeat(40)),path=resolve(config.hfHome,file);
+    await mkdir(resolve(config.hfHome,repo,'blobs'),{recursive:true});await mkdir(resolve(config.hfHome,prefix),{recursive:true});await writeFile(blob,bytes);await symlink(`../../blobs/${i?'a'.repeat(64):'b'.repeat(40)}`,path);
+    config.packageFiles.push({file,sha256:sha(bytes)});originals.push({path,blob,bytes});
+  }
+  return {...fixture,config,originals};
+}
+test('actual installer-shaped private snapshot links materialize to exclusive regular files with unchanged blobs and receipts',async t=>{
+  const {config,originals}=await installerPointerFixture(t),owner=await readFile(resolve(config.root,'hf-owner.json'));
+  const operations=await materializePrivateAdapter(config);assert.equal(operations.length,2);
+  for(const {path,blob,bytes} of originals){assert.equal((await lstat(path)).isSymbolicLink(),false);assert.equal((await lstat(path)).nlink,1);assert.notEqual((await lstat(path)).ino,(await lstat(blob)).ino);assert.deepEqual(await readFile(path),bytes);assert.deepEqual(await readFile(blob),bytes);}
+  assert.deepEqual(await readFile(resolve(config.root,'hf-owner.json')),owner);assert.equal((await json(resolve(config.root,'adapter-materialization.json'))).operations.length,2);
+});
+test('adapter materialization refuses external blobs, hash mismatches, unexpected links, shared blob hardlinks and escaped ownership',async t=>{
+  for(const kind of ['external','hash','unexpected','hardlink','ancestor','ownership','unexpected-pair']) {
+    const {base,config,originals}=await installerPointerFixture(t),first=originals[0];let selected=config;
+    if(kind==='external'){await unlink(first.path);await writeFile(resolve(base,'b'.repeat(40)),first.bytes);await symlink(resolve(base,'b'.repeat(40)),first.path);}
+    if(kind==='hash')await writeFile(first.blob,'wrong bytes');
+    if(kind==='unexpected')await symlink(first.blob,resolve(config.hfHome,'unexpected-link'));
+    if(kind==='hardlink')await link(first.blob,resolve(base,'shared-blob'));
+    if(kind==='ancestor'){const blobDirectory=resolve(first.blob,'..');await rm(blobDirectory,{recursive:true});await mkdir(resolve(base,'external-blobs'));await symlink(resolve(base,'external-blobs'),blobDirectory);}
+    if(kind==='ownership')selected={...config,sourceRoot:resolve(base,'other/checkout/source')};
+    if(kind==='unexpected-pair')selected={...config,editAdapterFiles:[config.editAdapterFiles[0],'../outside']};
+    await assert.rejects(()=>materializePrivateAdapter(selected),undefined,kind);assert.equal((await lstat(first.path)).isSymbolicLink(),true);await assert.rejects(()=>lstat(resolve(config.root,'adapter-materialization.json')),{code:'ENOENT'});
+  }
+});
+test('regular installed adapters remain exclusive and malformed regular bytes are refused',async t=>{
+  const {config,originals}=await installerPointerFixture(t);for(const row of originals){await unlink(row.path);await writeFile(row.path,row.bytes);}
+  assert.deepEqual(await materializePrivateAdapter(config),[]);await writeFile(originals[0].path,'wrong');await assert.rejects(()=>materializePrivateAdapter(config),/mismatch/);
+});
+test('canonical artifact environment removes dot segments and proves workspace aliases before exporting paths',async t=>{
+  const base=await realpath(await temporary('canonical-env'));t.after(()=>rm(base,{recursive:true,force:true}));const workspace=resolve(base,'workspace/repository');await mkdir(workspace,{recursive:true});await symlink(workspace,resolve(base,'alias'));
+  const env={GITHUB_WORKSPACE:workspace,MOSS_ROOT:resolve(workspace,'..')+'/repository/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:workspace+'/../moss-sc-26752/moss-builds-123-1-build-mlx',MOSS_BUNDLE:workspace+'/../moss-sc-26752/moss-bundle-123-1',GITHUB_ENV:resolve(base,'env')};
+  const output=await exportMossEnvironment(env);assert.equal(output.MOSS_ROOT,resolve(workspace,'../moss-sc-26752/moss-build-123-1-mlx'));for(const value of Object.values(output))assert.ok(!value.split(/[\\/]/).some(part=>part==='.'||part==='..'));assert.match(await readFile(env.GITHUB_ENV,'utf8'),/MOSS_BUILDS=/);
+  const alias={...env,GITHUB_WORKSPACE:resolve(base,'alias'),MOSS_ROOT:resolve(base,'alias')+'/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:undefined,MOSS_BUNDLE:undefined};assert.equal((await normalizeMossEnvironment(alias)).MOSS_ROOT,output.MOSS_ROOT);
+  await assert.rejects(()=>normalizeMossEnvironment({...env,MOSS_ROOT:resolve(base,'unrelated/moss-build-123-1-mlx')}),/escaped/);
+  await rm(resolve(workspace,'../moss-sc-26752'),{recursive:true});await mkdir(resolve(base,'unrelated'));await symlink(resolve(base,'unrelated'),resolve(workspace,'../moss-sc-26752'));await assert.rejects(()=>normalizeMossEnvironment(env),/linked ancestors/);
+});
+test('every artifact job normalizes paths before its first operation and installer materialization follows shutdown',async()=>{
+  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
+  for(const name of ['upload-inputs','build-native','execute-mlx','execute-cuda','verify-retained']) {
+    // Select by job body, independently of the display name of its first artifact step.
+    const body=workflow.split(/(?=^  [a-z][a-z-]*:\n)/m).find(body=>body.startsWith(`  ${name}:`));assert.ok(body,name);
+    const artifact=body.search(/uses: actions\/(?:download|upload)-artifact/),normalize=body.indexOf('moss-edit-terminal-actions.mjs normalize-env');assert.ok(normalize>=0&&normalize<artifact,name);
+  }
+  assert.doesNotMatch(workflow,/path: \$\{\{ inputs.upload_path/);assert.match(workflow,/path: \$\{\{ env.MOSS_UPLOAD_PATH/);
+  assert.ok(controller.indexOf('}finally{await stack.stop();}')<controller.indexOf('await materializePrivateAdapter(config)'));assert.ok(controller.indexOf('await materializePrivateAdapter(config)')<controller.indexOf("await save(resolve(out,'packages.json')"));
 });

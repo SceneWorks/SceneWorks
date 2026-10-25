@@ -12,7 +12,7 @@ import { command, sourceIdentity, filesUnder, contained, nativeDevice, sampler, 
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
-import { sealPrivateHf, transferPrivateHf, releasePrivateHf } from './lib/moss-private-hf.mjs';
+import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, exportMossEnvironment } from './lib/moss-private-hf.mjs';
 
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -260,6 +260,7 @@ export async function buildBackend(config) {
       installation={capture:await fileIdentity(capture),files:await filesUnder(resolve(out,'installation'))};
     }finally{await stack.stop();}
   }
+  await materializePrivateAdapter(config);
   const packages=[];
   for(const item of config.packageFiles) {
     const path=contained(config.hfHome,resolve(config.hfHome,item.file)),identity=await fileIdentity(path);
@@ -429,6 +430,7 @@ export async function finalize(config) {
 }
 export async function main(args=process.argv.slice(2)) {
   const [phase,...rest]=args;
+  if(phase==='normalize-env'&&rest.length===0)return exportMossEnvironment(process.env);
   if(phase==='bundle'&&rest.length===3){const result=await createBundle(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
   if(phase==='inventory-review'&&rest.length===4){const result=await inventoryReview(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
   if(phase==='validate-upload'&&rest.length===6)return validateUpload(...rest);

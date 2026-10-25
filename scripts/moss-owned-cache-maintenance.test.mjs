@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { OWNED_RUNS, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import { OWNED_RUNS, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
 const runtimes = await Promise.all([4, 5, 6].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.source, status: 'completed', conclusion: 'failure' });
@@ -23,6 +23,7 @@ function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, desti
       validateStopped(binding, latest, state(binding), jobs(binding)); return { run: binding.run, status: 'completed' };
     },
     read: async file => {
+      if(file===path.join(R9_DIAGNOSTIC.root,'runtime.json'))throw Object.assign(Error('absent owned fixture'),{code:'ENOENT'});
       const index = OWNED_RUNS.findIndex(binding => path.join(binding.root, 'runtime.json') === file);
       if (index >= 0) return mutateRuntime?.(runtimes[index], index) ?? runtimes[index];
       assert.ok([from, to].some(root => file === path.join(root, 'release', 'sceneworks-rust-api.exe'))); return Buffer.from('original R6 binary fixture');
@@ -118,4 +119,13 @@ test('action-free recovery gates native job preparation and keeps the normal fre
   assert.ok(helper.indexOf('GetAttributes($entry)') < helper.indexOf('$stack.Push($entry)'));
   assert.match(helper, /Reparse ancestor/); assert.match(helper, /Reparse descendant/);
 
+});
+
+test('fixed stopped R9 observation captures actual runtime bytes and HF capacity without authorizing mutation',async()=>{
+  const runtime={candidateId:R9_DIAGNOSTIC.candidate,sourceSha:R9_DIAGNOSTIC.source,inferenceSha:R9_DIAGNOSTIC.inference,backend:'cuda',root:R9_DIAGNOSTIC.root,hfHome:path.join(R9_DIAGNOSTIC.root,'hf'),sourceRoot:path.join(R9_DIAGNOSTIC.workspace,'source'),packageSource:'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9'},bytes=Buffer.from(JSON.stringify(runtime));
+  const calls=[],io={stopped:async binding=>{assert.equal(binding,R9_DIAGNOSTIC);return {status:'completed'};},inspect:async file=>{calls.push(file);return tree(file);},read:async file=>{assert.equal(file,path.join(R9_DIAGNOSTIC.root,'runtime.json'));return bytes;}};
+  const proof=await diagnoseR9(io);assert.equal(proof.readOnly,true);assert.equal(proof.runtime.utf8,bytes.toString('utf8'));assert.equal(proof.runtime.sha256.length,64);assert.equal(proof.inventory.bytes,100);assert.equal(OWNED_RUNS.some(item=>item.run===R9_DIAGNOSTIC.run),false);assert.equal(calls.length,2);
+  await assert.rejects(()=>diagnoseR9({...io,read:async()=>Buffer.from(JSON.stringify({...runtime,sourceSha:'0'.repeat(40)}))}),/identity/);
+  await assert.rejects(()=>diagnoseR9({...io,inspect:async file=>({...tree(file),reparsePoints:1})}),/reparse/);
+  await assert.rejects(()=>diagnoseR9({...io,stopped:async()=>{throw Error('active');}}),/active/);
 });

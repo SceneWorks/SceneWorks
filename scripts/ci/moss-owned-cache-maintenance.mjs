@@ -14,6 +14,17 @@ export const OWNED_RUNS = Object.freeze([
   { run: '40152001538', candidate: 'sc-26752-final-r5', source: '9ac78275e2f5f536541c1790fc840232fd5bdfdd', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', runtimeSha: '7ac52e00e6e712012b907a740e96e5c9d39c72483499205f637916e286e70b43' },
   { run: '40155160639', candidate: 'sc-26752-final-r6', source: '2490b2eed9bf986967c389ac69171d03b04835d7', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', runtimeSha: 'cfb0491496d4e29aafc466404526592fe2d2950a12f1566c74fcab9e728f007e' },
 ].map(item => Object.freeze({ ...item, attempt: 1, root: path.join(item.workspace, `moss-build-${item.run}-1-cuda`) })));
+// Observation only: never part of OWNED_RUNS and never a deletion/cache-copy candidate.
+export const R9_DIAGNOSTIC = Object.freeze({run:'40161906148',attempt:1,candidate:'sc-26752-final-r9',source:'97ab1f826528d62df99a645af69688d295fb1b53',inference:native,workspace:'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks',root:'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40161906148-1-cuda'});
+export async function diagnoseR9(io) {
+  const binding=R9_DIAGNOSTIC,stop=await io.stopped(binding),hf=path.join(binding.root,'hf'),file=path.join(binding.root,'runtime.json');
+  const inventory=validateTree(await io.inspect(hf),hf);validateTree(await io.inspect(file),file);
+  let bytes;try{bytes=await io.read(file);}catch(error){if(error.code==='ENOENT'){check(!inventory.exists,'R9 HF exists without runtime ownership proof');return {readOnly:true,stop,inventory,runtime:null};}throw error;}
+  check(bytes.length<=131072,'unexpected R9 runtime size');const runtime=JSON.parse(bytes);
+  check(runtime.candidateId===binding.candidate&&runtime.sourceSha===binding.source&&runtime.inferenceSha===binding.inference&&runtime.backend==='cuda','R9 observed runtime identity mismatch');
+  for(const [field,expected] of Object.entries({root:binding.root,hfHome:hf,sourceRoot:path.join(binding.workspace,'source'),packageSource:'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9'}))check(normal(runtime[field]??'')===normal(expected),`R9 runtime ${field} mismatch`);
+  return {readOnly:true,stop,inventory,runtime:{sha256:sha(bytes),byteLength:bytes.length,utf8:bytes.toString('utf8')}};
+}
 export function destination(env) {
   check(env.GITHUB_REPOSITORY === 'SceneWorks/SceneWorks', 'wrong repository');
   check(/^\d+$/.test(env.GITHUB_RUN_ID ?? '') && /^\d+$/.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'missing current Actions identity');
@@ -84,6 +95,7 @@ export async function maintain(env, io) {
   const root = destination(env), target = path.join(root, 'target');
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, before: await io.volume(), candidates: [], operations: [] };
   validateTree(await io.inspect(root), root);
+  receipt.r9Observation = await diagnoseR9(io);
   for (const binding of OWNED_RUNS) {
     const stop = await io.stopped(binding), hf = path.join(binding.root, 'hf');
     const inventory = validateTree(await io.inspect(hf), hf);
@@ -127,6 +139,7 @@ export async function maintain(env, io) {
       const originalBinarySha256 = sha(await io.read(path.join(from, 'release', 'sceneworks-rust-api.exe')));
       await io.ensure(root);
       validateTree(await io.inspect(root), root);
+  receipt.r9Observation = await diagnoseR9(io);
       check(!(await io.inspect(target)).exists, 'destination appeared before cache copy');
       await io.copy(from, target);
       const copied = validateTree(await io.inspect(target), target);

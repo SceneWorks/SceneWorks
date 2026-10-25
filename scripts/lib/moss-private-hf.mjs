@@ -1,8 +1,9 @@
 // Private installed model ownership only; shared HF inputs are never moved or removed.
-import { lstat, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, readdir, rename, rm, writeFile, realpath, readlink, copyFile, mkdtemp, mkdir, appendFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { resolve, dirname, basename } from 'node:path';
 import { canonical, requireThat, safePath, fileIdentity, json, digest } from './moss-edit-terminal.mjs';
-import { inspectTree } from '../ci/moss-owned-cache-maintenance.mjs';
+import { inspectTree, powershell } from '../ci/moss-owned-cache-maintenance.mjs';
 
 const absent=async path=>{try{await lstat(path);return false;}catch(error){if(error.code==='ENOENT')return true;throw error;}};
 const identity=config=>({candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,backend:config.backend,packagesSha256:digest(config.packageFiles)});
@@ -11,12 +12,15 @@ function owned(config,phase) {
   requireThat(match&&match[3]===config.backend&&dirname(config.root)===resolve(config.sourceRoot,'../..','moss-sc-26752')&&config.hfHome===resolve(config.root,'hf')&&config.hfHome!==config.packageSource,'exact current private HF ownership required');
   return match;
 }
-async function confined(path) {
+async function confined(path,{descendants=true}={}) {
   for(let cursor=resolve(path);;cursor=dirname(cursor)) {
     const info=await lstat(cursor);requireThat(!info.isSymbolicLink(),'private HF refuses linked ancestors');
     if(dirname(cursor)===cursor)break;
   }
-  if(process.platform==='win32')await inspectTree(path); // Reject every Windows reparse tag before traversal.
+  if(process.platform==='win32') {
+    if(descendants)await inspectTree(path); // Reject every Windows reparse tag before traversal.
+    else await powershell(`$ErrorActionPreference='Stop';$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(resolve(path)).toString('base64')}'));while($p){if(([IO.File]::GetAttributes($p) -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Reparse ancestor'};$p=[IO.Path]::GetDirectoryName($p)};@{safe=$true}|ConvertTo-Json -Compress`);
+  }
 }
 export async function privateHfIntegrity(config) {
   await confined(config.hfHome);
@@ -58,4 +62,50 @@ export async function releasePrivateHf(config) {
   await writeFile(resolve(config.root,'hf-final-integrity.json'),JSON.stringify({transfer:await fileIdentity(resolve(config.root,'hf-transfer.json')),files,workersStopped:true},null,2)+'\n',{flag:'wx',mode:0o600});
   await rm(config.hfHome,{recursive:true,force:false});
   await writeFile(resolve(config.root,'hf-released.json'),JSON.stringify({hfHome:config.hfHome,operation:'release-current-private-HF-after-worker-stop'})+'\n',{flag:'wx',mode:0o600});
+}
+
+// hf-hub installs snapshot pointers to blobs. Normalize only the two approved adapter
+// pointers after the installer stops; execution's blanket link refusal remains intact.
+export async function materializePrivateAdapter(config) {
+  owned(config,'build');await confined(config.hfHome,{descendants:false});
+  const allowed=config.editAdapterFiles??[],prefix=/^hub\/models--chinoll--Moss-Image-Edit\/snapshots\/[a-f0-9]{40}\//;
+  requireThat(allowed.length===2&&allowed.every(file=>prefix.test(file))&&new Set(allowed.map(file=>file.slice(0,file.lastIndexOf('/')))).size===1&&canonical(allowed.map(file=>basename(file)).sort())===canonical(['adapter_config.json','adapter_model.safetensors']),'exact approved adapter snapshot pair required');
+  const paths=new Set(allowed.map(file=>safePath(config.hfHome,file)));
+  const walk=async dir=>{for(const name of await readdir(dir)){const path=resolve(dir,name),info=await lstat(path);if(info.isSymbolicLink())requireThat(paths.has(path),'unexpected private HF symlink');else if(info.isDirectory())await walk(path);else requireThat(info.isFile()&&info.nlink===1,'private HF requires exclusive regular files');}};await walk(config.hfHome);
+  const operations=[];
+  for(const file of allowed) {
+    const path=safePath(config.hfHome,file),info=await lstat(path),expected=config.packageFiles.find(item=>item.file===file);
+    requireThat(expected,'adapter snapshot is absent from approved package inventory');await confined(dirname(path),{descendants:false});
+    if(!info.isSymbolicLink()){requireThat(info.isFile()&&info.nlink===1&&(await fileIdentity(path)).sha256===expected.sha256,'regular adapter bytes/ownership mismatch');continue;}
+    const link=await readlink(path),blob=await realpath(path),blobRoot=resolve(dirname(path),'../../blobs');
+    requireThat(dirname(blob)===blobRoot&&/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(basename(blob)),'adapter link escapes exact private repository blobs');
+    await confined(blob,{descendants:false});const blobInfo=await lstat(blob),before=await fileIdentity(blob);
+    requireThat(blobInfo.isFile()&&!blobInfo.isSymbolicLink()&&blobInfo.nlink===1&&before.sha256===expected.sha256,'adapter blob identity/hash mismatch');
+    const temporary=await mkdtemp(resolve(dirname(path),'.moss-adapter-'));
+    try {
+      const replacement=resolve(temporary,'payload');await copyFile(blob,replacement,constants.COPYFILE_EXCL);
+      requireThat(canonical(await fileIdentity(replacement))===canonical(before)&&(await lstat(replacement)).nlink===1,'materialized adapter bytes/ownership mismatch');
+      const current=await lstat(path),currentBlob=await lstat(blob);
+      requireThat(current.isSymbolicLink()&&current.ino===info.ino&&current.dev===info.dev&&await readlink(path)===link&&currentBlob.ino===blobInfo.ino&&currentBlob.dev===blobInfo.dev&&currentBlob.nlink===1&&canonical(await fileIdentity(blob))===canonical(before),'adapter link/blob changed before replacement');
+      await rename(replacement,path);requireThat(!(await lstat(path)).isSymbolicLink()&&(await lstat(path)).nlink===1&&canonical(await fileIdentity(path))===canonical(before),'adapter materialization did not produce exclusive frozen bytes');
+      operations.push({file,originalLink:link,originalBlob:blob,originalLinkIdentity:{dev:info.dev,ino:info.ino},originalBlobIdentity:{dev:blobInfo.dev,ino:blobInfo.ino,nlink:blobInfo.nlink},identity:before,operation:'materialize-approved-private-installer-pointer'});
+    }finally{await rm(temporary,{recursive:true,force:false});}
+  }
+  await privateHfIntegrity(config);
+  await writeFile(resolve(config.root,'adapter-materialization.json'),JSON.stringify({candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,operations},null,2)+'\n',{flag:'wx',mode:0o600});return operations;
+}
+export async function normalizeMossEnvironment(env) {
+  const workspace=await realpath(env.GITHUB_WORKSPACE),base=resolve(workspace,'..','moss-sc-26752'),rawBase=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752'),result={};
+  await mkdir(base,{recursive:true});await confined(base,{descendants:false});
+  for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_BUNDLE'])if(env[key]) {
+    requireThat(dirname(resolve(env[key]))===rawBase&&/^moss-(?:build|builds|execute|review|bundle)-[0-9]+-[0-9]+(?:-(?:build|execute|review|mlx|cuda))*$/.test(basename(env[key])),'MOSS artifact path escaped durable namespace');
+    result[key]=resolve(base,basename(env[key]));
+  }
+  result.MOSS_SOURCE=resolve(workspace,'source');result.MOSS_INFERENCE=resolve(workspace,'inference');
+  if(env.MOSS_UPLOAD_PATH)result.MOSS_UPLOAD_PATH=await realpath(env.MOSS_UPLOAD_PATH);
+  requireThat(Object.values(result).every(value=>!/[\r\n]/.test(value)),'invalid multiline Actions path');
+  return result;
+}
+export async function exportMossEnvironment(env) {
+  const result=await normalizeMossEnvironment(env);await appendFile(env.GITHUB_ENV,Object.entries(result).map(([key,value])=>`${key}=${value}\n`).join(''));return result;
 }
