@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
@@ -413,6 +413,10 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.throws(()=>validateDispatchEnvelope(JSON.stringify({...retry,tooling_sha:'82c534d50b72c1a5984514b90548002da212d735'}),'82c534d50b72c1a5984514b90548002da212d735',identity.inferenceSha,'82c534d50b72c1a5984514b90548002da212d735'),/distinct tooling/);
   assert.throws(()=>repaired({...execute,retry_inventory_path:retry.retry_inventory_path,retry_inventory_sha256:retry.retry_inventory_sha256}),/cannot consume/);
   assert.throws(()=>repaired({...continuation,review_artifact_id:'999'}),/no review/);
+  const cudaOnly={...execute,phase:'continue-cuda',tooling_sha:tooling,product_sha:identity.sourceSha,execution_run_id:'789',execution_run_attempt:'1',mlx_run_id:'987',mlx_run_attempt:'1',mlx_artifact_id:'654',mlx_tooling_sha:'d'.repeat(40)};
+  assert.equal(repaired(cudaOnly).mlx_artifact_id,'654');
+  for(const change of [{mlx_artifact_id:''},{mlx_run_id:'789'},{mlx_run_attempt:'0'},{mlx_tooling_sha:tooling},{retry_run_id:'999'},{original_inventory_path:continuation.original_inventory_path}])assert.throws(()=>repaired({...cudaOnly,...change}),/completed MLX artifact\/producer/);
+  assert.throws(()=>repaired({...continuation,mlx_run_id:'987'}),/no review\/native override/);
   assert.equal(repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha,native_run_id:'789',native_run_attempt:'1'}).native_run_id,'789');
   assert.throws(()=>repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha}),/original native run/);
   for(const value of [null,[],{}, {...execute,extra:'unexpected'},{...execute,bundle_run_id:123},{...execute,bundle_artifact_id:'../other'},{...execute,candidate_id:'../other'},{...execute,bundle_manifest_sha256:'wrong'},{...execute,phase:'build'},{...execute,execution_run_id:'789'},{...verify,execution_run_id:''},{...verify,review_artifact_id:''},{...verify,execution_run_attempt:'0'}])assert.throws(()=>validate(value));
@@ -428,7 +432,30 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   for(const profile of ['qwen-image-2-1-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights'])assert.ok(dispatcher.includes(`inputs.profile == '${profile}'`));
   assert.match(workflow,/workflow_call:/);assert.match(workflow,/SCENEWORKS_INFERENCE_READ_TOKEN:\s+required: false/);
   assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,6);
+  const cudaContinuation=workflow.match(/^  continue-cuda:\n([\s\S]*?)(?=^  verify-retained:)/m)?.[1];
+  assert.ok(cudaContinuation);assert.doesNotMatch(cudaContinuation,/shell:\s*bash/);
+  assert.match(cudaContinuation,/\$env:MOSS_REHYDRATE_ROOT/);assert.match(cudaContinuation,/\$LASTEXITCODE -ne 0/);
+  assert.match(cudaContinuation,/if: inputs\.phase == 'continue-cuda'[\s\S]*?artifact-ids: \$\{\{ inputs\.mlx_artifact_id \}\}/);
+  assert.match(workflow,/supplement-mlx-handoff:[\s\S]*?stage-completed-mlx-handoff[\s\S]*?include-hidden-files: true/);
+  assert.match(cudaContinuation,/needs: \[continue-mlx, supplement-mlx-handoff\][\s\S]*?needs\.supplement-mlx-handoff\.result == 'success'/);
+  assert.match(cudaContinuation,/name: moss-mlx-hidden-handoff-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow,/test "\$RUNNER_NAME" = nax-macos/);assert.match(workflow,/run-id: \$\{\{ inputs.review_run_id \|\| inputs.bundle_run_id \}\}/);
+});
+test('completed Mac hidden handoff supplement merges exact absent metadata and rejects changed identity or bytes',async()=>{
+  const root=await temporary('hidden-handoff'),data=resolve(root,'handoff/data');
+  try {
+    for(const name of [...Array.from({length:304},(_,index)=>`models/visible-${String(index).padStart(3,'0')}.bin`),...H27_HIDDEN_HANDOFF_FILES]) {
+      const file=resolve(data,name);await mkdir(resolve(file,'..'),{recursive:true});await writeFile(file,name.endsWith('.lock')?'':name);
+    }
+    const expected=await filesUnder(data),addedFiles=expected.filter(item=>H27_HIDDEN_HANDOFF_FILES.includes(item.file)),artifactFiles=expected.filter(item=>!H27_HIDDEN_HANDOFF_FILES.includes(item.file));
+    await save(resolve(root,'handoff/handoff.json'),{files:expected});
+    const identity={runId:40227959179,attempt:1,artifactId:12612171716,toolingSha:'a'.repeat(40),cudaToolingSha:'e'.repeat(40),completionSha256:'b'.repeat(64),retrySha256:'c'.repeat(64),handoffSha256:'d'.repeat(64)};
+    await save(resolve(root,'supplement.json'),{version:VERSION,name:'completed-mlx-hidden-handoff-supplement',...identity,stagingToolingSha:identity.cudaToolingSha,artifactFiles,addedFiles});
+    assert.equal((await validateCompletedMlxHandoffSupplement(root,identity)).addedFiles.length,7);
+    await assert.rejects(()=>validateCompletedMlxHandoffSupplement(root,{...identity,artifactId:1}),/wrong original producer/);
+    await writeFile(resolve(data,H27_HIDDEN_HANDOFF_FILES[0]),'tampered');
+    await assert.rejects(()=>validateCompletedMlxHandoffSupplement(root,identity),/differs from completed manifest/);
+  } finally {await rm(root,{recursive:true,force:true});}
 });
 test('first bundle copies only exact fixed inputs, provenance and declared fixtures, then seals every byte',async()=>{
   const root=await temporary('first-bundle'),input=resolve(root,'original.png'),receipt=resolve(root,'source.json'),numeric=resolve(root,'numeric.json'),fixture=resolve(root,'guard.npy');

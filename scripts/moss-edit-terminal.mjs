@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Dedicated edit protocol. Never invoke the historical sc-26325/GPU0 harness.
 import { constants } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile, copyFile, chmod, readdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -675,6 +676,20 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
         previous=current;
       }
       requireThat(previous.toolingSha===(repair.executionToolingSha??repair.tooling.head)&&!(await readdir(state.root)).some(name=>/^continuation-retry-[0-9]+\.json$/.test(name)&&Number(name.slice('continuation-retry-'.length,-'.json'.length))>(repair.retryOrdinal??1)),'final execution tooling or chained retry count changed');
+    }
+    if(repair.completedMlx) {
+      const record=await json(resolve(state.root,'external/completed-mlx-artifact-for-cuda.json')),capture=await json(resolve(state.root,'external/cuda-execution-tooling-capture.json')),producer=capture.repair?.tooling;
+      const supplementPath=resolve(state.root,'external/completed-mlx-handoff-supplement.json'),supplement=await json(supplementPath);
+      requireThat((await fileIdentity(supplementPath)).sha256===record.supplementSha256&&supplement.name==='completed-mlx-hidden-handoff-supplement'&&supplement.runId===record.runId&&supplement.attempt===record.attempt&&supplement.artifactId===record.artifactId&&supplement.toolingSha===record.toolingSha&&supplement.stagingToolingSha===record.cudaToolingSha&&supplement.handoffSha256===record.handoffSha256&&supplement.artifactFiles.length===304&&supplement.addedFiles.length===7,'retained completed-Mac handoff supplement identity changed');
+      requireThat(canonical(record)===canonical(repair.completedMlx)&&record.name==='completed-mlx-artifact-for-cuda'&&record.toolingSha===repair.executionToolingSha&&record.cudaToolingSha===repair.cudaExecutionToolingSha&&record.sourceSha===state.lock.sources.sceneworks.head&&record.inferenceSha===state.lock.sources.inference.head&&record.candidateId===state.lock.candidateId&&record.lockSha256===digest(state.lock)&&record.verifiedRows===25&&record.verifiedGuards===29&&record.originalRunId===adjudication.originalRunId&&record.originalAttempt===adjudication.originalAttempt&&capture.repair.retryOrdinal===repair.retryOrdinal&&capture.repair.executionToolingSha===record.toolingSha&&canonical(capture.repair.completedMlx)===canonical(record)&&producer?.head===record.cudaToolingSha&&producer.source?.head===record.cudaToolingSha&&producer.source?.tree===execFileSync('git',['-C',repair.tooling.sourceRoot,'rev-parse',`${record.cudaToolingSha}^{tree}`]).toString().trim(),'separate completed-Mac and CUDA tooling provenance changed');
+      execFileSync('git',['-C',repair.tooling.sourceRoot,'merge-base','--is-ancestor',record.toolingSha,record.cudaToolingSha]);
+      execFileSync('git',['-C',repair.tooling.sourceRoot,'merge-base','--is-ancestor',record.cudaToolingSha,repair.tooling.head]);
+      const expected={harness:'scripts/moss-edit-terminal.mjs',harnessLibrary:'scripts/lib/moss-edit-terminal.mjs',actionController:'scripts/moss-edit-terminal-actions.mjs',actionLibrary:'scripts/lib/moss-edit-terminal-actions.mjs',browserDriver:'scripts/moss-edit-terminal-browser.mjs',browserControls:'scripts/lib/moss-edit-terminal-controls.mjs'};
+      requireThat(canonical(Object.keys(producer.files).sort())===canonical(Object.keys(expected).sort()),'CUDA producer file closure changed');
+      for(const [name,path] of Object.entries(expected)) {
+        const bytes=execFileSync('git',['-C',repair.tooling.sourceRoot,'show',`${record.cudaToolingSha}:${path}`]);
+        requireThat(producer.files[name].replaceAll('\\','/').endsWith(`/${path}`)&&canonical(producer.identities[name])===canonical({byteLength:bytes.length,sha256:sha(bytes)}),'CUDA producer captured source bytes changed');
+      }
     }
     requireThat(adjudication.version===VERSION&&adjudication.name==='r16-checker-recovery'&&adjudication.rowId==='advanced-mlx-sft'&&adjudication.candidateId===state.lock.candidateId&&adjudication.sourceSha===state.lock.sources.sceneworks.head&&adjudication.inferenceSha===state.lock.sources.inference.head&&adjudication.toolingSha===(repair.previousToolingSha??repair.tooling.head)&&adjudication.inventorySha256===repair.inventorySha256&&adjudication.lockSha256===digest(state.lock),'checker adjudication substituted candidate/source/tooling');
     const id='advanced-mlx-sft',dir=resolve(state.root,'rows',id),attempt=resolve(state.root,'attempts/mlx'),failure=await json(resolve(dir,'failure.json')),attemptFailure=await json(resolve(attempt,`${id}.failure.json`)),start=await json(resolve(attempt,`${id}.start.json`)),receipt=await json(resolve(dir,'receipt.json')),job=await json(resolve(dir,'terminal-job.json')),readback=await json(resolve(dir,'recovery-job-readback.json')),proof=await json(resolve(attempt,`${id}.reconciliation.json`)),resolution=await json(resolve(attempt,`${id}.resolution.json`));

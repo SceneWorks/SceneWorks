@@ -16,29 +16,31 @@ export const H18_RETRY_ARTIFACT_ID = 12604596938;
 export const H18_RETRY_INVENTORY_SHA256 = 'f849b52f0e7724e13b1f8d5a8c7f2797038e22d0d8dfb1ab8e6e2cfd9af03668';
 export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha) {
   requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&/^[a-f0-9]{40}$/.test(dispatchSha)&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires exact product/tooling/inference commits');
-  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id'];
+  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha'];
   requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&required.every(key=>typeof value[key]==='string'&&value[key])&&Object.keys(value).every(key=>[...required,...optional].includes(key)&&typeof value[key]==='string'),'MOSS dispatch JSON has missing, unknown or non-string fields');
   requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.candidate_id)&&/^[a-f0-9]{64}$/.test(value.bundle_manifest_sha256),'MOSS dispatch candidate or manifest SHA is invalid');
-  requireThat(['upload','execute','continue','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute, continue or verify');
+  requireThat(['upload','execute','continue','continue-cuda','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute, continue, continue-cuda or verify');
   const empty=keys=>keys.every(key=>value[key]===undefined||value[key]==='');
-  const repair=value.phase==='continue'||(value.phase==='verify'&&value.tooling_sha);
+  const repair=['continue','continue-cuda'].includes(value.phase)||(value.phase==='verify'&&value.tooling_sha);
   requireThat(sourceSha===dispatchSha&&(!repair?empty(['tooling_sha','product_sha']):value.tooling_sha===dispatchSha&&/^[a-f0-9]{40}$/.test(value.product_sha??'')&&value.product_sha!==dispatchSha),'MOSS workflow commit must equal the exact product source or separately identify H17 product and H18 repair tooling');
   if(value.phase==='upload') {
     requireThat(['bundle','review'].includes(value.upload_kind)&&typeof value.upload_path==='string'&&value.upload_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.upload_path)===value.upload_path,'MOSS upload requires a canonical directory inside the owned epic run');
-    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id']),'MOSS upload cannot consume execution or prior artifact IDs');
+    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha']),'MOSS upload cannot consume execution or prior artifact IDs');
   } else {
     requireThat([value.bundle_run_id,value.bundle_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS execution/verify requires exact bundle IDs');
     requireThat(empty(['upload_path','upload_kind']),'MOSS execution/verify cannot upload host files');
     if(value.phase==='verify') {
       requireThat([value.execution_run_id,value.review_artifact_id,value.review_run_id??value.bundle_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS verify requires exact execution run, attempt and review artifact/run IDs');
-      requireThat(empty(['original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id'])&&(!repair?empty(['native_run_id','native_run_attempt']):[value.native_run_id,value.native_run_attempt].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS repaired verify requires original native run/attempt and no host inventory path');
+      requireThat(empty(['original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha'])&&(!repair?empty(['native_run_id','native_run_attempt']):[value.native_run_id,value.native_run_attempt].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS repaired verify requires original native run/attempt and no host inventory path');
     } else if(value.phase==='continue') {
-      requireThat([value.execution_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??''))&&empty(['review_artifact_id','review_run_id','native_run_id','native_run_attempt']),'MOSS continuation requires one exact original execution attempt and no review/native override');
+      requireThat([value.execution_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??''))&&empty(['review_artifact_id','review_run_id','native_run_id','native_run_attempt','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha']),'MOSS continuation requires one exact original execution attempt and no review/native override');
       requireThat(typeof value.original_inventory_path==='string'&&value.original_inventory_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.original_inventory_path)===value.original_inventory_path&&value.original_inventory_sha256===R16_ORIGINAL_INVENTORY_SHA256,'MOSS continuation requires the exact sealed local original-evidence boundary');
       const retry=value.retry_inventory_path!==undefined||value.retry_inventory_sha256!==undefined;
       if(retry)requireThat(value.tooling_sha!==H18_RETRY_TOOLING_SHA&&value.retry_inventory_path?.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.retry_inventory_path)===value.retry_inventory_path&&/^[a-f0-9]{64}$/.test(value.retry_inventory_sha256??'')&&(value.retry_inventory_sha256===H18_RETRY_INVENTORY_SHA256?empty(['retry_run_id','retry_artifact_id']):[value.retry_run_id,value.retry_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS retry needs a distinct tooling commit and exact sealed or downloaded failed-attempt artifact');
       else requireThat(empty(['retry_run_id','retry_artifact_id']),'MOSS continuation cannot name an artifact without a retry inventory');
-    } else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id']),'MOSS execute cannot consume prior execution or review evidence');
+    } else if(value.phase==='continue-cuda') {
+      requireThat([value.execution_run_id,value.execution_run_attempt??'1',value.mlx_run_id,value.mlx_run_attempt,value.mlx_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??''))&&/^[a-f0-9]{40}$/.test(value.mlx_tooling_sha??'')&&value.mlx_tooling_sha!==value.tooling_sha&&value.mlx_run_id!==value.execution_run_id&&empty(['original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','review_artifact_id','review_run_id','native_run_id','native_run_attempt']),'MOSS CUDA-only continuation requires a distinct completed MLX artifact/producer and original native-build attempt');
+    } else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha']),'MOSS execute cannot consume prior execution or review evidence');
   }
   const legacy=optional.slice(0,8),repairFields=optional.slice(8);
   return Object.fromEntries([...required,...legacy,...repairFields.filter(key=>value[key]!==undefined)].map(key=>[key,value[key]??(key==='execution_run_attempt'?'1':key==='review_run_id'&&value.phase==='verify'?value.bundle_run_id:'')]));
@@ -374,6 +376,69 @@ export async function importState(config,from) {
   requireThat(after.some(item=>item.id===config.projectId),'original campaign project missing from transferred registry');
   await writeFile(path,`${JSON.stringify(after,null,2)}\n`,{mode:0o600});
   await save(resolve(config.root,'state-relocation.json'),{version:VERSION,manifestSha256:digest(manifest),before,after,changed:'owned registry location fields only; project/job/asset/payload/recipe bytes preserved'});
+}
+export async function validateCompletedMlxArtifact(prior,{candidateId,sourceSha,inferenceSha,originalRunId,originalAttempt,toolingSha,runId,attempt,artifactId}) {
+  requireThat([originalRunId,originalAttempt,runId,attempt,artifactId].every(id=>Number.isSafeInteger(id)&&id>0)&&/^[a-f0-9]{40}$/.test(toolingSha),'completed MLX handoff requires exact run, artifact and producer identities');
+  const evidence=resolve(prior,'evidence'),[marker,retry,lock,plan,binding,handoff]=await Promise.all([
+    json(resolve(prior,'execution-continuation-retry-8.json')),json(resolve(evidence,'continuation-retry-8.json')),
+    json(resolve(evidence,'protocol.lock.json')),json(resolve(evidence,'cases.json')),
+    json(resolve(evidence,'bindings/mlx.json')),json(resolve(prior,'handoff/handoff.json'))]);
+  const lockSha256=digest(lock),bindingSha256=digest(binding),rows=plan.rows.filter(row=>row.backend==='mlx'),guards=plan.requiredGuardCases;
+  requireThat(marker.version===VERSION&&marker.execution==='COMPLETE'&&marker.backend==='mlx'&&marker.renders===25&&marker.refusals===29&&marker.lockSha256===lockSha256&&marker.toolingSha===toolingSha&&marker.originalRunId===originalRunId&&retry.ordinal===8&&retry.toolingSha===toolingSha&&retry.originalRunId===originalRunId&&retry.originalAttempt===originalAttempt&&retry.candidateId===candidateId&&retry.sourceSha===sourceSha&&retry.inferenceSha===inferenceSha&&retry.lockSha256===lockSha256&&lock.candidateId===candidateId&&lock.sources.sceneworks.head===sourceSha&&lock.sources.inference.head===inferenceSha&&rows.length===25&&guards.length===29&&binding.endpoint.projectId===handoff.projectId&&handoff.version===VERSION&&handoff.sources.sceneworks.head===sourceSha&&handoff.sources.inference.head===inferenceSha,'completed MLX producer, original product, frozen plan or handoff changed');
+  for(const row of rows) {
+    const dir=resolve(evidence,'rows',row.id),[receipt,request,job]=await Promise.all(['receipt.json','request.json','terminal-job.json'].map(name=>json(resolve(dir,name))));
+    requireThat(receipt.rowId===row.id&&receipt.backend==='mlx'&&receipt.execution==='VERIFIED'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256&&receipt.requestSha256===digest(request)&&receipt.jobSha256===digest(job)&&receipt.jobId===job.id&&Array.isArray(receipt.outputs)&&(row.expected==='canceled'?receipt.outputs.length===0&&job.status==='canceled':receipt.outputs.length>0&&job.status==='completed'),`completed MLX row ${row.id} changed`);
+    for(const output of receipt.outputs)requireThat((await fileIdentity(safePath(dir,output.file))).sha256===output.sha256,`completed MLX output ${row.id} changed`);
+  }
+  for(const name of guards) {
+    const suffix=name==='training-shift-nonfinite'?'-retry-7':name==='edit-dmd'?'-retry-8':'',dir=resolve(evidence,'guards',`mlx-${name}${suffix}`),[receipt,proof]=await Promise.all(['receipt.json','no-provider-load.json'].map(file=>json(resolve(dir,file))));
+    requireThat(receipt.case===name&&receipt.backend==='mlx'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256&&proof.case===name&&proof.backend==='mlx'&&proof.lockSha256===lockSha256&&proof.requestSha256===receipt.requestSha256&&proof.method==='source-bound-moss-boundaries/v1'&&proof.observation,`completed MLX refusal ${name} changed`);
+  }
+  requireThat(canonical(await filesUnder(resolve(prior,'handoff/data')))===canonical(handoff.files),'completed MLX stopped-state handoff bytes changed');
+  return {version:VERSION,name:'completed-mlx-artifact-for-cuda',runId,attempt,artifactId,toolingSha,originalRunId,originalAttempt,candidateId,sourceSha,inferenceSha,lockSha256,bindingSha256,projectId:handoff.projectId,completionSha256:(await fileIdentity(resolve(prior,'execution-continuation-retry-8.json'))).sha256,retrySha256:(await fileIdentity(resolve(evidence,'continuation-retry-8.json'))).sha256,handoffSha256:(await fileIdentity(resolve(prior,'handoff/handoff.json'))).sha256,verifiedRows:rows.length,verifiedGuards:guards.length};
+}
+export const H27_HIDDEN_HANDOFF_FILES = [
+  'models/.sceneworks-external-library-closures.json',
+  'models/.sceneworks-external-library-state.json',
+  'models/.sceneworks-external-library-state.lock',
+  'models/OpenMOSS-Team__MOSS-Image-Base/.sceneworks-download-complete.json',
+  'models/OpenMOSS-Team__MOSS-Image-Base/.sceneworks-download-receipt.lock',
+  'models/OpenMOSS-Team__MOSS-Image-SFT/.sceneworks-download-complete.json',
+  'models/OpenMOSS-Team__MOSS-Image-SFT/.sceneworks-download-receipt.lock'
+];
+export async function stageCompletedMlxHandoffSupplement(prior,stopped,stage,identity) {
+  const local=await validateCompletedMlxArtifact(stopped,identity);
+  const [artifactManifest,artifactHandoff,artifactMarker,artifactRetry]=await Promise.all([
+    json(resolve(prior,'handoff/handoff.json')),
+    fileIdentity(resolve(prior,'handoff/handoff.json')),
+    fileIdentity(resolve(prior,'execution-continuation-retry-8.json')),
+    fileIdentity(resolve(prior,'evidence/continuation-retry-8.json'))
+  ]);
+  requireThat(artifactHandoff.sha256===local.handoffSha256&&artifactMarker.sha256===local.completionSha256&&artifactRetry.sha256===local.retrySha256,'downloaded H27 artifact differs from completed stopped Mac producer');
+  const present=await filesUnder(resolve(prior,'handoff/data'));
+  const expected=artifactManifest.files,byPath=new Map(expected.map(item=>[item.file,item]));
+  requireThat(expected.length===311&&present.length===304&&new Set(expected.map(item=>item.file)).size===expected.length&&present.every(item=>canonical(item)===canonical(byPath.get(item.file))),'downloaded H27 handoff has changed or extra files');
+  const missing=expected.filter(item=>!present.some(found=>found.file===item.file));
+  requireThat(canonical(missing.map(item=>item.file).sort())===canonical([...H27_HIDDEN_HANDOFF_FILES].sort()),'downloaded H27 artifact does not omit exactly the known hidden metadata');
+  requireThat((await filesUnder(resolve(stopped,'handoff/data'))).every((item,index)=>canonical(item)===canonical(expected[index])),'stopped Mac handoff differs from original completed manifest');
+  for(const item of missing) {
+    const source=safePath(resolve(stopped,'handoff/data'),item.file),target=safePath(resolve(stage,'handoff/data'),item.file);
+    requireThat(canonical(await fileIdentity(source))===canonical({byteLength:item.byteLength,sha256:item.sha256}),'original hidden handoff metadata changed');
+    await mkdir(dirname(target),{recursive:true});await cp(source,target,{errorOnExist:true,force:false});
+  }
+  requireThat(/^[a-f0-9]{40}$/.test(identity.stagingToolingSha)&&identity.stagingToolingSha!==identity.toolingSha,'supplement must identify its separate staging tooling');
+  const record={version:VERSION,name:'completed-mlx-hidden-handoff-supplement',runId:identity.runId,attempt:identity.attempt,artifactId:identity.artifactId,toolingSha:identity.toolingSha,stagingToolingSha:identity.stagingToolingSha,completionSha256:local.completionSha256,retrySha256:local.retrySha256,handoffSha256:local.handoffSha256,artifactFiles:present,addedFiles:missing};
+  await save(resolve(stage,'supplement.json'),record);
+  return record;
+}
+export async function validateCompletedMlxHandoffSupplement(prior,identity) {
+  const supplement=await json(resolve(prior,'supplement.json'));
+  requireThat(supplement.version===VERSION&&supplement.name==='completed-mlx-hidden-handoff-supplement'&&supplement.runId===identity.runId&&supplement.attempt===identity.attempt&&supplement.artifactId===identity.artifactId&&supplement.toolingSha===identity.toolingSha&&supplement.stagingToolingSha===identity.cudaToolingSha&&supplement.completionSha256===identity.completionSha256&&supplement.retrySha256===identity.retrySha256&&supplement.handoffSha256===identity.handoffSha256,'merged hidden metadata has wrong original producer');
+  const expected=(await json(resolve(prior,'handoff/handoff.json'))).files;
+  const partition=[...supplement.artifactFiles,...supplement.addedFiles].sort((a,b)=>a.file.localeCompare(b.file));
+  requireThat(expected.length===311&&supplement.artifactFiles.length===304&&supplement.addedFiles.length===7&&canonical(supplement.addedFiles.map(item=>item.file).sort())===canonical([...H27_HIDDEN_HANDOFF_FILES].sort())&&canonical(partition)===canonical([...expected].sort((a,b)=>a.file.localeCompare(b.file))),'merged H27 handoff partition changed');
+  requireThat(canonical(await filesUnder(resolve(prior,'handoff/data')))===canonical(expected),'merged H27 handoff differs from completed manifest');
+  return supplement;
 }
 // Review material only: actual decoded pixels, no generated comparison image or verdict.
 export function rgbPng(width,height,pixels) {

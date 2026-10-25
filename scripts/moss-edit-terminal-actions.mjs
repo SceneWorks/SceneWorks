@@ -9,7 +9,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
-import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
@@ -339,6 +339,15 @@ export async function prepareContinuationCudaPackages(config,rehydrateConfig,ori
   }
   await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode,originalRunId,originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json'))});
 }
+export async function completedMlxHandoff(config,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha,toolingRoot) {
+  requireThat(config.backend==='cuda'&&treeIdentity(toolingRoot).head===cudaToolingSha&&cudaToolingSha!==mlxToolingSha,'completed Mac/CUDA tooling identities must be separate clean commits');
+  await execFile('git',['-C',toolingRoot,'merge-base','--is-ancestor',mlxToolingSha,cudaToolingSha]);
+  await sourceIdentity(config);
+  const record=await validateCompletedMlxArtifact(resolve(config.root,'prior'),{candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalRunId,originalAttempt,toolingSha:mlxToolingSha,runId,attempt,artifactId});
+  await validateCompletedMlxHandoffSupplement(resolve(config.root,'prior'),{...record,cudaToolingSha});
+  await save(resolve(config.root,'completed-mlx-artifact.json'),{...record,cudaToolingSha,supplementSha256:(await fileIdentity(resolve(config.root,'prior/supplement.json'))).sha256});
+  return record;
+}
 async function harness(config,args,label) {
   const prefix=config.continuation?.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:config.toolingRoot||config.continuation?'continuation-':'';
   await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
@@ -440,6 +449,10 @@ export async function executeBackend(config) {
   const continuing=Boolean(config.continuation);
   const repairTooling=Boolean(config.toolingRoot||continuing);
   const original=continuing?await validateContinuation(config):null;
+  if(config.completedMlx) {
+    const record=await json(resolve(config.root,'completed-mlx-artifact.json')),prior=resolve(config.root,'prior');
+    requireThat(config.backend==='cuda'&&canonical(record)===canonical(config.completedMlx)&&record.candidateId===config.candidateId&&record.sourceSha===config.sourceSha&&record.inferenceSha===config.inferenceSha&&record.cudaToolingSha===config.toolingSha&&record.toolingSha===(await json(resolve(prior,'evidence/continuation-retry-8.json'))).toolingSha&&record.completionSha256===(await fileIdentity(resolve(prior,'execution-continuation-retry-8.json'))).sha256&&record.retrySha256===(await fileIdentity(resolve(prior,'evidence/continuation-retry-8.json'))).sha256&&record.handoffSha256===(await fileIdentity(resolve(prior,'handoff/handoff.json'))).sha256&&record.supplementSha256===(await fileIdentity(resolve(prior,'supplement.json'))).sha256,'CUDA-only launch lost its authenticated completed Mac artifact');
+  }
   if(original?.retry)config.continuation.retry.ordinal=original.retry.ordinal;
   const retrySuffix=original?.retry?(original.retry.ordinal>1?`retry-${original.retry.ordinal}`:'retry'):null;
   const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,config.backend,'inventory.json')),config.backend,await sourceIdentity(config));
@@ -479,6 +492,10 @@ export async function executeBackend(config) {
   if(config.backend==='cuda') {
     const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;await importState(config,config.handoffRoot);
     await cp(config.priorEvidenceRoot,resolve(config.root,'evidence'),{recursive:true,errorOnExist:true,force:false});
+    if(config.completedMlx) {
+      await save(resolve(config.root,'evidence/external/completed-mlx-artifact-for-cuda.json'),config.completedMlx);
+      await cp(resolve(config.root,'prior/supplement.json'),resolve(config.root,'evidence/external/completed-mlx-handoff-supplement.json'),{errorOnExist:true,force:false});
+    }
   }
   const stack=await startStack(config,token);let stopped=false;
   try {
@@ -513,8 +530,10 @@ export async function executeBackend(config) {
     const tooling=repairTooling?{sourceRoot:toolingRoot,head:config.toolingSha??config.continuation.toolingSha,source:treeIdentity(toolingRoot),files:toolingFiles,identities:Object.fromEntries(await Promise.all(Object.entries(toolingFiles).map(async([name,path])=>[name,await fileIdentity(path)])))}:null;
     const retry=continuing?original.retry:await latestRetry(resolve(config.root,'evidence'));
     const launch=continuing?{...original.launch,guardRequests:config.guardRequests,repair:{name:'r16-checker-recovery',originalRoot:config.root,inventorySha256:original.manifestIdentity.sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal,...(await guardRepairFields(resolve(config.root,'evidence'),retry))}:{})}}:await launcher(config,config.projectId);
-    if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,...(await guardRepairFields(resolve(config.root,'evidence'),retry))}:{})};
+    if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,executionToolingSha:retry.toolingSha,...(await guardRepairFields(resolve(config.root,'evidence'),retry))}:{})};
+    if(config.completedMlx)launch.repair.completedMlx=config.completedMlx;
     const launchPath=resolve(config.root,continuing?(config.continuation.retry?`continuation-${retrySuffix}-launch.json`:'continuation-launch.json'):'launch.json');await save(launchPath,launch);
+    if(config.backend==='cuda'&&repairTooling)await cp(launchPath,resolve(config.root,'evidence/external/cuda-execution-tooling-capture.json'),{errorOnExist:true,force:false});
     if(!continuing) {if(config.backend==='mlx')await freeze(launchPath);else await bind(launchPath);}
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
       gpuId:state.binding.endpoint.workerGpuId,
@@ -637,6 +656,12 @@ export async function finalize(config) {
     const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
     const retry=await latestRetry(root);
     launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,historicalExecutionToolingSha:'2cd0363d59cb3eb0989bbb708000b6ffc907932a',executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,...(await guardRepairFields(root,retry))}:{})};
+    const completed=await optional(resolve(root,'external/completed-mlx-artifact-for-cuda.json'));
+    if(completed) {
+      const cudaCapture=await json(resolve(root,'external/cuda-execution-tooling-capture.json'));
+      requireThat(cudaCapture.repair?.completedMlx&&canonical(cudaCapture.repair.completedMlx)===canonical(completed),'CUDA-only launch lost its separate completed-Mac producer');
+      launch.repair.completedMlx=completed;launch.repair.cudaExecutionToolingSha=cudaCapture.repair.tooling.head;
+    }
   }
   await save(launchPath,launch);
   for(const entry of await filesUnder(config.reviewRoot)) {
@@ -669,10 +694,28 @@ export async function main(args=process.argv.slice(2)) {
     const [runtime,rehydrateRuntime,originalRunId,originalAttempt]=rest;
     return prepareContinuationCudaPackages(await json(runtime),await json(rehydrateRuntime),Number(originalRunId),Number(originalAttempt));
   }
+  if(phase==='completed-mlx-handoff'&&rest.length===8) {
+    const [runtime,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha]=rest;
+    const toolingRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+    return completedMlxHandoff(await json(runtime),Number(originalRunId),Number(originalAttempt),Number(runId),Number(attempt),Number(artifactId),mlxToolingSha,cudaToolingSha,toolingRoot);
+  }
+  if(phase==='stage-completed-mlx-handoff'&&rest.length===13) {
+    const [prior,stopped,stage,candidateId,sourceSha,inferenceSha,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha]=rest;
+    const toolingRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+    requireThat(treeIdentity(toolingRoot).head===cudaToolingSha&&cudaToolingSha!==mlxToolingSha,'hidden handoff staging requires exact separate clean CUDA tooling');
+    await execFile('git',['-C',toolingRoot,'merge-base','--is-ancestor',mlxToolingSha,cudaToolingSha]);
+    return stageCompletedMlxHandoffSupplement(prior,stopped,stage,{candidateId,sourceSha,inferenceSha,originalRunId:Number(originalRunId),originalAttempt:Number(originalAttempt),runId:Number(runId),attempt:Number(attempt),artifactId:Number(artifactId),toolingSha:mlxToolingSha,stagingToolingSha:cudaToolingSha});
+  }
   if(phase==='continue-cuda'&&rest.length===3) {
     const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime);
     requireThat(treeIdentity(toolingRoot).head===toolingSha&&toolingSha!==config.sourceSha,'CUDA continuation tooling differs from exact clean repair commit');
     config.toolingRoot=resolve(toolingRoot);config.toolingSha=toolingSha;config.preparedCudaPackages=true;
+    return executeBackend(config);
+  }
+  if(phase==='continue-cuda-only'&&rest.length===4) {
+    const [runtime,toolingRoot,toolingSha,recordPath]=rest,config=await json(runtime),record=await json(recordPath);
+    requireThat(resolve(recordPath)===resolve(config.root,'completed-mlx-artifact.json')&&record.cudaToolingSha===toolingSha&&treeIdentity(toolingRoot).head===toolingSha&&toolingSha!==config.sourceSha,'CUDA-only continuation must use its authenticated completed-Mac handoff and clean new tooling');
+    config.toolingRoot=resolve(toolingRoot);config.toolingSha=toolingSha;config.preparedCudaPackages=true;config.completedMlx=record;
     return executeBackend(config);
   }
   if(phase==='finalize-repair'&&rest.length===3) {
