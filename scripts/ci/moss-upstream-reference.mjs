@@ -5,6 +5,7 @@ import {createHash} from 'node:crypto';
 import {resolve,dirname,sep} from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import * as firstStepProbe from './moss-first-step-probe.mjs';
 export const PAYLOAD_SHA='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df';
 export const STAGED='/Users/michael/.codex/epic-runs/sc-26752/upstream-reference-actions-r15/payload';
 const PREP='/Users/michael/.codex/epic-runs/sc-26752/upstream-reference-prep-r15';
@@ -16,8 +17,8 @@ export function safe(root,file){check(typeof file==='string'&&file.length&&!file
 export function envelope(raw,ref,sha,backend){
   const value=JSON.parse(raw);check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase','closed reference envelope required');
   check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact dispatch source and mlx required');
-  check(['upload','execute'].includes(value.phase),'unknown reference phase');
-  for(const key of ['artifact_id','artifact_run_id'])check(value.phase==='upload'?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact artifact identity required');
+  check(['upload','execute','upload-probe','execute-probe'].includes(value.phase),'unknown reference phase');
+  for(const key of ['artifact_id','artifact_run_id'])check(value.phase.startsWith('upload')?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact artifact identity required');
   return value;
 }
 async function noLinks(root){for(let path=resolve(root);;path=dirname(path)){check(!(await lstat(path)).isSymbolicLink(),'linked ancestor refused');if(dirname(path)===path)break;}}
@@ -55,10 +56,17 @@ async function main(){
   const value=envelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);
   const root=resolve(BASE,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);check(/^[1-9][0-9]+$/.test(process.env.GITHUB_RUN_ID)&&/^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT),'actual Actions identity required');
   if(process.argv[2]==='validate'){
+    const probe=value.phase.endsWith('-probe'),probeModule=probe?firstStepProbe:null;
     if(value.phase==='upload')await verifyPayload(STAGED);
-    await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:STAGED}).map(([key,value])=>`${key}=${value??''}\n`).join(''));return;
+    if(value.phase==='upload-probe')await probeModule.verifyProbePayload(probeModule.PROBE_STAGED);
+    await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root:probe?resolve(BASE,`moss-first-step-probe-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`):root,payload:probe?probeModule.PROBE_STAGED:STAGED}).map(([key,value])=>`${key}=${value??''}\n`).join(''));return;
   }
-  check(process.argv[2]==='execute'&&value.phase==='execute','fixed execute phase required');
+  check(process.argv[2]==='execute'&&['execute','execute-probe'].includes(value.phase),'fixed execute phase required');
+  if(value.phase==='execute-probe'){
+    const probe=firstStepProbe,probeRoot=resolve(BASE,`moss-first-step-probe-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
+    await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(probeRoot,{mode:0o700});
+    const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);await probe.verifyProbePayload(download);await cp(download,resolve(probeRoot,'payload'),{recursive:true,errorOnExist:true,force:false});await probe.executeProbe(probeRoot,resolve(probeRoot,'payload'));return;
+  }
   await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});
   const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);await verifyPayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await execute(root,resolve(root,'payload'));
 }

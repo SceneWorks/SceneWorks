@@ -88,7 +88,7 @@ on:
         type: string
         default: "{}"
       moss_reference:
-        description: "One fixed frozen-upstream Base/single reference: closed JSON phase upload|execute and exact artifact_run_id/artifact_id (null for upload)."
+        description: "One fixed frozen-upstream Base/single reference: closed JSON phase upload|execute|upload-probe|execute-probe and exact artifact_run_id/artifact_id (null for uploads)."
         required: false
         type: string
         default: "{}"
@@ -251,7 +251,7 @@ env:
 
 jobs:
   moss-reference-maintenance:
-    if: inputs.profile == 'moss-upstream-reference'
+    if: inputs.profile == 'moss-upstream-reference' && (fromJSON(inputs.moss_reference).phase == 'upload' || fromJSON(inputs.moss_reference).phase == 'execute')
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 15
     permissions:
@@ -309,7 +309,7 @@ jobs:
         id: reference
         run: node scripts/ci/moss-upstream-reference.mjs validate
       - name: Upload immutable small reference payload (no model weights or venv)
-        if: steps.reference.outputs.phase == 'upload'
+        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-payload-${{ github.run_id }}-${{ github.run_attempt }}
@@ -317,7 +317,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Download exact immutable reference payload
-        if: steps.reference.outputs.phase == 'execute'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.reference.outputs.artifact_id }}
@@ -325,11 +325,20 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: ${{ runner.temp }}/moss-upstream-reference-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Checkout exact native source for cfg(test)-only first-step overlay
+        if: steps.reference.outputs.phase == 'execute-probe'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: '857f7a1996e3678a0773c3509ac0087522c19ce6'
+          path: moss-first-step-native-${{ github.run_id }}-${{ github.run_attempt }}
+          persist-credentials: false
+          token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
       - name: Run one reviewed fixed MPS reference after payload, runtime and model authentication
-        if: steps.reference.outputs.phase == 'execute'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe'
         run: node scripts/ci/moss-upstream-reference.mjs execute
       - name: Retain only reference outputs and authentication, separate from native evidence
-        if: always() && steps.reference.outputs.phase == 'execute'
+        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-result-${{ github.run_id }}-${{ github.run_attempt }}
@@ -338,6 +347,14 @@ jobs:
             ${{ steps.reference.outputs.root }}/upstream-base-single.diagnostic.json
             ${{ steps.reference.outputs.root }}/authentication.json
             ${{ steps.reference.outputs.root }}/execution.log
+            ${{ steps.reference.outputs.root }}/probe-authentication.json
+            ${{ steps.reference.outputs.root }}/probe-completion.json
+            ${{ steps.reference.outputs.root }}/comparison.json
+            ${{ steps.reference.outputs.root }}/*.log
+            ${{ steps.reference.outputs.root }}/upstream/*.json
+            ${{ steps.reference.outputs.root }}/upstream/*.f32le
+            ${{ steps.reference.outputs.root }}/native/*.json
+            ${{ steps.reference.outputs.root }}/native/*.f32le
           if-no-files-found: warn
           retention-days: 90
   moss-dispatch:
