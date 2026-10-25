@@ -3,7 +3,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
+import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, waitForReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 export { labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
@@ -166,19 +166,15 @@ async function originFor(state, rowId, sampleIndex, read) {
   return { receipt, asset, job };
 }
 
-async function historyReplay(page, row, route, origin, actions) {
+async function historyReplay(page, row, route, origin, expected, actions) {
   await openAsset(page, origin.asset, actions);
   await checked(page.getByLabel('Keep seed', { exact: true }), true, actions, 'Keep seed');
   await click(page.getByRole('button', { name: 'Use this recipe', exact: true }), actions, 'Use this recipe');
-  await waitValue(page,page.getByLabel('Prompt', { exact: true }),row.request.prompt);
-  await advanced(page, actions);
+  if(row.action==='seeded-recipe')await waitForReplayForm(page,expected,actions);
+  else {await waitValue(page,page.getByLabel('Prompt', { exact: true }),row.request.prompt);await advanced(page, actions);}
   // Read the form before any changes. A recipe copied from disk alone is not hydration proof.
   const prompt = await page.getByLabel('Prompt', { exact: true }).inputValue();
   requireThat(prompt === row.request.prompt, 'history hydration changed original prompt0');
-  if (row.action === 'seeded-recipe') {
-    requireThat(await page.getByLabel('One positive prompt per conditioning row', { exact: true }).inputValue() === row.request.prompts.join('\n'), 'history lost full conditioning batch');
-    requireThat(Number(await page.getByLabel('Variations', { exact: true }).inputValue()) === row.request.count && Number(await page.getByLabel('Seed', { exact: true }).inputValue()) === row.request.seed, 'Keep seed lost count/base seed');
-  }
   return { originRowId: route.originRowId, originJobId: origin.receipt.jobId, originAssetId: origin.asset.id, originSampleIndex: route.sampleIndex,
     selectedAssetId: origin.asset.id, selectedRecipe: origin.asset.recipe, hydrationObserved: true, keepSeed: true, observedAt: now(), form: { prompt } };
 }
@@ -431,7 +427,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     const uploaded = await json(resolve(state.root, `uploaded-${row.backend}.json`));
     const origin = route.originRowId ? await originFor(state, route.originRowId, route.sampleIndex, read) : null;
     let history, workflow;
-    if (route.history) history = await historyReplay(page, row, route, origin, actions);
+    if (route.history) history = await historyReplay(page, row, route, origin, expected, actions);
     if (route.workflow) workflow = await workflowReplay(page, state, row, origin, expected, uploaded, observation, actions, captureRoot);
     if (route.shell === 'editor') {
       await openAsset(page, uploaded.B, actions); await click(page.getByRole('button', { name: 'Edit', exact: true }), actions, 'Edit original B in Image Editor');
@@ -439,8 +435,8 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     } else if (route.shell === 'simple') {
       await shell(page, 'simple', actions); await click(page.getByRole('tab', { name: 'Edit', exact: true }), actions, 'Simple Edit');
     } else if (!route.workflow && !route.history) await click(page.getByRole('button', { name: 'Edit', exact: true }).or(page.getByRole('tab', { name: 'Edit', exact: true })), actions, 'Image Edit');
-    if (route.shell === 'full' && (route.workflow || route.history)) await verifyReplayForm(page, expected, actions);
-    else await configure(page, expected, route.shell, actions);
+    if (route.shell === 'full' && route.workflow) await waitForReplayForm(page, expected, actions);
+    else if (!(route.shell === 'full' && route.history && row.action === 'seeded-recipe')) await configure(page, expected, route.shell, actions);
     if (route.latentGuards) {
       for (const guard of LATENT_UPSCALE_GUARDS) {
         const engine = guard.slice('latent-inline-upscale-'.length);

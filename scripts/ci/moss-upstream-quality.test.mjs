@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
+import {execFileSync,spawnSync} from 'node:child_process';
 import {envelope,PRIOR_PAYLOAD,CASES_STAGED,verifyCasePayload,authenticateModels} from './moss-upstream-quality.mjs';
 
 const ref='a'.repeat(40),upload={phase:'upload-cases',artifact_run_id:null,artifact_id:null};
@@ -16,7 +18,7 @@ test('new suite keeps original frozen learned payload and sealed new data separa
   assert.equal(PRIOR_PAYLOAD,'/Users/michael/.codex/epic-runs/sc-26752/upstream-reference-actions-r15/payload');
   assert.equal(CASES_STAGED,'/Users/michael/.codex/epic-runs/sc-26752/h22-upstream-comparison-prep/payload');
 });
-test('sealed case data binds both actual Base/SFT model views without rehashing retained weights',async()=>{
+test('sealed case data binds both actual Base/SFT model views without rehashing retained weights',{skip:!existsSync(CASES_STAGED)},async()=>{
   const {cases,models}=await verifyCasePayload(CASES_STAGED);
   assert.deepEqual(cases.cases.map(item=>item.id),['base-four','sft-single','sft-four']);
   const root=await mkdtemp(resolve(tmpdir(),'moss-h22-auth-'));
@@ -25,6 +27,17 @@ test('sealed case data binds both actual Base/SFT model views without rehashing 
     assert.deepEqual(Object.keys(result.views),['base','sft']);
     assert.equal(result.identities.length,25);
     await result.assertStable();
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+test('real CLI upload-cases validate completes with the sealed payload and Actions outputs',{skip:!existsSync(CASES_STAGED)},async()=>{
+  const source=resolve(new URL('../../',import.meta.url).pathname),head=execFileSync('git',['-C',source,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
+  const root=await mkdtemp(resolve(tmpdir(),'moss-h23-cli-'));
+  try {
+    const output=resolve(root,'github-output'),result=spawnSync(process.execPath,[resolve(source,'scripts/ci/moss-upstream-reference.mjs'),'validate'],{
+      cwd:source,encoding:'utf8',timeout:15000,env:{...process.env,GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:head,SOURCE_REF:head,INPUT_BACKEND:'mlx',GITHUB_RUN_ID:'40217574855',GITHUB_RUN_ATTEMPT:'1',GITHUB_OUTPUT:output,MOSS_REFERENCE:JSON.stringify(upload)},
+    });
+    assert.equal(result.status,0,`reference CLI did not settle: ${result.stderr}`);
+    assert.match(await readFile(output,'utf8'),/^phase=upload-cases\n[\s\S]*payload=\/Users\/michael\/\.codex\/epic-runs\/sc-26752\/h22-upstream-comparison-prep\/payload\n$/);
   } finally {await rm(root,{recursive:true,force:true});}
 });
 test('registered MPS route queues one three-case execute suite and retains each case result',async()=>{

@@ -95,16 +95,22 @@ export async function continuationRemainingRows(evidenceRoot,plan) {
   }
   return rows.slice(7);
 }
-export async function retryRemainingRows(evidenceRoot,plan,lockSha256) {
-  const rows=plan.rows.filter(row=>row.backend==='mlx'),id='advanced-mlx-sft-replay';
-  requireThat(rows.length===25&&rows[6]?.id==='advanced-mlx-sft'&&rows[7]?.id===id,'H18 retry frozen MLX row order changed');
-  for(const row of rows.slice(0,7))requireThat((await json(resolve(evidenceRoot,'rows',row.id,'receipt.json'))).execution==='VERIFIED',`verified predecessor ${row.id} missing`);
-  const start=await json(resolve(evidenceRoot,'attempts/mlx',`${id}.start.json`));
-  requireThat(start.id===id&&start.backend==='mlx'&&start.transport==='ui'&&start.lockSha256===lockSha256&&await readFile(resolve(evidenceRoot,'attempts/mlx/dispatch.lock'),'utf8')===id,'exact unresolved H18 UI intent/dispatch lock missing');
-  for(const row of rows.slice(7))for(const file of [`rows/${row.id}/receipt.json`,`rows/${row.id}/failure.json`,`attempts/mlx/${row.id}.failure.json`,`attempts/mlx/${row.id}.resolution.json`,...(row.id===id?[]:[`attempts/mlx/${row.id}.start.json`])]) {
-    try{await lstat(safePath(evidenceRoot,file));requireThat(false,`unsubmitted row ${row.id} already changed`);}catch(error){if(error.code!=='ENOENT')throw error;}
+export async function retryRemainingRows(evidenceRoot,plan,lockSha256,bindingSha256) {
+  const rows=plan.rows.filter(row=>row.backend==='mlx');
+  requireThat(rows.length===25&&rows[6]?.id==='advanced-mlx-sft'&&rows[7]?.id==='advanced-mlx-sft-replay','frozen MLX retry row order changed');
+  let index=0;
+  while(index<rows.length&&await optionalJson(resolve(evidenceRoot,'rows',rows[index].id,'receipt.json'))) {
+    requireThat((await json(resolve(evidenceRoot,'rows',rows[index].id,'receipt.json'))).execution==='VERIFIED',`verified predecessor ${rows[index].id} missing`);
+    index++;
   }
-  return rows.slice(7);
+  const row=rows[index],id=row?.id;
+  requireThat(index>=7&&row?.transport?.startsWith('ui-'),'retry frontier must be one unsubmitted UI row after verified predecessors');
+  const start=await json(resolve(evidenceRoot,'attempts/mlx',`${id}.start.json`));
+  requireThat(start.id===id&&start.backend==='mlx'&&start.transport==='ui'&&start.lockSha256===lockSha256&&(!bindingSha256||start.bindingSha256===bindingSha256)&&await readFile(resolve(evidenceRoot,'attempts/mlx/dispatch.lock'),'utf8')===id,'exact unresolved UI intent/dispatch lock missing');
+  for(const later of rows.slice(index))for(const file of [`rows/${later.id}/receipt.json`,`rows/${later.id}/failure.json`,`attempts/mlx/${later.id}.failure.json`,`attempts/mlx/${later.id}.resolution.json`,...(later.id===id?[]:[`attempts/mlx/${later.id}.start.json`])]) {
+    try{await lstat(safePath(evidenceRoot,file));requireThat(false,`unsubmitted row ${later.id} already changed`);}catch(error){if(error.code!=='ENOENT')throw error;}
+  }
+  return rows.slice(index);
 }
 export async function submittedCanceledRemainingRows(evidenceRoot,plan,lockSha256,bindingSha256,checkpoint,root) {
   const rows=plan.rows.filter(row=>row.backend==='mlx');
@@ -131,15 +137,15 @@ export async function submittedCanceledRemainingRows(evidenceRoot,plan,lockSha25
   requireThat(lines.length>=3&&lines[0].phase==='baseline'&&lines.at(-1).phase==='drain'&&lines.some(item=>item.phase==='active'&&Date.parse(item.at)>=Date.parse(submitted.startedAt??submitted.createdAt)&&Date.parse(item.at)<=Date.parse(response.updatedAt))&&lines.every(item=>item.device?.uuid===admitted.device.uuid&&item.raw),'original whole-device canceled-job trace is incomplete or changed');
   return {remaining:rows.slice(index+1),recovery:{rowId:row.id,jobId:submitted.id,requestSha256:digest(request),submissionSha256:digest(submitted),attemptSha256:digest(start),sampleFile}};
 }
-export function validateFailedUiCapture(capture,lockSha256,{historical=null}={}) {
+export function validateFailedUiCapture(capture,lockSha256,{historical=null,rowId='advanced-mlx-sft-replay'}={}) {
   const oldSelector=historical==='h18'&&capture.error?.includes('strict mode violation')&&capture.error.includes('Download portable workflow (.json)');
   const oldObserver=historical==='h19'&&capture.error==='observed upload lacks multipart file bytes'&&capture.actions?.some(item=>item.action==='drop-workflow-file')&&!capture.actions.some(item=>item.action==='click'&&/^Generate(?: edit| [0-9]+ images?)?$/.test(item.control));
-  requireThat(capture.rowId==='advanced-mlx-sft-replay'&&capture.lockSha256===lockSha256&&typeof capture.error==='string'&&capture.error.length>0&&(oldSelector||oldObserver||(!historical&&capture.submissionPhase==='before-generate-attempt'))&&Array.isArray(capture.submissions)&&capture.submissions.length===0&&Array.isArray(capture.imageJobPosts)&&capture.imageJobPosts.length===0,'failed UI capture was not a proven pre-submission attempt');
+  requireThat(capture.rowId===rowId&&capture.lockSha256===lockSha256&&typeof capture.error==='string'&&capture.error.length>0&&(oldSelector||oldObserver||(!historical&&capture.submissionPhase==='before-generate-attempt'))&&Array.isArray(capture.submissions)&&capture.submissions.length===0&&Array.isArray(capture.imageJobPosts)&&capture.imageJobPosts.length===0&&!(capture.actions??[]).some(item=>item.action==='click'&&/^Generate(?: edit| [0-9]+ images?)?$/.test(item.control)),'failed UI capture was not a proven pre-submission attempt');
   return true;
 }
 export function continuationRowDisposition(row,remaining,{retry=false}={}) {
   const run=remaining.some(item=>item.id===row.id);
-  return {run,reuseUiIntent:run&&retry&&row.id==='advanced-mlx-sft-replay'};
+  return {run,reuseUiIntent:run&&retry&&row.id===remaining[0]?.id&&row.transport.startsWith('ui-')};
 }
 export async function sourceIdentity(config) {
   const sources={sceneworks:treeIdentity(config.sourceRoot),inference:treeIdentity(config.inferenceRoot)};

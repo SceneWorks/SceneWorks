@@ -84,7 +84,11 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
     const identities=Object.fromEntries(Object.entries(paths).map(([name,path])=>{const bytes=execFileSync('git',['-C',sourceRoot,'show',`${h21}:${path}`]);return[name,{byteLength:bytes.length,sha256:sha(bytes)}];}));
     const capture={repair:{retryOrdinal:3,tooling:{head:h21,source:{head:h21,tree:execFileSync('git',['-C',sourceRoot,'rev-parse',`${h21}^{tree}`],{encoding:'utf8'}).trim()},sourceRoot:toolingRoot,files,identities}}};
     const executionToolingCapture=await put('execution-tooling-capture.json',JSON.stringify(capture));
-    Object.assign(executionToolingCapture,{runId:'40214209083',artifactId:'12600000001',attempt:1});
+    Object.assign(executionToolingCapture,{runId:'40214209083',artifactId:'12607298574',attempt:1});
+    const finalPaths=Object.fromEntries(Object.entries(paths).map(([name,path])=>[name,`${toolingRoot}/${path}`]));
+    const finalIdentities=Object.fromEntries(Object.entries(paths).map(([name,path])=>{const bytes=execFileSync('git',['-C',sourceRoot,'show',`${verificationSha}:${path}`]);return[name,{byteLength:bytes.length,sha256:sha(bytes)}];}));
+    const finalCapture=await put('final-execution-tooling-capture.json',JSON.stringify({repair:{retryOrdinal:4,tooling:{head:verificationSha,source:{head:verificationSha,tree:execFileSync('git',['-C',sourceRoot,'rev-parse',`${verificationSha}^{tree}`],{encoding:'utf8'}).trim()},sourceRoot:toolingRoot,files:finalPaths,identities:finalIdentities}}}));
+    Object.assign(finalCapture,{runId:'40200000003',artifactId:'12600000003',attempt:1});
     const frozen=JSON.parse(await readFile('/Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json'));
     const inputs=Object.fromEntries(frozen.assets.map(item=>[item.id,item]));
     const lock={sources:{sceneworks:{head:'42a8aff9852d01e0506df8afc466c0024b6eed8c'},inference:{head:'857f7a1996e3678a0773c3509ac0087522c19ce6'}}};
@@ -107,11 +111,11 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
       upstream[cell]={cell,runId:base?'40191507328':'40200000001',artifactId:base?'12598132624':'12600000002',attempt:1,toolingSha:base?'d6af3f2623fff31cf000cfd5d79f23069b385d39':verificationSha,reviewer:'fixture reviewer',reviewedAt:'2026-10-25T00:00:00Z',image,diagnostic,authentication,noiseSha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',inputs:refs.map(id=>({id,sha256:inputs[id].sha256})),observation:`Observed ${cell} fixture`};
     }
     const suiteSummary=await put('upstream-suite-summary.json',JSON.stringify(summary));Object.assign(suiteSummary,{runId:'40200000001',artifactId:'12600000002',attempt:1});
-    const comparison={version:'sc-26757-upstream-comparison/v1',amendmentSha256:AMENDMENT_SHA256,lockSha256:digest(lock),executionToolingCapture,upstream,rows:rows.map(row=>({rowId:row.id})),suiteSummary};
+    const comparison={version:'sc-26757-upstream-comparison/v1',amendmentSha256:AMENDMENT_SHA256,lockSha256:digest(lock),executionToolingCapture,finalExecutionToolingCapture:finalCapture,upstream,rows:rows.map(row=>({rowId:row.id})),suiteSummary};
     const path=resolve(root,'quality-upstream-comparison.json');await writeFile(path,JSON.stringify(comparison));
-    assert.deepEqual(await loadQualityAmendment(root,lock,rows,inputs,{executionToolingSha:h21,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),comparison);
+    assert.deepEqual(await loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),comparison);
     [upstream['base-four'].image,upstream['sft-four'].image]=[upstream['sft-four'].image,upstream['base-four'].image];
     await writeFile(path,JSON.stringify(comparison));
-    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{executionToolingSha:h21,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/actual three-case suite output/);
+    await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/actual three-case suite output/);
   } finally {await rm(root,{recursive:true,force:true});}
 });

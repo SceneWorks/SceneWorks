@@ -22,9 +22,9 @@ const identity=async(root,record)=>{
   requireThat(canonical(actual)===canonical({sha256:record.sha256,byteLength:record.byteLength}),'upstream evidence bytes changed');
   return safePath(root,record.file);
 };
-export function validateExecutionToolingCapture(capture,executionToolingSha,verificationSourceRoot){
+export function validateExecutionToolingCapture(capture,executionToolingSha,verificationSourceRoot,ordinal=3){
   const tooling=capture?.repair?.tooling;
-  requireThat(capture?.repair?.retryOrdinal===3&&tooling?.head===executionToolingSha&&tooling.source?.head===executionToolingSha&&tooling.sourceRoot&&tooling.files&&tooling.identities,'H21 captured execution tooling differs from retained retry producer');
+  requireThat(capture?.repair?.retryOrdinal===ordinal&&tooling?.head===executionToolingSha&&tooling.source?.head===executionToolingSha&&tooling.sourceRoot&&tooling.files&&tooling.identities,'captured execution tooling differs from retained retry producer');
   const git=(...args)=>execFileSync('git',['-C',verificationSourceRoot,...args]);
   requireThat(tooling.source.tree===git('rev-parse',`${executionToolingSha}^{tree}`).toString().trim(),'H21 captured source tree changed');
   const expected={harness:'scripts/moss-edit-terminal.mjs',harnessLibrary:'scripts/lib/moss-edit-terminal.mjs',actionController:'scripts/moss-edit-terminal-actions.mjs',actionLibrary:'scripts/lib/moss-edit-terminal-actions.mjs',browserDriver:'scripts/moss-edit-terminal-browser.mjs',browserControls:'scripts/lib/moss-edit-terminal-controls.mjs'};
@@ -37,16 +37,20 @@ export function validateExecutionToolingCapture(capture,executionToolingSha,veri
   return true;
 }
 
-export async function loadQualityAmendment(root,lock,rows,inputs,{executionToolingSha,verificationToolingSha,verificationSourceRoot}={}){
+export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,verificationToolingSha,verificationSourceRoot}={}){
   const file=resolve(root,'quality-upstream-comparison.json');
   const comparison=await json(file).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
   if(!comparison)return null;
   requireThat(sha(await readFile(resolve(root,'quality-acceptance-amendment.md')))===AMENDMENT_SHA256,'approved quality amendment bytes changed');
   requireThat(comparison.version==='sc-26757-upstream-comparison/v1'&&comparison.amendmentSha256===AMENDMENT_SHA256&&comparison.lockSha256===digest(lock),'quality comparison not bound to approved policy and frozen lock');
   const captureEntry=comparison.executionToolingCapture;
-  requireThat(captureEntry?.file==='execution-tooling-capture.json'&&String(captureEntry.runId)==='40214209083'&&/^[1-9][0-9]*$/.test(String(captureEntry.artifactId))&&captureEntry.attempt===1&&/^[a-f0-9]{40}$/.test(executionToolingSha??'')&&verificationSourceRoot,'amended review requires actual H21 execution-tooling capture');
+  requireThat(captureEntry?.file==='execution-tooling-capture.json'&&String(captureEntry.runId)==='40214209083'&&String(captureEntry.artifactId)==='12607298574'&&captureEntry.attempt===1&&historicalExecutionToolingSha==='2cd0363d59cb3eb0989bbb708000b6ffc907932a'&&verificationSourceRoot,'amended review requires actual H21 execution-tooling capture');
   const capture=await json(await identity(root,captureEntry));
-  validateExecutionToolingCapture(capture,executionToolingSha,verificationSourceRoot);
+  validateExecutionToolingCapture(capture,historicalExecutionToolingSha,verificationSourceRoot);
+  const finalEntry=comparison.finalExecutionToolingCapture;
+  requireThat(finalEntry?.file==='final-execution-tooling-capture.json'&&/^[1-9][0-9]*$/.test(String(finalEntry.runId))&&/^[1-9][0-9]*$/.test(String(finalEntry.artifactId))&&String(finalEntry.runId)!==String(captureEntry.runId)&&String(finalEntry.artifactId)!==String(captureEntry.artifactId)&&finalEntry.attempt===1&&/^[a-f0-9]{40}$/.test(executionToolingSha??'')&&executionToolingSha===verificationToolingSha&&executionToolingSha!==historicalExecutionToolingSha,'amended review requires distinct actual final execution-tooling capture');
+  const finalCapture=await json(await identity(root,finalEntry));
+  validateExecutionToolingCapture(finalCapture,executionToolingSha,verificationSourceRoot,4);
   requireThat(canonical(Object.keys(comparison.upstream??{}).sort())===canonical([...CELLS].sort())&&Array.isArray(comparison.rows)&&comparison.rows.length===8,'all four upstream cells and eight native comparisons required');
   const qualityRows=rows.filter(row=>row.anchors);
   requireThat(qualityRows.length===8&&canonical(comparison.rows.map(r=>r.rowId).sort())===canonical(qualityRows.map(r=>r.id).sort()),'quality comparison omitted or duplicated native cell');

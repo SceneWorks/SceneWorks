@@ -80,7 +80,8 @@ async function load(configPath) {
     requireThat(tooling?.sourceRoot && /^[a-f0-9]{40}$/.test(tooling.head ?? '') && canonical(treeIdentity(tooling.sourceRoot)) === canonical(tooling.source) && tooling.head === tooling.source.head, 'continuation tooling checkout changed');
     requireThat(resolve(tooling.files?.harness) === fileURLToPath(import.meta.url) && resolve(tooling.files?.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)) && resolve(tooling.files?.browserDriver) === fileURLToPath(new URL('./moss-edit-terminal-browser.mjs',import.meta.url)) && resolve(tooling.files?.browserControls) === fileURLToPath(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url)), 'continuation did not execute its declared tooling');
     if(config.repair.verificationToolingSha){
-      requireThat(config.repair.verificationToolingSha===tooling.head&&/^[a-f0-9]{40}$/.test(config.repair.executionToolingSha??'')&&config.repair.executionToolingSha!==tooling.head&&resolve(tooling.files?.qualityAmendment)===fileURLToPath(new URL('./lib/moss-edit-quality-amendment.mjs',import.meta.url)),'separate H21 execution and H22 verification tooling identities required');
+      requireThat(config.repair.verificationToolingSha===tooling.head&&config.repair.historicalExecutionToolingSha==='2cd0363d59cb3eb0989bbb708000b6ffc907932a'&&/^[a-f0-9]{40}$/.test(config.repair.executionToolingSha??'')&&resolve(tooling.files?.qualityAmendment)===fileURLToPath(new URL('./lib/moss-edit-quality-amendment.mjs',import.meta.url)),'separate historical and final execution tooling identities required');
+      execFileSync('git',['-C',tooling.sourceRoot,'merge-base','--is-ancestor',config.repair.historicalExecutionToolingSha,tooling.head]);
       execFileSync('git',['-C',tooling.sourceRoot,'merge-base','--is-ancestor',config.repair.executionToolingSha,tooling.head]);
     }
     for (const [name, path] of Object.entries(tooling.files)) requireThat(canonical(await fileIdentity(path)) === canonical(tooling.identities[name]), `continuation tooling ${name} changed`);
@@ -633,8 +634,13 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
           const sample=prior.appendOnlyTails?.find(item=>item.file===known.sampleFile),sealed=prior.files.find(item=>item.file===known.sampleFile),memory=await json(resolve(dir,'memory.json'));
           requireThat((sample?sample.stoppedSha256===memory.raw?.sha256&&sample.stoppedByteLength===memory.raw.byteLength:sealed?.sha256===memory.raw?.sha256&&sealed.byteLength===memory.raw.byteLength)&&(await fileIdentity(resolve(dir,'memory-raw.jsonl'))).sha256===memory.raw.sha256,'original canceled-job whole-device sample changed');
         } else {
-          const oldCapture=await json(resolve(state.root,`continuation-prior-${ordinal}-root/captures/advanced-mlx-sft-replay${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`));
-          validateFailedUiCapture(oldCapture,digest(state.lock),{historical:ordinal===2?'h19':null});
+          const pendingId=current.pendingUiAttemptRowId??'advanced-mlx-sft-replay';
+          if(ordinal>=4) {
+            const row=state.plan.rows.find(item=>item.id===pendingId),pendingStartPath=resolve(state.root,'attempts/mlx',`${pendingId}.start.json`),pendingStart=await json(pendingStartPath),pendingResolution=await json(resolve(state.root,'attempts/mlx',`${pendingId}.resolution.json`)),pendingReceipt=await json(resolve(state.root,'rows',pendingId,'receipt.json'));
+            requireThat(row?.backend==='mlx'&&row.transport.startsWith('ui-')&&current.pendingUiAttemptRowId===pendingId&&current.pendingUiAttemptSha256===digest(pendingStart)&&pendingStart.lockSha256===digest(state.lock)&&prior.files.find(item=>item.file===`evidence/attempts/mlx/${pendingId}.start.json`)?.sha256===(await fileIdentity(pendingStartPath)).sha256&&!prior.files.some(item=>item.file===`evidence/rows/${pendingId}/receipt.json`)&&pendingResolution.state==='TERMINAL_VERIFIED'&&pendingResolution.attemptSha256===digest(pendingStart)&&pendingReceipt.execution==='VERIFIED'&&pendingReceipt.rowId===pendingId,'new retry did not preserve and resolve only its prior unsubmitted UI intent');
+          }
+          const oldCapture=await json(resolve(state.root,`continuation-prior-${ordinal}-root/captures/${pendingId}${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`));
+          validateFailedUiCapture(oldCapture,digest(state.lock),{historical:ordinal===2?'h19':null,rowId:pendingId});
         }
         previous=current;
       }
@@ -655,7 +661,7 @@ async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
   const requireEvidence = async (name, check) => { try { await check(); } catch (error) { findings.push({ item: name, state: ['ENOENT','MOSS_AWAITING_RESOLUTION'].includes(error.code) ? 'AWAITING' : 'FAIL', reason: error.code === 'ENOENT' ? 'required evidence missing' : error.message }); } };
   let qualityComparison=null;
-  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{executionToolingSha:state.config.repair?.executionToolingSha,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
+  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:state.config.repair?.historicalExecutionToolingSha,executionToolingSha:state.config.repair?.executionToolingSha,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
   let acceptedRecovery=false;
   if(state.config.repair)await requireEvidence('r16-original-checker-recovery',async()=>{acceptedRecovery=await validateRecoveryAdjudication(state);});
   for (const backend of ['mlx','cuda']) await requireEvidence(`dispatch-${backend}`,async () => {

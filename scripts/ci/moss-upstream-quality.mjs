@@ -2,10 +2,10 @@
 import {readFile,writeFile,appendFile,mkdir,lstat,stat,realpath,readdir,cp,symlink} from 'node:fs/promises';
 import {createReadStream,createWriteStream} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {resolve,dirname,sep} from 'node:path';
+import {resolve,dirname} from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {safe,verifyPayload as verifyPriorPayload,validateRuntime} from './moss-upstream-reference.mjs';
+import {safe,verifyPayload as verifyPriorPayload,validateRuntime} from './moss-upstream-reference-common.mjs';
 
 export const PRIOR_PAYLOAD='/Users/michael/.codex/epic-runs/sc-26752/upstream-reference-actions-r15/payload';
 export const CASES_STAGED='/Users/michael/.codex/epic-runs/sc-26752/h22-upstream-comparison-prep/payload';

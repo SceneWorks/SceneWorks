@@ -61,6 +61,25 @@ export async function verifyReplayForm(page, expected, actions) {
   actions.push({ at: now(), action: 'verify-restored-form', values: actual, referenceAssetIds: expected.referenceAssetIds, nativeOutput: native.output });
 }
 
+export async function waitForReplayForm(page, expected, actions, timeoutMs=10000) {
+  const started=Date.now(),deadline=started+timeoutMs;
+  let lastError;
+  try {
+    do {
+      page.setDefaultTimeout(Math.max(1,Math.min(1000,deadline-Date.now())));
+      try {
+        await verifyReplayForm(page,expected,actions);
+        actions.push({at:now(),action:'observe-complete-replay-hydration',expectedModel:expected.model,elapsedMs:Date.now()-started});
+        return;
+      } catch(error) { lastError=error; }
+      if(Date.now()>=deadline)break;
+      await page.waitForTimeout(Math.min(100,deadline-Date.now()));
+    } while(true);
+    const model=await modelPicker(page).inputValue({timeout:1000}).catch(error=>`unavailable: ${error.message}`);
+    throw Error(`actual replay form did not stabilize in ${Date.now()-started} ms: ${lastError?.message}; Model expected ${expected.model}, observed ${model}`);
+  } finally {page.setDefaultTimeout(30000);}
+}
+
 export async function configure(page, expected, kind, actions) {
   if (kind === 'editor') {
     await select(page.locator('.ie-insp-body select.ie-select').first(), expected.model, actions, 'Editor model');

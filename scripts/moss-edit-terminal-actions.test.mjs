@@ -1,5 +1,6 @@
 import test from 'node:test';
 import { constants } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm } from 'node:fs/promises';
@@ -135,7 +136,7 @@ test('continuation preserves original bytes and dispatches only untouched rows a
 });
 test('H18 pre-POST UI failure retries the exact unresolved intent once and keeps all seven verified rows',async t=>{
   const root=await temporary('retry'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));
-  const rows=Array.from({length:25},(_,index)=>({id:index===6?'advanced-mlx-sft':index===7?'advanced-mlx-sft-replay':`row-${index}`,backend:'mlx'})),plan={rows},lockSha256='a'.repeat(64);
+  const rows=Array.from({length:25},(_,index)=>({id:index===6?'advanced-mlx-sft':index===7?'advanced-mlx-sft-replay':`row-${index}`,backend:'mlx',...(index===7?{transport:'ui-workflow'}:{})})),plan={rows},lockSha256='a'.repeat(64);
   for(const row of rows.slice(0,7))await save(resolve(evidence,'rows',row.id,'receipt.json'),{execution:'VERIFIED',rowId:row.id});
   const original=await filesUnder(evidence),fields={transport:'ui',requestSha256:'b'.repeat(64),bindingSha256:'c'.repeat(64),lockSha256};
   const ticket=await reserveAttempt(evidence,'mlx','advanced-mlx-sft-replay',fields);
@@ -156,6 +157,31 @@ test('H18 pre-POST UI failure retries the exact unresolved intent once and keeps
   assert.deepEqual(await filesUnder(resolve(evidence,'rows')),original.filter(item=>item.file.startsWith('rows/')).map(item=>({...item,file:item.file.slice(5)})));
   await assertDispatchClear(evidence,'mlx');await assert.rejects(()=>retryRemainingRows(evidence,plan,lockSha256));
   assert.equal((await json(resolve(evidence,'attempts/mlx/advanced-mlx-sft-replay.resolution.json'))).jobId,'one-retried-ui-job');
+});
+test('last-row retry preserves 24 verified predecessors and rejects any second dispatch or observed POST',async t=>{
+  const root=await temporary('last-ui-retry'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));
+  const rows=Array.from({length:25},(_,index)=>({id:index===6?'advanced-mlx-sft':index===7?'advanced-mlx-sft-replay':index===24?'seeded-mlx-latents-replay':`row-${index}`,backend:'mlx',transport:index===24?'ui-history':'rest'})),plan={rows},lockSha256='a'.repeat(64),fields={transport:'ui',requestSha256:'b'.repeat(64),bindingSha256:'c'.repeat(64),lockSha256};
+  for(const row of rows.slice(0,24))await save(resolve(evidence,'rows',row.id,'receipt.json'),{execution:'VERIFIED',rowId:row.id});
+  const prior=await filesUnder(evidence),ticket=await reserveAttempt(evidence,'mlx',rows[24].id,fields);
+  const capture={rowId:rows[24].id,lockSha256,submissionPhase:'before-generate-attempt',error:'actual replay did not restore Model',submissions:[],imageJobPosts:[],actions:[{action:'Use this recipe'}]};
+  assert.equal(validateFailedUiCapture(capture,lockSha256,{rowId:rows[24].id}),true);
+  assert.throws(()=>validateFailedUiCapture({...capture,imageJobPosts:[{id:'unexpected'}]},lockSha256,{rowId:rows[24].id}),/pre-submission/);
+  assert.deepEqual((await retryRemainingRows(evidence,plan,lockSha256,fields.bindingSha256)).map(row=>row.id),[rows[24].id]);
+  assert.deepEqual(rows.map(row=>continuationRowDisposition(row,[rows[24]],{retry:true})),rows.map((_,index)=>({run:index===24,reuseUiIntent:index===24})));
+  await assert.rejects(()=>assertDispatchClear(evidence,'mlx'),{code:'MOSS_AWAITING_RESOLUTION'});
+  await assert.rejects(()=>retryRemainingRows(evidence,plan,lockSha256,'d'.repeat(64)),/exact unresolved UI intent/);
+  const adopted=await resumeUiAttempt(evidence,'mlx',rows[24].id,fields);assert.deepEqual(adopted.start,ticket.start);
+  await resolveAttempt(adopted,'TERMINAL_VERIFIED',{jobId:'only-last-row-job'});
+  assert.deepEqual(await filesUnder(resolve(evidence,'rows')),prior.filter(item=>item.file.startsWith('rows/')).map(item=>({...item,file:item.file.slice(5)})));
+  await assertDispatchClear(evidence,'mlx');
+});
+const stoppedH21='/Volumes/Models/sceneworks-terminal-sc-26752/moss-execute-40198829729-1-mlx';
+test('actual stopped H21 frontier is exactly the unsubmitted last MLX UI row',{skip:!existsSync(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-3/failure.json'))},async()=>{
+  const evidence=resolve(stoppedH21,'evidence'),lock=await json(resolve(evidence,'protocol.lock.json')),plan=await json(resolve(evidence,'cases.json')),binding=await json(resolve(evidence,'bindings/mlx.json'));
+  const capture=await json(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-3/failure.json'));
+  assert.deepEqual((await retryRemainingRows(evidence,plan,digest(lock),digest(binding))).map(row=>row.id),['seeded-mlx-latents-replay']);
+  assert.equal(validateFailedUiCapture(capture,digest(lock),{rowId:'seeded-mlx-latents-replay'}),true);
+  assert.equal(capture.imageJobPosts.length,0);assert.equal(capture.submissions.length,0);
 });
 test('known submitted canceled job resumes after eight verified rows without dispatching it again',async t=>{
   const root=await temporary('known-cancel'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));

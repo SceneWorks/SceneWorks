@@ -158,7 +158,7 @@ test('driver has no direct mutation transport or network interception fallback',
   assert.doesNotMatch(source,/reserveAttempt\s*\(/);
   assert.match(source,/await import\(pathToFileURL\(playwrightModule\)\.href\)/);
   assert.match(source,/Network\.eventSourceMessageReceived/);
-  assert.match(source,/await verifyReplayForm\(page, expected, actions\)/);
+  assert.match(source,/await waitForReplayForm\(page, expected, actions\)/);
 });
 
 // Inert locator protocol only: no browser, API, window or generated image is started.
@@ -201,7 +201,7 @@ test('both browser entrypoints use the fresh parent/leaf helper before importing
 
 test('production control extraction remains frozen and latent guards use the same tested labelled Engine control',async()=>{
   const driver=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8'),controller=await readFile(new URL('./moss-edit-terminal-actions.mjs',import.meta.url),'utf8'),controls=await readFile(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url),'utf8');
-  assert.match(driver,/import \{[^\n]*configure, verifyReplayForm \} from '\.\/lib\/moss-edit-terminal-controls.mjs'/);
+  assert.match(driver,/import \{[^\n]*configure, waitForReplayForm \} from '\.\/lib\/moss-edit-terminal-controls.mjs'/);
   assert.match(controller,/browserControls:'lib\/moss-edit-terminal-controls.mjs'/);
   assert.match(driver,/await select\(labelledSelect\(page,'Engine'\), engine/);
   assert.doesNotMatch(controls,/\bfetch\s*\(|\.request\.|\.route\s*\(|node:|process\./);

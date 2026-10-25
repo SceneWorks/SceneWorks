@@ -389,7 +389,6 @@ export async function validateContinuation(config) {
       await execFile('git',['-C',c.toolingRoot,'merge-base','--is-ancestor',previousToolingSha,c.toolingSha]);
       await assertOriginalEvidence(c.retry.artifactRoot,checkpoint,{exact:true});
       await assertH18CheckpointFiles(config.root,checkpoint,{archiveTag:`prior-${ordinal}`});
-      capturePath=`captures/advanced-mlx-sft-replay${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`;
     } else {
       requireThat(checkpoint.actualRunId===H18_RETRY_RUN_ID&&checkpoint.attempt===1&&checkpoint.artifactId===H18_RETRY_ARTIFACT_ID&&checkpoint.toolingSha===H18_RETRY_TOOLING_SHA,'H18 failed-continuation artifact identity changed');
       await assertH18CheckpointFiles(config.root,checkpoint);
@@ -403,12 +402,13 @@ export async function validateContinuation(config) {
       const submitted=await submittedCanceledRemainingRows(resolve(config.root,'evidence'),plan,digest(lock),digest(binding),checkpoint,config.root);
       remaining=submitted.remaining;recovery=submitted.recovery;
     } else {
+      if(chained)capturePath=`captures/${pending?.id}${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`;
       capture=await json(resolve(config.root,capturePath));
-      validateFailedUiCapture(capture,digest(lock),{historical:!chained?'h18':ordinal===2?'h19':null});
-      remaining=await retryRemainingRows(resolve(config.root,'evidence'),plan,digest(lock));
+      validateFailedUiCapture(capture,digest(lock),{historical:!chained?'h18':ordinal===2?'h19':null,rowId:pending?.id});
+      remaining=await retryRemainingRows(resolve(config.root,'evidence'),plan,digest(lock),digest(binding));
     }
     requireThat(!await optional(resolve(config.root,ordinal===1?'continuation-retry-start.json':`continuation-retry-${ordinal}-start.json`))&&!await optional(resolve(config.root,'execution-continuation.json')),'continuation retry already started or completed');
-    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,recovery,ordinal,previousToolingSha};
+    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,recovery,ordinal,previousToolingSha,pendingRowId:capture?.rowId};
   } else {
     await assertOriginalEvidence(resolve(config.root,'evidence'),manifest,{exact:true});
     remaining=await continuationRemainingRows(resolve(config.root,'evidence'),plan);
@@ -445,7 +445,7 @@ export async function executeBackend(config) {
         await mkdir(dirname(destination),{recursive:true,mode:0o700});
         await copyFile(safePath(config.root,item.file),destination,constants.COPYFILE_EXCL);
       }
-      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256,uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),...(original.retry.recovery?{submittedRecovery:original.retry.recovery}:{}),at:new Date().toISOString()};
+      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256,uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),...(original.retry.recovery?{submittedRecovery:original.retry.recovery}:{}),...(original.retry.pendingRowId&&original.retry.ordinal>=4?{pendingUiAttemptRowId:original.retry.pendingRowId,pendingUiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx',`${original.retry.pendingRowId}.start.json`)))}:{}),at:new Date().toISOString()};
       const file=original.retry.ordinal===1?'continuation-retry.json':`continuation-${retrySuffix}.json`;
       await save(resolve(config.root,original.retry.ordinal===1?'continuation-retry-start.json':`continuation-${retrySuffix}-start.json`),retryStart);
       await save(resolve(config.root,'evidence',file),retryStart);
@@ -603,7 +603,7 @@ export async function finalize(config) {
     const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
     const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
     const retry=await latestRetry(root);
-    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
+    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,historicalExecutionToolingSha:'2cd0363d59cb3eb0989bbb708000b6ffc907932a',executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
   }
   await save(launchPath,launch);
   for(const entry of await filesUnder(config.reviewRoot)) {
