@@ -442,6 +442,42 @@ pub fn stage_managed_minimax_h3_import_source(
 pub const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
 pub const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
 
+/// The ACTUAL snapshot roots an import binds its shared components against: the private
+/// source-library copies [`stage_component_snapshots`] materialized inside the data dir, not the
+/// operator tier/base scratch trees a test happened to stage first. Mutating or asserting against
+/// any other root no longer describes the committed components.
+pub fn shared_component_snapshot(data_dir: &Path) -> PathBuf {
+    component_snapshot(data_dir, "MiniMaxAI/MiniMax-H3", SHARED_REVISION)
+}
+
+/// The tiered component snapshot root (the `SceneWorks/minimax-h3-mlx` rehost) an import binds.
+pub fn tier_component_snapshot(data_dir: &Path) -> PathBuf {
+    component_snapshot(data_dir, "SceneWorks/minimax-h3-mlx", TIER_REVISION)
+}
+
+fn component_snapshot(data_dir: &Path, repo: &str, revision: &str) -> PathBuf {
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .repository_root(repo)
+        .expect("fixture component repository")
+        .join("snapshots")
+        .join(revision)
+}
+
+/// Reset the private bound component snapshots to their committed fixture content. A test that
+/// mutates or removes a bound component restores the exact bytes the import's frozen closure was
+/// captured against before its next case, so later cases never inherit earlier mutations.
+pub fn restage_component_snapshots(data_dir: &Path) {
+    for repo in ["MiniMaxAI/MiniMax-H3", "SceneWorks/minimax-h3-mlx"] {
+        let root = sceneworks_core::hf_home::model_source_library(data_dir)
+            .repository_root(repo)
+            .expect("fixture component repository");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).expect("fixture snapshot reset removes the repo tree");
+        }
+    }
+    stage_component_snapshots(data_dir);
+}
+
 /// Populate only synthetic source-library snapshots selected by the fixture's private data root.
 /// Callers retain their scoped CacheRootGuard; this helper never reads network or model payloads.
 pub fn stage_component_snapshots(data_dir: &Path) {

@@ -134,19 +134,24 @@ fn an_imported_h3_dit_reaches_the_mlx_provider_as_its_transformer_with_its_ident
         canonical(&tiers.path().join("q4").join("transformer")),
         "the resident builtin DiT must not be substituted for the import"
     );
+    // The bound shared components are the import's OWN source-library snapshots — the frozen
+    // closure the import committed — not the operator scratch trees the fixture staged from.
+    let data_dir = minimax_h3_data_dir(tiers.path());
+    let tier_snapshot = crate::minimax_h3_import_fixture::tier_component_snapshot(&data_dir);
+    let shared_snapshot = crate::minimax_h3_import_fixture::shared_component_snapshot(&data_dir);
     // The companion the binding records is real at the sibling the provider probes.
     assert_eq!(
         canonical(&transformer.with_file_name("transformer_ref")),
-        canonical(&tiers.path().join("q4").join("transformer_ref"))
+        canonical(&tier_snapshot.join("q4").join("transformer_ref"))
     );
     assert_eq!(
         canonical(&dir(Some(&spec.weights)).join("vae")),
-        canonical(&base.path().join("vae"))
+        canonical(&shared_snapshot.join("vae"))
     );
     assert_eq!(
         canonical(&dir(spec.components.get("text_encoder"))),
-        canonical(&tiers.path().join("q4").join("text_encoder")),
-        "the resident text encoder is reused"
+        canonical(&tier_snapshot.join("q4").join("text_encoder")),
+        "the frozen tier snapshot's text encoder is the bound component"
     );
     assert_eq!(spec.quantize, None, "the imported DiT is dense");
     // The base partition's lattice, not the Wan stride.
@@ -774,7 +779,27 @@ fn linked_mixed_case_shards_reach_the_provider_as_lowercase_canonical_files() {
     std::fs::write(&index_file, index.to_string()).unwrap();
     let plans = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
     let root = plans.approve_root(library.path()).unwrap();
-    let compiled = plans.compile_linked(&root.root_id, "linked-h3").unwrap();
+    // A real linked import commits the SAME frozen component closure a managed one does; the
+    // hand-compiled linked plan must carry it too, or the resolve is an actionable legacy refusal.
+    let declaration = json!({"family":"minimax-h3","baseModel":"minimax_h3",
+        "minimaxH3Partition":"fl2va","importComponentTier":"q4",
+        "downloads":crate::minimax_h3_import_fixture::component_downloads("q4", "fl2va")});
+    let mut context = sceneworks_core::model_artifacts::provenance::import_declaration_context(
+        declaration.as_object().unwrap(),
+    )
+    .unwrap();
+    context
+        .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+        .unwrap()["componentClosure"] =
+        sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
+            &data,
+            declaration.as_object().unwrap(),
+            &|| Ok(()),
+        )
+        .unwrap();
+    let compiled = plans
+        .compile_linked_with_context(&root.root_id, "linked-h3", context)
+        .unwrap();
     let mut entry = original.entry.clone();
     entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}));
     let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
@@ -828,21 +853,28 @@ fn incomplete_or_incompatible_imported_shared_components_never_reach_provider_lo
         &["transformer", "transformer_ref"],
     );
     let base = minimax_h3_base_root("mm_components_base_");
-    let encoder = tiers.path().join("q4/text_encoder");
-    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
-        &minimax_h3_data_dir(tiers.path()),
-        "component_test",
-    );
+    let data = minimax_h3_data_dir(tiers.path());
+    let imported =
+        crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(&data, "component_test");
+    // The components an import actually binds are its committed source-library snapshots, not the
+    // operator scratch trees; every case mutates the BOUND bytes and restores them exactly.
+    let tier_snapshot = crate::minimax_h3_import_fixture::tier_component_snapshot(&data);
+    let shared_snapshot = crate::minimax_h3_import_fixture::shared_component_snapshot(&data);
+    let encoder = tier_snapshot.join("q4/text_encoder");
     for file in [
         encoder.join("config.json"),
-        base.path().join("vae/config.json"),
-        base.path().join("audio_vae/config.json"),
-        base.path().join("FL2VA/audio_vae/metadata.json"),
-        base.path().join("tokenizer/tokenizer.json"),
-        base.path().join("tokenizer/tokenizer_config.json"),
+        shared_snapshot.join("vae/config.json"),
+        shared_snapshot.join("audio_vae/config.json"),
+        shared_snapshot.join("FL2VA/audio_vae/metadata.json"),
+        shared_snapshot.join("tokenizer/tokenizer.json"),
+        shared_snapshot.join("tokenizer/tokenizer_config.json"),
     ] {
         for missing in [true, false] {
-            crate::minimax_h3_import_fixture::write_shared_configs(base.path(), &encoder);
+            crate::minimax_h3_import_fixture::restage_component_snapshots(&data);
+            crate::minimax_h3_import_fixture::write_shared_configs(
+                base.path(),
+                &tiers.path().join("q4/text_encoder"),
+            );
             if missing {
                 std::fs::remove_file(&file).unwrap();
             } else {
@@ -1698,4 +1730,59 @@ fn supervised_h3_cpu_preparation_returns_the_task_result_without_cancel() {
         .await
     });
     assert_eq!(result.expect("the prepared result reaches the caller"), 42);
+}
+
+/// Finding 4's generation-time guarantee on the REAL preparation path: component bytes that
+/// drifted from the import's FROZEN closure are refused by component and repair action, never
+/// silently bound for the render. The mutation targets the bound source-library snapshot, not an
+/// operator scratch tree — the bytes the render would actually acquire.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_mutated_bound_component_refuses_generation_through_the_frozen_closure() {
+    let tiers = minimax_h3_tier_root("mm_drift_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_drift_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
+    let data = minimax_h3_data_dir(tiers.path());
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &data,
+        "closure_drift_test",
+    );
+    let bound = crate::minimax_h3_import_fixture::tier_component_snapshot(&data)
+        .join("q4")
+        .join("transformer_ref")
+        .join("config.json");
+    let original = std::fs::read(&bound).unwrap();
+    std::fs::write(&bound, b"{\"mutated\":true}").unwrap();
+
+    let probe = ArmProbe::default();
+    let error = drive_minimax_h3_arm(
+        tiers.path(),
+        base.path(),
+        &probe,
+        &imported_minimax_h3_request("closure_drift_test", &imported.entry),
+    )
+    .map(|(_decoded, raw)| raw)
+    .expect_err("component content that drifted from the frozen closure must refuse the render");
+    let message = error.to_string();
+    assert!(
+        message.contains("incompatible-component"),
+        "the refusal keeps the checkpoint-plan refusal vocabulary: {message}"
+    );
+    assert!(
+        message.contains("H3 component content drift")
+            || message.contains("frozen H3 component was not acquired"),
+        "the refusal names the drifted component: {message}"
+    );
+    assert!(
+        message.contains("repair/reimport or rescan"),
+        "the refusal states the recovery action: {message}"
+    );
+    assert!(
+        probe.spec.lock().unwrap().is_none(),
+        "drifted content never reaches a provider load"
+    );
+    std::fs::write(&bound, original).unwrap();
 }
