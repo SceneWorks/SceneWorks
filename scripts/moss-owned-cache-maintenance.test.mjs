@@ -99,10 +99,16 @@ test('insufficient free capacity skips cache copying and preserves original cach
   assert.equal(receipt.cache.state, 'insufficient-proved-copy-headroom-original-cache-retained');
   assert.ok(receipt.cache.requiredFreeBytes > receipt.cache.freeBeforeCopy.free);
 });
-test('workflow uses reviewed in-memory helper before checkout, no setup/install/GPU command', async () => {
+test('action-free recovery gates native job preparation and keeps the normal fresh build', async () => {
   const workflow = await readFile(new URL('../.github/workflows/moss-edit-terminal.yml', import.meta.url), 'utf8');
-  const build = workflow.slice(workflow.indexOf('  build-native:')), step = build.slice(build.indexOf('    steps:'), build.indexOf('      - uses: actions/checkout'));
-  assert.match(step, /matrix.backend == 'cuda'/); assert.match(step, /contents\/scripts\/ci\/moss-owned-cache-maintenance.mjs\?ref=\$env:MOSS_SOURCE_SHA/);
+  const recovery = workflow.slice(workflow.indexOf('  windows-maintenance:'), workflow.indexOf('  build-native:'));
+  const build = workflow.slice(workflow.indexOf('  build-native:')), step = recovery.slice(recovery.indexOf('    steps:'));
+  assert.match(recovery, /^    if: inputs.phase == 'execute'$/m);
+  assert.match(recovery, /^    runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+  assert.doesNotMatch(recovery, /\buses:/); assert.doesNotMatch(recovery, /\bneeds:/);
+  assert.match(build, /^    needs: windows-maintenance$/m);
+  assert.doesNotMatch(build, /--moss-disk-maintenance/);
+  assert.match(step, /contents\/scripts\/ci\/moss-owned-cache-maintenance.mjs\?ref=\$env:MOSS_SOURCE_SHA/);
   assert.match(step, /externals\\node24\\bin\\node.exe/); assert.match(step, /\$program \| & \$node --input-type=module - --moss-disk-maintenance/);
   assert.doesNotMatch(step, /WriteAllText|Set-Content|npm |cargo |nvidia-smi|Remove-Item/);
   assert.match(build, /node source\\scripts\\moss-edit-terminal-actions.mjs build/);

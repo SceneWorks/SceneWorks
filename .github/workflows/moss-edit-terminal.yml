@@ -150,26 +150,15 @@ jobs:
           path: ${{ inputs.upload_path }}/
           if-no-files-found: error
           retention-days: 90
-  build-native:
+  windows-maintenance:
     if: inputs.phase == 'execute'
-    strategy:
-      fail-fast: false
-      matrix:
-        backend: [mlx, cuda]
-    runs-on: ${{ matrix.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
-    timeout-minutes: 180
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 15
     env:
-      MOSS_BACKEND: ${{ matrix.backend }}
-      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
-      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
-      CUDA_COMPUTE_CAP: '120'
-      CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
-      SCENEWORKS_GPU_ID: '1'
+      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-cuda
     steps:
-      # Run before checkout/setup: D: may have no room for another worktree or model copy.
+      # No uses steps: run before another job prepares/downloads its action dependencies.
       - name: Reclaim only verified stopped MOSS copies and conditionally copy the R6 build cache
-        if: matrix.backend == 'cuda'
         shell: powershell
         env:
           MOSS_MAINTENANCE_TOKEN: ${{ github.token }}
@@ -187,6 +176,24 @@ jobs:
           # Stream exact-ref source in memory; no disk write, checkout, tool install or GPU probe.
           $program | & $node --input-type=module - --moss-disk-maintenance
           if ($LASTEXITCODE -ne 0) { throw 'Guarded stopped-run disk recovery failed' }
+  build-native:
+    needs: windows-maintenance
+    if: inputs.phase == 'execute'
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [mlx, cuda]
+    runs-on: ${{ matrix.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 180
+    env:
+      MOSS_BACKEND: ${{ matrix.backend }}
+      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
+      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
+      CUDA_COMPUTE_CAP: '120'
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
+      SCENEWORKS_GPU_ID: '1'
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
