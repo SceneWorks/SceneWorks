@@ -142,7 +142,7 @@ export async function openAsset(page, asset, actions) {
   await tile.waitFor({ state: 'visible' });
   requireThat(await tile.count() === 1, `original asset tile is ambiguous: ${asset.id}`);
   await tile.dblclick(); actions.push({ at: now(), action: 'open-asset', assetId: asset.id, displayName: asset.displayName });
-  await page.getByRole('button', { name: 'Save As…', exact: true }).waitFor({ state: 'visible' });
+  await page.getByLabel('Asset preview', { exact: true }).getByRole('button', { name: 'Save As…', exact: true }).waitFor({ state: 'visible' });
 }
 
 async function originFor(state, rowId, sampleIndex, read) {
@@ -181,11 +181,25 @@ async function dropFile(page, path, actions) {
   actions.push({ at: now(), action: 'drop-workflow-file', file: basename(path), sha256: sha(bytes) });
 }
 
+export async function selectedAssetExport(page,state,asset) {
+  const preview=page.getByLabel('Asset preview', { exact: true });
+  requireThat(await preview.count()===1,'selected asset preview is ambiguous');
+  const tensor=asset.type==='tensor',control=tensor?preview.getByRole('link', { name: 'Download portable workflow (.json)', exact: true }):preview.getByRole('button', { name: 'Save As…', exact: true });
+  requireThat(await control.count()===1,'selected asset export control is ambiguous');
+  if(tensor) {
+    const companion=asset.extra?.workflowCompanion?.path,href=await control.getAttribute('href');
+    const url=href?new URL(href):null,api=new URL(state.binding.endpoint.apiUrl);
+    requireThat(companion&&url?.origin===api.origin&&decodeURIComponent(url.pathname)===`/api/v1/projects/${asset.projectId}/files/${companion}`,'preview workflow export belongs to another asset');
+  }
+  return control;
+}
+
 async function workflowReplay(page, state, row, origin, expected, uploaded, observation, actions, root) {
   await openAsset(page, origin.asset, actions);
   const tensor = origin.asset.type === 'tensor';
+  const exportControl=await selectedAssetExport(page,state,origin.asset);
   const downloadEvent = page.waitForEvent('download');
-  await click(tensor ? page.getByRole('link', { name: 'Download portable workflow (.json)', exact: true }) : page.getByRole('button', { name: 'Save As…', exact: true }), actions, tensor ? 'Download portable workflow (.json)' : 'Save As…');
+  await click(exportControl, actions, tensor ? 'Download portable workflow (.json)' : 'Save As…');
   const download = await downloadEvent, file = tensor ? 'original.sceneworks-workflow.json' : 'original.png';
   requireThat(!await download.failure(), 'actual browser workflow download failed'); await download.saveAs(resolve(root, file));
   const bytes = await readFile(resolve(root, file));

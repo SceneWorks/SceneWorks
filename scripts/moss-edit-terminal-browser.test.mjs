@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile, lstat, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { createFreshCaptureDirectory, captureUi, capturePackageInstallUi, openAsset, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
+import { createFreshCaptureDirectory, captureUi, capturePackageInstallUi, openAsset, selectedAssetExport, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
 import { createPlan, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
 
 const inputs = { provenance: 'inert browser route fixture', single_case: { references: ['B'], width: 768, height: 512, prompt: 'single' },
@@ -31,6 +31,17 @@ test('UI driver rejects REST/MCP or cancellation allocation rather than dispatch
   assert.throws(() => describeUiRow({transport:'rest'}), /allocated UI/);
   assert.throws(() => describeUiRow({transport:'mcp'}), /allocated UI/);
   assert.throws(() => describeUiRow({transport:'ui-full',cancelAtDenoise:true}), /not allocated/);
+});
+
+test('workflow replay selects only the active preview export when background has the same link',async()=>{
+  const asset={type:'tensor',projectId:'project-one',extra:{workflowCompanion:{path:'assets/tensors/original.sceneworks-workflow.json'}}};
+  const href='http://127.0.0.1:17333/api/v1/projects/project-one/files/assets/tensors/original.sceneworks-workflow.json';
+  const state={binding:{endpoint:{apiUrl:'http://127.0.0.1:17333'}}};
+  const link=value=>({count:async()=>1,getAttribute:async()=>value});
+  let activeHref=href,scoped=0;
+  const page={getByRole:()=>{throw Error('global link lookup would match background and preview');},getByLabel:(name)=>{assert.equal(name,'Asset preview');return {count:async()=>1,getByRole:(role,options)=>{assert.equal(role,'link');assert.equal(options.name,'Download portable workflow (.json)');scoped++;return link(activeHref);}}}};
+  assert.equal(await selectedAssetExport(page,state,asset).then(control=>control.getAttribute('href')),href);assert.equal(scoped,1);
+  for(const changed of [href.replace('project-one','project-two'),href.replace('127.0.0.1:17333','localhost:17333'),href.replace('/api/v1/','/proxy/api/v1/')]){activeHref=changed;await assert.rejects(()=>selectedAssetExport(page,state,asset),/another asset/);}
 });
 
 test('binary multipart bytes survive exact extraction including NUL and CRLF, with quoted boundary', () => {
@@ -154,7 +165,7 @@ test('driver has no direct mutation transport or network interception fallback',
 function assetLibrary(assets) {
   const opened=[];let search='',type='';
   const control={async click(){},async fill(value){search=value;},async inputValue(){return search;},async selectOption(value){type=value;}};
-  const page={getByRole(role){return role==='combobox'?{...control,async inputValue(){return type;}}:{...control,async waitFor(){}};},locator(selector){
+  const page={getByRole(role){return role==='combobox'?{...control,async inputValue(){return type;}}:{...control,async waitFor(){}};},getByLabel(name){assert.equal(name,'Asset preview');return {getByRole(role,options){assert.equal(role,'button');assert.equal(options.name,'Save As…');return {async waitFor(){}};}};},locator(selector){
     if(selector==='nav')return {getByRole(){return control;}};
     const match=/^\.asset-tile\[data-asset-id=(".*")\]$/.exec(selector);assert.ok(match,`selection must use exact asset identity: ${selector}`);
     const matches=assets.filter(asset=>asset.id===JSON.parse(match[1]));

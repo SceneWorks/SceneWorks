@@ -6,9 +6,9 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport } from './lib/moss-edit-terminal.mjs';
+import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, continuationRemainingRows, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
@@ -133,6 +133,37 @@ test('continuation preserves original bytes and dispatches only untouched rows a
   await assert.rejects(()=>assertOriginalEvidence(root,manifest),/original evidence bytes changed/);
   await assert.rejects(()=>continuationRemainingRows(root,plan));
 });
+test('H18 pre-POST UI failure retries the exact unresolved intent once and keeps all seven verified rows',async t=>{
+  const root=await temporary('retry'),evidence=resolve(root,'evidence');t.after(()=>rm(root,{recursive:true,force:true}));
+  const rows=Array.from({length:25},(_,index)=>({id:index===6?'advanced-mlx-sft':index===7?'advanced-mlx-sft-replay':`row-${index}`,backend:'mlx'})),plan={rows},lockSha256='a'.repeat(64);
+  for(const row of rows.slice(0,7))await save(resolve(evidence,'rows',row.id,'receipt.json'),{execution:'VERIFIED',rowId:row.id});
+  const original=await filesUnder(evidence),fields={transport:'ui',requestSha256:'b'.repeat(64),bindingSha256:'c'.repeat(64),lockSha256};
+  const ticket=await reserveAttempt(evidence,'mlx','advanced-mlx-sft-replay',fields);
+  const capture={rowId:ticket.id,lockSha256,error:"locator.click: Error: strict mode violation: getByRole('link', { name: 'Download portable workflow (.json)', exact: true }) resolved to 2 elements",submissions:[],imageJobPosts:[]};
+  assert.equal(validateFailedUiCapture(capture,lockSha256),true);
+  for(const mutation of [{submissions:[{}]},{imageJobPosts:[{}]},{error:'different UI failure'}])assert.throws(()=>validateFailedUiCapture({...capture,...mutation},lockSha256),/pre-submission/);
+  const remaining=await retryRemainingRows(evidence,plan,lockSha256);
+  assert.deepEqual(remaining.map(row=>row.id),rows.slice(7).map(row=>row.id));
+  assert.deepEqual(rows.map(row=>continuationRowDisposition(row,remaining,{retry:true})),rows.map((_,index)=>({run:index>=7,reuseUiIntent:index===7})));
+  await assert.rejects(()=>assertDispatchClear(evidence,'mlx'),{code:'MOSS_AWAITING_RESOLUTION'});
+  const adopted=await resumeUiAttempt(evidence,'mlx',ticket.id,fields);assert.deepEqual(adopted.start,ticket.start);
+  await resolveAttempt(adopted,'TERMINAL_VERIFIED',{jobId:'one-retried-ui-job'});
+  assert.deepEqual(await filesUnder(resolve(evidence,'rows')),original.filter(item=>item.file.startsWith('rows/')).map(item=>({...item,file:item.file.slice(5)})));
+  await assertDispatchClear(evidence,'mlx');await assert.rejects(()=>retryRemainingRows(evidence,plan,lockSha256));
+  assert.equal((await json(resolve(evidence,'attempts/mlx/advanced-mlx-sft-replay.resolution.json'))).jobId,'one-retried-ui-job');
+});
+test('H18 checkpoint permits only two sealed post-upload log prefixes and archives disappearing mutex',async t=>{
+  const root=await temporary('checkpoint'),retained=await temporary('retained');t.after(()=>rm(root,{recursive:true,force:true}));t.after(()=>rm(retained,{recursive:true,force:true}));
+  for(let index=0;index<300;index++)await save(resolve(root,'evidence',`old-${index}.json`),{index});
+  await mkdir(resolve(root,'evidence/attempts/mlx'),{recursive:true});await writeFile(resolve(root,'evidence/attempts/mlx/dispatch.lock'),'advanced-mlx-sft-replay');
+  const tails=[];for(const name of ['api-continuation.log','journal-continuation.jsonl']){await writeFile(resolve(root,name),'artifact-prefix');tails.push({file:name,stoppedByteLength:0,stoppedSha256:''});}
+  const files=await filesUnder(root);for(const tail of tails){await writeFile(resolve(root,tail.file),'artifact-prefix\npost-upload-tail');const identity=await fileIdentity(resolve(root,tail.file));tail.stoppedByteLength=identity.byteLength;tail.stoppedSha256=identity.sha256;}
+  const checkpoint={files,appendOnlyTails:tails};assert.equal(await assertH18CheckpointFiles(root,checkpoint),303);
+  for(const item of files){const path=resolve(retained,item.file==='evidence/attempts/mlx/dispatch.lock'?'continuation-h18-dispatch.lock':item.file.startsWith('evidence/')?item.file.slice(9):`continuation-h18-root/${item.file}`);await mkdir(resolve(path,'..'),{recursive:true});await writeFile(path,await readFile(resolve(root,item.file)));}
+  await unlink(resolve(root,'evidence/attempts/mlx/dispatch.lock'));
+  assert.equal(await assertH18CheckpointFiles(retained,checkpoint,{retained:true}),303);
+  await writeFile(resolve(retained,'continuation-h18-root/api-continuation.log'),'artifact-prefix\nchanged-tail');await assert.rejects(()=>assertH18CheckpointFiles(retained,checkpoint,{retained:true}),/stopped bytes changed/);
+});
 test('fixture aliases require real upload/readback IDs and preserve actual lexical nonfinite bytes',()=>{
   const bindings={campaignProject:'actual-project',foreign:{asset:{id:'actual-foreign-id'}}};
   const resolved=resolveGuardAliases({request:{assetId:'$fixture:foreign'},rawJson:'{"projectId":"$campaignProject","shift":NaN,"assetId":"$fixture:foreign"}'},bindings);
@@ -221,6 +252,11 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.throws(()=>repaired({...continuation,tooling_sha:identity.sourceSha}),/separately identify H17 product/);
   assert.throws(()=>repaired({...continuation,original_inventory_path:'/private/foreign'}),/sealed local original-evidence/);
   assert.throws(()=>repaired({...continuation,original_inventory_sha256:'e'.repeat(64)}),/sealed local original-evidence/);
+  const retry={...continuation,retry_inventory_path:'/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/h18-actual-artifact-inventory.json',retry_inventory_sha256:H18_RETRY_INVENTORY_SHA256};
+  assert.equal(repaired(retry).retry_inventory_sha256,H18_RETRY_INVENTORY_SHA256);
+  assert.throws(()=>repaired({...retry,retry_inventory_sha256:'e'.repeat(64)}),/sealed checkpoint/);
+  assert.throws(()=>validateDispatchEnvelope(JSON.stringify({...retry,tooling_sha:'82c534d50b72c1a5984514b90548002da212d735'}),'82c534d50b72c1a5984514b90548002da212d735',identity.inferenceSha,'82c534d50b72c1a5984514b90548002da212d735'),/distinct tooling/);
+  assert.throws(()=>repaired({...execute,retry_inventory_path:retry.retry_inventory_path,retry_inventory_sha256:retry.retry_inventory_sha256}),/cannot consume/);
   assert.throws(()=>repaired({...continuation,review_artifact_id:'999'}),/no review/);
   assert.equal(repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha,native_run_id:'789',native_run_attempt:'1'}).native_run_id,'789');
   assert.throws(()=>repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha}),/original native run/);

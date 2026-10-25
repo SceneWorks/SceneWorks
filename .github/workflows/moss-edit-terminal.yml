@@ -45,6 +45,14 @@ on:
         description: SHA256 of the original partial evidence inventory; continue only
         required: false
         type: string
+      retry_inventory_path:
+        description: Exact sealed H18 failed-continuation artifact inventory; retry only
+        required: false
+        type: string
+      retry_inventory_sha256:
+        description: SHA256 of the H18 failed-continuation artifact inventory; retry only
+        required: false
+        type: string
       upload_path:
         description: Exact sealed local directory on nax-macos; upload only
         required: false
@@ -109,6 +117,12 @@ on:
         required: false
         type: string
       original_inventory_sha256:
+        required: false
+        type: string
+      retry_inventory_path:
+        required: false
+        type: string
+      retry_inventory_sha256:
         required: false
         type: string
       upload_path:
@@ -492,9 +506,11 @@ jobs:
         env:
           MOSS_ORIGINAL_INVENTORY_PATH: ${{ inputs.original_inventory_path }}
           MOSS_ORIGINAL_INVENTORY_SHA256: ${{ inputs.original_inventory_sha256 }}
+          MOSS_RETRY_INVENTORY_PATH: ${{ inputs.retry_inventory_path }}
+          MOSS_RETRY_INVENTORY_SHA256: ${{ inputs.retry_inventory_sha256 }}
         run: |
           test "$RUNNER_NAME" = nax-macos
-          node tooling/scripts/moss-edit-terminal-actions.mjs continue-mlx "$MOSS_ROOT/runtime.json" "$GITHUB_WORKSPACE/tooling" "${{ inputs.tooling_sha }}" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "$MOSS_ORIGINAL_INVENTORY_PATH" "$MOSS_ORIGINAL_INVENTORY_SHA256"
+          node tooling/scripts/moss-edit-terminal-actions.mjs continue-mlx "$MOSS_ROOT/runtime.json" "$GITHUB_WORKSPACE/tooling" "${{ inputs.tooling_sha }}" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "$MOSS_ORIGINAL_INVENTORY_PATH" "$MOSS_ORIGINAL_INVENTORY_SHA256" "$MOSS_RETRY_INVENTORY_PATH" "$MOSS_RETRY_INVENTORY_SHA256"
       - name: Retain original and appended actual MLX evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
