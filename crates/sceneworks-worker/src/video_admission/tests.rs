@@ -5740,6 +5740,7 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
                     resident_bytes: 8 * GIB,
                     evicted_bytes: 6 * GIB,
                     table_bytes_per_timestep: GIB / 64,
+                    adapter: None,
                     projections: vec![
                         projection("blocks.0.adaln_proj.linear", false, RowDomain::Schedule),
                         projection("blocks.0.attn.to_q", true, RowDomain::Packed),
@@ -5754,6 +5755,7 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
                     resident_bytes: 10 * GIB,
                     evicted_bytes: 0,
                     table_bytes_per_timestep: 0,
+                    adapter: None,
                     projections: vec![
                         projection(
                             "token_refiner.blocks.0.attn.to_q",
@@ -5901,6 +5903,168 @@ fn native_quant_selector<'a>(
     selector.anchors = None;
     selector.curves = None;
     selector
+}
+
+/// Native-main late consumer delta (c): a declared per-task adapter profile makes the SELECTED
+/// task's steady residency the overlay — added exactly once, with the install high-water priced
+/// INSIDE the native windowed peaks — while the route-independent global overlay remains only the
+/// legacy None-profile fallback. A profile on an UNSELECTED task never prices this request.
+/// NOT-LOCALLY-EXECUTED at the current pin (needs native-main's H3AdapterMemoryProfile);
+/// hosted CI compiles and runs it with the final pin.
+#[test]
+fn native_quant_selected_adapter_profile_prices_the_steady_overlay_once_on_both_backends() {
+    use gen_core::h3_adapter_memory::H3AdapterMemoryProfile;
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let request = native_quant_request(&[]);
+        let geometry = geometry(124, VideoGeometryRole::Requested);
+        let ordinary = PhasePeaks {
+            conditioning_bytes: 7,
+            denoise_bytes: 11,
+            decode_bytes: 13,
+        };
+
+        // Control: no profile anywhere, and a deliberately LARGE global overlay so the fallback
+        // is distinguishable from any profile residency below.
+        let mut plain = native_quant_contract(lane, 2);
+        plain.asset_facts.overlay_bytes = 5 * GIB;
+        let native = plain
+            .phase_facts
+            .as_ref()
+            .unwrap()
+            .native_quant
+            .as_ref()
+            .unwrap();
+        let rows = native_rows_at(request, geometry, native);
+        let dit = native
+            .precompute_peak_bytes(rows)
+            .max(native.denoise_peak_bytes(rows));
+        let fallback = native_quant_phase_floor(
+            &plain,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            ordinary,
+        )
+        .unwrap();
+        assert_eq!(
+            fallback.denoise_bytes,
+            dit + 5 * GIB,
+            "no profile: the legacy global overlay prices the floor"
+        );
+
+        // Selected (base) task carries a profile whose resident equals its install peak, so the
+        // native peaks are unchanged and only the STEADY overlay differs.
+        let mut profiled = native_quant_contract(lane, 2);
+        profiled.asset_facts.overlay_bytes = 5 * GIB;
+        profiled
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap()
+            .tasks[0]
+            .adapter = Some(H3AdapterMemoryProfile {
+            resident_bytes: GIB / 2,
+            install_peak_bytes: GIB / 2,
+            projections: vec![],
+        });
+        let selected = native_quant_phase_floor(
+            &profiled,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            ordinary,
+        )
+        .unwrap();
+        assert_eq!(
+            selected.denoise_bytes,
+            dit + GIB / 2,
+            "a declared profile's SELECTED steady residency replaces the global overlay, added once"
+        );
+        assert!(
+            selected.denoise_bytes < fallback.denoise_bytes,
+            "the profile must actually be consulted, not shadowed by the larger global overlay"
+        );
+
+        // The same profile on the UNSELECTED reference task prices nothing for this base request.
+        let mut unselected = native_quant_contract(lane, 2);
+        unselected.asset_facts.overlay_bytes = 5 * GIB;
+        unselected
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap()
+            .tasks[1]
+            .adapter = Some(H3AdapterMemoryProfile {
+            resident_bytes: GIB / 2,
+            install_peak_bytes: GIB / 2,
+            projections: vec![],
+        });
+        let ignored = native_quant_phase_floor(
+            &unselected,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            ordinary,
+        )
+        .unwrap();
+        assert_eq!(
+            ignored.denoise_bytes,
+            dit + 5 * GIB,
+            "an unselected task's profile falls back to the legacy overlay for this request"
+        );
+    }
+}
+
+/// Native-main late consumer delta (b): the selected partition's OWN patch geometry reaches the
+/// consumer — `selected_patch` returns it exactly, and a request whose latent is not divisible
+/// by it refuses with the native error instead of being priced at stock rows.
+/// NOT-LOCALLY-EXECUTED at the current pin (needs native-main's selected_patch); hosted CI
+/// compiles and runs it with the final pin.
+#[test]
+fn native_quant_selected_patch_geometry_is_propagated_not_stocked_on_both_backends() {
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        let mut contract = native_quant_contract(lane, 2);
+        let native = contract
+            .phase_facts
+            .as_mut()
+            .unwrap()
+            .native_quant
+            .as_mut()
+            .unwrap();
+        // The frame axis of this lattice (17n+5 → 124 frames, or its latent quarter 31) is
+        // indivisible by 3 in every interpretation, so a [3, 2, 2] source patch must refuse.
+        native.tasks[0].patch_size = [3, 2, 2];
+        let request = native_quant_request(&[]);
+        let geometry = geometry(124, VideoGeometryRole::Requested);
+        let shape = request.shape_at(geometry);
+        assert_eq!(
+            native.selected_patch(shape).unwrap(),
+            [3, 2, 2],
+            "the selected task's actual patch is reported, never the stock [1, 2, 2]"
+        );
+        let ordinary = PhasePeaks {
+            conditioning_bytes: 7,
+            denoise_bytes: 11,
+            decode_bytes: 13,
+        };
+        let refusal = native_quant_phase_floor(
+            &contract,
+            &selection_for(MemoryStrategy::Resident),
+            Some(request),
+            geometry,
+            ordinary,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refusal.contains("not divisible by source patch"),
+            "an incompatible selected patch must surface the native refusal, not a default: {refusal}"
+        );
+    }
 }
 
 #[test]

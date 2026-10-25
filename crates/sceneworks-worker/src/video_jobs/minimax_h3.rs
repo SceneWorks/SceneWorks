@@ -1967,7 +1967,7 @@ pub(super) fn with_imported_h3_source_seals<T>(
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(super) const H3_PREPARATION_CANCELED: &str =
-    "[h3-preparation-canceled] checkpoint preparation canceled";
+    sceneworks_core::minimax_h3_load::H3_PREPARATION_CANCELED_MARKER;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(super) fn h3_preparation_checkpoint(cancel: &gen_core::CancelFlag) -> std::io::Result<()> {
@@ -2168,10 +2168,28 @@ fn resolve_imported_minimax_h3_dit_with_check(
         .layers
         .iter()
         .map(|layer| {
-            check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
-            let pin = gen_core::PinnedWeightsFile::pin(&layer.path)
-                .map_err(|e| refuse("source-drift", e.to_string()))?;
-            check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
+            // Native-main late consumer delta: the plan layer pins through the typed checked
+            // pin, so a cancelled acquisition stops inside a bounded read and the native layer's
+            // actual acquisition work reaches the active preparation span verbatim.
+            let pin = gen_core::PinnedWeightsFile::pin_with_progress(
+                &layer.path,
+                || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Err(gen_core::Error::Canceled)
+                    }
+                    Err(error) => Err(gen_core::Error::Io(error)),
+                },
+                |progress| {
+                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+                },
+            )
+            .map_err(|e| match e {
+                gen_core::Error::Canceled => {
+                    refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
+                }
+                other => refuse("source-drift", other.to_string()),
+            })?;
             let expected = layer
                 .layer
                 .source
@@ -2318,10 +2336,25 @@ fn resolve_imported_minimax_h3_dit_with_check(
                 let path = directory
                     .join(&member.destination)
                     .join(&file.relative_path);
-                check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
-                let pin = gen_core::PinnedWeightsFile::pin(&path)
-                    .map_err(|e| refuse("source-drift", e.to_string()))?;
-                check().map_err(|error| refuse("source-acquisition", error.to_string()))?;
+                let pin = gen_core::PinnedWeightsFile::pin_with_progress(
+                    &path,
+                    || match check() {
+                        Ok(()) => Ok(()),
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                            Err(gen_core::Error::Canceled)
+                        }
+                        Err(error) => Err(gen_core::Error::Io(error)),
+                    },
+                    |progress| {
+                        sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+                    },
+                )
+                .map_err(|e| match e {
+                    gen_core::Error::Canceled => {
+                        refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
+                    }
+                    other => refuse("source-drift", other.to_string()),
+                })?;
                 let actual = format!(
                     "sha256:{}",
                     pin.content_sha256()
