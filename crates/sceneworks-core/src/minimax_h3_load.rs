@@ -107,6 +107,15 @@ impl PreparedH3Load {
         spec: &mut LoadSpec,
         authority: Option<H3SourceAuthority>,
     ) -> Result<Self, String> {
+        Self::prepare_authorized_with_check(spec, authority, &|| Ok(()))
+    }
+
+    pub fn prepare_authorized_with_check(
+        spec: &mut LoadSpec,
+        authority: Option<H3SourceAuthority>,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Self, String> {
+        check().map_err(|error| error.to_string())?;
         if let Some(authority) = &authority {
             authority.validate()?;
         }
@@ -140,6 +149,7 @@ impl PreparedH3Load {
         }));
         let mut directories = BTreeMap::new();
         for dir in dirs {
+            check().map_err(|error| error.to_string())?;
             let dir = std::path::absolute(dir).map_err(|e| e.to_string())?;
             let snapshot = if dir.is_dir() {
                 Some(members(&dir)?)
@@ -154,7 +164,12 @@ impl PreparedH3Load {
         }
         let files = paths
             .into_iter()
-            .map(|path| PinnedWeightsFile::pin(path).map_err(|e| e.to_string()))
+            .map(|path| {
+                check().map_err(|error| error.to_string())?;
+                let pin = PinnedWeightsFile::pin(path).map_err(|error| error.to_string())?;
+                check().map_err(|error| error.to_string())?;
+                Ok::<_, String>(pin)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let configured_dirs = spec
             .directory_source_paths()
@@ -188,6 +203,7 @@ impl PreparedH3Load {
         spec.prepare_with_file_pins(receipt.spec_files.iter().cloned())
             .map_err(|e| e.to_string())?;
         receipt.validate(spec)?;
+        check().map_err(|error| error.to_string())?;
         Ok(receipt)
     }
 

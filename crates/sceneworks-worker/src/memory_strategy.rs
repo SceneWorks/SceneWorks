@@ -260,6 +260,29 @@ fn run_with_scope<T>(
         // scope and before the provider reads the request (epic 25899).
         execution_domains.reapply_after_request_scope(request);
     }
+    let applied = request.memory.unwrap_or_default();
+    let component = if applied.stream_transformer_blocks {
+        match applied.transformer_window_component.unwrap_or_default() {
+            gen_core::TransformerComponent::Dit => "Dit",
+            gen_core::TransformerComponent::TextEncoder => "TextEncoder",
+            gen_core::TransformerComponent::Both => "Both",
+        }
+    } else {
+        "none"
+    };
+    tracing::info!(
+        event = "generation_memory_policy_applied",
+        engine = generator.descriptor().id,
+        strategy = ?context.selection.strategy,
+        scope_configured = scope.is_some(),
+        stage_residency = applied.stage_residency,
+        stream_transformer_blocks = applied.stream_transformer_blocks,
+        tile_vae_decode = applied.tile_vae_decode,
+        chunk_attention = applied.chunk_attention,
+        window_size = applied.transformer_window_size,
+        window_component = component,
+        "Provider scope configuration completed; fields describe the actual request handed to generate, not a requested scenario label"
+    );
     let result = run(generator, request, on_progress);
     if let Some(scope) = scope.as_mut() {
         let outcome = match &result {

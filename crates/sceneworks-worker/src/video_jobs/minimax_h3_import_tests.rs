@@ -282,6 +282,73 @@ fn an_imported_h3_prefixed_id_routes_and_loads_its_plan_weights() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn an_imported_h3_dit_loads_compatible_turbo_and_style_adapters_with_its_identity() {
+    let tiers = minimax_h3_tier_root("mm_imp_lora_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_imp_lora_base_");
+    crate::minimax_h3_import_fixture::write_shared_configs(
+        base.path(),
+        &tiers.path().join("q4/text_encoder"),
+    );
+    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+        &minimax_h3_data_dir(tiers.path()),
+        "singularity_fl2va_dense",
+    );
+    let turbo = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p");
+    let style = minimax_h3_turbo_lora(tiers.path(), "community_style_rank16");
+    let mut request = imported_minimax_h3_request("singularity_fl2va_dense", &imported.entry);
+    request.loras = vec![turbo.clone(), style.clone()];
+    let probe = ArmProbe::default();
+    let (_, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("an imported DiT carrying compatible adapters renders");
+    let spec = probe
+        .spec
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a provider load ran");
+    let mut loaded: Vec<_> = spec
+        .adapters
+        .iter()
+        .map(|adapter| std::fs::canonicalize(&adapter.path).expect("staged adapter"))
+        .collect();
+    loaded.sort();
+    let mut expected = vec![
+        std::fs::canonicalize(turbo["path"].as_str().expect("turbo path")).expect("turbo"),
+        std::fs::canonicalize(style["path"].as_str().expect("style path")).expect("style"),
+    ];
+    expected.sort();
+    assert_eq!(
+        loaded, expected,
+        "the requested adapter stack must reach the imported LOAD — no silent drop, no stock \
+         checkpoint substitution"
+    );
+    let engine_request = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        engine_request.steps,
+        Some(4),
+        "the turbo recipe reaches the imported render through its partition semantics"
+    );
+    assert_eq!(engine_request.scheduler_shift, Some(6.0));
+    assert_eq!(raw["minimaxH3Turbo"], json!("minimax_h3_turbo_4step_768p"));
+    // Identity survives the adapter composition: still the imported checkpoint everywhere.
+    assert_eq!(raw["model"], json!("singularity_fl2va_dense"));
+    assert_eq!(
+        raw["importPlan"]["checkpointId"],
+        json!(imported.checkpoint_id)
+    );
+    assert_eq!(
+        raw["importPlan"]["semanticDigest"],
+        json!(imported.semantic_digest)
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn an_imported_h3_entry_without_its_binding_or_under_a_builtin_id_never_loads() {
     let tiers = minimax_h3_tier_root("mm_imp_neg_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_imp_neg_base_");
@@ -482,24 +549,31 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         json!(imported.semantic_digest)
     );
 
-    // The real admission gate still rejects absent/insufficient budgets before invoking the loader.
-    for (budget, needle) in [
-        (None, "could not read free GPU VRAM"),
-        (
-            Some(crate::vram_gate::VramBudget {
-                free_gb: 0.0,
-                ..imported_h3_fixture_budget(&imported.entry)
-            }),
-            "needs ~",
-        ),
+    // The stock BF16 measured row no longer prices an imported source (terminal review finding 2):
+    // an absent budget probe, or one far below the stock dense row, must still reach the ACTUAL
+    // source-aware admission in the shared funnel rather than being refused by another
+    // checkpoint's measurement. The builtin gate policy itself is preserved and pinned by
+    // `imported_h3_admission_requires_a_known_sufficient_budget` against the same entry.
+    for budget in [
+        None,
+        Some(crate::vram_gate::VramBudget {
+            free_gb: 0.1,
+            total_gb: 0.1,
+        }),
     ] {
-        let rejected = ArmProbe::default();
-        let error = drive_candle_imported_minimax_h3(&settings, &rejected, &request, budget)
-            .expect_err("the real gate must refuse before the stub loader");
-        assert!(error.to_string().contains(needle), "{error}");
+        let rendered = ArmProbe::default();
+        let raw = drive_candle_imported_minimax_h3(&settings, &rendered, &request, budget)
+            .unwrap_or_else(|error| {
+                panic!("the stock row must not refuse an imported source: {error}")
+            });
         assert!(
-            rejected.spec.lock().unwrap().is_none(),
-            "refused before provider loading"
+            rendered.spec.lock().unwrap().is_some(),
+            "the imported render reached the provider under actual source-aware admission"
+        );
+        assert_eq!(
+            raw["importPlan"]["checkpointId"],
+            json!(imported.checkpoint_id),
+            "identity stays the imported checkpoint's, not the stock row's"
         );
     }
 
@@ -1547,4 +1621,75 @@ fn pruned_source_reaches_provider_with_source_bound_identity_for_every_partition
             );
         }
     }
+}
+
+/// Terminal review finding 6: supervised CPU preparation cancels BETWEEN bounded steps, joins the
+/// detached blocking task (so its held source/derivative leases outlive the abandoned async owner),
+/// and never reports completion for work a user canceled.
+#[test]
+fn supervised_h3_cpu_preparation_cancels_between_bounded_steps_and_joins_the_task() {
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let total = 200usize;
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task_completed = completed.clone();
+    let task = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        loop {
+            crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&task_cancel)
+                .map_err(|error| WorkerError::Canceled(error.to_string()))?;
+            std::thread::sleep(Duration::from_millis(5));
+            let done = task_completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if done >= total {
+                return Ok(());
+            }
+        }
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime builds");
+    let result = runtime.block_on(crate::video_jobs::minimax_h3::supervise_h3_preparation(
+        cancel,
+        task,
+        Duration::from_millis(15),
+        || async { Ok(true) },
+    ));
+    match result {
+        Err(WorkerError::Canceled(message)) => assert!(
+            message.contains("h3-preparation-canceled"),
+            "the surfaced cancellation is the preparation checkpoint's own: {message}"
+        ),
+        other => panic!("supervision must surface cooperative cancellation, got {other:?}"),
+    }
+    let done = completed.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        done < total,
+        "the blocking task stopped at a bounded checkpoint ({done}/{total}), not after completing \
+         the canceled preparation"
+    );
+}
+
+/// The same supervisor without a cancel observes the task's own completion and returns its value.
+#[test]
+fn supervised_h3_cpu_preparation_returns_the_task_result_without_cancel() {
+    let cancel = gen_core::CancelFlag::new();
+    let task = tokio::task::spawn_blocking(move || -> WorkerResult<u32> {
+        for _ in 0..4 {
+            crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&cancel)
+                .map_err(|error| WorkerError::Canceled(error.to_string()))?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(42)
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test runtime builds");
+    let result = runtime.block_on(crate::video_jobs::minimax_h3::supervise_h3_preparation(
+        gen_core::CancelFlag::new(),
+        task,
+        Duration::from_millis(10),
+        || async { Ok(false) },
+    ));
+    assert_eq!(result.expect("the prepared result reaches the caller"), 42);
 }

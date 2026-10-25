@@ -1204,16 +1204,33 @@ pub fn source_file_sha256_with_check(
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut hashed_bytes = 0u64;
+    let checkpoint = |hashed_bytes| match check() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = if error.kind() == std::io::ErrorKind::Interrupted { "Canceled" } else { "Failed" },
+                hashed_bytes, source_bytes = before.size_bytes,
+                "Source content acquisition stopped; no digest was published");
+            Err(error)
+        }
+    };
     loop {
-        check()?;
+        checkpoint(hashed_bytes)?;
         let read = file.read(&mut buffer)?;
-        check()?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        hashed_bytes += read as u64;
+        if hashed_bytes == read as u64 || hashed_bytes % (256 * 1024 * 1024) < read as u64 {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = "Reading", hashed_bytes,
+                source_bytes = before.size_bytes, "Actual bounded source-content hash progress");
+        }
+        checkpoint(hashed_bytes)?;
     }
-    check()?;
+    checkpoint(hashed_bytes)?;
     let after = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
     if !before.identifies_same_entry(&after) || fs::canonicalize(path)? != target {
         return Err(std::io::Error::other(format!(
@@ -1221,7 +1238,10 @@ pub fn source_file_sha256_with_check(
             path.display()
         )));
     }
-    check()?;
+    checkpoint(hashed_bytes)?;
+    tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+        acquisition = "ColdContentRead", state = "Acquired", hashed_bytes,
+        source_bytes = before.size_bytes, "Complete source digest acquired after source identity verification");
     Ok(format!("{:x}", hasher.finalize()))
 }
 

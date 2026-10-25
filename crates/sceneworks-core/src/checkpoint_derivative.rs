@@ -377,14 +377,25 @@ impl CheckpointDerivativeStore {
         resolved: &ResolvedCheckpointV1,
         request: &CheckpointDerivativeRequestV1,
     ) -> Result<Option<ResolvedCacheLease>, CheckpointDerivativeError> {
+        self.acquire_with_check(resolved, request, &|| Ok(()))
+    }
+
+    pub fn acquire_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ResolvedCacheLease>, CheckpointDerivativeError> {
         let cache_key = self.cache_key(resolved, request)?;
         let resolver =
             ModelArtifactResolver::new(crate::hf_home::model_source_library(&self.data_dir));
-        let lease = self.cache.acquire_complete(
+        let lease = self.cache.acquire_complete_with_check(
             &cache_key,
             &resolver,
             &derivative_owner(&resolved.checkpoint_id),
+            check,
         )?;
+        check().map_err(ResolvedCacheError::from)?;
         if lease.is_some() {
             // An additive sidecar, not a journal-format change: old builds must still be able to
             // read both metadata slots after rollback. Written only while the exact artifact is leased.
@@ -498,10 +509,34 @@ impl CheckpointDerivativeStore {
         request: &CheckpointDerivativeRequestV1,
         produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
     ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
-        let resolved = self.plans.resolve(checkpoint_id)?;
-        let plan = self.plan_for(&resolved, request)?;
+        self.ensure_with_check(checkpoint_id, request, &|| Ok(()), produce)
+    }
+
+    pub fn ensure_with_check(
+        &self,
+        checkpoint_id: &str,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        let resolved = self.plans.resolve_with_check(checkpoint_id, check)?;
+        self.ensure_resolved_with_check(&resolved, request, check, produce)
+    }
+
+    /// Reuse a caller's already verified acquisition instead of hashing a racy source twice.
+    /// The caller retains its source lease and seals across this producer transaction.
+    pub fn ensure_resolved_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        check().map_err(ResolvedCacheError::from)?;
+        let checkpoint_id = &resolved.checkpoint_id;
+        let plan = self.plan_for(resolved, request)?;
         let cache_key = plan.cache_key()?;
-        if let Some(metadata) = self.cache.lookup_complete(&cache_key)? {
+        if let Some(metadata) = self.cache.lookup_complete_with_check(&cache_key, check)? {
             return Ok(CheckpointDerivativeOutcomeV1::AlreadyPresent(Box::new(
                 metadata,
             )));
@@ -525,7 +560,7 @@ impl CheckpointDerivativeStore {
             };
         reservation.prepare_for_materialization()?;
         let outputs = CheckpointDerivativeOutputs {
-            resolved: &resolved,
+            resolved,
             staging: reservation.staging_path(),
             declared: request
                 .outputs
@@ -533,9 +568,14 @@ impl CheckpointDerivativeStore {
                 .map(|output| validate_output_path(output))
                 .collect::<Result<BTreeSet<_>, _>>()?,
         };
-        if let Err(message) = produce(&outputs) {
+        let produced = check()
+            .map_err(|error| error.to_string())
+            .and_then(|_| produce(&outputs))
+            .and_then(|_| check().map_err(|error| error.to_string()));
+        if let Err(message) = produced {
             // Nothing partial survives: the staging tree is removed and the entry is recorded
             // interrupted, so the next attempt starts empty and no reader can ever see it.
+            drop(outputs);
             reservation.discard()?;
             return Err(CheckpointDerivativeError::Producer {
                 checkpoint_id: checkpoint_id.to_owned(),
@@ -543,7 +583,7 @@ impl CheckpointDerivativeStore {
             });
         }
         drop(outputs);
-        match reservation.publish_produced(&plan) {
+        match reservation.publish_produced_with_check(&plan, check) {
             Ok(metadata) => Ok(CheckpointDerivativeOutcomeV1::Produced(Box::new(metadata))),
             Err(error) => Err(CheckpointDerivativeError::Cache(error)),
         }

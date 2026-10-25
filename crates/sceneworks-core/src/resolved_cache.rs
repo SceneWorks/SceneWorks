@@ -1148,6 +1148,15 @@ impl ResolvedCacheStore {
         &self,
         cache_key: &str,
     ) -> Result<Option<ResolvedCacheMetadata>, ResolvedCacheError> {
+        self.lookup_complete_with_check(cache_key, &|| Ok(()))
+    }
+
+    pub fn lookup_complete_with_check(
+        &self,
+        cache_key: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ResolvedCacheMetadata>, ResolvedCacheError> {
+        check()?;
         let digest = cache_key_digest(cache_key)?;
         let metadata_lock = self.lock_metadata(&digest)?;
         let result = match self.read_metadata_unlocked(&digest)? {
@@ -1157,16 +1166,18 @@ impl ResolvedCacheStore {
                 // Paths and sizes only (sc-21534): this is a read — callers use it to decide
                 // whether materialization can be skipped, and the load boundary
                 // ([`Self::acquire_complete`]) still re-hashes before any bytes reach a runtime.
-                validate_complete_metadata_inner(
+                validate_complete_metadata_inner_with_check(
                     self,
                     &metadata,
                     ContentVerification::PathsAndSizesOnly,
+                    check,
                 )?;
                 Some(*metadata)
             }
             _ => None,
         };
         drop(metadata_lock);
+        check()?;
         Ok(result)
     }
 
@@ -1307,6 +1318,17 @@ impl ResolvedCacheStore {
         resolver: &ModelArtifactResolver,
         logical_model_owner: &str,
     ) -> Result<Option<ResolvedCacheLease>, ResolvedCacheError> {
+        self.acquire_complete_with_check(cache_key, resolver, logical_model_owner, &|| Ok(()))
+    }
+
+    pub fn acquire_complete_with_check(
+        &self,
+        cache_key: &str,
+        resolver: &ModelArtifactResolver,
+        logical_model_owner: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ResolvedCacheLease>, ResolvedCacheError> {
+        check()?;
         let logical_model_owner = validate_model_owner(logical_model_owner)?.to_owned();
         let digest = cache_key_digest(cache_key)?;
         let artifact_lock = FileLock::shared(open_lock_file(&self.artifact_lock_path(&digest))?)?;
@@ -1335,7 +1357,8 @@ impl ResolvedCacheStore {
         // from the one the last successful verification recorded. It reads and stamps that verdict
         // under the `metadata_lock` held above — the same lock the usage stamp below is written
         // under — so a verdict is never recorded without the lock that made it true.
-        validate_complete_metadata(self, &metadata)?;
+        validate_complete_metadata_with_check(self, &metadata, check)?;
+        check()?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
             .acquire_runtime_lease_prevalidated(&artifact)
@@ -2029,49 +2052,65 @@ impl ResolvedCacheReservation {
 
     pub(crate) fn publish_staged(
         self,
-        mut artifact: ResolvedModelArtifact,
+        artifact: ResolvedModelArtifact,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &self.staging_path)
-        {
-            return Err(ResolvedCacheError::new(
-                "staged artifact is not rooted at its reservation staging directory",
-            ));
-        }
-        validate_staging_confinement(&self)?;
-        artifact
-            .validate()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-        if artifact
-            .cache_key()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?
-            != self.cache_key
-        {
-            return Err(ResolvedCacheError::new(
-                "staged artifact cache key differs from its reservation",
-            ));
-        }
-        sync_tree(&self.staging_path)?;
-        let entry = self.store.entry_path(&self.cache_key)?;
-        let bundle = self.bundle_path()?;
-        if std::fs::symlink_metadata(&bundle).is_ok() {
-            return Err(ResolvedCacheError::new(
-                "resolved cache bundle appeared before atomic publication",
-            ));
-        }
-        {
+        self.publish_staged_with_check(artifact, &|| Ok(()))
+    }
+
+    fn publish_staged_with_check(
+        self,
+        mut artifact: ResolvedModelArtifact,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let preparation = (|| {
+            check()?;
+            if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &self.staging_path)
+            {
+                return Err(ResolvedCacheError::new(
+                    "staged artifact is not rooted at its reservation staging directory",
+                ));
+            }
+            validate_staging_confinement(&self)?;
+            artifact
+                .validate_with_check(check)
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+            if artifact
+                .cache_key()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+                != self.cache_key
+            {
+                return Err(ResolvedCacheError::new(
+                    "staged artifact cache key differs from its reservation",
+                ));
+            }
+            sync_tree_with_check(&self.staging_path, check)?;
+            let entry = self.store.entry_path(&self.cache_key)?;
+            let bundle = self.bundle_path()?;
+            if std::fs::symlink_metadata(&bundle).is_ok() {
+                return Err(ResolvedCacheError::new(
+                    "resolved cache bundle appeared before atomic publication",
+                ));
+            }
             let _metadata_lock = self.store.lock_metadata(&self.digest)?;
             let metadata = self.store.read_metadata_locked(&self.digest)?;
             self.verify_ownership(&metadata)?;
-        }
+            check()?;
+            Ok::<_, ResolvedCacheError>((entry, bundle))
+        })();
+        let (entry, bundle) = match preparation {
+            Ok(paths) => paths,
+            Err(error) => {
+                self.discard()?;
+                return Err(error);
+            }
+        };
         publish_rename(&self.staging_path, &bundle)?;
-        sync_dir(&entry).map_err(|error| {
-            ResolvedCacheError::new(format!(
-                "sync published entry directory {}: {error}",
-                entry.display()
-            ))
-        })?;
+        if let Err(error) = sync_dir(&entry) {
+            self.discard_unpublished_bundle()?;
+            return Err(error);
+        }
         artifact.location = ArtifactLocation::ResolvedLocal { root: bundle };
-        self.record_complete(artifact)
+        self.record_complete_checked(artifact, check, true)
     }
 
     /// Publish a bundle the producer wrote into [`Self::staging_path`] (sc-20635).
@@ -2086,26 +2125,46 @@ impl ResolvedCacheReservation {
     /// published: a declared file it did not write, a declared path that is a symlink or a
     /// directory, or a file it wrote that the plan does not declare (which would leave bytes the
     /// entry's own accounting never counts and retention would over-reclaim against).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn publish_produced(
         self,
         plan: &DerivedArtifactPlan,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
-        let mut declared = BTreeSet::new();
-        for member in &mut artifact.closure.members {
-            for file in &mut member.files {
-                let relative = member.destination.join(&file.relative_path);
-                let path = self.staging_path.join(&relative);
-                let (size_bytes, sha256) = measure_produced_file(&path)?;
-                file.size_bytes = Some(size_bytes);
-                file.sha256 = Some(sha256);
-                declared.insert(relative);
+        self.publish_produced_with_check(plan, &|| Ok(()))
+    }
+
+    pub(crate) fn publish_produced_with_check(
+        self,
+        plan: &DerivedArtifactPlan,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let prepared = (|| {
+            check()?;
+            let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
+            let mut declared = BTreeSet::new();
+            for member in &mut artifact.closure.members {
+                for file in &mut member.files {
+                    let relative = member.destination.join(&file.relative_path);
+                    let path = self.staging_path.join(&relative);
+                    let (size_bytes, sha256) = measure_produced_file(&path, check)?;
+                    file.size_bytes = Some(size_bytes);
+                    file.sha256 = Some(sha256);
+                    declared.insert(relative);
+                }
+            }
+            artifact.closure = ResolvedBundleClosure::new(artifact.closure.members)
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+            reject_undeclared_produced_files(&self.staging_path, &declared)?;
+            check()?;
+            Ok::<_, ResolvedCacheError>(artifact)
+        })();
+        match prepared {
+            Ok(artifact) => self.publish_staged_with_check(artifact, check),
+            Err(error) => {
+                self.discard()?;
+                Err(error)
             }
         }
-        artifact.closure = ResolvedBundleClosure::new(artifact.closure.members)
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-        reject_undeclared_produced_files(&self.staging_path, &declared)?;
-        self.publish_staged(artifact)
     }
 
     /// Abandon a reservation whose producer failed: drop whatever it staged and record the entry
@@ -2118,6 +2177,22 @@ impl ResolvedCacheReservation {
         }
         self.mark_interrupted()?;
         Ok(())
+    }
+
+    /// Roll back only a bundle renamed by this still-owned, unpublished transaction.
+    /// Source/library paths and another owner's reservation can never enter this cleanup.
+    fn discard_unpublished_bundle(self) -> Result<(), ResolvedCacheError> {
+        {
+            let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+            let metadata = self.store.read_metadata_locked(&self.digest)?;
+            self.verify_ownership(&metadata)?;
+            let bundle = self.bundle_path()?;
+            if std::fs::symlink_metadata(&bundle).is_ok() {
+                let entry = self.store.entry_path(&self.cache_key)?;
+                remove_managed_tree(&bundle, &entry)?;
+            }
+        }
+        self.discard()
     }
 
     /// Marks only this still-owned reservation interrupted. The private reservation/session
@@ -2143,30 +2218,52 @@ impl ResolvedCacheReservation {
     /// Records publication after a later materializer has atomically installed and validated the
     /// bundle. This method does not copy, move, or delete any model bytes.
     pub fn record_complete(
-        mut self,
+        self,
         artifact: ResolvedModelArtifact,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        let expected_root = self.bundle_path()?;
-        if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &expected_root)
-        {
-            return Err(ResolvedCacheError::new(
-                "complete artifact is not rooted at its resolved-cache bundle",
-            ));
-        }
-        validate_completion_confinement(&self.store, &self.cache_key, &artifact)?;
-        artifact
-            .validate()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-        if artifact
-            .cache_key()
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?
-            != self.cache_key
-        {
-            return Err(ResolvedCacheError::new(
-                "complete artifact cache key differs from its reservation",
-            ));
-        }
-        let verified_bytes = checked_artifact_bytes(&artifact)?;
+        self.record_complete_checked(artifact, &|| Ok(()), false)
+    }
+
+    fn record_complete_checked(
+        mut self,
+        artifact: ResolvedModelArtifact,
+        check: &dyn Fn() -> std::io::Result<()>,
+        cleanup_unpublished: bool,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let validation = (|| {
+            check()?;
+            let expected_root = self.bundle_path()?;
+            if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &expected_root)
+            {
+                return Err(ResolvedCacheError::new(
+                    "complete artifact is not rooted at its resolved-cache bundle",
+                ));
+            }
+            validate_completion_confinement(&self.store, &self.cache_key, &artifact)?;
+            artifact
+                .validate_with_check(check)
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+            if artifact
+                .cache_key()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+                != self.cache_key
+            {
+                return Err(ResolvedCacheError::new(
+                    "complete artifact cache key differs from its reservation",
+                ));
+            }
+            check()?;
+            checked_artifact_bytes(&artifact)
+        })();
+        let verified_bytes = match validation {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if cleanup_unpublished {
+                    self.discard_unpublished_bundle()?;
+                }
+                return Err(error);
+            }
+        };
         let _metadata_lock = self.store.lock_metadata(&self.digest)?;
         let mut metadata = self.store.read_metadata_locked(&self.digest)?;
         self.verify_ownership(&metadata)?;
@@ -2626,7 +2723,11 @@ fn validate_pending_derivative_shape(
 
 /// Measure one file a producer staged. Never follows a link and never accepts anything but a
 /// regular file, so a producer cannot publish bytes that live outside the staging directory.
-fn measure_produced_file(path: &Path) -> Result<(u64, String), ResolvedCacheError> {
+fn measure_produced_file(
+    path: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(u64, String), ResolvedCacheError> {
+    check()?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ResolvedCacheError::new(format!(
             "produced derivative file {} is missing: {error}",
@@ -2642,27 +2743,16 @@ fn measure_produced_file(path: &Path) -> Result<(u64, String), ResolvedCacheErro
             path.display()
         )));
     }
-    let mut file = File::open(path)?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    let mut size_bytes = 0_u64;
-    loop {
-        let read = std::io::Read::read(&mut file, &mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-        size_bytes = size_bytes
-            .checked_add(read as u64)
-            .ok_or_else(|| ResolvedCacheError::new("produced derivative byte count overflow"))?;
-    }
+    let digest = crate::checkpoint_plan_store::source_file_sha256_with_check(path, check)?;
+    let size_bytes = std::fs::metadata(path)?.len();
+    check()?;
     if size_bytes != metadata.len() {
         return Err(ResolvedCacheError::new(format!(
             "produced derivative file {} changed while it was being measured",
             path.display()
         )));
     }
-    Ok((size_bytes, format!("sha256:{:x}", digest.finalize())))
+    Ok((size_bytes, format!("sha256:{digest}")))
 }
 
 /// Refuse a staged tree holding anything the plan did not declare.
@@ -2839,6 +2929,15 @@ fn validate_complete_metadata(
     store: &ResolvedCacheStore,
     metadata: &ResolvedCacheMetadata,
 ) -> Result<(), ResolvedCacheError> {
+    validate_complete_metadata_with_check(store, metadata, &|| Ok(()))
+}
+
+fn validate_complete_metadata_with_check(
+    store: &ResolvedCacheStore,
+    metadata: &ResolvedCacheMetadata,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), ResolvedCacheError> {
+    check()?;
     let digest = cache_key_digest(&metadata.cache_key)?;
     let bundle = store.bundle_path(&metadata.cache_key)?;
     // Observed BEFORE the decision, so the same observation is what the receipt is judged against
@@ -2852,10 +2951,11 @@ fn validate_complete_metadata(
     let recorded = store.read_content_receipt(&digest, &metadata.cache_key);
     if let (Some(recorded), Some(before)) = (&recorded, &before) {
         if &recorded.files == before && !receipt_expired(recorded)? {
-            return validate_complete_metadata_inner(
+            return validate_complete_metadata_inner_with_check(
                 store,
                 metadata,
                 ContentVerification::PathsAndSizesOnly,
+                check,
             );
         }
     }
@@ -2864,7 +2964,12 @@ fn validate_complete_metadata(
     // is about to re-decide it — least of all if that pass fails and leaves this entry to be read
     // again by something that would have trusted the stale answer.
     store.remove_content_receipt(&digest)?;
-    validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)?;
+    validate_complete_metadata_inner_with_check(
+        store,
+        metadata,
+        ContentVerification::RehashEveryFile,
+        check,
+    )?;
 
     // Re-observe AFTER the read and require both observations to agree before recording a verdict
     // — the same before/after guard `bind_or_probe_validated` uses around a library probe and
@@ -2886,6 +2991,7 @@ fn validate_complete_metadata(
             "cache bundle changed while its contents were being verified",
         ));
     }
+    check()?;
     store.write_content_receipt(
         &digest,
         &ClosureContentReceipt {
@@ -2957,6 +3063,16 @@ fn validate_complete_metadata_inner(
     metadata: &ResolvedCacheMetadata,
     verification: ContentVerification,
 ) -> Result<(), ResolvedCacheError> {
+    validate_complete_metadata_inner_with_check(store, metadata, verification, &|| Ok(()))
+}
+
+fn validate_complete_metadata_inner_with_check(
+    store: &ResolvedCacheStore,
+    metadata: &ResolvedCacheMetadata,
+    verification: ContentVerification,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), ResolvedCacheError> {
+    check()?;
     let digest = cache_key_digest(&metadata.cache_key)?;
     // Shape only here: the mode-specific content check is the `match verification` below, so
     // passing `verification` through would hash the whole closure TWICE per full-strength call
@@ -2983,14 +3099,15 @@ fn validate_complete_metadata_inner(
     match verification {
         ContentVerification::RehashEveryFile => metadata
             .artifact
-            .validate()
+            .validate_with_check(check)
             .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
         ContentVerification::PathsAndSizesOnly => {
             artifact_without_content_hashes(&metadata.artifact)
-                .validate()
+                .validate_with_check(check)
                 .map_err(|error| ResolvedCacheError::new(error.to_string()))?
         }
     }
+    check()?;
     if metadata
         .artifact
         .cache_key()
@@ -3540,7 +3657,16 @@ fn write_synced_file(path: &Path, body: &[u8]) -> Result<(), ResolvedCacheError>
 ///   durable before the rename. Windows has no POSIX directory fsync (`sync_dir` is a
 ///   no-op there); journaled NTFS metadata plus the write-through publish rename cover
 ///   that side.
+#[cfg_attr(not(test), allow(dead_code))]
 fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
+    sync_tree_with_check(path, &|| Ok(()))
+}
+
+fn sync_tree_with_check(
+    path: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), ResolvedCacheError> {
+    check()?;
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         ResolvedCacheError::new(format!("inspect staged path {}: {error}", path.display()))
     })?;
@@ -3564,7 +3690,7 @@ fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
                     path.display()
                 ))
             })?;
-            sync_tree(&item.path())?;
+            sync_tree_with_check(&item.path(), check)?;
         }
         sync_dir(path).map_err(|error| {
             ResolvedCacheError::new(format!("sync staged directory {}: {error}", path.display()))

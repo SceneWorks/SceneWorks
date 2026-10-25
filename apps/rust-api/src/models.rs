@@ -9506,6 +9506,31 @@ fn imported_lora_advertisement_verdict(
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) -> Option<bool> {
+    // An imported plan-backed H3 video entry serves the family's adapter surface on exactly the
+    // lanes its claim predicate can serve; the same per-lane probe that decides video eligibility
+    // decides adapter advertisement, so the catalog can never offer an adapter no lane will claim.
+    if object.get("type").and_then(Value::as_str) == Some("video")
+        && sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(object)
+    {
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let mut probe = serde_json::Map::new();
+        probe.insert("model".to_owned(), Value::String(id.to_owned()));
+        probe.insert("mode".to_owned(), Value::String("text_to_video".to_owned()));
+        probe.insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(object.clone()),
+        );
+        probe.insert(
+            "loras".to_owned(),
+            Value::Array(vec![json!({ "id": "minimax_h3_turbo_4step_v01" })]),
+        );
+        let lane_serves = |lane: &str| {
+            sceneworks_core::jobs_store::imported_video_lane_claims_with_lora(lane, &probe)
+        };
+        let mlx_serves = mlx_lane_available && lane_serves("mlx");
+        let candle_serves = candle_lane_available && lane_serves("candle");
+        return Some(mlx_serves || candle_serves);
+    }
     if object.get("type").and_then(Value::as_str) != Some("image") {
         return None;
     }

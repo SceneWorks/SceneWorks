@@ -779,9 +779,9 @@ pub fn import_config_download(base: &Value, tier: &str, os: &str) -> Result<Valu
 /// can run. Descriptive metadata retains the author's wording; inherited component terms and
 /// attribution are unioned afterward and cannot be erased by that wording or a false flag.
 /// Deliberately NOT copied: the builtin's downloads and paths (the imported DiT is its own
-/// weights), `mlx.repo` (the builtin tier repo), and `loraCompatibility` — adapter and turbo
-/// support on imported H3 checkpoints is a later story, and advertising adapters the imported route
-/// refuses would admit jobs nothing can run.
+/// weights) and `mlx.repo` (the builtin tier repo). Adapter family compatibility is the same H3
+/// LoRA/LoKr surface as the native provider; target shapes, task partitions and pruning basis remain
+/// enforced against the imported tensors by the native installer.
 pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) {
     let Ok(partition) = MiniMaxH3Partition::from_entry(entry) else {
         entry.insert("capabilities".to_owned(), json!([]));
@@ -853,8 +853,10 @@ pub fn apply_minimax_h3_studio_surface_defaults(entry: &mut Map<String, Value>) 
             }
         }
     }
-    // Withdraw the family-wide adapter advertisement `apply_model_manifest_defaults` synthesizes.
-    entry.remove("loraCompatibility");
+    entry.insert(
+        "loraCompatibility".to_owned(),
+        json!({"families": [MINIMAX_H3_IMPORT_FAMILY]}),
+    );
 }
 
 /// Trusted license owners of the components reused by this declaration. These rows describe
@@ -1161,7 +1163,7 @@ mod tests {
     }
 
     #[test]
-    fn the_studio_surface_is_the_shipped_base_partitions_and_withdraws_adapters() {
+    fn the_studio_surface_preserves_partition_semantics_and_native_adapter_family() {
         let mut entry = stamped_entry();
         // The residue an import request that guessed `type: "image"` leaves behind must not survive:
         // route-owned fields are the partition's, not the request's.
@@ -1181,9 +1183,10 @@ mod tests {
             json!(["text_to_video", "image_to_video", "first_last_frame"]),
             "an imported dense DiT serves the base partition's modes only"
         );
-        assert!(
-            entry.get("loraCompatibility").is_none(),
-            "adapters are not advertised on imported H3 checkpoints yet"
+        assert_eq!(
+            entry["loraCompatibility"]["families"],
+            json!(["minimax-h3"]),
+            "compatible LoRA/LoKr and turbo adapters reach the same native family installer"
         );
         assert!(
             entry["mlx"].get("repo").is_none(),

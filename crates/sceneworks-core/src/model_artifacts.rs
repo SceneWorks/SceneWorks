@@ -292,6 +292,16 @@ impl ResolvedBundleClosure {
     }
 
     pub fn validate_at_root(&self, root: &Path) -> Result<(), ArtifactContractError> {
+        self.validate_at_root_with_check(root, &|| Ok(()))
+    }
+
+    /// Same closure proof, with cooperative checkpoints around bounded content reads.
+    pub fn validate_at_root_with_check(
+        &self,
+        root: &Path,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<(), ArtifactContractError> {
+        check().map_err(|error| ArtifactContractError(error.to_string()))?;
         self.validate_canonical()?;
         let root = canonical_or_absolute(root)?;
         for member in &self.members {
@@ -299,9 +309,10 @@ impl ResolvedBundleClosure {
             let member_root = rebase_under(&root, &member.destination)?;
             for file in &member.files {
                 let path = rebase_under(&member_root, &file.relative_path)?;
-                validate_artifact_file(&path, file)?;
+                validate_artifact_file_with_check(&path, file, check)?;
             }
         }
+        check().map_err(|error| ArtifactContractError(error.to_string()))?;
         Ok(())
     }
 
@@ -348,6 +359,16 @@ impl ResolvedBundleClosure {
         primary_identity: &ArtifactIdentity,
         primary_snapshot_root: &Path,
     ) -> Result<Vec<ResolvedBundleFileLocation>, ArtifactContractError> {
+        self.source_file_locations_with_check(primary_identity, primary_snapshot_root, &|| Ok(()))
+    }
+
+    pub fn source_file_locations_with_check(
+        &self,
+        primary_identity: &ArtifactIdentity,
+        primary_snapshot_root: &Path,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Vec<ResolvedBundleFileLocation>, ArtifactContractError> {
+        check().map_err(|error| ArtifactContractError(error.to_string()))?;
         self.validate_canonical()?;
         primary_identity.validate()?;
         let library = source_library_for_primary_snapshot(primary_identity, primary_snapshot_root)?;
@@ -372,8 +393,14 @@ impl ResolvedBundleClosure {
             validate_source_ancestors(&snapshot, &member_root)?;
             for (file_index, file) in member.files.iter().enumerate() {
                 let source_path = member_root.join(&file.relative_path);
-                let source_path =
-                    validate_source_file(&library, &member.source, &snapshot, &source_path, file)?;
+                let source_path = validate_source_file(
+                    &library,
+                    &member.source,
+                    &snapshot,
+                    &source_path,
+                    file,
+                    check,
+                )?;
                 let output_path = member.destination.join(&file.relative_path);
                 validate_relative_path(&output_path, "artifact output file")?;
                 locations.push(ResolvedBundleFileLocation {
@@ -465,6 +492,14 @@ pub struct ResolvedModelArtifact {
 
 impl ResolvedModelArtifact {
     pub fn validate(&self) -> Result<(), ArtifactContractError> {
+        self.validate_with_check(&|| Ok(()))
+    }
+
+    pub fn validate_with_check(
+        &self,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<(), ArtifactContractError> {
+        check().map_err(|error| ArtifactContractError(error.to_string()))?;
         if self.schema_version != MODEL_ARTIFACT_CONTRACT_VERSION {
             return Err(ArtifactContractError(format!(
                 "unsupported model artifact contract version {}",
@@ -490,10 +525,14 @@ impl ResolvedModelArtifact {
         }
         match &self.location {
             ArtifactLocation::SourceLibrary { root } => {
-                self.closure.source_file_locations(&self.identity, root)?;
+                self.closure
+                    .source_file_locations_with_check(&self.identity, root, check)?;
+                check().map_err(|error| ArtifactContractError(error.to_string()))?;
                 Ok(())
             }
-            ArtifactLocation::ResolvedLocal { root } => self.closure.validate_at_root(root),
+            ArtifactLocation::ResolvedLocal { root } => {
+                self.closure.validate_at_root_with_check(root, check)
+            }
         }
     }
 
@@ -1199,7 +1238,12 @@ pub(crate) fn observe_content_hashes<T>(body: impl FnOnce() -> T) -> (T, u64) {
     (value, CONTENT_HASH_COUNT.with(std::cell::Cell::get))
 }
 
-fn validate_artifact_file(path: &Path, file: &ArtifactFile) -> Result<(), ArtifactContractError> {
+fn validate_artifact_file_with_check(
+    path: &Path,
+    file: &ArtifactFile,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<(), ArtifactContractError> {
+    check().map_err(|error| ArtifactContractError(error.to_string()))?;
     let metadata = std::fs::metadata(path).map_err(|error| {
         ArtifactContractError(format!(
             "artifact closure file {} is unavailable: {error}",
@@ -1224,28 +1268,18 @@ fn validate_artifact_file(path: &Path, file: &ArtifactFile) -> Result<(), Artifa
     if let Some(expected) = &file.sha256 {
         #[cfg(test)]
         count_content_hash();
-        use std::io::Read;
-        let mut input = std::fs::File::open(path).map_err(|error| {
-            ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
-        })?;
-        let mut digest = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = input.read(&mut buffer).map_err(|error| {
+        let digest = crate::checkpoint_plan_store::source_file_sha256_with_check(path, check)
+            .map_err(|error| {
                 ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
             })?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&buffer[..read]);
-        }
-        if format!("sha256:{:x}", digest.finalize()) != *expected {
+        if format!("sha256:{digest}") != *expected {
             return Err(ArtifactContractError(format!(
                 "artifact closure hash changed for {}",
                 path.display()
             )));
         }
     }
+    check().map_err(|error| ArtifactContractError(error.to_string()))?;
     Ok(())
 }
 
@@ -1375,7 +1409,9 @@ fn validate_source_file(
     snapshot: &Path,
     path: &Path,
     file: &ArtifactFile,
+    check: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<PathBuf, ArtifactContractError> {
+    check().map_err(|error| ArtifactContractError(error.to_string()))?;
     let parent = path.parent().ok_or_else(|| {
         ArtifactContractError(format!(
             "artifact source file {} has no parent",
@@ -1444,7 +1480,7 @@ fn validate_source_file(
             path.display()
         )));
     }
-    validate_artifact_file(&canonical, file)?;
+    validate_artifact_file_with_check(&canonical, file, check)?;
     Ok(canonical)
 }
 
