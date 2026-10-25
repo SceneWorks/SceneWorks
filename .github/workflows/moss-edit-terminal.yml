@@ -167,6 +167,26 @@ jobs:
       CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
       SCENEWORKS_GPU_ID: '1'
     steps:
+      # Run before checkout/setup: D: may have no room for another worktree or model copy.
+      - name: Reclaim only verified stopped MOSS copies and conditionally copy the R6 build cache
+        if: matrix.backend == 'cuda'
+        shell: powershell
+        env:
+          MOSS_MAINTENANCE_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:MOSS_SOURCE_SHA -notmatch '^[a-f0-9]{40}$') { throw 'Exact reviewed source SHA required' }
+          $runnerRoot = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
+          $node = Join-Path $runnerRoot 'externals\node24\bin\node.exe'
+          if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'Existing runner Node24 is required; no install on full disk' }
+          $headers = @{ Authorization = "Bearer $env:MOSS_MAINTENANCE_TOKEN"; Accept = 'application/vnd.github+json' }
+          $url = "https://api.github.com/repos/SceneWorks/SceneWorks/contents/scripts/ci/moss-owned-cache-maintenance.mjs?ref=$env:MOSS_SOURCE_SHA"
+          $helper = Invoke-RestMethod -Uri $url -Headers $headers
+          if ($helper.path -ne 'scripts/ci/moss-owned-cache-maintenance.mjs' -or $helper.encoding -ne 'base64' -or $helper.size -gt 131072) { throw 'Unexpected reviewed maintenance helper' }
+          $program = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($helper.content))
+          # Stream exact-ref source in memory; no disk write, checkout, tool install or GPU probe.
+          $program | & $node --input-type=module - --moss-disk-maintenance
+          if ($LASTEXITCODE -ne 0) { throw 'Guarded stopped-run disk recovery failed' }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
