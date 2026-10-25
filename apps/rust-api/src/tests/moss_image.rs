@@ -3,7 +3,7 @@ fn setup(temp: &tempfile::TempDir) {
     let config = temp.path().join("config/manifests");
     single_model_manifest(&config, "moss_image_sft", "OpenMOSS-Team/MOSS-Image-SFT");
     let mut model = json!({"id":"moss_image_sft","name":"MOSS SFT","type":"image","family":"moss_image","capabilities":["text_to_image"],"downloads":[{"provider":"huggingface","repo":"OpenMOSS-Team/MOSS-Image-SFT","revision":"fc5de0d56fc910cbca6f6625a70f5f582b26deb1","files":["transformer/config.json"]}],"image":{"supportsSchedulerShift":true,"maxPromptBatchImages":8},"defaults":{"resolution":"1024x1024","count":1,"steps":50,"guidanceScale":3,"schedulerShift":5},"limits":{"minDimension":16,"maxDimension":4096,"requiresDimensionsMultipleOf":16},"conditionalComponents":[{"provider":"huggingface","repo":"lodestones/MOSS-Image-SFT-8-steps-dmd","revision":"5ff314b4c1470876b114b810146085db8a181a6e","componentId":"moss-dmd-dataspace","files":["dataspace.safetensors"],"requiredFor":["moss_dmd_unmerged_bf16","moss_dmd_full_fp32"]}]});
-    model["conditionalComponents"].as_array_mut().unwrap().push(json!({"provider":"huggingface","repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","componentId":"moss-image-edit","files":["adapter_config.json","adapter_model.safetensors"],"license":"unspecified","requiredFor":["moss_image_edit"]}));
+    model["conditionalComponents"].as_array_mut().unwrap().push(json!({"provider":"huggingface","repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","componentId":"moss-image-edit","files":["adapter_config.json","adapter_model.safetensors"],"license":"unspecified","requiredFor":["moss_image_edit"]}));
     let mut base = model.clone();
     base["id"] = json!("moss_image_base");
     std::fs::write(
@@ -437,7 +437,7 @@ async fn moss_edit_candle_enqueue_requires_exact_package_and_is_actually_claimab
             assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
             assert!(error.to_string().contains("moss_image_edit"), "{error}");
         }
-        selected["revision"] = json!("e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11");
+        selected["revision"] = json!("3be9c40037e1b89b17aa85ff6f8ee805872aa558");
         super::yue2_catalog::seed_snapshot(&temp, &selected);
         let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body).await;
         assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -499,7 +499,7 @@ async fn moss_edit_typed_api_defaults_receipt_scrubbing_reference_ownership_and_
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
-    let selected = json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]});
+    let selected = json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]});
     super::yue2_catalog::seed_snapshot(&temp, &selected);
     let app = create_app(test_settings(&temp)).unwrap();
     let (_, project) = request(
@@ -572,7 +572,7 @@ async fn assert_moss_edit_replay_transitions(action: &str) {
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     super::yue2_catalog::seed_snapshot(
         &temp,
-        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let app = create_app(test_settings(&temp)).unwrap();
     let (status, project) = request(
@@ -776,7 +776,7 @@ async fn moss_edit_mcp_round_trip(reference_count: usize) {
     setup(&temp);
     super::yue2_catalog::seed_snapshot(
         &temp,
-        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -976,7 +976,7 @@ async fn moss_edit_stored_payload_workflow_round_trip(count: usize) {
     setup(&temp);
     super::yue2_catalog::seed_snapshot(
         &temp,
-        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
     let (_, project) = request(
@@ -1092,7 +1092,7 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     setup(&temp);
     super::yue2_catalog::seed_snapshot(
         &temp,
-        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1728,7 +1728,7 @@ async fn moss_consumer_typed_replay_preserves_mixed_aspect_duplicate_slots_and_r
         setup(&temp);
         super::yue2_catalog::seed_snapshot(
             &temp,
-            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
         );
         let mut settings = test_settings(&temp);
         settings.candle_required = candle_required;
@@ -1872,7 +1872,7 @@ async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering(
         setup(&temp);
         super::yue2_catalog::seed_snapshot(
             &temp,
-            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11","files":["adapter_config.json","adapter_model.safetensors"]}),
+            &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

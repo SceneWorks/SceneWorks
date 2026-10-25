@@ -12,6 +12,13 @@ the final merged contract refresh, independent review, final paired source/pin,
 the single campaign are still required. No source fixes
 are allowed while a candidate is frozen. A source fix invalidates that candidate.
 
+The current edit adapter resolves at immutable Hugging Face revision
+`3be9c40037e1b89b17aa85ff6f8ee805872aa558`. It replaces the unavailable
+`e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11` locator while preserving the approved
+weights SHA256 `17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf`
+and config SHA256 `b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669`.
+Historical receipts retain their original revision; they are not relabeled.
+
 ## Prepare and freeze
 
 Current unexecuted protocol is **v5**, retaining v3's exact **50 renders,

@@ -58,7 +58,7 @@ export function childEnvironment(config,token) {
   Object.assign(env,{SCENEWORKS_DATA_DIR:resolve(state,'data'),SCENEWORKS_CONFIG_DIR:resolve(state,'config'),SCENEWORKS_CREDENTIALS_DIR:resolve(state,'credentials'),
     SCENEWORKS_JOBS_DB_PATH:resolve(state,'data','cache','jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,
     SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(config.port),SCENEWORKS_API_URL:`http://127.0.0.1:${config.port}`,
-    SCENEWORKS_WORKER_ID:config.workerId,SCENEWORKS_WORKER_CHILD:'1',SCENEWORKS_GPU_ID:cuda?'1':'mlx',
+    SCENEWORKS_WORKER_ID:config.workerId,SCENEWORKS_GPU_ID:cuda?'1':'mlx',
     SCENEWORKS_BACKEND_MLX_ENABLED:String(!cuda),SCENEWORKS_BACKEND_CANDLE_ENABLED:String(cuda),SCENEWORKS_POLL_SECONDS:'1',SCENEWORKS_HEARTBEAT_SECONDS:'2',
     HF_HOME:config.hfHome,HF_HUB_CACHE:resolve(config.hfHome,'hub'),HUGGINGFACE_HUB_CACHE:resolve(config.hfHome,'hub'),HF_XET_CACHE:resolve(config.hfHome,'xet'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1'});
   if(cuda)Object.assign(env,{CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:CUDA_UUID});else delete env.CUDA_VISIBLE_DEVICES;
@@ -71,6 +71,19 @@ export function childEnvironment(config,token) {
 // The API owns and drains this CPU loop; its identity must not replace the GPU registration.
 export function utilityWorkerEnvironment(config) {
   return {SCENEWORKS_RUN_UTILITY_INPROCESS:'1',SCENEWORKS_RUST_WORKER_GPU_ID:'cpu',SCENEWORKS_WORKER_ID:`${config.workerId}-utility`,SCENEWORKS_UTILITY_WORKERS:'1'};
+}
+// Only standalone worker processes own the Windows stdin-EOF shutdown contract.
+export function standaloneWorkerEnvironment() {
+  return {SCENEWORKS_WORKER_ONLY:'1',SCENEWORKS_WORKER_CHILD:'1'};
+}
+// Whitelist bounded readiness fields; never persist tokens, environment or response bodies.
+export function stackReadinessSnapshot({health,workers=[],children=[],workerId,httpStatus=null}) {
+  const text=value=>typeof value==='string'?value.slice(0,200):null;
+  return {version:VERSION,at:new Date().toISOString(),expectedWorkerId:workerId,httpStatus,
+    health:{status:text(health?.status),readinessStatus:text(health?.readiness?.status)},
+    workers:workers.slice(0,16).map(worker=>({id:text(worker.id),gpuId:text(worker.gpuId),status:text(worker.status),
+      capabilities:Array.isArray(worker.capabilities)?worker.capabilities.slice(0,64).map(text):[]})),
+    children:children.slice(0,2).map((child,index)=>({role:index===0?'api':'worker',pid:child.pid??null,exitCode:child.exitCode??null,signalCode:child.signalCode??null,startError:Boolean(child.startError)}))};
 }
 export function readyUtilityWorker(workers,workerId) {
   return workers.find(worker=>worker.id===`${workerId}-utility`&&worker.gpuId==='cpu'&&worker.status==='idle'&&worker.capabilities?.includes('model_download'));
@@ -117,7 +130,7 @@ export async function startStack(config,token) {
   await cp(resolve(config.sourceRoot,'config'),resolve(config.stateRoot,'config'),{recursive:true,errorOnExist:true,force:false});
   const env=childEnvironment(config,token),children=[],handles=[];
   const launch=async(name,extra)=>{const handle=await open(resolve(config.root,`${name}.log`),'wx',0o600);handles.push(handle);const child=spawn(config.apiBinary,[],{cwd:config.sourceRoot,env:{...env,...extra},stdio:[name.startsWith('worker')?'pipe':'ignore',handle.fd,handle.fd],windowsHide:true});child.once('error',error=>{child.startError=error;});children.push(child);return child;};
-  const api=await launch('api',utilityWorkerEnvironment(config)),client=new Api(env.SCENEWORKS_API_URL,token);let worker=await launch('worker',{SCENEWORKS_WORKER_ONLY:'1'}),restarts=0;
+  const api=await launch('api',utilityWorkerEnvironment(config)),client=new Api(env.SCENEWORKS_API_URL,token);let worker=await launch('worker',standaloneWorkerEnvironment()),restarts=0;
   const stopOne=async(child,isWorker)=>{if(child.exitCode!==null||child.signalCode!==null)return;let timer;try {
     await new Promise((done,fail)=>{child.once('exit',done);timer=setTimeout(()=>fail(Error('owned native process did not stop; state transfer forbidden')),30000);if(process.platform==='win32'&&isWorker)child.stdin.end();else child.kill('SIGTERM');});
   }finally{clearTimeout(timer);}};
@@ -130,18 +143,20 @@ export async function startStack(config,token) {
     const oldPid=worker.pid;await stopOne(worker,true);requireThat(worker.exitCode!==null||worker.signalCode!==null,'owned worker cache process still running');
     const oldExit={code:worker.exitCode,signal:worker.signalCode};
     await sourceIdentity(config);await nativeDevice(config.backend);config.observationJournal=resolve(config.root,`journal-${++restarts}.jsonl`);
-    worker=await launch(`worker-restart-${restarts}`,{SCENEWORKS_WORKER_ONLY:'1',SCENEWORKS_MOSS_OBSERVATION_JOURNAL:config.observationJournal});
+    worker=await launch(`worker-restart-${restarts}`,{...standaloneWorkerEnvironment(),SCENEWORKS_MOSS_OBSERVATION_JOURNAL:config.observationJournal});
     return {reason,oldPid,oldExit,newPid:worker.pid,journal:config.observationJournal,source:await sourceIdentity(config),workerId:config.workerId,at:new Date().toISOString(),meaning:'actual idle owned worker process exited; its native resident caches cannot be reused by reentry'};
   };
   try {
-    const deadline=Date.now()+180000;let ready,utility;
+    const deadline=Date.now()+180000;let ready,utility,lastHealth,lastWorkers=[],lastHttpStatus=null;
     while(Date.now()<deadline) {
       for(const child of children)requireThat(!child.startError&&child.exitCode===null&&child.signalCode===null,'source-built API/worker exited before readiness');
-      try {const health=await client.request('/api/v1/health'),workers=await client.request('/api/v1/workers');ready=workers.find(item=>item.id===config.workerId);utility=readyUtilityWorker(workers,config.workerId);
+      try {const health=await client.request('/api/v1/health'),workers=await client.request('/api/v1/workers');lastHealth=health;lastWorkers=workers;lastHttpStatus=null;ready=workers.find(item=>item.id===config.workerId);utility=readyUtilityWorker(workers,config.workerId);
         if(health.status==='ok'&&health.readiness?.status==='ready'&&ready?.gpuId===(config.backend==='cuda'?'1':'mlx')&&ready.status==='idle'&&utility)break;
-      }catch{}await delay(500);
+      }catch(error){lastHttpStatus=Number.isInteger(error.status)?error.status:null;}await delay(500);
     }
-    requireThat(ready?.gpuId===(config.backend==='cuda'?'1':'mlx')&&ready.status==='idle'&&utility,'actual native/CPU model_download workers never registered on their bound identities');
+    const registered=ready?.gpuId===(config.backend==='cuda'?'1':'mlx')&&ready.status==='idle'&&utility;
+    if(!registered)await save(resolve(config.root,'startup-readiness.json'),stackReadinessSnapshot({health:lastHealth,workers:lastWorkers,children,workerId:config.workerId,httpStatus:lastHttpStatus}));
+    requireThat(registered,'actual native/CPU model_download workers never registered on their bound identities; inspect startup-readiness.json');
     await save(resolve(config.root,'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString()});
     return {api:client,children,stop,restartIdleWorker,async restartWorker(canceledJobId){
       const job=await client.request(`/api/v1/jobs/${encodeURIComponent(canceledJobId)}`);

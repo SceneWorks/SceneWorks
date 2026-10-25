@@ -74,7 +74,7 @@
         {
           "provider": "huggingface",
           "repo": "chinoll/Moss-Image-Edit",
-          "revision": "e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11",
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
           "files": ["adapter_config.json", "adapter_model.safetensors"],
           "license": "unspecified",
           "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",
@@ -251,7 +251,7 @@
         {
           "provider": "huggingface",
           "repo": "chinoll/Moss-Image-Edit",
-          "revision": "e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11",
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
           "files": ["adapter_config.json", "adapter_model.safetensors"],
           "license": "unspecified",
           "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",

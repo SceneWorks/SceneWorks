@@ -459,7 +459,7 @@ export function findEditReport(asset, job) {
 }
 export function validateEditReport(row, request, report, originals) {
   requireThat(report && report.base && Array.isArray(report.references), 'missing actual native edit provider report');
-  requireThat(report.adapter_repository === 'chinoll/Moss-Image-Edit' && report.adapter_revision === 'e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11' && report.adapter_sha256 === '17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf' && report.config_sha256 === 'b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669' && report.applied_projections === 252 && report.edit_contract === 'ref-prefix-only-t0__target-text-original-moss-v1', 'provider did not use the exact published edit adapter');
+  requireThat(report.adapter_repository === 'chinoll/Moss-Image-Edit' && report.adapter_revision === '3be9c40037e1b89b17aa85ff6f8ee805872aa558' && report.adapter_sha256 === '17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf' && report.config_sha256 === 'b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669' && report.applied_projections === 252 && report.edit_contract === 'ref-prefix-only-t0__target-text-original-moss-v1', 'provider did not use the exact published edit adapter');
   requireThat(report.references.length === row.refs.length, 'report reference cardinality mismatch');
   requireThat(report.reference_max_edge === request.advanced.mossImageEdit.reference_max_edge && report.use_kv_cache === request.advanced.mossImageEdit.use_kv_cache, 'effective reference/cache controls differ');
   const base = report.base.data ?? report.base;

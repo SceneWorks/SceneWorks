@@ -1,12 +1,13 @@
 import test from 'node:test';
+import { stripJsoncComments } from './lib/jsonc.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan } from './lib/moss-edit-terminal.mjs';
+import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -62,19 +63,35 @@ test('child environment isolates owned state/cache/auth and never invents a hard
 test('owned installation stack enables a distinct CPU download claimant and requires its actual registration',async()=>{
   for(const backend of ['mlx','cuda']) {
     const config={stateRoot:'/private/owned/state',backend,port:17957,workerId:`native-${backend}`,hfHome:'/private/owned/hf'};
-    const native=childEnvironment(config,'private-inert-token'),api={...native,...utilityWorkerEnvironment(config)};
+    const common=childEnvironment(config,'private-inert-token'),native={...common,...standaloneWorkerEnvironment()},api={...common,...utilityWorkerEnvironment(config)};
+    assert.equal(Object.hasOwn(common,'SCENEWORKS_WORKER_CHILD'),false);assert.equal(Object.hasOwn(api,'SCENEWORKS_WORKER_CHILD'),false);
+    assert.equal(native.SCENEWORKS_WORKER_CHILD,'1');assert.equal(native.SCENEWORKS_WORKER_ONLY,'1');
     assert.equal(api.SCENEWORKS_RUN_UTILITY_INPROCESS,'1');assert.equal(api.SCENEWORKS_RUST_WORKER_GPU_ID,'cpu');assert.equal(api.SCENEWORKS_UTILITY_WORKERS,'1');
     assert.notEqual(api.SCENEWORKS_WORKER_ID,native.SCENEWORKS_WORKER_ID);
     const gpu={id:native.SCENEWORKS_WORKER_ID,gpuId:native.SCENEWORKS_GPU_ID,status:'idle',capabilities:['image_edit']};
     const utility={id:api.SCENEWORKS_WORKER_ID,gpuId:api.SCENEWORKS_RUST_WORKER_GPU_ID,status:'idle',capabilities:['cpu','model_download']};
     assert.equal(readyUtilityWorker([gpu],config.workerId),undefined);
     assert.equal(readyUtilityWorker([gpu,utility],config.workerId),utility);
-    for(const changes of [{id:gpu.id},{gpuId:gpu.gpuId},{status:'busy'},{capabilities:['cpu']}])assert.equal(readyUtilityWorker([gpu,{...utility,...changes}],config.workerId),undefined);
+    for(const changes of [{id:gpu.id},{gpuId:gpu.gpuId},{status:'busy'},{status:'offline'},{capabilities:['cpu']}])assert.equal(readyUtilityWorker([gpu,{...utility,...changes}],config.workerId),undefined);
   }
   const source=await readFile(resolve(sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs'),'utf8');
   assert.match(source,/launch\('api',utilityWorkerEnvironment\(config\)\)/);
   assert.match(source,/utility=readyUtilityWorker\(workers,config.workerId\)/);
   assert.match(source,/utilityWorker:utility/);
+  assert.match(source,/launch\('worker',standaloneWorkerEnvironment\(\)\)/);
+  assert.match(source,/launch\(`worker-restart-\$\{restarts\}`,\{\.\.\.standaloneWorkerEnvironment\(\),/);
+  assert.match(source,/stdio:\[name.startsWith\('worker'\)\?'pipe':'ignore'/);
+  assert.match(source,/if\(!registered\)await save\(resolve\(config.root,'startup-readiness.json'\),stackReadinessSnapshot/);
+});
+test('startup failure diagnostics retain bounded worker state without credentials or response bodies',()=>{
+  const snapshot=stackReadinessSnapshot({workerId:'native',httpStatus:200,health:{status:'ok',readiness:{status:'ready'},token:'secret'},
+    workers:[{id:'native-utility',gpuId:'cpu',status:'offline',capabilities:['cpu','model_download'],accessToken:'secret',extra:{password:'secret'}}],
+    children:[{pid:1,exitCode:null,signalCode:null,startError:new Error('secret')}]});
+  assert.deepEqual(snapshot.health,{status:'ok',readinessStatus:'ready'});
+  assert.deepEqual(snapshot.workers,[{id:'native-utility',gpuId:'cpu',status:'offline',capabilities:['cpu','model_download']}]);
+  assert.equal(snapshot.children[0].startError,true);assert.doesNotMatch(JSON.stringify(snapshot),/secret|accessToken|password/);
+  const bounded=stackReadinessSnapshot({workers:Array.from({length:30},()=>({id:'x'.repeat(300),capabilities:Array(100).fill('cpu')})),children:Array(10).fill({})});
+  assert.equal(bounded.workers.length,16);assert.equal(bounded.workers[0].id.length,200);assert.equal(bounded.workers[0].capabilities.length,64);assert.equal(bounded.children.length,2);
 });
 test('stopped registry relocation preserves all identities and rejects any unrelated project path',()=>{
   const original=[{id:'same-project',path:'/old/data/projects/campaign.sceneworks',name:'actual',other:{jobId:'same-job'}}];
@@ -220,6 +237,21 @@ test('actual PNG workflow inspector evidence preserves original exported bytes a
 test('lexical scalar proof targets only actual training shift and has no unrelated malformed JSON',()=>{
   for(const token of ['NaN','Infinity','-Infinity'])validateLexicalNonfinite(`{"advanced":{"mossImage":{"training_shift":${token}}}}`);
   for(const raw of ['{"prompt":"NaN","advanced":{"mossImage":{"training_shift":null}}}','{"training_shift":NaN}','{"advanced":{"mossImage":{"training_shift":NaN}},"bad":}','{"advanced":{"mossImage":{"training_shift":NaN,"other":Infinity}}}'])assert.throws(()=>validateLexicalNonfinite(raw));
+});
+test('current adapter locator and native report preserve the exact approved config and weight identities',async()=>{
+  const manifest=JSON.parse(stripJsoncComments(await readFile(resolve(sourceRoot,'config/manifests/builtin.models.jsonc'),'utf8')));
+  const revision='3be9c40037e1b89b17aa85ff6f8ee805872aa558',weight='17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf',configSha='b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669';
+  for(const id of ['moss_image_base','moss_image_sft']) {
+    const component=manifest.models.find(model=>model.id===id).conditionalComponents.find(component=>component.componentId==='moss-image-edit');
+    assert.equal(component.revision,revision);assert.equal(component.weightsSha256,weight);assert.equal(component.license,'unspecified');
+    assert.deepEqual(component.files,['adapter_config.json','adapter_model.safetensors']);
+  }
+  const row={backend:'cuda',variant:'base',refs:['B'],output:'images',outputCount:1};
+  const request={width:16,height:16,seed:7,advanced:{steps:1,guidanceScale:1,schedulerShift:1,mossImage:{},mossImageEdit:{reference_max_edge:64,use_kv_cache:true}}};
+  const report={adapter_repository:'chinoll/Moss-Image-Edit',adapter_revision:revision,adapter_sha256:weight,config_sha256:configSha,applied_projections:252,edit_contract:'ref-prefix-only-t0__target-text-original-moss-v1',references:[{}],reference_max_edge:64,use_kv_cache:true,
+    base:{execution_device:'cuda',resolved:{variant:'base',steps:1,guidance:1,shift:1,training_shift:1,max_sequence_length:4096},output_kind:'images',latent_shape:[1,128,1,1],samples:[{seed:7,noise_sha256:'a'.repeat(64)}]}};
+  validateEditReport(row,request,report);
+  for(const changed of [{adapter_revision:'e19b6ab0fb8fd010cb6f1c7f5b9bfe152252df11'},{adapter_sha256:'0'.repeat(64)},{config_sha256:'0'.repeat(64)}])assert.throws(()=>validateEditReport(row,request,{...report,...changed}),/exact published edit adapter/);
 });
 test('installer projection is exactly the integrated pinned config and adapter weights on both variants',()=>{
   const component={componentId:'moss-image-edit',requiredFor:['moss_image_edit'],repo:'chinoll/Moss-Image-Edit',revision:'e'.repeat(40),files:['adapter_config.json','adapter_model.safetensors'],weightsSha256:'f'.repeat(64)},prefix=`hub/models--chinoll--Moss-Image-Edit/snapshots/${component.revision}/`,config={editAdapterFiles:component.files.map(file=>prefix+file),packageFiles:[{file:prefix+'adapter_model.safetensors',sha256:component.weightsSha256}]},manifest={models:['moss_image_base','moss_image_sft'].map(id=>({id,conditionalComponents:[structuredClone(component)]}))};
