@@ -1,7 +1,7 @@
 {
-  "_comment": "Source inventory mechanically regenerated at inference revision f63ca1fb for epic sc-26679 terminal native integration: the checked-sealing cancellation path, the bounded H3 proof-route guards, and the Windows supervisor teardown accounting fence. The current generated inventory contains 786 provenance candidates and 117 production-Rust crate prefixes. Existing source/license dispositions are retained; this pin update does not claim the advisory compliance worklist is resolved or introduce new classifications. Historical measurement and provenance receipts retain their recorded revisions; this generated source inventory is not a measurement-currency assertion.",
-  "inferenceRevision": "f63ca1fb5b317b4e8f817bcf30329593f91e479b",
-  "auditDigest": "f9b9009868810621b5a7ee618ede74f57fa1fbc2d519bfeea7c04593bc3fea7f",
+  "_comment": "Source inventory mechanically regenerated at inference revision 350bd900 (native main) for epic sc-26679 terminal delivery: the checked-sealing cancellation path, the bounded H3 proof-route guards, and the Windows supervisor teardown accounting fence. The current generated inventory contains 786 provenance candidates and 117 production-Rust crate prefixes. Existing source/license dispositions are retained; this pin update does not claim the advisory compliance worklist is resolved or introduce new classifications. Historical measurement and provenance receipts retain their recorded revisions; this generated source inventory is not a measurement-currency assertion.",
+  "inferenceRevision": "350bd900ee559ad0e5f2227b3e551d81b74b9501",
+  "auditDigest": "cb7801613701a1486617232fb036d7bfa6eb3d2f71297a7c744ef3c253574f23",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "f63ca1fb5b317b4e8f817bcf30329593f91e479b",
+    "revision": "350bd900ee559ad0e5f2227b3e551d81b74b9501",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "f63ca1fb5b317b4e8f817bcf30329593f91e479b",
+    "revision": "350bd900ee559ad0e5f2227b3e551d81b74b9501",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
