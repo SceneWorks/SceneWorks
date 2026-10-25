@@ -23,11 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       starvector_terminal_operation:
-        description: Run the ordinary Linux build, a terminal operation, or explicitly selected synthetic H3 model proofs.
+        description: Run the ordinary Linux build, a terminal operation, or explicit H3 model/admission proofs.
         required: true
         default: standard
         type: choice
-        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both]
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof]
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
@@ -77,10 +77,97 @@ concurrency:
   # Every terminal phase shares one non-canceling bridge queue. An unrelated
   # ordinary Linux compile must not cancel a source/provision/readiness/campaign
   # caller, and a later terminal phase must wait for its predecessor to finish.
-  group: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge') }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge')) }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
+  # Explicit hosted CPU proof only: no recurring PR/main mutation job and no GPU queue/token.
+  h3-admission-proof:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_NET_OFFLINE: "true"
+      CARGO_BUILD_JOBS: "2"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Read checkout Rust toolchain
+        id: h3_admission_toolchain
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel):
+              raise SystemExit("checkout Rust channel must be an exact version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"channel={channel}", file=output)
+          PY
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ steps.h3_admission_toolchain.outputs.channel }}
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Initialize CPU proof evidence before dependency setup
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/h3-admission-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$evidence"
+          echo "H3_ADMISSION_EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$evidence/source-sha.txt"
+          cp Cargo.lock "$evidence/Cargo.lock"
+          sha256sum Cargo.lock crates/sceneworks-worker/src/video_admission.rs > "$evidence/source-inputs.sha256"
+          printf '%s\n' 'cfg=default; Linux parity worker/lib; CPU-only; no model execution' > "$evidence/configuration.txt"
+          mkdir -p "$HOME/.cache/huggingface" "$HOME/.cache/torch" "$HOME/SceneWorks/data"
+      - name: Fetch the pinned inference source, never model weights
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked 2>&1 | tee "$H3_ADMISSION_EVIDENCE/dependency-fetch.log"
+      - name: Install CPU isolation tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee "$H3_ADMISSION_EVIDENCE/isolation-setup.log"
+          sudo apt-get install -y --no-install-recommends bubblewrap 2>&1 | tee -a "$H3_ADMISSION_EVIDENCE/isolation-setup.log"
+      - name: Prove H3 admission baseline, assertion reds and restored greens on CPU
+        run: |
+          set -euo pipefail
+          # Drop back to the runner user inside a network-less namespace. The read-only host
+          # tree exposes no physical GPU devices; only this checkout, Cargo sources and owned
+          # temp evidence are writable. Mask real HF/Torch/app-data caches at the OS boundary.
+          sudo -E bwrap --unshare-net --unshare-pid --die-with-parent \
+            --ro-bind / / \
+            --bind "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" \
+            --bind "$RUNNER_TEMP" "$RUNNER_TEMP" \
+            --bind "${CARGO_HOME:-$HOME/.cargo}" "${CARGO_HOME:-$HOME/.cargo}" \
+            --tmpfs "$HOME/.cache/huggingface" --tmpfs "$HOME/.cache/torch" \
+            --tmpfs "$HOME/SceneWorks/data" --proc /proc --dev /dev \
+            --setenv HOME "$HOME" --setenv PATH "$PATH" --chdir "$GITHUB_WORKSPACE" \
+            -- /usr/sbin/runuser --user "$USER" --preserve-environment -- \
+            python3 scripts/ci/h3_admission_mutation_proof.py \
+              --output-dir "$H3_ADMISSION_EVIDENCE/proof" --cfg default \
+            2>&1 | tee "$H3_ADMISSION_EVIDENCE/proof-driver.log"
+      - name: Keep actual H3 CPU source, pin, assertions and restoration evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-admission-cpu-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.H3_ADMISSION_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 30
+
   # This file is already registered on main, so --ref <published story branch> executes that
   # branch's positively selected proof jobs without activating the H3/Veda registration stubs.
   h3-import-mlx:

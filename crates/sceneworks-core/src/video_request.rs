@@ -2206,11 +2206,24 @@ pub fn video_admission(
     if !video_admission_surface(model, lane).routed {
         return VideoAdmission::NotRouted;
     }
+    video_admission_for_geometries(
+        model,
+        video_admission_geometries(model, lane, width, height, frames, decode_chunk_size),
+        selector,
+    )
+}
+
+/// Grade a provider-resolved geometry envelope using the same aggregation as catalog routes.
+/// A loaded imported provider can establish its own request allocation bound without borrowing
+/// a built-in model's identity or silently inheriting its measurements/decoder cap.
+pub fn video_admission_for_geometries(
+    model: &str,
+    geometries: impl IntoIterator<Item = VideoAdmissionGeometry>,
+    selector: &mut dyn VideoStrategySelector,
+) -> VideoAdmission {
     let mut admitted: Option<(StrategyRung, VideoAdmissionGeometry, f64, f64)> = None;
     let mut rejected: Option<(VideoAdmissionGeometry, f64, f64)> = None;
-    for geometry in
-        video_admission_geometries(model, lane, width, height, frames, decode_chunk_size)
-    {
+    for geometry in geometries {
         match selector.select(geometry) {
             VideoRungSelection::Selected {
                 rung,

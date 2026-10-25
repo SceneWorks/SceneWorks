@@ -3019,7 +3019,25 @@ pub(super) async fn generate_video_using(
                         reference_image_short_edge: input.reference_image_short_edge,
                     })
                     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+                let native_quant_request = generator
+                    .memory_strategy_contract()
+                    .and_then(|contract| contract.phase_facts.as_ref())
+                    .and_then(|phase| phase.native_quant.as_ref())
+                    .map(|_| crate::video_admission::NativeQuantRequest {
+                        shape: gen_core::veda::workspace::Request {
+                            veda: input.veda.as_ref(),
+                            width: input.width,
+                            height: input.height,
+                            frames: input.frames,
+                            count: 1,
+                            prompt: &input.prompt,
+                            conditioning: &input.conditioning,
+                            reference_image_short_edge: input.reference_image_short_edge,
+                        },
+                        evaluations: input.steps,
+                    });
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    native_quant_request,
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
                     route: engine_id,

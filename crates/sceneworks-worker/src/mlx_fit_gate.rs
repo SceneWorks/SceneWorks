@@ -2656,6 +2656,27 @@ pub(crate) fn estimate_floor_smallest_parameters(
             .min()
             .map(Some)
     };
+    let transformer_window_component = if engaged
+        .contains(&MemoryStrategy::BoundedTransformerResidency)
+        && contract
+            .phase_facts
+            .as_ref()
+            .and_then(|phase| phase.native_quant.as_ref())
+            .is_some()
+    {
+        contract
+            .capability(MemoryStrategy::BoundedTransformerResidency)?
+            .parameters
+            .transformer_window_components
+            .iter()
+            .copied()
+            .min()
+            // Preserve the legacy/default Dit representation; non-default declared scopes
+            // must reach validation and execution rather than silently becoming Dit.
+            .filter(|component| *component != gen_core::TransformerComponent::Dit)
+    } else {
+        None
+    };
     Some(gen_core::MemoryStrategyParameters {
         stage_residency: None,
         decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
@@ -2670,7 +2691,7 @@ pub(crate) fn estimate_floor_smallest_parameters(
         transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
             &ranges.transformer_window_sizes
         })?,
-        transformer_window_component: None,
+        transformer_window_component,
     })
 }
 
@@ -9959,6 +9980,7 @@ mod tests {
         contract.asset_facts.base_bytes = gib_to_bytes(FULL_LADDER_WEIGHTS_GB);
         contract.asset_facts.transformer_bytes = gib_to_bytes(FULL_LADDER_WEIGHTS_GB);
         contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
+            native_quant: None,
             architecture: None,
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: Some(gen_core::StreamedWeightFacts {
@@ -11733,6 +11755,7 @@ mod tests {
         );
         let mut sdxl = contract.clone();
         sdxl.phase_facts = Some(gen_core::MemoryPhaseFacts {
+            native_quant: None,
             architecture: Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip),
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: None,
