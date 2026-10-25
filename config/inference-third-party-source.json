@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed for inference revision b322697b, the merged shared-LLM decoder manual-only lane. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes, byte-identical to the preceding scan: this delta only adds `#[ignore]` annotations to shared-LLM decoder model tests, a new manual `llm-decoder-fixture` CI lane, and the Windows campaign-supervisor fixture fix, so no candidate, marker, classification or crate prefix changed and no MOSS-Image training source moved. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
-  "inferenceRevision": "b322697bec39e4f7e06a5477a5a2ffab19c1c759",
-  "auditDigest": "889527e5ac29c7dbec220700553c4e32f9f4108966d78afd76f837ab9b348a2a",
+  "_comment": "Source inventory checked for inference revision b939f3e8, the merged optional prepared-evaluation diagnostic from PR #1344. The actual merged-source scan contains 772 provenance candidates and 113 production-Rust crate prefixes; both generated inventories are byte-identical to the preceding b322697b scan, so no candidate path, provenance marker, classification or crate prefix changed. This advance adds test-support tensor descriptors and canonical content hashing to MOSS evaluation receipts, not a training algorithm, optimizer, hyperparameter or model-source change. The supplied merged probe and recorded relied-on sources were hash-verified against the prior diagnostic head. Existing native-architecture source dispositions remain applicable. This descriptive source review makes no new model-weight license grant, real-weight acceptance claim, or peak-memory claim; existing disclosures and advisory compliance work remain unchanged.",
+  "inferenceRevision": "b939f3e883b75d3ec5e12263bde914ae5f5b2830",
+  "auditDigest": "e8775b38385ab80180bd4b68b35f15e740da0590d5289731f15202052c89ef78",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,7 +17,7 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "b322697bec39e4f7e06a5477a5a2ffab19c1c759",
+    "revision": "b939f3e883b75d3ec5e12263bde914ae5f5b2830",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
@@ -980,7 +980,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "b322697bec39e4f7e06a5477a5a2ffab19c1c759",
+    "revision": "b939f3e883b75d3ec5e12263bde914ae5f5b2830",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 113,
     "cratePopulationSha256": "ab0ed6216bcf1dfefdb1e0998f10d6aab347add8d4d3b6913c9c21939a1fe253"

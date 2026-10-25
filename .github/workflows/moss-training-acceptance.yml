@@ -1,0 +1,285 @@
+# Reusable only, reached exclusively from the manual memory-catalog dispatcher.
+# No publication, weight download, automatic PR/main trigger or global resource queue.
+name: MOSS training terminal acceptance
+on:
+  workflow_call:
+    inputs:
+      workflowSource:
+        required: true
+        type: string
+      inference_sha:
+        required: false
+        type: string
+        default: ""
+      moss_runner_label:
+        required: true
+        type: string
+      moss_phase:
+        required: true
+        type: string
+      moss_evidence_run_id:
+        required: false
+        type: string
+        default: ""
+      moss_inspection_json:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      SCENEWORKS_INFERENCE_READ_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    working-directory: sceneworks-source
+jobs:
+  capture:
+    if: ${{ inputs.moss_phase == 'capture' }}
+    # Both backends run four exact cases sequentially, never a cell matrix.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: mlx
+            os: macos
+          - backend: cuda
+            os: windows
+    runs-on: ${{ matrix.backend == 'mlx' && fromJSON(format('["self-hosted","macOS","ARM64","{0}"]', inputs.moss_runner_label)) || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 390
+    env:
+      MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
+      MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
+      MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      RUSTC_WRAPPER: ""
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../moss-training-target-${{ inputs.workflowSource }}-${{ matrix.backend }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_TEST_STRIP: none
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: none
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: none
+    steps:
+      - name: Record macOS lane job start before checkout or preparation
+        if: ${{ matrix.backend == 'mlx' }}
+        shell: bash
+        run: echo "MOSS_CROSS_LOAD_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+        working-directory: ${{ github.workspace }}
+      - name: Record Windows lane job start before checkout or preparation
+        if: ${{ matrix.backend == 'cuda' }}
+        shell: powershell
+        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.ToString('o'))
+        working-directory: ${{ github.workspace }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.workflowSource }}
+          path: sceneworks-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read-only inference main source proof (missing-source-access requires existing read token)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: main
+          path: inference-source
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
+        if: ${{ matrix.backend == 'cuda' }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        if: ${{ matrix.backend == 'mlx' }}
+        with:
+          toolchain: "1.97.1"
+      - name: Prepare release MLX library (not model weights)
+        if: ${{ matrix.backend == 'mlx' }}
+        shell: bash
+        run: scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+      - name: Consume the exact shared fixed-dataset artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: moss-dataset
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Guarded capture MLX
+        if: ${{ matrix.backend == 'mlx' }}
+        env:
+          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+        shell: bash
+        run: node scripts/moss-training-acceptance.mjs --phase capture --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json
+      - name: Guarded capture CUDA with native compiler environment
+        if: ${{ matrix.backend == 'cuda' }}
+        env:
+          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/moss-training-acceptance.mjs --phase capture --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json
+      - name: Preserve raw logs, native records, exports, previews and supervision even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: capture-${{ matrix.backend }}
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}/
+          if-no-files-found: error
+          retention-days: 30
+  cross-load:
+    if: ${{ inputs.moss_phase == 'capture' }}
+    needs: capture
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: mlx
+            os: macos
+          - backend: cuda
+            os: windows
+    runs-on: ${{ matrix.backend == 'mlx' && fromJSON(format('["self-hosted","macOS","ARM64","{0}"]', inputs.moss_runner_label)) || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 390
+    env:
+      MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
+      MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
+      MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      RUSTC_WRAPPER: ""
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../moss-training-target-${{ inputs.workflowSource }}-${{ matrix.backend }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_TEST_STRIP: none
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: none
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: none
+    steps:
+      - name: Record macOS lane job start before checkout or preparation
+        if: ${{ matrix.backend == 'mlx' }}
+        shell: bash
+        run: echo "MOSS_CROSS_LOAD_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+        working-directory: ${{ github.workspace }}
+      - name: Record Windows lane job start before checkout or preparation
+        if: ${{ matrix.backend == 'cuda' }}
+        shell: powershell
+        run: Add-Content -Path $env:GITHUB_ENV -Value ('MOSS_CROSS_LOAD_JOB_STARTED_AT=' + [DateTimeOffset]::UtcNow.ToString('o'))
+        working-directory: ${{ github.workspace }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.workflowSource }}
+          path: sceneworks-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read-only inference main source proof (missing-source-access requires existing read token)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: main
+          path: inference-source
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
+        if: ${{ matrix.backend == 'cuda' }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        if: ${{ matrix.backend == 'mlx' }}
+        with:
+          toolchain: "1.97.1"
+      - name: Prepare release MLX library (not model weights)
+        if: ${{ matrix.backend == 'mlx' }}
+        shell: bash
+        run: scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: capture-*
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers
+          merge-multiple: false
+      - name: Consume the same fixed-dataset bytes for cross-load identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: moss-dataset
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Guarded cross-load MLX
+        if: ${{ matrix.backend == 'mlx' }}
+        env:
+          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+        shell: bash
+        run: node scripts/moss-training-acceptance.mjs --phase cross-load --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/cross-load-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json --peer-artifacts "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers"
+      - name: Guarded cross-load CUDA with native compiler environment
+        if: ${{ matrix.backend == 'cuda' }}
+        env:
+          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/moss-training-acceptance.mjs --phase cross-load --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/cross-load-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json --peer-artifacts "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers"
+      - name: Preserve raw logs, native records, exports, previews and supervision even on failure
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cross-load-${{ matrix.backend }}
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/cross-load-${{ matrix.backend }}/
+          if-no-files-found: error
+          retention-days: 30
+  finalize:
+    if: ${{ inputs.moss_phase == 'finalize' }}
+    # Separate manual finalization consumes one original capture run and real
+    # inspection records. It never repeats training or silently invents reviews.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
+      MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
+      MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
+      MOSS_CAPTURE_RUN_ID: ${{ inputs.moss_evidence_run_id }}
+      MOSS_INSPECTION_JSON: ${{ inputs.moss_inspection_json }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.workflowSource }}
+          path: sceneworks-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read-only inference main source proof (missing-source-access requires existing read token)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: main
+          path: inference-source
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Install static schema validator (no native model execution)
+        run: python3 -m pip install 'jsonschema==4.26.0' 'Pillow>=11,<13'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.moss_evidence_run_id }}
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers
+      - name: Finalize complete evidence, without GPU
+        run: node scripts/moss-training-acceptance.mjs --phase finalize --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/finalize" --backend mlx --manifest scripts/ci/moss-training-acceptance/campaign.json --peer-artifacts "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ always() }}
+        with:
+          name: finalize
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/finalize/
+          if-no-files-found: error
+          retention-days: 30
