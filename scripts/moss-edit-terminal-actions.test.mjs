@@ -686,15 +686,18 @@ test('regular installed adapters remain exclusive and malformed regular bytes ar
 });
 test('canonical artifact environment removes dot segments and proves workspace aliases before exporting paths',async t=>{
   const base=await realpath(await temporary('canonical-env'));t.after(()=>rm(base,{recursive:true,force:true}));const workspace=resolve(base,'workspace/repository');await mkdir(workspace,{recursive:true});await symlink(workspace,resolve(base,'alias'));
-  const env={GITHUB_WORKSPACE:workspace,MOSS_ROOT:resolve(workspace,'..')+'/repository/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:workspace+'/../moss-sc-26752/moss-builds-123-1-build-mlx',MOSS_BUNDLE:workspace+'/../moss-sc-26752/moss-bundle-123-1',GITHUB_ENV:resolve(base,'env')};
+  const env={GITHUB_WORKSPACE:workspace,MOSS_ROOT:resolve(workspace,'..')+'/repository/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:workspace+'/../moss-sc-26752/moss-builds-123-1-build-mlx',MOSS_BUNDLE:workspace+'/../moss-sc-26752/moss-bundle-123-1',MOSS_PRIOR_MLX:workspace+'/../moss-sc-26752/moss-h27-prior-123-1',MOSS_SUPPLEMENT:workspace+'/../moss-sc-26752/moss-h27-hidden-123-1',GITHUB_ENV:resolve(base,'env')};
   const output=await exportMossEnvironment(env);assert.equal(output.MOSS_ROOT,resolve(workspace,'../moss-sc-26752/moss-build-123-1-mlx'));for(const value of Object.values(output))assert.ok(!value.split(/[\\/]/).some(part=>part==='.'||part==='..'));assert.match(await readFile(env.GITHUB_ENV,'utf8'),/MOSS_BUILDS=/);
-  const alias={...env,GITHUB_WORKSPACE:resolve(base,'alias'),MOSS_ROOT:resolve(base,'alias')+'/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:undefined,MOSS_BUNDLE:undefined};assert.equal((await normalizeMossEnvironment(alias)).MOSS_ROOT,output.MOSS_ROOT);
+  assert.equal(output.MOSS_PRIOR_MLX,resolve(workspace,'../moss-sc-26752/moss-h27-prior-123-1'));assert.equal(output.MOSS_SUPPLEMENT,resolve(workspace,'../moss-sc-26752/moss-h27-hidden-123-1'));
+  assert.match(await readFile(env.GITHUB_ENV,'utf8'),/MOSS_SUPPLEMENT=.*moss-h27-hidden-123-1/);
+  await assert.rejects(()=>normalizeMossEnvironment({...env,MOSS_SUPPLEMENT:workspace+'/../moss-sc-26752/moss-h27-prior-123-1'}),/escaped durable namespace/);
+  const alias={...env,GITHUB_WORKSPACE:resolve(base,'alias'),MOSS_ROOT:resolve(base,'alias')+'/../moss-sc-26752/moss-build-123-1-mlx',MOSS_BUILDS:undefined,MOSS_BUNDLE:undefined,MOSS_PRIOR_MLX:resolve(base,'alias')+'/../moss-sc-26752/moss-h27-prior-123-1',MOSS_SUPPLEMENT:resolve(base,'alias')+'/../moss-sc-26752/moss-h27-hidden-123-1'};const normalizedAlias=await normalizeMossEnvironment(alias);assert.equal(normalizedAlias.MOSS_ROOT,output.MOSS_ROOT);assert.equal(normalizedAlias.MOSS_PRIOR_MLX,output.MOSS_PRIOR_MLX);assert.equal(normalizedAlias.MOSS_SUPPLEMENT,output.MOSS_SUPPLEMENT);
   await assert.rejects(()=>normalizeMossEnvironment({...env,MOSS_ROOT:resolve(base,'unrelated/moss-build-123-1-mlx')}),/escaped/);
   await rm(resolve(workspace,'../moss-sc-26752'),{recursive:true});await mkdir(resolve(base,'unrelated'));await symlink(resolve(base,'unrelated'),resolve(workspace,'../moss-sc-26752'));await assert.rejects(()=>normalizeMossEnvironment(env),/linked ancestors/);
 });
 test('every artifact job normalizes paths before its first operation and installer materialization follows shutdown',async()=>{
   const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
-  for(const name of ['upload-inputs','build-native','execute-mlx','execute-cuda','verify-retained']) {
+  for(const name of ['upload-inputs','build-native','execute-mlx','execute-cuda','supplement-mlx-handoff','verify-retained']) {
     // Select by job body, independently of the display name of its first artifact step.
     const body=workflow.split(/(?=^  [a-z][a-z-]*:\n)/m).find(body=>body.startsWith(`  ${name}:`));assert.ok(body,name);
     const artifact=body.search(/uses: actions\/(?:download|upload)-artifact/),normalize=body.indexOf('moss-edit-terminal-actions.mjs normalize-env');assert.ok(normalize>=0&&normalize<artifact,name);

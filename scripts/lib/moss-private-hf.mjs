@@ -134,14 +134,16 @@ export async function materializePrivateAdapter(config) {
   await writeFile(resolve(config.root,'adapter-materialization.json'),JSON.stringify({candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,operations},null,2)+'\n',{flag:'wx',mode:0o600});return operations;
 }
 export function mossArtifactRoute(key,path,rawBase,platform=process.platform) {
-  const external=key!=='MOSS_BUNDLE'&&platform==='darwin'&&dirname(resolve(path))===MAC_MOSS_BASE;
-  requireThat((dirname(resolve(path))===rawBase||external)&&/^moss-(?:build|builds|execute|review|bundle)-[0-9]+-[0-9]+(?:-(?:build|execute|review|mlx|cuda))*$/.test(basename(path)),'MOSS artifact path escaped durable namespace');
+  const supplement=key==='MOSS_PRIOR_MLX'||key==='MOSS_SUPPLEMENT';
+  const external=!supplement&&key!=='MOSS_BUNDLE'&&platform==='darwin'&&dirname(resolve(path))===MAC_MOSS_BASE;
+  const leaf=basename(path),valid=supplement?new RegExp(`^moss-h27-${key==='MOSS_PRIOR_MLX'?'prior':'hidden'}-[0-9]+-[0-9]+$`).test(leaf):/^moss-(?:build|builds|execute|review|bundle)-[0-9]+-[0-9]+(?:-(?:build|execute|review|mlx|cuda))*$/.test(leaf);
+  requireThat((dirname(resolve(path))===rawBase||external)&&valid,'MOSS artifact path escaped durable namespace');
   return {external,leaf:basename(path)};
 }
 export async function normalizeMossEnvironment(env) {
   const workspace=await realpath(env.GITHUB_WORKSPACE),base=resolve(workspace,'..','moss-sc-26752'),rawBase=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752'),result={};
   await mkdir(base,{recursive:true});await confined(base,{descendants:false});
-  for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_BUNDLE'])if(env[key]) {
+  for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_BUNDLE','MOSS_PRIOR_MLX','MOSS_SUPPLEMENT'])if(env[key]) {
     const {external}=mossArtifactRoute(key,env[key],rawBase);
     if(external) {
       const mount=resolve(MAC_MOSS_BASE,'..');await confined(mount,{descendants:false});
