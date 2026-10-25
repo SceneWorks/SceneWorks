@@ -419,8 +419,7 @@ test("the margin column is the derivation's, not a literal in this script", asyn
 
 test("the located binding population covers every closure digest the manifest carries", async () => {
   // Derived from the manifest, not pinned to a number: a NEW whole-block fit lands as one more
-  // `inferenceClosureDigest` occurrence, and a population walk that cannot see it reds here. Same
-  // "derive coverage from the source" discipline the pre-push trigger test applies. A
+  // `inferenceClosureDigest` occurrence, and a population walk that cannot see it reds here. A
   // `calibrations[]`-only walk fails this by two on the shipped manifest.
   // The occurrence count comes from `digestOccurrences` — the SAME comment-excluding scan the
   // locator's own orphan check consumes — not a resembling regex over the raw body (sc-18208). The

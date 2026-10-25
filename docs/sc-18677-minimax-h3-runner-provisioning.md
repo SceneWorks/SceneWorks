@@ -17,6 +17,12 @@ spend a self-hosted lane discovering it.
 
 ## 1. The runner (AC2)
 
+> Historical provisioning evidence below records the registration at capture time.
+> On 2026-10-24, runners 3 and 4 moved to the organization `self-hosted-gpu` group,
+> making all four available to SceneWorks, inference, and ChatWorks. Their labels
+> remain unchanged. See [AGENTS.md](../AGENTS.md#sceneworks-runner-discovery) for
+> live discovery; the IDs, registration levels, and capacity figures below are historical.
+
 The `cuda` pool is **four** runners across **two registration levels**, and they are all listener
 processes on **one physical box**, `MICHAEL-TRX50`, running as `MICHAEL-TRX50\Michael`. So "the
 runner's GPU" is this box's GPU, and concurrent jobs share it.

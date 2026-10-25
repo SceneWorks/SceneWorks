@@ -164,6 +164,26 @@ describe("SimpleShell", () => {
     vi.restoreAllMocks();
   });
 
+  it("leaves the phone drawer unchanged when the desktop collapse preference is enabled", async () => {
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback) { this.callback = callback; }
+      observe() { this.callback([{ contentRect: { width: 390 } }]); }
+      disconnect() {}
+    });
+    const context = baseContext();
+    const props = { lockedToSimple: true, onSidebarCollapsedChange: vi.fn() };
+    await renderShell(root, context, props);
+    expect(container.querySelector(".su-root").dataset.bp).toBe("phone");
+    await click(container.querySelector('[aria-label="Open menu"]'));
+    const originalDrawer = container.querySelector(".su-nav").outerHTML;
+    await renderShell(root, context, { ...props, sidebarCollapsed: true });
+    expect(container.querySelector(".su-nav").outerHTML).toBe(originalDrawer);
+    expect(container.querySelector(".sidebar-toggle")).toBeNull();
+    expect(container.querySelector(".su-sidebar-collapsed")).toBeNull();
+    await click(container.querySelector('[aria-label="Close menu"]'));
+    expect(container.querySelector(".su-nav")).toBeNull();
+  });
+
   it("opens on the Image Studio with the persistent sidebar", async () => {
     await renderShell(root, baseContext());
     expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Image Studio");

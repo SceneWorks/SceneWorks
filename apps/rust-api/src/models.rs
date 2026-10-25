@@ -1018,16 +1018,81 @@ pub(crate) async fn create_model_download_job(
     Path(model_id): Path<String>,
     ApiJson(payload): ApiJson<ModelDownloadRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
-    let model = model_catalog(&state)
-        .await?
-        .into_iter()
+    let catalog = model_catalog(&state).await?;
+    let model = catalog
+        .iter()
         .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .cloned()
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
             context: None,
             code: None,
         })?;
+    if let Some(component_id) = payload.component_id.as_deref() {
+        ensure_model_not_cleanup_only(&model)?;
+        if !payload.choices.is_empty() {
+            return Err(ApiError::bad_request(
+                "Imported component repair takes no co-requisite choices",
+            ));
+        }
+        let base = model
+            .get("baseModel")
+            .and_then(Value::as_str)
+            .and_then(|id| {
+                catalog
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(id))
+            })
+            .ok_or_else(|| {
+                ApiError::bad_request("Imported component repair requires its compatible base")
+            })?;
+        let download = bound_import_component_download(
+            &model,
+            base,
+            component_id,
+            payload.variant.as_deref(),
+            &state.settings.data_dir,
+        )
+        .map_err(ApiError::bad_request)?;
+        ensure_inherited_component_licenses_acknowledged(
+            &state,
+            model.as_object().expect("validated import"),
+            payload.license_acknowledged,
+        )
+        .await?;
+        ensure_license_acknowledged_for_source(
+            &state,
+            &[download.get("repo").and_then(Value::as_str)],
+            None,
+            payload.license_acknowledged,
+        )
+        .await?;
+        let mut job_payload = build_model_download_job_payload(
+            &model,
+            &model_id,
+            &download,
+            None,
+            false,
+            payload.license_acknowledged,
+            &state.settings.data_dir,
+        )?;
+        job_payload.insert("componentId".to_owned(), json!(component_id));
+        job_payload.insert(
+            "importComponentTier".to_owned(),
+            model["importComponentTier"].clone(),
+        );
+        let job = create_generation_job(
+            state,
+            JobType::ModelDownload,
+            None,
+            None,
+            job_payload,
+            requested_gpu_or_auto(payload.requested_gpu),
+        )
+        .await?;
+        return Ok((StatusCode::CREATED, Json(public_job_snapshot(job))));
+    }
     ensure_model_downloadable(&model)?;
     // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
     //
@@ -1512,6 +1577,92 @@ pub(crate) fn conditional_components_missing(
             })
         })
         .collect())
+}
+
+/// Source validity is independent of aggregate resident-component readiness. The store reuses its
+/// sealed source stamps and rehashes only changed/racy entries, as at the existing install probe.
+fn imported_source_present(entry: &JsonObject, data_dir: &FsPath) -> bool {
+    let Some(checkpoint_id) = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)
+    else {
+        return false;
+    };
+    let Ok(resolved) = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+        .resolve(checkpoint_id)
+    else {
+        return false;
+    };
+    if sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(entry) {
+        sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan).is_ok()
+    } else {
+        entry
+            .get("importPlan")
+            .and_then(|binding| binding.get("planId"))
+            .and_then(Value::as_str)
+            .is_none_or(|plan_id| resolved.plan.plan_id == plan_id)
+    }
+}
+
+/// Stable row identity, including legacy resident companions without a component name.
+fn imported_component_id(row: &Value, index: usize) -> String {
+    row.get("componentId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("resident-{index}"))
+}
+
+/// Unknown identifiers and alternate tiers never fall back to the primary DiT download. Resolve
+/// against BOTH the persisted closure and the compatible base's authorized resident rows.
+fn bound_import_component_download(
+    model: &Value,
+    base: &Value,
+    component_id: &str,
+    requested_variant: Option<&str>,
+    data_dir: &FsPath,
+) -> Result<Value, String> {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let entry = model
+        .as_object()
+        .ok_or("Imported component repair requires an import")?;
+    if !sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(entry)
+        || !imported_source_present(entry, data_dir)
+    {
+        return Err(
+            "Repair the imported source by relinking, rescanning or re-importing it first".into(),
+        );
+    }
+    let tier = sceneworks_core::minimax_h3_import::selected_import_component_tier(entry)?;
+    if requested_variant.is_some_and(|requested| requested != tier) {
+        return Err("Component repair must retain the imported assembly's selected tier".into());
+    }
+    let rows = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .ok_or("The import has no bound resident components")?;
+    let candidates: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| imported_component_id(row, *index) == component_id)
+        .collect();
+    if candidates.len() != 1 {
+        return Err("Unknown or ambiguous imported resident component".into());
+    }
+    let (_, row) = candidates[0];
+    let expected = sceneworks_core::minimax_h3_import::import_component_downloads(
+        entry,
+        base,
+        Some(tier),
+        std::env::consts::OS,
+    )?;
+    if !is_co_requisite_download(row) || !expected.contains(row) {
+        return Err(
+            "The bound component no longer matches the compatible base; re-import the checkpoint"
+                .into(),
+        );
+    }
+    if imported_component_presence(data_dir, row) == CoRequisitePresence::Installed {
+        return Err("This imported resident component is already installed".into());
+    }
+    Ok(row.clone())
 }
 
 fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
@@ -3358,6 +3509,7 @@ fn import_source_supported(source: &FsPath) -> Result<Option<String>, ApiError> 
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
     request: AxumRequest,
@@ -4220,6 +4372,21 @@ pub(crate) async fn queue_model_import_job(
     );
     payload.insert("manifestEntry".to_owned(), manifest_entry);
     if let Some((base, rows, _)) = import_components {
+        // sc-26687 / sc-26690: the SAME inherited-component gate at the DOWNLOAD boundary. Closing
+        // only the generation door would still let an unacknowledged component's bytes land, so a
+        // resident component is fetched only once its own terms are acknowledged. Idempotent with
+        // the generation-admission gate in `create_generation_job_with_status`.
+        if let Some(entry) = payload.get("manifestEntry").and_then(Value::as_object) {
+            ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+        }
         for row in rows {
             // The import worker fetches this literal config through the shared installer only if
             // inspection finds no source-owned claim. It writes no primary download receipt.
@@ -4801,6 +4968,8 @@ struct ModelCatalogEntryState {
     cache_incomplete: bool,
     missing_required_files: Vec<String>,
     update_available: bool,
+    // Reuse the existing plan/source probe for the product projection, never resolve it twice.
+    imported_source_present: Option<bool>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -8001,6 +8170,7 @@ fn install_state_for(
             }
             Err(error) => missing.push(error.to_string()),
         }
+        let source_present = missing.is_empty();
         let rows = model_co_requisite_downloads(model);
         if let Err(reason) =
             sceneworks_core::minimax_h3_import::selected_import_component_tier(entry)
@@ -8045,6 +8215,7 @@ fn install_state_for(
             cache_incomplete: !missing.is_empty(),
             missing_required_files: missing,
             update_available: false,
+            imported_source_present: Some(source_present),
         };
     }
     if let Some(download_context) = download_context {
@@ -8273,6 +8444,7 @@ fn install_state_for(
                 || co_requisite_incomplete,
             missing_required_files,
             update_available: stale_files_present || soft_co_requisite_update,
+            imported_source_present: None,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
         ModelCatalogEntryState {
@@ -8282,6 +8454,7 @@ fn install_state_for(
             cache_incomplete: false,
             missing_required_files: Vec::new(),
             update_available: false,
+            imported_source_present: None,
         }
     } else {
         ModelCatalogEntryState {
@@ -8291,6 +8464,7 @@ fn install_state_for(
             cache_incomplete: false,
             missing_required_files: Vec::new(),
             update_available: false,
+            imported_source_present: None,
         }
     }
 }
@@ -9469,6 +9643,268 @@ fn apply_imported_video_support_surface(object: &mut JsonObject) {
     }
 }
 
+/// The product surface of an imported, plan-backed checkpoint (sc-26687): what was imported
+/// (source variant), what it can do (supported operations), where it can run (supported backends),
+/// whether its components are assembled (component readiness), and what to do about the ones that
+/// are not (actionable repair steps).
+///
+/// ONE derivation behind Model Manager, Video Studio, the API and MCP, so the repair a card offers
+/// is the same repair the API describes. Derived server-side from the entry and its bound plan; the
+/// client never supplies any of it. Written on the response clone beside the neighbouring
+/// `modelAvailability` / `modelResolution` / `cacheEligibility` projections — these describe this
+/// deployment and this install state, so they are runtime projections rather than persisted
+/// manifest keys.
+fn apply_imported_checkpoint_product_surface(
+    object: &mut JsonObject,
+    data_dir: &FsPath,
+    source_present: Option<bool>,
+) {
+    if object.get("catalogScope").and_then(Value::as_str) == Some("builtin") {
+        return;
+    }
+    if sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object).is_none() {
+        return;
+    }
+    object.insert(
+        "importedSource".to_owned(),
+        imported_source_description(object),
+    );
+    object.insert(
+        "supportedOperations".to_owned(),
+        Value::Array(imported_supported_operations(object)),
+    );
+    // Omitted rather than emptied when the catalog carries NO per-lane verdict at all. An empty
+    // array is a real "neither backend here", and saying that about an entry nothing has judged
+    // would read as a refusal the scheduler never made.
+    if let Some(backends) = imported_supported_backends(object) {
+        object.insert("supportedBackends".to_owned(), Value::Array(backends));
+    }
+    let (readiness, repairs) = imported_component_readiness(object, data_dir, source_present);
+    object.insert("componentReadiness".to_owned(), readiness);
+    object.insert("repairActions".to_owned(), Value::Array(repairs));
+}
+
+/// Which source variant was imported and how it is held.
+///
+/// `sourceVariant` is the axis that actually distinguishes one imported checkpoint from its
+/// siblings. For MiniMax-H3 that is the task partition the checkpoint DECLARED (fl2va / ref2va /
+/// hybrid) — filenames and directory names prove nothing about task compatibility, which is
+/// precisely why the declaration is the variant. An import carrying no such declaration has only
+/// the structural source shape to distinguish it by, so that is what it reports.
+fn imported_source_description(object: &JsonObject) -> Value {
+    let checkpoint_id =
+        sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object).unwrap_or_default();
+    // Ownership rides the checkpoint id's own prefix — the convention every reader of
+    // `importPlan.checkpointId` already speaks (`apps/web/src/checkpointLibrary.js`
+    // `modelOwnership`), so this and the web's linked/managed split cannot drift apart.
+    let ownership_mode = if checkpoint_id.starts_with("linked/") {
+        "linked"
+    } else {
+        "managed"
+    };
+    let declared_partition =
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(object)
+            .ok()
+            .map(|partition| partition.as_str());
+    let source_shape = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    // The assembly names the imported DiT under `transformer`, except on a Ref2VA import where the
+    // DiT is the reference partition and lives under `transformer_ref`. Find whichever binding the
+    // plan actually owns rather than hard-coding one key.
+    let plan_binding = sceneworks_core::minimax_h3_import::entry_assembly(object)
+        .and_then(|assembly| assembly.get("components"))
+        .and_then(Value::as_object)
+        .and_then(|components| {
+            components
+                .iter()
+                .find(|(_, binding)| binding.get("source").and_then(Value::as_str) == Some("plan"))
+        });
+    let transformer_directory = plan_binding
+        .and_then(|(_, binding)| binding.get("directory"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let sharded = plan_binding
+        .and_then(|(_, binding)| binding.get("layerIds"))
+        .and_then(Value::as_array)
+        .is_some_and(|layers| layers.len() > 1);
+    json!({
+        "family": object.get("family").cloned().unwrap_or(Value::Null),
+        "sourceShape": source_shape,
+        "ownershipMode": ownership_mode,
+        "sourceVariant": declared_partition.or(source_shape),
+        "declaredPartition": declared_partition,
+        "baseModel": object.get("baseModel").cloned().unwrap_or(Value::Null),
+        "componentTier": object.get("importComponentTier").cloned().unwrap_or(Value::Null),
+        "transformerDirectory": transformer_directory,
+        "sharded": sharded,
+    })
+}
+
+/// The operations this import serves, from its EXPLICIT task contract.
+///
+/// An H3 import answers from the partition it declared, because identical shapes do not prove
+/// partition compatibility. Any other import's operations are whatever its registered route
+/// projected onto `capabilities`, which is already the operation contract for it — and the field
+/// the recipe gate (`recipe_presets::validate_recipe_preset_model_workflow`) reads, so the two can
+/// never disagree about what a saved recipe may ask for.
+fn imported_supported_operations(object: &JsonObject) -> Vec<Value> {
+    if let Ok(partition) =
+        sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(object)
+    {
+        let mut operations = Vec::new();
+        if partition.supports_base() {
+            operations.extend(["text_to_video", "image_to_video", "first_last_frame"]);
+        }
+        if partition.supports_references() {
+            operations.push("reference_to_video");
+        }
+        return operations
+            .into_iter()
+            .map(|operation| Value::String(operation.to_owned()))
+            .collect();
+    }
+    object
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The native backends this deployment can actually claim the import on, read off the same
+/// per-lane verdicts the scheduler's claim predicates and the Video Studio gate consult.
+///
+/// `None` when the entry carries neither verdict — "nobody has judged this", which is a different
+/// answer from `Some(vec![])` ("both lanes looked and neither will claim it").
+fn imported_supported_backends(object: &JsonObject) -> Option<Vec<Value>> {
+    let verdict = |key: &str| {
+        object
+            .get(key)
+            .and_then(|block| block.get("supported"))
+            .and_then(Value::as_bool)
+    };
+    let (mac, candle) = (verdict("macSupport"), verdict("candleSupport"));
+    if mac.is_none() && candle.is_none() {
+        return None;
+    }
+    let mut backends = Vec::new();
+    if mac == Some(true) {
+        backends.push(Value::String("mlx".to_owned()));
+    }
+    if candle == Some(true) {
+        backends.push(Value::String("candle-cuda".to_owned()));
+    }
+    Some(backends)
+}
+
+/// Whether this import's assembly is COMPLETE here, component by component, plus the repair that
+/// would make each missing component complete.
+///
+/// The imported DiT is the entry's own plan/source closure, independent of aggregate cache state. The
+/// rest are the resident components the assembly reuses from the declared compatible base, each
+/// resolved through the shared component-presence probe — never through a filename or a repository
+/// allowlist.
+fn imported_component_readiness(
+    object: &JsonObject,
+    data_dir: &FsPath,
+    source_present: Option<bool>,
+) -> (Value, Vec<Value>) {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+
+    let mut components = Vec::new();
+    let mut repairs = Vec::new();
+    let state_name = |presence: CoRequisitePresence| match presence {
+        CoRequisitePresence::Installed => "installed",
+        CoRequisitePresence::Incomplete => "incomplete",
+        CoRequisitePresence::Absent => "missing",
+    };
+
+    // A declaration the contract refuses (an absent or incompatible `baseModel` / task partition)
+    // cannot be repaired by downloading anything: it needs the user to declare the compatible base.
+    let declaration_ok = sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(object)
+        .is_ok()
+        || !sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(object);
+    if !declaration_ok {
+        repairs.push(json!({
+            "id": "declare-compatible-base",
+            "kind": "select-base",
+            "label": "Declare the compatible base model and task partition (fl2va, ref2va, or hybrid)",
+        }));
+    }
+
+    let dit_present = source_present.unwrap_or_else(|| imported_source_present(object, data_dir));
+    components.push(json!({
+        "componentId": "transformer",
+        "role": "imported_dit",
+        "source": "plan",
+        "model": Value::Null,
+        "present": dit_present,
+        "state": if dit_present { "installed" } else { "missing" },
+    }));
+    if !dit_present {
+        // The damaged SOURCE is never re-fetched by the stock model downloader: a managed import
+        // must go through the checkpoint import panel again (the inspector re-validates and
+        // re-ingests the bytes under managed ownership), and a linked checkpoint keeps the Model
+        // Manager's linked-repair affordance, which is the seam that decides relink versus rescan
+        // from the library root index — deliberately not re-derived from a path here.
+        let linked = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(object)
+            .is_some_and(|id| id.starts_with("linked/"));
+        repairs.push(if linked {
+            json!({
+                "id": "repair-linked-checkpoint",
+                "kind": "rescan",
+                "label": "Relink or rescan the linked checkpoint in Model Manager",
+            })
+        } else {
+            json!({
+                "id": "repair-imported-checkpoint",
+                "kind": "reimport",
+                "label": "Re-import the damaged checkpoint in the checkpoint import panel",
+            })
+        });
+    }
+
+    for (index, row) in object
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        let presence = imported_component_presence(data_dir, row);
+        let component_id = imported_component_id(row, index);
+        let source = row.get("repo").and_then(Value::as_str).unwrap_or_default();
+        let present = presence == CoRequisitePresence::Installed;
+        components.push(json!({
+            "componentId": component_id,
+            "role": "resident",
+            "source": "resident",
+            "model": source,
+            "present": present,
+            "state": state_name(presence),
+        }));
+        if !present {
+            repairs.push(json!({
+                "id": format!("install-component:{component_id}"),
+                "kind": "download",
+                "componentId": component_id,
+                "variant": object.get("importComponentTier").cloned().unwrap_or(Value::Null),
+                "label": format!("Download the compatible {component_id} from {source}"),
+            }));
+        }
+    }
+
+    // An incomplete assembly is never READY: `components` says which member is at fault and
+    // `repairActions` says what to do, but nothing here may let a half-provisioned import look
+    // selectable-and-runnable.
+    let ready = declaration_ok
+        && components
+            .iter()
+            .all(|component| component.get("present").and_then(Value::as_bool) == Some(true));
+    (json!({ "ready": ready, "components": components }), repairs)
+}
+
 fn apply_imported_provider_surface_for_lanes(
     object: &mut JsonObject,
     mlx_lane_available: bool,
@@ -10264,6 +10700,7 @@ fn apply_model_catalog_entry(
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
     apply_conditional_component_state(object, data_dir);
+    apply_imported_checkpoint_product_surface(object, data_dir, state.imported_source_present);
     if platform_cleanup_only {
         // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
         // action projection even though the preserved manifest metadata is still needed by the
@@ -16641,6 +17078,149 @@ mod minimax_h3_import_declaration_tests {
     }
 
     #[tokio::test]
+    async fn h3_card_repairs_only_the_missing_bound_component_not_the_imported_dit() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let _ = app(&temp);
+        let settings = test_settings(&temp);
+        let library = temp.path().join("library");
+        let source = library.join("custom");
+        write_lifecycle_h3(&source);
+        let store =
+            sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+        let root = store.approve_root(&library).unwrap();
+        let compiled = store.compile_linked(&root.root_id, "custom").unwrap();
+        let revision = "0123456789012345678901234567890123456789";
+        let rows = json!([
+            {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"componentId":"audio_vae","files":["audio_vae/config.json", "audio_vae/weights.safetensors"]},
+            {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"q4","coRequisite":true,"componentId":"text_encoder","files":["q4/text_encoder/config.json", "q4/text_encoder/model.safetensors"]}
+        ]);
+        let mut entry = json!({"id":"repair_h3","name":"Repair H3", "baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4", "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"custom"}, "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}, "downloads":rows}).as_object().unwrap().clone();
+        let assembly =
+            sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                &compiled.plan,
+                &entry,
+            )
+            .unwrap();
+        sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        let manifest = settings.config_dir.join("manifests/user.models.jsonc");
+        std::fs::write(
+            &manifest,
+            json!({"schemaVersion":1,"models":[entry]}).to_string(),
+        )
+        .unwrap();
+        // The selected base authorizes only these resident rows, not its primary DiT download.
+        let builtin_path = settings.config_dir.join("manifests/builtin.models.jsonc");
+        let mut builtin: Value =
+            serde_json::from_str(&std::fs::read_to_string(&builtin_path).unwrap()).unwrap();
+        let base = &mut builtin["models"][0];
+        base["downloads"]
+            .as_array_mut()
+            .unwrap()
+            .extend(rows.as_array().unwrap().iter().cloned());
+        std::fs::write(builtin_path, builtin.to_string()).unwrap();
+        for row in rows.as_array().unwrap() {
+            let cache = super::huggingface_repo_cache_path(
+                &settings.data_dir,
+                row["repo"].as_str().unwrap(),
+            )
+            .unwrap();
+            for file in row["files"].as_array().unwrap() {
+                let path = cache
+                    .join("snapshots")
+                    .join(revision)
+                    .join(file.as_str().unwrap());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"fixture").unwrap();
+            }
+        }
+        // Start complete; remove ONLY audio VAE bytes. The import and text encoder remain sound.
+        let audio = super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared")
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join("audio_vae/weights.safetensors");
+        std::fs::remove_file(&audio).unwrap();
+        let router = create_app(settings.clone()).unwrap();
+        let (status, catalog) = request(router.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{catalog}");
+        let projected = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "repair_h3")
+            .unwrap();
+        assert_eq!(projected["downloadable"], false);
+        assert_eq!(projected["componentReadiness"]["ready"], false);
+        let components = projected["componentReadiness"]["components"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            components
+                .iter()
+                .find(|row| row["source"] == "plan")
+                .unwrap()["present"],
+            true,
+            "missing audio VAE must not mark the imported DiT absent"
+        );
+        let repairs = projected["repairActions"].as_array().unwrap();
+        assert_eq!(repairs.len(), 1, "only audio VAE needs repair: {repairs:?}");
+        assert_eq!(repairs[0]["componentId"], "audio_vae");
+        let (status, error) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/models/repair_h3/download",
+            json!({"componentId":repairs[0]["componentId"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(error["code"], "license_acknowledgment_required");
+        let (status, job) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/models/repair_h3/download",
+            json!({"componentId":repairs[0]["componentId"], "licenseAcknowledged":true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["repo"], "fixture/shared");
+        assert_eq!(job["payload"]["revision"], revision);
+        assert_eq!(job["payload"]["files"], rows[0]["files"]);
+        assert_eq!(job["payload"]["importComponentTier"], "q4");
+        assert_eq!(job["payload"]["componentId"], "audio_vae");
+        assert!(job["payload"].get("family").is_none());
+        assert!(job["payload"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| !file.as_str().unwrap().contains("transformer")));
+        for body in [
+            json!({}),
+            json!({"componentId":"transformer"}),
+            json!({"componentId":"audio_vae","variant":"q8"}),
+            json!({"componentId":"text_encoder"}),
+            json!({"componentId":""}),
+        ] {
+            let (status, response) = request(
+                router.clone(),
+                "POST",
+                "/api/v1/models/repair_h3/download",
+                body.clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        }
+        let (status, jobs) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{jobs}");
+        assert_eq!(
+            jobs.as_array().unwrap().len(),
+            1,
+            "repair must not queue a stock DiT or unrelated component: {jobs}"
+        );
+        assert!(store.resolve(&compiled.checkpoint_id).is_ok());
+    }
+
+    #[tokio::test]
     async fn h3_public_rescan_readiness_and_removal_keep_component_and_source_ownership() {
         let _env = isolate_hf_cache();
         let temp = tempfile::tempdir().unwrap();
@@ -16883,5 +17463,347 @@ mod minimax_h3_import_declaration_tests {
             )
             .installed
         );
+    }
+}
+
+/// The imported-checkpoint product surface (sc-26687) — what Model Manager, Video Studio, the API
+/// and MCP all read. These assert the VALUES a user acts on: the declared task contract's
+/// operations, the backends that will actually claim the import, and the repair a missing
+/// component calls for. Not that a field was written.
+#[cfg(test)]
+mod imported_checkpoint_product_surface_tests {
+    use super::*;
+
+    /// A plan-backed imported MiniMax-H3 entry. `partition` / `base_model` are the DECLARATION the
+    /// contract validates — deliberately parameterized, because the whole point of the surface is
+    /// that it reports what was declared rather than what the shapes happen to look like.
+    fn imported_h3_entry(partition: &str, base_model: &str) -> JsonObject {
+        json!({
+            "id": "my_singularity_tune",
+            "name": "My Singularity tune",
+            "type": "video",
+            "family": "minimax-h3",
+            "catalogScope": "user",
+            "importSourceShape": "transformer_directory",
+            "baseModel": base_model,
+            "minimaxH3Partition": partition,
+            "importComponentTier": "q4",
+            "importPlan": {
+                "checkpointId": "managed/install-42",
+                "planId": "checkpoint-plan-7",
+                "assembly": {
+                    "schemaVersion": 1,
+                    "family": "minimax-h3",
+                    "partition": partition,
+                    "components": {
+                        "transformer": {
+                            "source": "plan",
+                            "layerId": "artifact:diffusion_pytorch_model.safetensors",
+                            "layerIds": ["artifact:diffusion_pytorch_model.safetensors"],
+                            "directory": "",
+                            "descriptorLayerIds": []
+                        }
+                    }
+                }
+            },
+            "capabilities": ["reference_to_video"],
+            "macSupport": {"supported": true},
+            "candleSupport": {"supported": true},
+        })
+        .as_object()
+        .expect("fixture is an object")
+        .clone()
+    }
+
+    /// A data dir that cannot exist, so every component-presence probe answers ABSENT without the
+    /// test reading or writing anything on this host.
+    /// Returned by reference: `Path` is unsized, so returning it by value is a compile error, and
+    /// `apply_imported_checkpoint_product_surface` takes `&FsPath` anyway.
+    fn empty_data_dir() -> &'static FsPath {
+        std::path::Path::new("/nonexistent-sc26687-product-surface")
+    }
+
+    fn project(mut entry: JsonObject) -> JsonObject {
+        apply_imported_checkpoint_product_surface(&mut entry, empty_data_dir(), None);
+        entry
+    }
+
+    /// Write the smallest checkpoint `compile_linked` accepts as an H3 DiT directory: a
+    /// published-geometry config plus one complete safetensors carrying exactly those shapes.
+    fn write_tiny_h3(dir: &std::path::Path) {
+        let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
+        for (key, value) in [
+            ("num_layers", 1),
+            ("num_refiner_layers", 1),
+            ("num_attention_heads", 2),
+            ("attention_head_dim", 6),
+            ("hidden_size", 8),
+            ("ffn_dim", 8),
+            ("in_channels", 2),
+            ("audio_in_channels", 2),
+            ("text_dim", 8),
+            ("freq_dim", 4),
+            ("time_embed_hidden_dim", 8),
+            ("time_embed_dim", 4),
+            ("rope_freq_dim", 1),
+        ] {
+            config[key] = json!(value);
+        }
+        let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
+            .shapes()
+            .unwrap();
+        let mut header = serde_json::Map::new();
+        let mut offset = 0;
+        for (name, shape) in shapes {
+            let size = shape.iter().product::<usize>() * 2;
+            header.insert(
+                name,
+                json!({"dtype":"BF16","shape":shape,"data_offsets":[offset,offset+size]}),
+            );
+            offset += size;
+        }
+        let encoded = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(encoded);
+        bytes.resize(bytes.len() + offset, 0x31);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), bytes).unwrap();
+    }
+
+    /// A plan-backed entry whose linked source REALLY resolves under its own `data_dir` — the only
+    /// fixture a readiness verdict means anything against. The tempdir is held for the test's
+    /// lifetime so the source bytes stay present while the surface is projected.
+    struct CompiledImport {
+        entry: JsonObject,
+        data_dir: std::path::PathBuf,
+        _temp: tempfile::TempDir,
+    }
+
+    fn real_imported_h3_entry(partition: &str) -> CompiledImport {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let library = temp.path().join("library");
+        write_tiny_h3(&library.join("tune"));
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
+        let root = store.approve_root(&library).unwrap();
+        let compiled = store.compile_linked(&root.root_id, "tune").unwrap();
+        let mut entry = json!({
+            "id": "my_singularity_tune",
+            "name": "My Singularity tune",
+            "type": "video",
+            "family": "minimax-h3",
+            "catalogScope": "user",
+            "importSourceShape": "transformer_directory",
+            "baseModel": "minimax_h3",
+            "minimaxH3Partition": partition,
+            "importComponentTier": "q4",
+            "importPlan": {
+                "checkpointId": compiled.checkpoint_id,
+                "planId": compiled.plan.plan_id,
+                "semanticDigest": compiled.record.plan.semantic_digest
+            },
+            "capabilities": ["reference_to_video"],
+            "macSupport": {"supported": true},
+            "candleSupport": {"supported": true},
+        })
+        .as_object()
+        .expect("fixture is an object")
+        .clone();
+        let assembly =
+            sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+                &compiled.plan,
+                &entry,
+            )
+            .unwrap();
+        sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        CompiledImport {
+            entry,
+            data_dir,
+            _temp: temp,
+        }
+    }
+
+    fn project_at(mut entry: JsonObject, data_dir: &FsPath) -> JsonObject {
+        apply_imported_checkpoint_product_surface(&mut entry, data_dir, None);
+        entry
+    }
+
+    fn operations(entry: &JsonObject) -> Vec<String> {
+        entry["supportedOperations"]
+            .as_array()
+            .expect("supportedOperations is an array")
+            .iter()
+            .map(|value| value.as_str().expect("operation is a string").to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn ref2va_declares_only_the_reference_operation() {
+        let entry = project(imported_h3_entry("ref2va", "minimax_h3_ref"));
+        assert_eq!(operations(&entry), ["reference_to_video"]);
+        assert_eq!(entry["importedSource"]["sourceVariant"], json!("ref2va"));
+        assert_eq!(
+            entry["importedSource"]["declaredPartition"],
+            json!("ref2va")
+        );
+        assert_eq!(
+            entry["importedSource"]["baseModel"],
+            json!("minimax_h3_ref")
+        );
+        assert_eq!(entry["importedSource"]["ownershipMode"], json!("managed"));
+        assert_eq!(entry["importedSource"]["componentTier"], json!("q4"));
+    }
+
+    #[test]
+    fn fl2va_declares_the_base_operations_and_not_the_reference_one() {
+        let entry = project(imported_h3_entry("fl2va", "minimax_h3"));
+        assert_eq!(
+            operations(&entry),
+            ["text_to_video", "image_to_video", "first_last_frame"]
+        );
+    }
+
+    #[test]
+    fn hybrid_declares_every_operation_the_checkpoint_can_serve() {
+        let entry = project(imported_h3_entry("hybrid", "minimax_h3"));
+        assert_eq!(
+            operations(&entry),
+            [
+                "text_to_video",
+                "image_to_video",
+                "first_last_frame",
+                "reference_to_video"
+            ]
+        );
+    }
+
+    #[test]
+    fn supported_backends_follow_the_lane_verdicts_the_scheduler_uses() {
+        let mut entry = imported_h3_entry("ref2va", "minimax_h3_ref");
+        entry.insert("macSupport".to_owned(), json!({"supported": false}));
+        let entry = project(entry);
+        assert_eq!(entry["supportedBackends"], json!(["candle-cuda"]));
+    }
+
+    #[test]
+    fn an_entry_no_lane_has_judged_omits_the_backend_verdict() {
+        let mut entry = imported_h3_entry("ref2va", "minimax_h3_ref");
+        entry.remove("macSupport");
+        entry.remove("candleSupport");
+        let entry = project(entry);
+        assert!(
+            entry.get("supportedBackends").is_none(),
+            "nobody judged this entry, so the surface must stay silent rather than refuse it"
+        );
+    }
+
+    #[test]
+    fn a_complete_assembly_is_ready_and_offers_no_repair() {
+        let CompiledImport {
+            entry,
+            data_dir,
+            _temp,
+        } = real_imported_h3_entry("fl2va");
+        let entry = project_at(entry, &data_dir);
+        let components = entry["componentReadiness"]["components"]
+            .as_array()
+            .expect("components");
+        assert_eq!(
+            components.len(),
+            1,
+            "only the imported DiT is bound: {components:?}"
+        );
+        assert_eq!(components[0]["componentId"], json!("transformer"));
+        assert_eq!(
+            components[0]["present"],
+            json!(true),
+            "the plan-backed source reads present on its own resolution, nothing aggregates it"
+        );
+        assert_eq!(entry["componentReadiness"]["ready"], json!(true));
+        assert_eq!(entry["repairActions"], json!([]));
+    }
+
+    #[test]
+    fn a_missing_resident_component_blocks_readiness_and_names_the_download() {
+        let CompiledImport {
+            mut entry,
+            data_dir,
+            _temp,
+        } = real_imported_h3_entry("fl2va");
+        entry.insert(
+            "downloads".to_owned(),
+            json!([
+                {
+                    "componentId": "audio_vae",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e",
+                    "subdir": "audio_vae",
+                    "files": ["audio_vae/*"]
+                }
+            ]),
+        );
+        let entry = project_at(entry, &data_dir);
+        assert_eq!(
+            entry["componentReadiness"]["ready"],
+            json!(false),
+            "a half-provisioned assembly must never look ready"
+        );
+        let components = entry["componentReadiness"]["components"]
+            .as_array()
+            .expect("components");
+        assert_eq!(
+            components
+                .iter()
+                .find(|component| component["source"] == json!("plan"))
+                .expect("imported DiT row")["present"],
+            json!(true),
+            "a missing resident component must not demote the imported source: {components:?}"
+        );
+        let repairs = entry["repairActions"].as_array().expect("repairActions");
+        assert!(
+            repairs.iter().any(|repair| {
+                repair["id"] == json!("install-component:audio_vae")
+                    && repair["kind"] == json!("download")
+                    && repair["componentId"] == json!("audio_vae")
+                    && repair["variant"] == json!("q4")
+                    && repair["label"].as_str().is_some_and(|label| {
+                        label.contains("audio_vae") && label.contains("MiniMaxAI/MiniMax-H3")
+                    })
+            }),
+            "{repairs:?}"
+        );
+    }
+
+    #[test]
+    fn an_incompatible_base_declaration_offers_the_compatible_base_repair() {
+        // The entry declares ref2va but names the FL2VA base: shapes cannot settle that, and no
+        // download fixes it either.
+        let entry = project(imported_h3_entry("ref2va", "minimax_h3"));
+        assert_eq!(entry["componentReadiness"]["ready"], json!(false));
+        assert_eq!(entry["importedSource"]["declaredPartition"], Value::Null);
+        let repairs = entry["repairActions"].as_array().expect("repairActions");
+        assert!(
+            repairs
+                .iter()
+                .any(|repair| repair["id"] == json!("declare-compatible-base")),
+            "{repairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_builtin_entry_carries_no_imported_product_surface() {
+        let mut entry = imported_h3_entry("ref2va", "minimax_h3_ref");
+        entry.insert("catalogScope".to_owned(), json!("builtin"));
+        let entry = project(entry);
+        for key in [
+            "importedSource",
+            "supportedOperations",
+            "supportedBackends",
+            "componentReadiness",
+            "repairActions",
+        ] {
+            assert!(entry.get(key).is_none(), "builtin entry gained {key}");
+        }
     }
 }

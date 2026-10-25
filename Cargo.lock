@@ -2223,7 +2223,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5093,7 +5093,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5239,7 +5239,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6979,7 +6979,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-core"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "directories",
  "fs2",
@@ -7013,7 +7013,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-desktop"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "futures-util",
  "if-addrs",
@@ -7034,6 +7034,8 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "webview2-com",
+ "windows-core 0.61.2",
  "windows-sys 0.59.0",
  "zip",
 ]
@@ -7068,7 +7070,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-image-quality"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "image",
  "image_hasher",
@@ -7080,7 +7082,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-mcp"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7100,7 +7102,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-memory-adapter"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "candle-gen",
  "candle-gen-scail2",
@@ -7130,7 +7132,7 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-api"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7168,14 +7170,14 @@ dependencies = [
 
 [[package]]
 name = "sceneworks-rust-worker"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "sceneworks-worker",
 ]
 
 [[package]]
 name = "sceneworks-worker"
-version = "0.8.12"
+version = "0.10.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -7724,7 +7726,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9000,7 +9002,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

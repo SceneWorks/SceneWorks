@@ -33,7 +33,7 @@ jobs:
             apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       # DELIBERATELY NOT `save-if: main`, unlike the PR and release lanes (see the note on the
       # `parity-rust` cache step in check.yml). This workflow is `workflow_dispatch:` only, so its
       # runs are manual packaging iterations on whatever branch the operator is working from —

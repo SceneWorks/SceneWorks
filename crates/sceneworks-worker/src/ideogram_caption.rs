@@ -152,7 +152,7 @@ pub(crate) fn looks_like_placeholder(pixels: &[u8], width: u32, height: u32) -> 
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
     let mut colorful = 0usize;
-    for px in pixels.chunks_exact(3) {
+    for px in pixels.as_chunks::<3>().0 {
         let (r, g, b) = (px[0] as u16, px[1] as u16, px[2] as u16);
         if r.max(g).max(b) - r.min(g).min(b) > COLOR_SPREAD_THRESHOLD {
             colorful += 1;

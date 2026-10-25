@@ -345,6 +345,57 @@ fn plan(source: SourceLocatorV1) -> ImportPlanV1 {
 }
 
 #[test]
+fn replay_import_reference_refuses_same_id_rebound_to_another_plan() {
+    use sceneworks_core::checkpoint_import::validate_replay_import_reference;
+    let original = plan(linked("external-models", "flux/model.safetensors"));
+    let reference = original.plan_reference().unwrap();
+    let expected = json!({
+        "modelId":"my-import", "checkpointId":"managed/install-a", "planId":reference.plan_id,
+        "semanticDigest":reference.semantic_digest, "sourceBindingIdentity":reference.source_binding_identity,
+        "family":"flux", "baseModel":"flux-base", "declaredPartition":"fl2va"
+    });
+    assert!(validate_replay_import_reference(&expected, Some(&expected)).is_ok());
+    for key in [
+        "modelId",
+        "checkpointId",
+        "planId",
+        "semanticDigest",
+        "sourceBindingIdentity",
+        "family",
+        "baseModel",
+        "declaredPartition",
+    ] {
+        let mut rebound = expected.clone();
+        rebound[key] = json!("different");
+        let error = validate_replay_import_reference(&expected, Some(&rebound))
+            .expect_err(&format!("same selection must refuse a changed {key}"));
+        assert!(error.contains("Reimport") && error.contains(key), "{error}");
+    }
+    assert!(
+        validate_replay_import_reference(&expected, None).is_err(),
+        "stock is not the original import"
+    );
+}
+
+#[test]
+fn replay_import_reference_legacy_optional_fields_do_not_invent_identity() {
+    use sceneworks_core::checkpoint_import::validate_replay_import_reference;
+    let actual = json!({"modelId":"custom", "checkpointId":"managed/original", "planId":"original", "semanticDigest":"sha256:original"});
+    let legacy =
+        json!({"modelId":"custom", "checkpointId":"managed/original", "planId":"original"});
+    assert!(validate_replay_import_reference(&legacy, Some(&actual)).is_ok());
+    for key in ["modelId", "checkpointId", "planId"] {
+        let mut incomplete = legacy.clone();
+        incomplete.as_object_mut().unwrap().remove(key);
+        assert!(
+            validate_replay_import_reference(&incomplete, Some(&actual)).is_err(),
+            "missing {key} cannot establish the original selection"
+        );
+    }
+    assert!(validate_replay_import_reference(&Value::Null, Some(&actual)).is_err());
+}
+
+#[test]
 fn linked_and_managed_copies_have_the_same_semantic_plan_but_different_bindings() {
     let linked_plan = plan(linked("external-models", "flux/model.safetensors"));
     let managed_plan = plan(managed("installed-flux", "weights/model.safetensors"));
@@ -735,7 +786,7 @@ fn future_versions_precede_duplicate_body_diagnostics() {
 
     assert_recompile_rescan_required!(
         SourceLocatorV1,
-        format!(r#"{{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}"#)
+        r#"{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}"#
     );
     assert_recompile_rescan_required!(
         ImportPlanV1,
