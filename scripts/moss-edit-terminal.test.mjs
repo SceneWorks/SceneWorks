@@ -110,11 +110,14 @@ test('whole-second job snapshots bracket millisecond device samples without admi
     { phase:'active',at:'2026-10-25T14:25:03.300Z' },
     { phase:'drain',at:'2026-10-25T14:25:05.400Z' },
   ] };
-  assert.equal(samplesBracketJob(samples,job),true);
-  assert.equal(samplesBracketJob(samples,{ ...job,startedAt:'2026-10-25T14:25:02.000Z' }),false);
-  assert.equal(samplesBracketJob({ samples:[{ ...samples.samples[0],at:'2026-10-25T14:25:03.000Z' },...samples.samples.slice(1)] },job),false);
-  assert.equal(samplesBracketJob({ samples:[samples.samples[0],samples.samples[2]] },job),false);
-  assert.equal(samplesBracketJob({ samples:samples.samples.slice(0,2) },job),false);
+  const attempt={startedAt:'2026-10-25T14:25:02.654Z'};
+  assert.equal(samplesBracketJob(samples,job,attempt),true);
+  assert.equal(samplesBracketJob(samples,job),false);
+  assert.equal(samplesBracketJob(samples,{ ...job,startedAt:'2026-10-25T14:25:02.000Z' },attempt),false);
+  assert.equal(samplesBracketJob({ samples:[{ ...samples.samples[0],at:'2026-10-25T14:25:02.800Z' },...samples.samples.slice(1)] },job,attempt),false);
+  assert.equal(samplesBracketJob({ samples:[{ ...samples.samples[0],at:'2026-10-25T14:25:03.000Z' },...samples.samples.slice(1)] },job,attempt),false);
+  assert.equal(samplesBracketJob({ samples:[samples.samples[0],samples.samples[2]] },job,attempt),false);
+  assert.equal(samplesBracketJob({ samples:samples.samples.slice(0,2) },job,attempt),false);
 });
 test('quality cannot pass from PNG production, a missing anchor or an averaged failure', () => {
   const row = primaryRows(inputs)[0], outputs = [{ sha256: 'f'.repeat(64) }];

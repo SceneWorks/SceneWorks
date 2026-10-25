@@ -798,7 +798,8 @@ async function verify(configPath, retained = false) {
     const raw=(await readFile(safePath(path,samples.raw.file),'utf8')).trimEnd().split('\n').map(line=>JSON.parse(line));
     requireThat(raw.length===samples.samples.length&&raw.every((item,index)=>item.device.uuid===receipt.device.uuid&&item.raw&&canonical({at:item.at,phase:item.phase,usedBytes:item.usedBytes})===canonical(samples.samples[index])),'raw whole-device observations differ from reported samples');
     const memory = memorySummary(samples, job.id);
-    requireThat(samplesBracketJob(samples,job), 'whole-device samples did not bracket actual worker execution');
+    const attemptStart=await json(resolve(state.root,'attempts',backend,`${row.id}.start.json`));
+    requireThat(samplesBracketJob(samples,job,attemptStart), 'whole-device samples did not bracket actual worker execution');
     if (row.anchors) {
       const reviewPath=historicalOnly?resolve(state.config.historicalQualityReviewRoot,'rows',row.id,'quality-review.json'):resolve(path,'quality-review.json'),review=await json(reviewPath);
       const verdict=qualityComparison?compareQualityRow(row,review,(await fileIdentity(reviewPath)).sha256,receipt.outputs,qualityComparison):reviewVerdict(row,review,receipt.outputs);
