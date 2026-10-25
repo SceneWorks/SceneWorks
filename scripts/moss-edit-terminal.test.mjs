@@ -405,7 +405,8 @@ function editorCase() {
   const expected={...structuredClone(row.request),projectId:'target-project',referenceAssetIds:['uploaded-original-B']};
   const uploadBytes=png([10,20,30,255],6),original=pngRgbIdentity(png([10,20,30]));
   const origin={jobId:'actual-mlx-origin',outputs:[{assetId:'actual-origin-output'}]};
-  const sigmas=Array.from({length:31},(_,index)=>Math.fround(1-index/30));sigmas[1]=0.9929999709129333;
+  // Actual retained H27 SFT recipe schedule; H32 Windows GET differs at seven decimal spellings.
+  const sigmas=[1,0.9929999709129333,0.9850000143051147,0.9779999852180481,0.968999981880188,0.9599999785423279,0.9509999752044678,0.9409999847412109,0.9300000071525574,0.9179999828338623,0.9049999713897705,0.8920000195503235,0.8769999742507935,0.8610000014305115,0.843999981880188,0.824999988079071,0.8040000200271606,0.781000018119812,0.7559999823570251,0.7279999852180481,0.6959999799728394,0.6599999666213989,0.6189999580383301,0.5719999670982361,0.5169999599456787,0.453000009059906,0.37700000405311584,0.2840000092983246,0.17000001668930054,0.024000002071261406,0];
   const recipe={prompt:'original request',seed:173,rawAdapterSettings:{steps:30,mossImageEditExecutionReport:{base:{sampling:{kind:'euler',sigmas}}}}};
   const originJob={id:origin.jobId,projectId:'origin-project',status:'completed',payload:{projectId:'origin-project',prompt:'original request',advanced:{steps:30}},result:{assets:[{id:'actual-origin-output',recipe:structuredClone(recipe)}]}};
   const originAsset={id:'actual-origin-output',projectId:'origin-project',lineage:{jobId:origin.jobId},recipe};
@@ -435,12 +436,11 @@ test('v4 Editor source binding admits only the observed opaque original raster a
 });
 test('Editor source binding records raw cross-host recipe drift but accepts only exact FP32 sigma bits',()=>{
   const f=editorCase(),s=value=>value.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas;
-  s(f.historyJob.result.assets[0].recipe)[1]=0.9929999709129332;
-  s(f.historyAsset.recipe)[1]=0.9929999709129332;
-  s(f.capture.history.selectedRecipe)[1]=0.9929999709129332;
+  const observed=new Map([[1,0.9929999709129332],[3,0.977999985218048],[5,0.959999978542328],[7,0.9409999847412108],[9,0.9179999828338624],[10,0.9049999713897704],[29,0.02400000207126141]]);
+  for(const recipe of [f.historyJob.result.assets[0].recipe,f.historyAsset.recipe,f.capture.history.selectedRecipe])for(const [index,value] of observed)s(recipe)[index]=value;
   const proof=validateEditorSource(f);
   for(const comparison of Object.values(proof.historyComparison)) {
-    assert.equal(comparison.rawEqual,false);assert.equal(comparison.typedEqual,true);assert.deepEqual(comparison.sigmaDifferingIndices,[1]);
+    assert.equal(comparison.rawEqual,false);assert.equal(comparison.typedEqual,true);assert.deepEqual(comparison.sigmaDifferingIndices,[...observed.keys()]);
   }
   const mutated=change=>{const copy=structuredClone(f);change(copy);assert.throws(()=>validateEditorSource(copy));};
   const bytes=new DataView(new ArrayBuffer(4));bytes.setFloat32(0,0.9929999709129332,false);bytes.setUint32(0,bytes.getUint32(0,false)+1,false);
