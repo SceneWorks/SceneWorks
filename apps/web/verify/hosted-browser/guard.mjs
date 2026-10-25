@@ -152,6 +152,35 @@ export function resolvePlaywrightEntry({
 }
 
 /**
+ * Load a resolved Playwright package through CommonJS.
+ *
+ * Playwright's package entry is CJS and may expose `chromium` through a getter or a
+ * re-export that ESM named-export detection cannot see, which leaves `chromium`
+ * undefined after a dynamic import. Requiring the explicit private entry is the
+ * bounded interop fix; it never resolves through the app tree or a global fallback.
+ *
+ * @param {{entry: string, requireImpl?: (id: string) => any}} options
+ * @returns {{module: any, chromium: {launch: Function}}}
+ */
+export function loadPlaywrightCommonJs({ entry, requireImpl } = {}) {
+  if (typeof entry !== "string" || !isAbsolute(entry)) {
+    throw new Error("an absolute resolved Playwright entry is required");
+  }
+  const requireFromEntry = requireImpl ?? createRequire(entry);
+  let loaded;
+  try {
+    loaded = requireFromEntry(entry);
+  } catch (error) {
+    throw new Error(`cannot require playwright from the private tools root: ${error.message}`);
+  }
+  const chromium = loaded?.chromium ?? loaded?.default?.chromium;
+  if (!chromium || typeof chromium.launch !== "function") {
+    throw new Error("playwright CJS module does not expose a launchable chromium");
+  }
+  return { module: loaded, chromium };
+}
+
+/**
  * Browser binaries must stay inside the same private tools prefix. Defaults to
  * `<root>/browsers`; an explicit PLAYWRIGHT_BROWSERS_PATH is accepted only under the root.
  */

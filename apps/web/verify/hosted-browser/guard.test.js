@@ -15,6 +15,7 @@ import {
   evaluateEnvironment,
   evaluateSourceIdentity,
   productionWebDigest,
+  loadPlaywrightCommonJs,
   resolveArtifactDir,
   resolveBrowsersPath,
   resolvePlaywrightEntry,
@@ -312,5 +313,50 @@ describe("private Playwright tools resolution", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+function fakeCommonJsPlaywright(indexSource, { implSource = null } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "sc26687-playwright-cjs-"));
+  const packageDir = join(root, "node_modules", "playwright");
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "playwright", version: PLAYWRIGHT_VERSION, main: "index.js" }));
+  writeFileSync(join(packageDir, "index.js"), indexSource);
+  if (implSource !== null) writeFileSync(join(packageDir, "impl.js"), implSource);
+  return root;
+}
+
+describe("Playwright CJS interop", () => {
+  it("exposes chromium for plain, getter, exports and re-export CJS shapes", () => {
+    const shapes = [
+      "module.exports = { chromium: { launch() {} } };\n",
+      "const out = {}; Object.defineProperty(out, 'chromium', { enumerable: true, get() { return { launch() {} }; } }); module.exports = out;\n",
+      "exports.chromium = { launch() {} };\n",
+      "module.exports = require('./impl');\n",
+      "module.exports = { default: { chromium: { launch() {} } } };\n",
+    ];
+    for (const source of shapes) {
+      const root = fakeCommonJsPlaywright(source, { implSource: "module.exports = { chromium: { launch() {} } };\n" });
+      try {
+        const tools = resolvePlaywrightEntry({ root });
+        const loaded = loadPlaywrightCommonJs({ entry: tools.entry });
+        expect(tools.version).toBe(PLAYWRIGHT_VERSION);
+        expect(typeof loaded.chromium.launch).toBe("function");
+        expect(loaded.chromium).toBe(loaded.chromium);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+  it("refuses a CJS module without a launchable chromium or a non-absolute entry", () => {
+    const missing = fakeCommonJsPlaywright("module.exports = { chromium: {} };\n");
+    try {
+      const tools = resolvePlaywrightEntry({ root: missing });
+      expect(() => loadPlaywrightCommonJs({ entry: tools.entry })).toThrow(/launchable chromium/);
+    } finally {
+      rmSync(missing, { recursive: true, force: true });
+    }
+    expect(() => loadPlaywrightCommonJs({ entry: "node_modules/playwright/index.js" })).toThrow(/absolute resolved Playwright entry/);
+    expect(() => loadPlaywrightCommonJs({ entry: "" })).toThrow(/absolute resolved Playwright entry/);
   });
 });

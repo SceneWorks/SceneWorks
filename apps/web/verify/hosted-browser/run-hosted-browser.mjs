@@ -11,7 +11,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import {
   PLAYWRIGHT_VERSION,
@@ -25,6 +25,7 @@ import {
   evaluateEnvironment,
   evaluateSourceIdentity,
   productionWebDigest,
+  loadPlaywrightCommonJs,
   resolveArtifactDir,
   resolveBrowsersPath,
   resolvePlaywrightEntry,
@@ -211,7 +212,9 @@ async function main() {
     // global resolution fallback. Install and browser CLI paths are handled by the workflow.
     playwrightTools = resolvePlaywrightEntry({ root: process.env.SC26687_PLAYWRIGHT_ROOT });
     playwrightBrowsersPath = resolveBrowsersPath(process.env, { root: process.env.SC26687_PLAYWRIGHT_ROOT });
-    ({ chromium } = await import(pathToFileURL(playwrightTools.entry).href));
+    // Playwright's entry is CJS; require the explicit private entry so getter/re-export
+    // shapes that ESM named-export detection misses still expose chromium.
+    ({ chromium } = loadPlaywrightCommonJs({ entry: playwrightTools.entry }));
   } catch (error) {
     const message =
       "The playwright package is required from the isolated per-run tools root for this hosted proof.\n" +
