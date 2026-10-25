@@ -109,7 +109,7 @@ test('action-free recovery gates native job preparation and keeps the normal fre
   const workflow = await readFile(new URL('../.github/workflows/moss-edit-terminal.yml', import.meta.url), 'utf8');
   const recovery = workflow.slice(workflow.indexOf('  windows-maintenance:'), workflow.indexOf('  build-native:'));
   const build = workflow.slice(workflow.indexOf('  build-native:')), step = recovery.slice(recovery.indexOf('    steps:'));
-  assert.match(recovery, /^    if: inputs.phase == 'execute'$/m);
+  assert.match(recovery, /^    if: inputs.phase == 'execute' \|\| inputs.phase == 'cuda-rebase'$/m);
   assert.match(recovery, /^    runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
   assert.doesNotMatch(recovery, /\buses:/); assert.doesNotMatch(recovery, /\bneeds:/);
   assert.match(build, /^    needs: windows-maintenance$/m);

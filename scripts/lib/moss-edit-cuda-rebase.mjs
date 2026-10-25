@@ -23,15 +23,16 @@ const FIXTURE_FILES=new Set([
 const PRODUCT_PIN_FILES=new Set(['Cargo.toml','Cargo.lock','crates/sceneworks-core/Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml']);
 const PIN_PROVENANCE_FILES=new Set(['crates/sceneworks-worker/src/catalog_semantic_jobs.rs','crates/sceneworks-memory-adapter/src/lib.rs']);
 const PIN_DERIVED_FILES=new Set(['config/inference-provider-closures.json','config/anchor-loader-closures.json','config/inference-provenance-candidates.tsv','config/inference-third-party-source.json']);
-// Git objects of the eleven outputs from the successful official pin bump at c65aea3c.
-// Later tooling commits may not substitute generated facts for this fixed source pair.
+// Git objects of the eleven official pin outputs from c65aea3c, with the audit
+// comment's full-SHA prose shortened for H36 CI (its derived auditDigest is unchanged).
+// Later tooling commits may not substitute generated facts for this fixed pair.
 const PIN_OUTPUT_OBJECTS=new Map(Object.entries({
   'Cargo.lock':'e6feb2d0a6e419a79ff2e589e9144f552780d65a',
   'Cargo.toml':'6c0d98fc2105f997a3c3ae011a3950af5865d083',
   'config/anchor-loader-closures.json':'2fd9fb27f8e69f1fbd61d741fcba9bba24fe7e47',
   'config/inference-provenance-candidates.tsv':'76fbba15a6a29fce37a386a1394daea08816fb21',
   'config/inference-provider-closures.json':'6665dbb1160d81ff91c5a9f05fb2a244f1c73862',
-  'config/inference-third-party-source.json':'29ba14d33d853080fc55a83cb42ab551503f4a91',
+  'config/inference-third-party-source.json':'1ca93910c8af60a9b75f74157a87df0fd294a4b5',
   'crates/sceneworks-core/Cargo.toml':'69e4bf702e5e2cf4139f222d9f5c0e3e464f3854',
   'crates/sceneworks-memory-adapter/Cargo.toml':'7c2e7712c5c186cd8544cc6be17a251e4bc4b02a',
   'crates/sceneworks-memory-adapter/src/lib.rs':'614b4133c67ef6aa5b0c7aa700f3fdf015603069',
