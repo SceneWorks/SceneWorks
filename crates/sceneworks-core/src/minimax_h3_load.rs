@@ -238,7 +238,7 @@ impl PreparedH3Load {
                         }
                         Err(error) => Err(gen_core::Error::Io(error)),
                     },
-                    |progress| observe_artifact_seal_progress(progress),
+                    observe_artifact_seal_progress,
                 )
                 .map_err(|error| match error {
                     gen_core::Error::Canceled => H3_PREPARATION_CANCELED_MARKER.to_owned(),
@@ -420,7 +420,7 @@ mod tests {
             without
                 .files()
                 .iter()
-                .all(|pin| pin.loader_path() != &companion_file),
+                .all(|pin| pin.loader_path() != companion_file.as_path()),
             "no sibling heuristic may invent a companion the caller did not acquire"
         );
 
@@ -437,14 +437,14 @@ mod tests {
         assert!(
             with.files()
                 .iter()
-                .any(|pin| pin.loader_path() == &companion_file),
+                .any(|pin| pin.loader_path() == companion_file.as_path()),
             "the explicit companion is acquired into the prepared receipt"
         );
         assert!(
             direct
                 .prepared_file_pins()
                 .iter()
-                .all(|(_, pin)| pin.loader_path() != &companion_file),
+                .all(|(_, pin)| pin.loader_path() != companion_file.as_path()),
             "companion acquisition installs nothing on the provider spec"
         );
         // The check above would pass vacuously against an empty pin set, so the spec's OWN
@@ -462,7 +462,7 @@ mod tests {
         let acquired_digest = with
             .files()
             .iter()
-            .find(|pin| pin.loader_path() == &companion_file)
+            .find(|pin| pin.loader_path() == companion_file.as_path())
             .expect("the companion was acquired")
             .content_sha256()
             .to_vec();
@@ -478,7 +478,7 @@ mod tests {
         let mutated_digest = reprepared
             .files()
             .iter()
-            .find(|pin| pin.loader_path() == &companion_file)
+            .find(|pin| pin.loader_path() == companion_file.as_path())
             .expect("the companion is re-acquired")
             .content_sha256()
             .to_vec();
