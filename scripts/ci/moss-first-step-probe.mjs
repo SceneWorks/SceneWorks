@@ -63,17 +63,29 @@ export async function executeProbe(root,payload,env=process.env){
 // Separate fixed diagnostic: reuse already encoded upstream inputs, never execute Python/models upstream.
 export const ENCODING_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-only-prep/payload';
 export const ENCODING_SHA='3004cb310e3e3e98de8ea0901ca848f2b67c81f9aebb7aff6ca974e19230ffd2';
+export const ENCODING_PRECISION_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-precision-prep/payload';
+// Freeze these together after the native precision profile and its cfg(test) overlay are reviewed.
+export const ENCODING_PRECISION_PIN=null;
+export const ENCODING_PRECISION_SHA=null;
 const ENCODING_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-first-step-40195966134-1/target';
 const ENCODING_HUB=BASE+'/moss-execute-40198829729-1-mlx/hf/hub';
 const INPUT_SHA='47b07acccc6491dbc1f4c5c3135fe37d4d65f4afb496d28dafd8ca63a08cd47d';
 const UPSTREAM_SHA='ade384909936c7b55326ce3bf7a804e827c9b6b1ffbdc9232e7e36b5016b9b57';
+const REQUEST_SHA='f9337c3c4ee20d8fddc00451df4ef53f0bbe68e8c5bed7217b835af53f2781f3';
+const B_SHA='c6ec194e6d7e04a2893449e530cf51d064c6adfd9847f0b028921b21e1c1bcb5';
 const ENCODING_SHAPES={positive:[1,71,4096],negative:[1,10,4096],positive_mask:[1,71],negative_mask:[1,10],reference_0:[1,128,21,32]};
-export function encodingEnvelope(raw,ref,sha,backend){
+const OLD_ENCODING={pin:PIN,sha:ENCODING_SHA,kind:'sc-26752-normal-encoding/v1',staged:ENCODING_STAGED,precision:false};
+export function encodingPrecisionProfile(pin=ENCODING_PRECISION_PIN,sha=ENCODING_PRECISION_SHA){
+ check(typeof pin==='string'&&/^[a-f0-9]{40}$/.test(pin)&&pin!==PIN&&typeof sha==='string'&&/^[a-f0-9]{64}$/.test(sha),'reviewed encoding precision pin and payload are pending');
+ return {pin,sha,kind:'sc-26752-normal-encoding-precision/v1',staged:ENCODING_PRECISION_STAGED,precision:true};
+}
+export function encodingEnvelope(raw,ref,sha,backend,precision){
  const value=JSON.parse(raw);
  check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase','closed encoding envelope required');
  check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact encoding source and mlx required');
- check(['upload-encoding','execute-encoding'].includes(value.phase),'unknown encoding phase');
- for(const key of ['artifact_id','artifact_run_id'])check(value.phase==='upload-encoding'?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact encoding artifact identity required');
+ check(['upload-encoding','execute-encoding','upload-encoding-precision','execute-encoding-precision'].includes(value.phase),'unknown encoding phase');
+ if(value.phase.endsWith('-precision'))check((precision??encodingPrecisionProfile()).precision===true,'precision profile required');
+ for(const key of ['artifact_id','artifact_run_id'])check(value.phase.startsWith('upload-')?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact encoding artifact identity required');
  return value;
 }
 async function tensorValues(root,name,item,shape){
@@ -83,14 +95,16 @@ async function tensorValues(root,name,item,shape){
  const bytes=await readFile(path);check(digest(bytes)===item.sha256,'encoding tensor SHA mismatch');
  const values=[];for(let i=0;i<bytes.length;i+=4){const value=bytes.readFloatLE(i);check(Number.isFinite(value),'nonfinite encoding tensor');if(name.endsWith('_mask'))check(value===1,'fixed unpadded mask must be all ones');values.push(value);}return values;
 }
-export async function verifyEncodingPayload(root,expected=ENCODING_SHA){
- await noLinks(root);const bytes=await readFile(resolve(root,'payload-manifest.json'));check(bytes.length<65536&&digest(bytes)===expected,'encoding manifest SHA mismatch');
- const manifest=JSON.parse(bytes);check(manifest.kind==='sc-26752-normal-encoding/v1'&&manifest.nativePin===PIN&&manifest.upstreamRun==='40195966134'&&manifest.inputsSha256===INPUT_SHA&&manifest.upstreamSha256===UPSTREAM_SHA,'encoding provenance mismatch');
+export async function verifyEncodingPayload(root,profile=OLD_ENCODING){
+ await noLinks(root);const bytes=await readFile(resolve(root,'payload-manifest.json'));check(bytes.length<65536&&digest(bytes)===profile.sha,'encoding manifest SHA mismatch');
+ const manifest=JSON.parse(bytes);check(manifest.kind===profile.kind&&manifest.nativePin===profile.pin&&manifest.upstreamRun==='40195966134'&&manifest.inputsSha256===INPUT_SHA&&manifest.upstreamSha256===UPSTREAM_SHA,'encoding provenance mismatch');
+ if(profile.precision)check(manifest.historicalManifestSha256===ENCODING_SHA&&manifest.historicalNativePin===PIN,'historical encoding producer mismatch');
  check(Array.isArray(manifest.files)&&manifest.files.length===13,'fixed encoding payload closure required');const wanted=new Set(['payload-manifest.json']);
  for(const item of manifest.files){check(!wanted.has(item.file),'duplicate encoding file');wanted.add(item.file);const path=safe(root,item.file);await noLinks(path);const info=await lstat(path);check(info.isFile()&&info.nlink===1&&info.size===item.byteLength&&info.size<=8*1024*1024&&await fileHash(path)===item.sha256,'encoding payload file mismatch');}
  async function walk(path,prefix=''){for(const entry of await readdir(path,{withFileTypes:true})){check(!entry.isSymbolicLink(),'encoding payload link');const file=prefix+entry.name;if(entry.isDirectory())await walk(resolve(path,entry.name),file+'/');else check(wanted.has(file),'unlisted encoding file');}}await walk(root);
  const inputBytes=await readFile(resolve(root,'upstream/inputs.json')),upstreamBytes=await readFile(resolve(root,'upstream/upstream.json'));
  check(digest(inputBytes)===INPUT_SHA&&digest(upstreamBytes)===UPSTREAM_SHA,'retained upstream identity mismatch');
+ if(profile.precision)check(await fileHash(resolve(root,'request.json'))===REQUEST_SHA&&await fileHash(resolve(root,'B.png'))===B_SHA,'frozen request or B image changed');
  const inputs=JSON.parse(inputBytes),upstream=JSON.parse(upstreamBytes);
  check(inputs.kind==='sc-26752-first-step-inputs/v1'&&inputs.nativeHead===PIN&&upstream.status==='CAPTURED_FIRST_STEP_ONLY'&&upstream.inputsSha256===INPUT_SHA&&upstream.predictions===2&&upstream.updates===1,'retained capture incomplete');
  check(Object.keys(inputs.tensors).length===6,'exact six retained inputs required');
@@ -145,9 +159,9 @@ export function encodingMetrics(reference,native){
  for(let i=0;i<reference.length;i++){const a=reference[i],b=native[i];check(Number.isFinite(a)&&Number.isFinite(b),'nonfinite encoding metric');const d=b-a;error+=d*d;ref+=a*a;out+=b*b;dot+=a*b;absolute+=Math.abs(d);signed+=d;max=Math.max(max,Math.abs(d));equal+=Number(a===b);}
  return {elements:reference.length,maxAbsError:max,meanAbsError:absolute/reference.length,rmse:Math.sqrt(error/reference.length),relativeL2:ref?Math.sqrt(error/ref):null,cosineSimilarity:ref&&out?dot/Math.sqrt(ref*out):null,signedMeanError:signed/reference.length,equalValues:equal};
 }
-export async function compareEncoding(payload,nativeRoot){
+export async function compareEncoding(payload,nativeRoot,profile=OLD_ENCODING){
  const inputs=JSON.parse(await readFile(resolve(payload,'upstream/inputs.json'))),bytes=await readFile(resolve(nativeRoot,'native.json'));check(bytes.length<65536,'oversized native encoding receipt');const native=JSON.parse(bytes);
- check(native.kind==='sc-26752-native-normal-encoding/v1'&&native.status==='CAPTURED_ENCODING_ONLY'&&native.nativePin===PIN&&native.inputsSha256===INPUT_SHA,'incomplete native encoding');
+ check(native.kind==='sc-26752-native-normal-encoding/v1'&&native.status==='CAPTURED_ENCODING_ONLY'&&native.nativePin===profile.pin&&native.inputsSha256===INPUT_SHA,'incomplete native encoding');
  check(native.requestSha256===await fileHash(resolve(payload,'request.json'))&&native.referencePngSha256===inputs.provenance.referenceSha256,'native encoding input mismatch');
  check(Object.keys(native.tensors).sort().join(',')===Object.keys(ENCODING_SHAPES).sort().join(','),'unexpected native encoding tensor closure');
  const request=JSON.parse(await readFile(resolve(payload,'request.json')));
@@ -155,48 +169,50 @@ export async function compareEncoding(payload,nativeRoot){
  for(const item of Object.values(native.tensors))check(typeof item.sourceDtype==='string'&&item.sourceDtype.length>0,'native source dtype missing');
  const metrics={};for(const [name,shape] of Object.entries(ENCODING_SHAPES))metrics[name]=encodingMetrics(await tensorValues(resolve(payload,'upstream'),name,inputs.tensors[name],shape),await tensorValues(nativeRoot,name,native.tensors[name],shape));
  check(native.referenceReceipts.length===1&&native.referenceReceipts[0].latent_sha256===native.tensors.reference_0.sha256,'reference receipt tensor mismatch');
- return {kind:'sc-26752-normal-encoding-comparison/v1',status:'METRICS_ONLY_NO_ACCEPTANCE_VERDICT',inputsSha256:INPUT_SHA,nativeReceiptSha256:digest(bytes),text:{positive:metrics.positive,negative:metrics.negative,positive_mask:metrics.positive_mask,negative_mask:metrics.negative_mask},vae:{reference_0:metrics.reference_0},note:'Normally encoded text and deterministic VAE only; no DiT, denoising, image generation or numerical acceptance threshold.'};
+ return {kind:'sc-26752-normal-encoding-comparison/v1',status:'METRICS_ONLY_NO_ACCEPTANCE_VERDICT',inputsSha256:INPUT_SHA,nativeReceiptSha256:digest(bytes),...(profile.precision?{historicalNativePin:PIN,nativePin:profile.pin}:{}),text:{positive:metrics.positive,negative:metrics.negative,positive_mask:metrics.positive_mask,negative_mask:metrics.negative_mask},vae:{reference_0:metrics.reference_0},note:'Normally encoded text and deterministic VAE only; no DiT, denoising, image generation or numerical acceptance threshold.'};
 }
-export async function executeEncoding(root,payload,env=process.env){
+export async function executeEncoding(root,payload,env=process.env,profile=OLD_ENCODING){
  check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','encoding execution requires registered Mac Actions');
- const manifest=await verifyEncodingPayload(payload),source=resolve(env.GITHUB_WORKSPACE,`moss-first-step-native-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`),nativeRoot=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752',`moss-encoding-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+ const manifest=await verifyEncodingPayload(payload,profile),source=resolve(env.GITHUB_WORKSPACE,`moss-first-step-native-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`),nativeRoot=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752',`moss-encoding-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
  await noLinks(source);await noLinks(dirname(nativeRoot));await mkdir(nativeRoot,{mode:0o700});
  const common={...env,CARGO_HOME:resolve(nativeRoot,'cargo-home'),CARGO_TARGET_DIR:resolve(nativeRoot,'target'),CARGO_BUILD_JOBS:'2',CMAKE_BUILD_PARALLEL_LEVEL:'2',CARGO_PROFILE_RELEASE_STRIP:'none',CARGO_INCREMENTAL:'0',HF_HOME:resolve(root,'hf'),HF_HUB_OFFLINE:'1',CUDA_VISIBLE_DEVICES:'',OMP_NUM_THREADS:'1'};
  let gitIndex=0;const git=async args=>(await run('git',args,{cwd:source,env:common,log:resolve(root,`encoding-git-${++gitIndex}.log`)})).trimEnd();
- check(await git(['rev-parse','HEAD'])===PIN&&await git(['status','--porcelain'])==='','encoding native checkout must be clean exact pin');
+ check(await git(['rev-parse','HEAD'])===profile.pin&&await git(['status','--porcelain'])==='','encoding native checkout must be clean exact pin');
  const identity=JSON.parse(await readFile(resolve(payload,'overlay/source-identity.json')));
- check(identity.baseHead===PIN&&identity.libPath==='crates/media/mlx-gen/mlx-gen-moss-image/src/lib.rs'&&identity.newModulePath==='crates/media/mlx-gen/mlx-gen-moss-image/src/encoding_probe.rs'&&identity.test==='encoding_probe::fixed_normal_encoding_only','fixed encoding overlay identity required');
+ check(identity.baseHead===profile.pin&&identity.libPath==='crates/media/mlx-gen/mlx-gen-moss-image/src/lib.rs'&&identity.newModulePath==='crates/media/mlx-gen/mlx-gen-moss-image/src/encoding_probe.rs'&&identity.test==='encoding_probe::fixed_normal_encoding_only','fixed encoding overlay identity required');
+ if(profile.precision)check(identity.historicalNativePin===PIN&&identity.historicalManifestSha256===ENCODING_SHA,'encoding overlay historical binding mismatch');
  const lib=safe(source,identity.libPath);check(await fileHash(lib)===identity.originalLibSha256,'encoding original lib mismatch');
  await git(['apply','--check',resolve(payload,'overlay/lib.rs.patch')]);await git(['apply',resolve(payload,'overlay/lib.rs.patch')]);await copyFile(resolve(payload,'overlay/encoding_probe.rs'),safe(source,identity.newModulePath),constants.COPYFILE_EXCL);
  check(await fileHash(lib)===identity.overlayLibSha256,'encoding patched lib mismatch');
  const delta=await git(['status','--porcelain','--untracked-files=all']);check(delta.split('\n').sort().join('\n')===[' M '+identity.libPath,'?? '+identity.newModulePath].sort().join('\n'),'unexpected encoding source delta');
  const clone=await cloneEncodingTarget(ENCODING_WARM,common.CARGO_TARGET_DIR);await noLinks(CARGO_SEED);await copyCacheExclusive(CARGO_SEED,common.CARGO_HOME);
  const models={base:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-Base/snapshots/1ceede80badddd6a7812069619edaa5633587192',shared:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-SFT/snapshots/fc5de0d56fc910cbca6f6625a70f5f582b26deb1',adapter:ENCODING_HUB+'/models--chinoll--Moss-Image-Edit/snapshots/3be9c40037e1b89b17aa85ff6f8ee805872aa558'};
- await writeFile(resolve(root,'probe-authentication.json'),JSON.stringify({kind:'sc-26752-encoding-authentication/v1',manifestSha256:ENCODING_SHA,nativePin:PIN,routeSource:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,originalUpstreamRun:manifest.upstreamRun,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,overlay:identity,sourceDelta:delta,source,target:common.CARGO_TARGET_DIR,warmTarget:ENCODING_WARM,clone,models,modelAuthentication:'unchanged native Sources/ArtifactSeal authentication before learned tensor loading'},null,2)+'\n',{flag:'wx'});
+ await writeFile(resolve(root,'probe-authentication.json'),JSON.stringify({kind:'sc-26752-encoding-authentication/v1',manifestSha256:profile.sha,nativePin:profile.pin,...(profile.precision?{historicalNativePin:PIN,historicalManifestSha256:ENCODING_SHA}:{}),routeSource:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,originalUpstreamRun:manifest.upstreamRun,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,overlay:identity,sourceDelta:delta,source,target:common.CARGO_TARGET_DIR,warmTarget:ENCODING_WARM,clone,models,modelAuthentication:'unchanged native Sources/ArtifactSeal authentication before learned tensor loading'},null,2)+'\n',{flag:'wx'});
  const build=await run('rustup',['run','1.98.0','cargo','test','--locked','--release','-p','mlx-gen-moss-image','--lib','--no-run','--message-format=json'],{cwd:source,env:common,log:resolve(root,'native-build.log')});const binary=probeBinary(build,common.CARGO_TARGET_DIR),binarySha256=await fileHash(binary);
- await verifyEncodingPayload(payload);
+ await verifyEncodingPayload(payload,profile);
  await run(binary,[identity.test,'--exact','--ignored','--nocapture','--test-threads=1'],{cwd:source,env:{...common,MOSS_ENCODING_ADMITTED:'1',MOSS_ENCODING_PAYLOAD:payload,MOSS_ENCODING_OUTPUT:resolve(root,'native'),MOSS_ENCODING_REQUEST_SHA:await fileHash(resolve(payload,'request.json')),MOSS_ENCODING_BASE:models.base,MOSS_ENCODING_SHARED:models.shared,MOSS_ENCODING_ADAPTER:models.adapter},log:resolve(root,'native.log')});
- const comparison=await compareEncoding(payload,resolve(root,'native'));await writeFile(resolve(root,'comparison.json'),JSON.stringify(comparison,null,2)+'\n',{flag:'wx'});
- await verifyEncodingPayload(payload);await cp(resolve(payload,'upstream'),resolve(root,'upstream'),{recursive:true,errorOnExist:true,force:false});
- await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-encoding-completion/v1',nativePin:PIN,binary,binarySha256,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,nativeSha256:await fileHash(resolve(root,'native/native.json')),comparisonSha256:await fileHash(resolve(root,'comparison.json')),scope:'normal encoding only; upstream reused byte-for-byte; no DiT/sampling/image run'},null,2)+'\n',{flag:'wx'});
+ const comparison=await compareEncoding(payload,resolve(root,'native'),profile);await writeFile(resolve(root,'comparison.json'),JSON.stringify(comparison,null,2)+'\n',{flag:'wx'});
+ await verifyEncodingPayload(payload,profile);await cp(resolve(payload,'upstream'),resolve(root,'upstream'),{recursive:true,errorOnExist:true,force:false});
+ await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-encoding-completion/v1',nativePin:profile.pin,...(profile.precision?{historicalNativePin:PIN,historicalManifestSha256:ENCODING_SHA}:{}),binary,binarySha256,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,nativeSha256:await fileHash(resolve(root,'native/native.json')),comparisonSha256:await fileHash(resolve(root,'comparison.json')),scope:'normal encoding only; upstream reused byte-for-byte; no DiT/sampling/image run'},null,2)+'\n',{flag:'wx'});
 }
 async function encodingMain(){
  const phase=JSON.parse(process.env.MOSS_REFERENCE??'{}').phase;
- if(!['upload-encoding','execute-encoding'].includes(phase)){
+ if(!['upload-encoding','execute-encoding','upload-encoding-precision','execute-encoding-precision'].includes(phase)){
   check(process.argv[2]==='route'&&['validate','execute'].includes(process.argv[3]),'fixed reference route required');
   const code=await new Promise((done,fail)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('./moss-upstream-reference.mjs',import.meta.url)),process.argv[3]],{stdio:'inherit',env:process.env});child.on('error',fail);child.on('close',done);});check(code===0,'original reference route failed');return;
  }
  check(process.env.GITHUB_ACTIONS==='true'&&process.env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','registered Mac encoding route only');
  const value=encodingEnvelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);
+ const profile=value.phase.endsWith('-precision')?encodingPrecisionProfile():OLD_ENCODING;
  check(/^[1-9][0-9]+$/.test(process.env.GITHUB_RUN_ID)&&/^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT),'actual encoding Actions identity required');
  const root=resolve(BASE,`moss-encoding-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
  check(process.argv[2]==='route','fixed route required');
  if(process.argv[3]==='validate'){
-  if(value.phase==='upload-encoding')await verifyEncodingPayload(ENCODING_STAGED);
-  await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:ENCODING_STAGED}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;
+  if(value.phase.startsWith('upload-'))await verifyEncodingPayload(profile.staged,profile);
+  await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:profile.staged,...(profile.precision?{native_pin:profile.pin}:{})}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;
  }
- check(process.argv[3]==='execute'&&value.phase==='execute-encoding','fixed encoding execute required');
+ check(process.argv[3]==='execute'&&value.phase.startsWith('execute-encoding'),'fixed encoding execute required');
  await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});
- const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);await verifyEncodingPayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeEncoding(root,resolve(root,'payload'));
+ const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);await verifyEncodingPayload(download,profile);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeEncoding(root,resolve(root,'payload'),process.env,profile);
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))await encodingMain();

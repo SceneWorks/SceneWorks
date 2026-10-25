@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile,writeFile,mkdtemp,rm,symlink,realpath,mkdir,stat,link} from 'node:fs/promises';
+import {readFile,writeFile,mkdtemp,rm,symlink,realpath,mkdir,stat,link,cp,access} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {envelope,PAYLOAD_SHA} from './moss-upstream-reference.mjs';
-import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,encodingEnvelope,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
+import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,ENCODING_STAGED,ENCODING_SHA,verifyEncodingPayload,encodingEnvelope,encodingPrecisionProfile,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),ref='a'.repeat(40),pin='857f7a1996e3678a0773c3509ac0087522c19ce6';
 test('probe dispatch is closed, immutable-artifact-only, and cannot select backend/source/commands',()=>{
  for(const phase of ['upload-probe','execute-probe']){const value={phase,artifact_id:phase==='upload-probe'?null:'123456',artifact_run_id:phase==='upload-probe'?null:'1234567'};assert.deepEqual(envelope(JSON.stringify(value),ref,ref,'mlx'),value);for(const bad of [{...value,command:'cargo test'},{...value,payload:'/tmp/x'},{...value,device:'cpu'}])assert.throws(()=>envelope(JSON.stringify(bad),ref,ref,'mlx'));assert.throws(()=>envelope(JSON.stringify(value),ref,ref,'candle'));assert.throws(()=>envelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));}
@@ -40,6 +40,32 @@ test('encoding envelope is fixed, source-bound and artifact-only',()=>{
  assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,ref,'candle'));
  assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));
 });
+test('precision encoding stays pending until an exact reviewed native and payload pair is frozen',()=>{
+ const upload={phase:'upload-encoding-precision',artifact_id:null,artifact_run_id:null},execute={phase:'execute-encoding-precision',artifact_id:'123456',artifact_run_id:'123457'};
+ assert.throws(()=>encodingPrecisionProfile(),/pending/);
+ assert.throws(()=>encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx'),/pending/);
+ assert.throws(()=>encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx'),/pending/);
+ const profile=encodingPrecisionProfile('b'.repeat(40),'c'.repeat(64));
+ assert.deepEqual(encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx',profile),upload);
+ assert.deepEqual(encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx',profile),execute);
+ for(const bad of [{...execute,native_pin:'b'.repeat(40)},{...execute,payload:'/tmp/elsewhere'},{...execute,artifact_id:null}])assert.throws(()=>encodingEnvelope(JSON.stringify(bad),ref,ref,'mlx',profile));
+ assert.throws(()=>encodingEnvelope(JSON.stringify(execute),ref,'d'.repeat(40),'mlx',profile));
+ assert.throws(()=>encodingEnvelope(JSON.stringify(execute),ref,ref,'candle',profile));
+ assert.throws(()=>encodingPrecisionProfile(pin,'c'.repeat(64)),/pending/);
+ assert.throws(()=>encodingPrecisionProfile('b'.repeat(40),'not-a-sha'),/pending/);
+});
+test('precision payload binds the exact historical tensors, request and B image independently of new overlay',async t=>{
+ try{await access(resolve(ENCODING_STAGED,'payload-manifest.json'));}catch{t.skip('retained sealed encoding payload unavailable on this host');return;}
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'moss-precision-payload-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ await cp(ENCODING_STAGED,resolve(root,'payload'),{recursive:true});const payload=resolve(root,'payload');
+ const original=JSON.parse(await readFile(resolve(payload,'payload-manifest.json')));
+ const manifest={...original,kind:'sc-26752-normal-encoding-precision/v1',nativePin:'b'.repeat(40),historicalNativePin:pin,historicalManifestSha256:ENCODING_SHA};
+ const bytes=Buffer.from(JSON.stringify(manifest));await writeFile(resolve(payload,'payload-manifest.json'),bytes);
+ const profile=encodingPrecisionProfile('b'.repeat(40),sha(bytes));await verifyEncodingPayload(payload,profile);
+ const changed=Buffer.from(await readFile(resolve(payload,'request.json')));changed[0]^=1;await writeFile(resolve(payload,'request.json'),changed);
+ manifest.files.find(x=>x.file==='request.json').sha256=sha(changed);const replaced=Buffer.from(JSON.stringify(manifest));await writeFile(resolve(payload,'payload-manifest.json'),replaced);
+ await assert.rejects(()=>verifyEncodingPayload(payload,encodingPrecisionProfile(profile.pin,sha(replaced))),/frozen request or B image changed/);
+});
 test('encoding metrics separate observations from acceptance and reject invalid inputs',()=>{
  const same=encodingMetrics([1,2,3],[1,2,3]);assert.equal(same.relativeL2,0);assert.equal(same.equalValues,3);assert.equal(same.cosineSimilarity,1);
  const changed=encodingMetrics([1,2],[2,4]);assert.equal(changed.relativeL2,1);assert.equal(changed.maxAbsError,2);assert.equal(changed.cosineSimilarity,1);assert.ok(!('pass' in changed));
@@ -65,5 +91,7 @@ test('encoding route has no upstream execution and retains ordinary route behavi
  assert.doesNotMatch(encoding,/capture_first_step|runtime.launcher|executeProbe|sample_latents/);
  assert.match(encoding,/cloneEncodingTarget\(ENCODING_WARM/);assert.ok(encoding.indexOf('cloneEncodingTarget(')<encoding.indexOf("run('rustup'"));assert.match(encoding,/encoding_probe::fixed_normal_encoding_only/);
  const workflow=await readFile(new URL('../../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8');assert.match(workflow,/moss-first-step-probe.mjs route validate/);assert.match(workflow,/phase == 'execute-encoding'/);
+ assert.match(workflow,/phase == 'execute-encoding-precision'/);assert.match(workflow,/ref: \$\{\{ steps\.reference\.outputs\.native_pin \}\}/);
+ assert.match(workflow,/ref: '857f7a1996e3678a0773c3509ac0087522c19ce6'/);
  assert.match(code,/moss-upstream-reference-common.mjs/);assert.doesNotMatch(code,/import .*from '.\/moss-upstream-reference.mjs'/);
 });
