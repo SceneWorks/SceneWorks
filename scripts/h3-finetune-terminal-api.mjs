@@ -34,7 +34,7 @@ export function assertRecordedAssertion({actual,expected,operator='equals'}){
     assert.ok(typeof actual==='string'&&typeof expected==='string'&&expected.length>0&&actual.includes(expected),'actual refusal did not contain the expected specific reason');
   }else{assert.equal(operator,'equals','unknown assertion operator');assert.deepEqual(actual,expected);}
 }
-export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity } = {}) {
+export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity, uploadFile } = {}) {
   const base = new URL(s.baseUrl);
   assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
   assert.ok(s.timeoutSeconds > 0 && s.timeoutSeconds <= 7200);
@@ -43,14 +43,16 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
   const deadline = Math.min(now() + s.timeoutSeconds * 1000,deadlineMs), captures = {}, transcript = [];
   let activeJob;
   const record = async r => { transcript.push(r); await onRecord(r); };
-  async function request(method, route, body, expectedStatus) {
+  async function request(method, route, body, expectedStatus, upload) {
     assert.ok(route.startsWith('/api/v1/') && !route.includes('..'), 'existing app API route required');
     const url = new URL(route, base); assert.equal(url.origin, base.origin);
     assert.ok(now() < deadline, 'scenario timeout');
-    const response = await fetchImpl(url, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) });
+    let wireBody=body===undefined?undefined:JSON.stringify(body),headers={'content-type':'application/json'},recordedBody=body;
+    if(upload){assert.equal(method,'POST');assert.match(route,/^\/api\/v1\/projects\/[^/]+\/assets$/,'only the existing asset upload endpoint accepts files');assert.equal(typeof uploadFile,'function','source-bound upload adapter required');assert.equal(body,undefined,'upload fields are explicit, not arbitrary request bodies');const blob=await uploadFile(upload);assert.ok(blob instanceof Blob&&blob.size>0);const form=new FormData();form.set('file',blob,upload.fileName);wireBody=form;headers={};recordedBody={multipartFile:{path:upload.path,sha256:upload.sha256,mimeType:upload.mimeType,fileName:upload.fileName}};}
+    const response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) });
     const text = await response.text();
     const result = text ? JSON.parse(text) : null;
-    await record({ method, route, request: body, status: response.status, result });
+    await record({ method, route, request: recordedBody, status: response.status, result });
     assert.equal(response.status, expectedStatus, `${method} ${route}: ${text.slice(0, 400)}`);
     return result;
   }
@@ -71,7 +73,7 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
         activeJob = undefined;
       } else {
         const requestedRoute = expand(step.path, captures);
-        result = await request(step.method, requestedRoute, expand(step.body, captures), step.expectedStatus);
+        result = await request(step.method, requestedRoute, expand(step.body, captures), step.expectedStatus, step.upload?expand(step.upload,captures):undefined);
         // Submission identity is durable before waiting, including replay/retry failure recovery.
         if (step.method === 'POST' && result?.id && (['/api/v1/models/import','/api/v1/loras/import', '/api/v1/video/jobs'].includes(requestedRoute) || /^\/api\/v1\/jobs\/[^/]+\/(retry|duplicate)$/.test(requestedRoute))) activeJob = result.id;
       }

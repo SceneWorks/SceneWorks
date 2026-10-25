@@ -256,6 +256,22 @@ class SpeechStageTests(unittest.TestCase):
                 stage(SimpleNamespace(name=name), receipt=receipt, allow_unit_fake=False)
             self.assertEqual(caught.exception.code, "license")
 
+    def test_scoped_operator_input_needs_no_invented_person_date_or_signature(self):
+        with tempfile.TemporaryDirectory() as name:
+            receipt = base_receipt(name)
+            original = receipt["licenseAuthority"]
+            operator = {"acknowledged": True, "assetSets": ["speech"], "licenseIds": ["CC-BY-4.0"], "inheritedLicenseIds": []}
+            receipt["licenseAuthority"] = {"kind": "operator-scoped-binding", "acknowledged": operator["acknowledged"], "operatorInput": copy.deepcopy(operator), "inputSha256": hashlib.sha256(json.dumps(operator, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), "subjects": original["subjects"]}
+            result = stage(SimpleNamespace(name=name), receipt=receipt)
+            self.assertEqual(result["license"]["licenseAuthority"]["operatorInput"], operator)
+            self.assertNotIn("approvedBy", result["license"]["licenseAuthority"])
+            self.assertEqual(result["proof_kind"], "unit_fake")
+        with tempfile.TemporaryDirectory() as name:
+            receipt = base_receipt(name)
+            receipt["licenseAuthority"] = {"kind": "operator-scoped-binding", "acknowledged": True, "operatorInput": {"acknowledged": False, "assetSets": ["speech"], "licenseIds": ["CC-BY-4.0"]}, "inputSha256": "a" * 64, "subjects": receipt["licenseAuthority"]["subjects"]}
+            with self.assertRaises(speech.SpeechStageError):
+                stage(SimpleNamespace(name=name), receipt=receipt)
+
     def test_missing_license_approval_fields_fail(self):
         for path in (("kind",), ("approvedBy",), ("approvedAt",), ("reference",), ("subjects",), ("acknowledged",)):
             with tempfile.TemporaryDirectory() as name:

@@ -156,14 +156,41 @@ export function parseStageRequest(raw) {
   assert.ok(Array.isArray(assetSets) && assetSets.length > 0 && assetSets.every(v => typeof v === 'string'), 'asset_sets must be a non-empty string array');
   return { ...request, assetSets };
 }
+// One explicit operator scope may cover the cohort; file identities are program bindings,
+// not additional approvals. Keep the original input unchanged and never infer acknowledgment.
+const scopeJson=value=>JSON.stringify((function ordered(v){return Array.isArray(v)?v.map(ordered):v&&typeof v==='object'?Object.fromEntries(Object.keys(v).sort().map(k=>[k,ordered(v[k])])):v;})(value));
+export function assertScopedBinding(authority,{allowUnitFake=false}={}) {
+  assert.equal(authority?.kind,'operator-scoped-binding');const input=authority.operatorInput;
+  assert.ok(input&&typeof input==='object'&&!Array.isArray(input));assert.equal(input.acknowledged,true,'explicit scoped acknowledgment required');assert.equal(authority.acknowledged,input.acknowledged);
+  assert.ok(allowUnitFake||input.proof_kind!=='unit_fake','synthetic consent is not real approval');
+  assert.equal(authority.inputSha256,createHash('sha256').update(scopeJson(input)).digest('hex'),'operator acknowledgment input changed');
+  for(const field of ['assetSets','licenseIds','inheritedLicenseIds'])assert.ok(Array.isArray(input[field])&&input[field].every(v=>typeof v==='string'&&v.length),`scoped acknowledgment ${field} required`);
+  assert.ok(Array.isArray(authority.subjects)&&authority.subjects.length,'actual source bindings required');
+  for(const subject of authority.subjects){sha64(subject.sha256);assert.equal(subject.acknowledged,input.acknowledged);const origin=subject.origin;assert.ok(origin,'bound input origin required');
+    if(origin.kind==='catalog-component')assert.equal(input.includeSelectedComponents,true,'selected components are outside the approved scope');
+    else assert.ok(input.assetSets.includes(origin.assetSet),'source asset set is outside the approved scope');
+    const generatedCC0=subject.licenseId==='CC0-1.0'&&origin.kind==='generated-control';
+    assert.ok(generatedCC0||input.licenseIds.includes(subject.licenseId),'license is outside the approved scope');
+    if(subject.inheritedLicenseId)assert.ok(input.inheritedLicenseIds.includes(subject.inheritedLicenseId)&&subject.inheritedAcknowledged===input.acknowledged,'inherited license is outside the approved scope');
+  }
+  return authority;
+}
+export function bindScopedAuthority(operatorInput,facts,{allowUnitFake=false}={}) {
+  assert.equal(operatorInput?.acknowledged,true,'explicit scoped acknowledgment required');
+  const input=structuredClone(operatorInput),subjects=facts.map(fact=>({role:fact.role,sha256:fact.sha256,licenseId:fact.legal.licenseId,...(fact.legal.inheritedLicenseId?{inheritedLicenseId:fact.legal.inheritedLicenseId,inheritedAcknowledged:input.acknowledged}:{}),...(fact.legal.attributionRequired?{attribution:fact.legal.attributionRequired}:{}),acknowledged:input.acknowledged,origin:structuredClone(fact.origin)}));
+  return assertScopedBinding({kind:'operator-scoped-binding',acknowledged:input.acknowledged,operatorInput:input,inputSha256:createHash('sha256').update(scopeJson(input)).digest('hex'),subjects},{allowUnitFake});
+}
 // Explicit real legal authority BEFORE any download. Never accept terms/login automatically.
 export function assertStageAuthority(authority, files, { allowUnitFake = false } = {}) {
   assert.ok(authority && typeof authority === 'object', 'explicit license authority required before any download');
   assert.equal(authority.acknowledged, true, 'license must be explicitly acknowledged');
-  assert.ok(authority.kind === 'user-approved' || (allowUnitFake && authority.kind === 'unit_fake'), 'synthetic consent is not real legal approval');
-  assert.ok(typeof authority.approvedBy === 'string' && authority.approvedBy.length > 0, 'approving authority required');
-  assert.ok(typeof authority.reference === 'string' && authority.reference.length > 0, 'approval reference required');
-  assert.ok(Number.isFinite(Date.parse(authority.approvedAt)), 'approval timestamp required');
+  if(authority.kind==='operator-scoped-binding')assertScopedBinding(authority,{allowUnitFake});
+  else {
+    assert.ok(authority.kind === 'user-approved' || (allowUnitFake && authority.kind === 'unit_fake'), 'synthetic consent is not real legal approval');
+    assert.ok(typeof authority.approvedBy === 'string' && authority.approvedBy.length > 0, 'approving authority required');
+    assert.ok(typeof authority.reference === 'string' && authority.reference.length > 0, 'approval reference required');
+    assert.ok(Number.isFinite(Date.parse(authority.approvedAt)), 'approval timestamp required');
+  }
   fileAcknowledgments(authority, files);
   return authority;
 }
@@ -519,7 +546,7 @@ export async function runStage({ request, backend, book, env = process.env, plat
     settings: { backend: selectedBackend, platform, privateRoot: root, cacheRoot: cacheHub({ platform, env }), fileTimeoutMs, jobBoundMs, maxRetries },
     runner: { runnerName: env.RUNNER_NAME ?? null, arch: process.arch, platform, githubActions: env.GITHUB_ACTIONS === 'true' },
     device,
-    licenseAuthority: { kind: authority.kind, approvedBy: authority.approvedBy, approvedAt: authority.approvedAt, reference: authority.reference, subjects: (authority.subjects ?? []).map(knownSubject), acknowledged: authority.acknowledged },
+    licenseAuthority: authority.kind==='operator-scoped-binding'?structuredClone(authority):{ kind: authority.kind, approvedBy: authority.approvedBy, approvedAt: authority.approvedAt, reference: authority.reference, subjects: (authority.subjects ?? []).map(knownSubject), acknowledged: authority.acknowledged },
     startedAt: new Date(now()).toISOString(),
     endedAt: null,
     durationMs: null,

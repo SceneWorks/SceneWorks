@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { requiredCases, SOURCE, ARTIFACTS, hashFile, validatePlan, verifiedStagingRoot } from './h3-finetune-terminal.mjs';
+import {assertScopedBinding} from './h3-finetune-terminal-stage.mjs';
 import { operationalCases, operationalCaseById, chooseMatrixBackend } from './h3-finetune-terminal-reduced.mjs';
 const caseCheck=c=>c.kind==='source-cancel'?'generation-source-prep-cancel':c.sourceVariant==='opaque-renamed-linked'?'renamed':c.sourceVariant==='independent-finetune-pulpcut-merge'?'independent-finetune':c.id.split('.').slice(2).join('.');
 export const caseBook = JSON.parse(await readFile(new URL('../docs/testing/sc-26691-h3-cases.json', import.meta.url), 'utf8'));
@@ -95,13 +96,13 @@ export async function prepareControlledLoKr(spec,directory) {
   const provenance={kind:'prepared-generated-input-not-campaign-proof',...(spec.proof_kind==='unit_fake'?{proof_kind:'unit_fake'}:{}),trained:false,license:'CC0-1.0 newly generated factor values; inherited base-model terms still apply to model execution',sourceCheckpointSha256:spec.sourceCheckpointSha256,sourceContractSha256:spec.sourceContractSha256,sourceDeclaration:spec.sourceDeclaration,target:spec.target,shape:spec.shape,factorShapes:shapes,seed:spec.seed,amplitude:spec.amplitude,tensorNames:Object.keys(header).filter(k=>k!=='__metadata__'),sha256:await hashFile(file),meaning:'Every generated factor/delta is retained. This does not trim, convert or make claims about a public trained adapter. Native target/shape compatibility and effect on the real checkpoint must be proved by the authorized case.'};
   await writeFile(path.join(directory,'provenance.json'),JSON.stringify(provenance,null,2)+'\n',{flag:'wx'});return {file,provenance};
 }
-export function concretePlan(swRoot, inferenceRoot, stageRoot, {inventory='reduced-v1',matrixDecision}={}) {
+export function concretePlan(swRoot, inferenceRoot, stageRoot, {inventory='reduced-v1',matrixDecision,backend}={}) {
   if(inventory==='reduced-v1'){
-    const cases=operationalCases().map(c=>{
+    const cases=operationalCases(backend).map(c=>{
       const scenario=path.join(stageRoot,`${c.id}.scenario.json`);
       return {...c,...(c.group==='artifact'?{artifact:ARTIFACTS[c.index-1]}:{}),...(c.kind!=='actual-artifact-probe'?{scenario}:{}),commands:[['node',path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),c.kind==='actual-artifact-probe'?'actual-artifact-probe':'api',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot]]};
     });
-    return {kind:'preparation-not-campaign-evidence',inventory,source:SOURCE,matrixDecision,cases,regressionCatalog:requiredCases(),unresolvedInterfaces:caseBook.unresolvedInterfaces};
+    return {kind:'preparation-not-campaign-evidence',inventory,backend,source:SOURCE,matrixDecision,cases,regressionCatalog:requiredCases(),unresolvedInterfaces:caseBook.unresolvedInterfaces};
   }
   for (const r of [swRoot, inferenceRoot, stageRoot]) assert.ok(path.isAbsolute(r), 'absolute coordinator staging paths required');
   assert.deepEqual(caseBook.source, SOURCE);
@@ -143,14 +144,17 @@ export function concretePlan(swRoot, inferenceRoot, stageRoot, {inventory='reduc
 
 export function assertLicenseAuthority(e, {allowUnitFake=false}={}) {
   const authority=e.licenseAuthority;
-  assert.ok(authority?.acknowledged===true && authority.approvedBy && authority.reference && Number.isFinite(Date.parse(authority.approvedAt)), 'explicit source and inherited-component license acknowledgment authority required');
-  assert.ok(authority.kind==='user-approved' || (allowUnitFake && authority.kind==='unit_fake'), 'synthetic consent is not real legal approval');
+  if(authority?.kind==='operator-scoped-binding')assertScopedBinding(authority,{allowUnitFake});
+  else {
+    assert.ok(authority?.acknowledged===true && authority.approvedBy && authority.reference && Number.isFinite(Date.parse(authority.approvedAt)), 'explicit source and inherited-component license acknowledgment authority required');
+    assert.ok(authority.kind==='user-approved' || (allowUnitFake && authority.kind==='unit_fake'), 'synthetic consent is not real legal approval');
+  }
   const source=e.family==='ltx'?e.ltxAdapter:e.model;
   for(const [role,inputs] of [['source',[source]],['component',e.model.components??[]],['adapter',e.adapters??[]]])for(const input of inputs){hex(input?.sha256);if(role!=='source')assert.equal(input.licenseAcknowledged,true,'explicit inherited component/adapter acknowledgment required before any import');assert.ok(authority.subjects?.some(s=>s.role===role&&s.sha256===input.sha256),`missing explicit ${role} license authority for actual input`);}
   assert.ok(e.model.components?.length,'inherited component authority is required even before canceled/interrupted import');
   return authority;
 }
-function validateExecution(e, c, allowUnitFake=false) {
+function validateExecution(e, c, allowUnitFake=false, book=caseBook) {
   assertLicenseAuthority(e,{allowUnitFake});
   assert.ok(e.label && /^[a-zA-Z0-9_-]+$/.test(e.label));
   if(e.family==='ltx') {
@@ -168,7 +172,7 @@ function validateExecution(e, c, allowUnitFake=false) {
     assert.ok(e.model.files.some(f => f.sha256 === e.model.sha256), 'primary payload identity must be an actual source file, not a tree stamp');
   }
   if (c.artifact && e.identityControl?.kind!=='different-bytes-negative') {
-    assert.equal(e.model.sha256, caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256);
+    assert.equal(e.model.sha256, book.artifacts.find(a => a.artifact === c.artifact).expectedSha256);
     assert.equal(e.model.partition, 'ref2va');
   }
   // Preload import cancellation/retry has a source identity, not a fictional native load.
@@ -180,7 +184,7 @@ function validateExecution(e, c, allowUnitFake=false) {
   if (check === 'ltx-add-select-generate') assert.equal(e.family, 'ltx', 'LTX parity must run LTX, not an H3 scenario with an LTX label');
   if (check === 'independent-finetune') {
     assert.ok(e.model.lineage?.source && e.model.lineage?.revision, 'independently published compatible fine-tune/merge provenance required; no new training is implied');
-    assert.ok(!caseBook.artifacts.some(a => a.expectedSha256 === e.model.sha256), 'renamed Singularity is not independent generalization');
+    assert.ok(!book.artifacts.some(a => a.expectedSha256 === e.model.sha256), 'renamed Singularity is not independent generalization');
   }
   const format = { 'native-single': 'native-single', 'sharded-diffusers': 'sharded-diffusers', 'dense-f16': 'f16', 'dense-bf16': 'bf16', 'dense-f32': 'f32' }[check];
   if (format) assert.equal(e.model.sourceFormat, format, 'case must use its actual staged source format, not merely its label');
@@ -212,7 +216,7 @@ function validateExecution(e, c, allowUnitFake=false) {
     hex(a.sha256); assert.ok(a.id && a.source && a.revision && a.compatibilitySource && a.licenseAcknowledged === true);
     assert.equal(a.topology, e.model.topology, 'adapter topology must match source, not just dimensions');
     assert.equal(a.partition, e.model.partition);
-    const recipe=caseBook.sampling.turbo.find(r=>r.id===a.id);
+    const recipe=book.sampling.turbo.find(r=>r.id===(a.recipeId??a.id));
     if(recipe){for(const key of ['steps','schedulerShift','audioSchedulerShift'])assert.equal(s[key],recipe[key],`selected accelerator must use its declared trained ${key}`);assert.equal(Math.min(s.width,s.height),recipe.trainingShortEdge);}
   }
 }
@@ -266,32 +270,34 @@ export function reducedConditioning(c, assets) {
   if(c.slug==='real-hybrid-prompt-change')value.prompt='A blue cube slides left across a white table, synchronized soft impacts.';
   return value;
 }
-function assertReducedBindings(c,p,executions) {
+function assertReducedBindings(c,p,executions,book=caseBook) {
   assert.ok(executions?.length,'actual staged execution binding required');
   const renamed=c.index===4;
   assert.equal(executions.length,renamed?2:1,'one AV submission per reduced case; only renamed identity adds an import-only negative');
   if(renamed)assertCoverage({...c,id:`${c.backend}.generalization.renamed`},executions);
   for(const e of executions){
     if(e.identityControl?.kind==='different-bytes-negative')continue;
-    const artifact=/^artifact\.(\d)-/.exec(c.modelKey);if(artifact)assert.equal(e.model.sha256,caseBook.artifacts[Number(artifact[1])].expectedSha256,'reduced binding must use its frozen content identity');
+    const artifact=/^artifact\.(\d)-/.exec(c.modelKey);if(artifact)assert.equal(e.model.sha256,book.artifacts[Number(artifact[1])].expectedSha256,'reduced binding must use its frozen content identity');
     const expectedMode=({'text':'text_to_video','image':'image_to_video','last-frame-only':'image_to_video','first-last-frame':'first_last_frame','reference':'reference_to_video','ordered-mixed':'reference_to_video'})[c.conditioning];
     if(expectedMode)assert.equal(e.mode,expectedMode,'reduced surface must exercise its declared API operation');
-    if(c.index>=15&&c.index<=20||c.index===22){assert.equal(e.model.sha256,caseBook.stagingAssets.hybrid[0].expectedSha256,'use the frozen actual b25 hybrid source');assert.equal(e.model.partition,'hybrid');assert.equal(e.model.hybridBinding?.kind,'single-checkpoint','actual one-checkpoint hybrid declaration required');}
-    if(c.index===21){assert.equal(e.model.sha256,caseBook.stagingAssets.pulpcut[0].expectedSha256,'use the independently published frozen PulpCut merge');assert.equal(e.model.partition,'fl2va');assert.ok(e.model.lineage?.source&&e.model.lineage?.revision);}
+    if(c.index>=15&&c.index<=20||c.index===22){assert.equal(e.model.sha256,book.stagingAssets.hybrid[0].expectedSha256,'use the frozen actual b25 hybrid source');assert.equal(e.model.partition,'hybrid');assert.equal(e.model.hybridBinding?.kind,'single-checkpoint','actual one-checkpoint hybrid declaration required');}
+    if(c.index===21){assert.equal(e.model.sha256,book.stagingAssets.pulpcut[0].expectedSha256,'use the independently published frozen PulpCut merge');assert.equal(e.model.partition,'fl2va');assert.ok(e.model.lineage?.source&&e.model.lineage?.revision);}
     if(renamed){assert.equal(e.ownershipMode,'linked');assert.equal(e.model.sourceFormat,'native-single');}
-    const adapters=e.adapters??[],accelerators=adapters.filter(a=>a.role==='accelerator'||caseBook.sampling.turbo.some(r=>r.id===a.id));
-    if(['ref-turbo-baseline','lokr+ref-turbo-baseline','lokr-repeat','drop-lokr'].includes(c.adapterRecipe))assert.ok(accelerators.some(a=>a.id==='minimax_h3_ref2v_turbo_4step'),'declared RefTurbo accelerator must actually be selected');
+    const adapters=e.adapters??[],accelerators=adapters.filter(a=>a.role==='accelerator'||book.sampling.turbo.some(r=>r.id===a.id));
+    if(['ref-turbo-baseline','lokr+ref-turbo-baseline','lokr-repeat','drop-lokr'].includes(c.adapterRecipe))assert.ok(accelerators.some(a=>(a.recipeId??a.id)==='minimax_h3_ref2v_turbo_4step'),'declared RefTurbo accelerator must actually be selected');
     if(['lokr+ref-turbo-baseline','lokr-repeat'].includes(c.adapterRecipe))assert.ok(adapters.some(a=>a.kind==='lokr'),'actual LoKr must be selected');
     if(c.adapterRecipe==='drop-lokr')assert.ok(!adapters.some(a=>a.kind==='lokr'),'drop only the LoKr, retaining accelerator');
     if(c.adapterRecipe==='drop-lora')assert.equal(adapters.length,0,'LoRA drop must remove the selected adapter while retaining the trained sampling recipe');
     const recipe={'fl-turbo-4v01':'minimax_h3_turbo_4step_v01','fl-turbo-8':'minimax_h3_turbo_8step','fl-turbo-4v1.0-768':'minimax_h3_turbo_4step_768p'}[c.adapterRecipe];
-    if(recipe){const declared=caseBook.sampling.turbo.find(r=>r.id===recipe);assert.ok(declared,`unknown frozen recipe ${recipe}`);assert.ok(adapters.some(a=>a.id===declared.id),'select the declared published adapter, not just its step count');}
+    if(recipe){const declared=book.sampling.turbo.find(r=>r.id===recipe);assert.ok(declared,`unknown frozen recipe ${recipe}`);assert.ok(adapters.some(a=>(a.recipeId??a.id)===declared.id),'select the declared published adapter, not just its step count');}
   }
 }
 export function buildScenario(c, p, executions) {
+  assert.ok(p.unitCasebook===undefined||p.proof_kind==='unit_fake','casebook injection is unit_fake only');
+  const book=p.unitCasebook??caseBook;
   const reduced=operationalCaseById(c.id);
   assert.ok(reduced || requiredCases().some(expected => expected.id === c.id));
-  if(reduced){for(const key of ['kind','index','slug','modelKey','conditioning','adapterRecipe'])assert.deepEqual(c[key],reduced[key],`reduced case reclassification: ${key}`);assertReducedBindings(c,p,executions);}
+  if(reduced){for(const key of ['kind','index','slug','modelKey','conditioning','adapterRecipe'])assert.deepEqual(c[key],reduced[key],`reduced case reclassification: ${key}`);assertReducedBindings(c,p,executions,book);}
   assert.ok(executions?.length > 0, 'actual staged execution binding required');
   assert.ok(p.projectId && Number.isSafeInteger(p.seed) && p.seed>=0 && typeof p.requestedGpu === 'string' && p.requestedGpu.length > 0);
   assert.ok(p.timeoutSeconds > 0 && p.timeoutSeconds <= 7200);
@@ -317,7 +323,7 @@ export function buildScenario(c, p, executions) {
   }
   const steps = clone(p.setupSteps ?? []), comparisons = [], lifecycleActions = [];
   for (const e of executions) {
-    validateExecution(e, c, p.proof_kind==='unit_fake');
+    validateExecution(e, c, p.proof_kind==='unit_fake',book);
     const prefix = e.label;
     if(e.family==='ltx') {
       const a=e.ltxAdapter;
@@ -359,12 +365,17 @@ export function buildScenario(c, p, executions) {
       }
       steps.push({ id: `${prefix}_installed`, waitJob: cap(`${prefix}_import/id`), assert: [eq('/result/modelId', e.model.modelId)] });
     }
+    for(const [adapterIndex,a]of (e.family==='ltx'?[]:e.adapters??[]).entries())if(a.importPath){
+      const id=`${prefix}_h3_adapter_${adapterIndex}`;steps.push({id,method:'POST',path:'/api/v1/loras/import',body:{loraId:a.id,name:a.id,sourcePath:a.importPath,expectedSha256:a.sha256,family:'minimax-h3',baseModel:e.model.modelId,scope:'project',projectId:p.projectId,licenseAcknowledged:e.licenseAuthority.acknowledged},expectedStatus:201});
+      steps.push({id:`${id}_installed`,waitJob:cap(`${id}/id`),assert:[eq('/status','completed')]});
+      steps.push({id:`${id}_selected`,method:'GET',path:{$concat:['/api/v1/loras?projectId=',p.projectId]},expectedStatus:200,assert:[{pointer:'',contains:{id:a.id,baseModel:e.model.modelId}}]});
+    }
     const requestedCheck = c.group === 'capability' && !['turbo', 'lora', 'lokr', 'hybrid'].includes(check) ? check : e.conditioning ?? (e.mode === 'reference_to_video' ? 'audio-reference' : e.mode === 'first_last_frame' ? 'first-last-frame' : e.mode === 'image_to_video' ? 'image' : 'text');
     const selectedAdapters = (e.family==='ltx'?[e.ltxAdapter]:e.adapters ?? []).map(a => ({ id: a.id, weight: a.weight ?? 1 }));
     const variants = reduced?[reducedConditioning(c,p.assets??{})]:conditioning(requestedCheck, p.assets ?? {});
     if (['turbo', 'lora', 'lokr'].includes(check)) {
       // Hold checkpoint, seed, NFE, shifts and geometry fixed; remove ONLY adapters.
-      const accelerator=a=>a.role==='accelerator'||caseBook.sampling.turbo.some(r=>r.id===a.id);
+      const accelerator=a=>a.role==='accelerator'||caseBook.sampling.turbo.some(r=>r.id===(a.recipeId??a.id));
       let targets=(e.adapters??[]).filter(a=>check==='turbo'?accelerator(a):a.kind===check&&!accelerator(a));
       if(check==='lora'&&!targets.length)targets=(e.adapters??[]).filter(a=>a.kind==='lora');
       assert.ok(targets.length,'selected adapter mechanism must have a real controlled target');
@@ -429,7 +440,7 @@ export async function prepareCases(parameters, destination) {
   assert.ok(path.isAbsolute(destination));
   const inventory=parameters.inventory??'reduced-v1';
   const matrixDecision=parameters.matrixAnchors?chooseMatrixBackend({anchors:parameters.matrixAnchors}):parameters.matrixDecision;
-  const plan = concretePlan(parameters.swRoot, parameters.inferenceRoot, destination,{inventory,matrixDecision});
+  const plan = concretePlan(parameters.swRoot, parameters.inferenceRoot, destination,{inventory,matrixDecision,backend:parameters.backend});
   const scenarios = [];
   for (const c of plan.cases.filter(hasScenario)) {
     const executions = parameters.bindings?.[c.id];
@@ -516,6 +527,6 @@ export async function finalizeCampaignPlan(parameters, preparedRoot) {
     }
     cases.push(c);
   }
-  const plan={version:1,preparationState:parameters.inlineAssetEnsure===true?'awaiting-inline-assets':'bound',inventory:book.inventory,nativeEvidence:parameters.nativeEvidence,matrixDecision:book.matrixDecision,matrixAnchors:parameters.matrixAnchors,proofIndex:parameters.proofIndex??[],coverageDisposition:'explicit-unproven-required',source:SOURCE,sceneworks:parameters.sceneworks,inference:parameters.inference,output:parameters.output,responsibleTask:'sc-26691',nextAuthorizedAction:parameters.nextAuthorizedAction,cases,...(parameters.proof_kind==='unit_fake'?{proof_kind:'unit_fake'}:{})};validatePlan(plan);
+  const plan={version:1,preparationState:parameters.inlineAssetEnsure===true?'awaiting-inline-assets':'bound',inventory:book.inventory,backend:book.backend,nativeEvidence:parameters.nativeEvidence,matrixDecision:book.matrixDecision,matrixAnchors:parameters.matrixAnchors,proofIndex:parameters.proofIndex??[],coverageDisposition:'explicit-unproven-required',source:SOURCE,sceneworks:parameters.sceneworks,inference:parameters.inference,output:parameters.output,responsibleTask:'sc-26691',nextAuthorizedAction:parameters.nextAuthorizedAction,cases,...(parameters.proof_kind==='unit_fake'?{proof_kind:'unit_fake'}:{})};validatePlan(plan);
   await writeFile(filename,JSON.stringify(plan,null,2)+'\n',{flag:'wx'});return {plan:filename,cases:cases.length,status:'bound-not-executed'};
 }

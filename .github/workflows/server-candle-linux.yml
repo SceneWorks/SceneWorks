@@ -452,9 +452,9 @@ jobs:
       native_evidence_sha: ${{ fromJSON(inputs.campaign_run_id).native_evidence_sha }}
       backend: ${{ inputs.starvector_terminal_operation == 'h3-terminal-mlx' && 'mlx' || 'cuda' }}
       expected_runner: ${{ fromJSON(inputs.campaign_run_id).expected_runner }}
-      plan_path: ${{ fromJSON(inputs.campaign_run_id).plan_path }}
-      output_path: ${{ fromJSON(inputs.campaign_run_id).output_path }}
-      case_id: ${{ fromJSON(inputs.campaign_run_id).case_id }}
+      plan_path: ${{ fromJSON(inputs.campaign_run_id).plan_path || '' }}
+      output_path: ${{ fromJSON(inputs.campaign_run_id).output_path || '' }}
+      case_id: ${{ fromJSON(inputs.campaign_run_id).case_id || '' }}
       campaign_request: ${{ inputs.campaign_run_id }}
     secrets:
       SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || secrets.INFERENCE_READ_TOKEN }}

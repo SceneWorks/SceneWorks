@@ -42,13 +42,63 @@ All five real-browser cases must execute and pass: Model Manager repair serializ
 ## Execution path
 
 - `node scripts/h3-finetune-terminal.mjs list` prints the reduced operational manifest and the separate regression catalog. The catalog contains: the eight frozen artifact/backend executions, plus backend-local numerical, conditioning, generalization, and lifecycle mechanisms. No filename or precision substitution is allowed. Capability mechanisms may use different *compatible* artifacts, not falsely exercise an unsupported operation on every file.
-- Stage a version-1 JSON plan **outside both clean repositories**. `check-plan PLAN` validates its complete inventory without running anything.
-- Only after the coordinator confirms the final stationary paired revisions, inference-main merge, and permanent consumer pin: use the **already registered** `.github/workflows/server-candle-linux.yml` entrypoint (workflow ID `297197519`), selecting exactly `h3-terminal-mlx` or `h3-terminal-cuda`. Its same-ref local `workflow_call` reuses `.github/workflows/h3-finetune-terminal.yml`; that new file need not be registered on default main first. Supply the exact pair, one listed case, staged plan/output and exact runner through the explicit H3 JSON request described below. Authorization defaults to false. MLX uses the existing `rw-chroma` route and requires `nax-macos-2`; CUDA uses the existing Windows `cuda,real-weights` route. Do not use another physical device to work around an actual task restriction.
+- For the backward-compatible external-plan path only, stage a version-1 JSON plan **outside both clean repositories**; first-run bootstrap below does not require one. `check-plan PLAN` validates its complete inventory without running anything.
+- Only after the coordinator confirms the final stationary paired revisions, inference-main merge, and permanent consumer pin: use the **already registered** `.github/workflows/server-candle-linux.yml` entrypoint (workflow ID `297197519`), selecting exactly `h3-terminal-mlx` or `h3-terminal-cuda`. Its same-ref local `workflow_call` reuses `.github/workflows/h3-finetune-terminal.yml`; that new file need not be registered on default main first. Supply the exact pair, evidence revision and exact runner, with either the typed inline bootstrap request or an already prepared external plan/output. Authorization defaults to false. MLX uses the existing `rw-chroma` route and requires `nax-macos-2`; CUDA uses the existing Windows `cuda,real-weights` route. Do not use another physical device to work around an actual task restriction.
 - The job checks out the exact product source pair plus the separately declared native evidence feature revision. It validates the permanent product pin and inference-main ancestry and preserves ordinary real-AV input hashing. Bounded artifact probes instead trust the actual full-staging digest and recheck selected ranges only. All paths capture actual subprocess results and clean source identities. Artifact cases retrieve only the frozen HF revision's metadata (`blobs=true`) during the authorized job and compare the actual checkpoint digest with its published LFS SHA-256, retaining `source-catalog.json`; internally consistent stock-weight receipts cannot impersonate a frozen artifact. Its inline asset ensure verifies or stages only the explicitly licensed selected files; it never chooses substitute checkpoints, claims a GPU reservation, or acquires global tokens/locks.
 - `run-case PLAN CASE SW_ROOT INFERENCE_ROOT` is Actions-only. Each command is an argv array (no shell interpolation); `H3_CASE_DIR`, `H3_CASE_ID`, `H3_INFERENCE_ROOT`, and `H3_TIMEOUT_SECONDS` are provided. Commands must use task-owned API/worker instances and disposable application state, never a user's running app/shared mutable cache. Native builds/fixtures also run only in explicit Actions.
 - `verify PLAN` rechecks ordinary real-AV source inputs and retained evidence, and redecodes AV/comparisons; bounded probes never rehash the whole model and use their source-host selected-range readback plus retained native/CPU receipts; missing cases are failures. This command records delivery evidence, **not** an automatic merge, Shortcut transition, or statement that a reviewer validated the linked CI/tracker snapshots.
 
-## Registered dispatch route (preparation only)
+## First-run inline bootstrap (no SSH or pre-existing plan files)
+
+Use the same registered terminal routes with `bootstrap` instead of `plan_path`/`output_path`. The job checks out the exact source pair and separate evidence revision, preflights its private Python 3.12 + Torch 2.9.1 interpreter, then creates an exclusive owner-marked root. **The bootstrap branch runs before the first external-plan read.** It validates the supplied scope, uses the existing stager and catalog component machinery, prepares CC0/LibriSpeech/identity/LoKr inputs, binds actual hashes, and calls the existing `prepare-cases` / `bind-plan` functions. Negative-fixture and generated hashes come from real creation receipts; no future run ID, stage root, receipt or placeholder hash is an operator input.
+
+The operator supplies one explicit acknowledgment, not eleven human checksum approvals or separate per-case signatures. `legalAuthority.acknowledged` must come from the actual operator; **none has been obtained by this preparation**. The original object is retained unchanged with observed run/input-hash provenance. Named asset sets, applicable license IDs, inherited MiniMax terms and selected catalog components define its scope. Program-generated per-file bindings are facts, never additional consent. Unknown sources/licenses outside that scope fail. The existing detailed-authority/external-plan path remains supported.
+
+The following builds one exact request from actual operator choices. It does not obtain approval, choose a published source revision, or dispatch anything by itself. `ACTUAL_SCOPE_ACKNOWLEDGED` is a JSON boolean supplied only after the operator's real approval; memory budgets and PulpCut shifts are explicit operator choices, not measured-safe budgets or an invented published training schedule.
+
+```sh
+jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED" \
+  --arg runner "$EXPECTED_RUNNER" --argjson host "$OPERATOR_HOST_BUDGET_BYTES" \
+  --argjson device "$OPERATOR_DEVICE_BUDGET_BYTES" \
+  --argjson shift "$OPERATOR_PULPCUT_SHIFT" --argjson audioShift "$OPERATOR_PULPCUT_AUDIO_SHIFT" '
+{
+  stationary_pair_authorized: true, sceneworks_sha: $sw,
+  inference_sha: "350bd900ee559ad0e5f2227b3e551d81b74b9501",
+  native_evidence_ref: "feature/sc-26679-h3-finetune-import",
+  native_evidence_sha: "1f00423846c9fdc2b6752ee2326d56a7b1a2d99f",
+  expected_runner: $runner, adaptive_matrix: true,
+  bootstrap: {
+    casebook: "sc-26691-h3-cases-v1", cohort: "reduced-v1",
+    componentSelections: [{modelId:"minimax_h3",tier:"q4"},{modelId:"minimax_h3_ref",tier:"q4"}],
+    operator: {
+      compatibleBase:"builtin:minimax_h3", projectName:"H3 reduced terminal proof",
+      seed:314159, requestedGpu:"0", gpuId:"0", port:43210, componentTier:"q4",
+      hostBudgetBytes:$host, deviceBudgetBytes:$device,
+      minimumControlDelta:0.01, maximumBaselineDelta:0.001,
+      width:1088, height:544, wideWidth:1536, wideHeight:768,
+      timeoutSeconds:7200, lokrAmplitude:0.05,
+      pulpcutSampling:{steps:8,schedulerShift:$shift,audioSchedulerShift:$audioShift,
+        contractSource:"Pinned publisher declares eight steps; shifts explicitly selected by the operator, not asserted as a published trained recipe"}
+    },
+    legalAuthority: {
+      acknowledged:$ack,
+      assetSets:["singularity","hybrid","pulpcut","turbo","speech"],
+      licenseIds:["MiniMax-H3-Community-License-Agreement","Apache-2.0","CC-BY-4.0"],
+      inheritedLicenseIds:["MiniMax-H3-Community-License-Agreement"],
+      includeSelectedComponents:true
+    }
+  }
+}' > "$ACTUAL_TERMINAL_REQUEST_JSON"
+gh workflow run server-candle-linux.yml --repo SceneWorks/SceneWorks \
+  --ref "$PUBLISHED_FINAL_SHA" -f starvector_terminal_operation="$TERMINAL_OPERATION" \
+  -f campaign_run_id="$(cat "$ACTUAL_TERMINAL_REQUEST_JSON")"
+```
+
+For MLX, `TERMINAL_OPERATION=h3-terminal-mlx` and `EXPECTED_RUNNER=nax-macos-2`. For CUDA use `h3-terminal-cuda` and the actual approved full-weights runner selected from the live pool; the manual lane retains PCI ordering/device zero and discovers its physical UUID. Adaptive mode exchanges metadata-only first-reference/first-hybrid timings between the two existing jobs with a bounded wait; no GPU ratio is assumed. `adaptive_matrix:false` runs the symmetric maximum for an independently scheduled lane. Neither mode makes optional 84-catalog cells a close gate.
+
+A prepared plan is not execution proof. Missing required reduced executions, failed native/source/AV/causal guarantees, inconsistent identities/counts or invalid omission prerequisites fail. `requiredReducedComplete` / `ok` describe this reduced requirement; `catalogComplete` and the explicit catalog UNPROVEN list are separate disclosures. Packed projection is not QKV/FFN codec proof, and cold cancellation completes no load or peak.
+
+## Registered external-plan route (backward compatibility)
 
 Read-only registration checks found **Server Candle (Linux/NVIDIA)** active as ID `297197519`, path `.github/workflows/server-candle-linux.yml`, with default-main blob `7a16e9cf1579186199056aedf4892220f5776b26`. The new H3 file was absent on main (Contents API 404) and absent from registered workflows. Do **not** merge an incomplete feature to main to activate it, dispatch a deliberately registration-only H3/Veda stub, or assume the new file itself can dispatch from a feature ref.
 
@@ -275,7 +325,7 @@ The four REQUIRED LightX2v files at the revision above are:
 
 Required additional HF files above total **47,484,662,777 B** (148,229,256,245 B including frozen4), before private copies/components. Opt-in identity fixtures copy only the smallest W4A8 source twice (23,535,861,536 logical B; CoW when supported), never 34GB unnecessarily. Existing builtin text encoder/tokenizer/config/video+audio VAE closures are still REQUIRED, explicitly licensed and byte-committed by the real schema-two import; they are not silently omitted or replaced by stock DiTs. Dense F16/F32 inputs are not claimed satisfied by BF16/INT8 labels. Optional `prepare_float_variants:true` + explicit `float_source_profile` selects an actually staged raw BF16 profile; the runner's private Python/numpy2.2.6 tool streams only BF16 tensors in bounded chunks, preserving all keys/shapes/non-BF16 auxiliaries/index ownership, exact BF16→F32 bits and truthful F16 underflow/overflow behavior. Actual output sizes/full hashes are recorded AFTER bytes exist, never invented as HF hashes or new training; the runtime independently inspects the real body tensor headers against each dense-format claim. No eligible cached source leaves these/sharded cases UNPROVEN. The four raw snapshot sets are cache-only by default; an observed absence fails before any large transfer unless a subsequent explicit `allow_fresh_builtin_download:true` input authorizes it. Wuli Fixed6/8 is EXCLUDED (AdaLN-free fixed-step topology); Wuli4 is an adapter+output projections, not a full checkpoint. No unknown format or claimed new training is manufactured.
 
-For every selected file the source book supplies **expected** `legal:{licenseId,inheritedLicenseId?,attributionRequired?}`. The explicit input subject must name its full SHA, `acknowledged:true` and matching license ID; inherited use additionally needs matching inherited ID + `inheritedAcknowledged:true`; required attribution must occur in the actual input text. The stager copies only those known affirmed fields with approver/date/reference into each per-file receipt. H3/frozen/hybrid/PulpCut inherit MiniMax-H3 Community terms; LightX2v is Apache-2.0 but base acknowledgment is still required; speech uses the recorded LibriSpeech CC BY4 credit. Expected license metadata is NEVER approval. No real acknowledgment has been taken here; do not fill in a human's identity/approval that nobody supplied.
+For every selected file the source book supplies **expected** `legal:{licenseId,inheritedLicenseId?,attributionRequired?}`. The detailed external-plan authority can name its full SHA, `acknowledged:true` and matching license ID; inherited use additionally needs matching inherited ID + `inheritedAcknowledged:true`; required attribution must occur in the actual input text. Inline bootstrap instead retains the single scoped operator input unchanged and programmatically binds actual file hashes and factual attribution to that approval. It does not require a human name, exact approval time or signature reference. The legacy detailed path retains its supplied metadata. H3/frozen/hybrid/PulpCut inherit MiniMax-H3 Community terms; LightX2v is Apache-2.0 but base acknowledgment is still required; speech uses the recorded LibriSpeech CC BY4 credit. Expected license metadata is NEVER approval. No real acknowledgment has been taken here; do not fill in a human's identity/approval that nobody supplied.
 
 After the coordinator publishes/authorizes the final source, the registered call shape is:
 

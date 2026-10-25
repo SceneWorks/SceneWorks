@@ -90,7 +90,7 @@ async function fixture(t, backend = 'mlx') {
 test('fresh private root stages measured components/references and source-bound published config, deduplicating both bases', async t => {
   const f = await fixture(t), sourceBefore = await snapshot(f.swRoot), evidenceBefore = await snapshot(f.evidenceRoot), rawBefore = structuredClone(f.rawAck);
   const r = await prepareBootstrapInputs(f.args);
-  assert.ok(r.componentRecords.length > 0); assert.equal(r.seedFiles.length, r.componentRecords.length);
+  assert.ok(r.componentRecords.length > 0); assert.equal(r.seedFiles.filter(s => s.mode === 'hardlink').length, r.componentRecords.length);
   for (const row of r.componentRecords) { assert.equal(row.actualBytes, (await stat(row.finalPath)).size); assert.equal(row.observedSha256, hash(await readFile(row.finalPath))); assert.ok(row.finalPath.startsWith(f.stageRoot + path.sep)); assert.equal(row.cache.hub, f.cacheRoot); }
   for (const model of ['minimax_h3', 'minimax_h3_ref']) {
     assert.ok(r.componentsByModel[model].some(c => c.id === 'text_encoder'));
@@ -102,10 +102,41 @@ test('fresh private root stages measured components/references and source-bound 
   assert.equal(r.config.sha256, hash(await readFile(r.config.path))); assert.deepEqual(r.config.dit, publishedH3Config(codec));
   assert.equal(r.config.provenance.sha256, hash(Buffer.from(codec))); assert.equal(r.config.provenance.codeSha, sourceSha);
   assert.notEqual(r.config.dit.num_attention_heads * r.config.dit.attention_head_dim, r.config.dit.hidden_size, 'published rectangular projections remain legal');
-  for (const seed of r.seedFiles) { assert.equal(seed.mode, 'hardlink'); assert.ok(seed.input.startsWith(f.stageRoot + path.sep)); assert.match(seed.destination, /^hf\/hub\/models--[^/]+\/snapshots\/[a-f0-9]{40}\//); }
+  for (const seed of r.seedFiles) {
+    assert.ok(seed.input.startsWith(f.stageRoot + path.sep));
+    if (seed.mode === 'hardlink') assert.match(seed.destination, /^hf\/hub\/models--[^/]+\/snapshots\/[a-f0-9]{40}\//);
+    else { assert.equal(seed.mode, 'copy'); assert.match(seed.destination, /^hf\/hub\/models--[^/]+\/refs\/[a-f0-9]{40}$/); }
+  }
   assert.deepEqual(await snapshot(f.swRoot), sourceBefore); assert.deepEqual(await snapshot(f.evidenceRoot), evidenceBefore); assert.deepEqual(f.rawAck, rawBefore);
   const firstBody = f.calls.findIndex(c => c.url.includes('/resolve/'));
   assert.ok(firstBody >= 0); assert.ok(f.acks.filter(a => a.context.scopeOnly).length > 0);
+});
+
+test('private immutable cache refs contain exact revision bytes, deduplicate seeds and never become model components', async t => {
+  const f = await fixture(t), cacheBefore = await snapshot(f.cacheRoot), r = await prepareBootstrapInputs(f.args);
+  const refs = r.inputs.filter(i => i.role === 'cache-ref');
+  assert.equal(refs.length, new Set(r.componentRecords.map(c => `${c.repo}@${c.revision}`)).size);
+  assert.equal(new Set(r.seedFiles.map(s => s.destination)).size, r.seedFiles.length);
+  for (const input of refs) {
+    const revision = path.basename(input.path), bytes = await readFile(input.path);
+    assert.equal(bytes.toString('ascii'), revision); assert.equal(bytes.length, 40); assert.equal(input.sha256, hash(bytes));
+    const seed = r.seedFiles.find(s => s.input === input.path); assert.equal(seed.mode, 'copy');
+    assert.ok(seed.destination.endsWith(`/refs/${revision}`));
+    assert.ok(!r.componentRecords.some(c => c.finalPath === input.path));
+    assert.ok(Object.values(r.componentsByModel).every(cs => cs.every(c => c.path !== input.path)));
+  }
+  assert.ok(!r.seedFiles.some(s => s.destination.endsWith('/refs/main')));
+  assert.ok(!r.seedFiles.some(s => s.input === r.config.path), 'generated architecture stays input-only');
+  assert.deepEqual(await snapshot(f.cacheRoot), cacheBefore);
+});
+
+test('private cache ref metadata cannot write through a symlink into a foreign cache', async t => {
+  const f = await fixture(t), row = [...f.trees.keys()][0].split('@')[0];
+  const repoRoot = path.join(f.stageRoot, 'hf/hub', `models--${row.replaceAll('/', '--')}`);
+  await mkdir(repoRoot, { recursive: true }); await symlink(f.cacheRoot, path.join(repoRoot, 'refs'));
+  const cacheBefore = await snapshot(f.cacheRoot);
+  await assert.rejects(prepareBootstrapInputs(f.args), /private directory cannot be a symlink/);
+  assert.deepEqual(await snapshot(f.cacheRoot), cacheBefore);
 });
 
 test('real catalog rows obey tier/platform and omit all soft predictors and stock DiT siblings', () => {

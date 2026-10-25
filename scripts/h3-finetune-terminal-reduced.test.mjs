@@ -135,8 +135,8 @@ test('conditional matrix accounts for 37 AV + 4 probes + 2 cancel without claimi
   const plan = fullPlan();
   const closure = validateClosure(plan);
   assert.equal(closure.executionInventoryComplete,true);
-  assert.equal(closure.ok,false);
-  assert.equal(closure.status,'unproven');
+  assert.equal(closure.ok,true);assert.equal(closure.requiredReducedComplete,true);assert.equal(closure.catalogComplete,false);
+  assert.equal(closure.status,'reduced-complete-with-catalog-disclosures');
   assert.deepEqual(closure.counts, { 'full-av': 37, 'actual-artifact-probe': 4, 'source-cancel': 2, total: 43 });
   assert.deepEqual(closure.expectedCounts, { 'full-av': 37, 'actual-artifact-probe': 4, 'source-cancel': 2, total: 43 });
   assertEveryCellCategorizedOnce(closure.coverage);
@@ -189,6 +189,11 @@ test('native encoded markers require all passed causal discriminators, not count
   assert.throws(()=>validate(lines.slice(1).join('\n'),{backend:'mlx',testSelectors:[selector]}),/missing or duplicate/);
   assert.throws(()=>validate(lines.join('\n'),{backend:'mlx',testSelectors:[]}),/selector/);
   assert.throws(()=>validate(lines.join('\n').replace('max_abs=1e-2','max_abs=0'),{backend:'mlx',testSelectors:[selector]}),/exceed/);
+});
+test('required reduced completeness does not gate on optional catalog proof completeness',()=>{
+  const complete=fullPlan({asymmetric:false});complete.proofIndex=[];const result=validateClosure(complete);
+  assert.equal(result.ok,true);assert.equal(result.requiredReducedComplete,true);assert.equal(result.catalogComplete,false);assert.ok(result.catalogUnproven.length>0);
+  complete.realReceipts.pop();const missing=validateClosure(complete);assert.equal(missing.ok,false);assert.equal(missing.requiredReducedComplete,false);
 });
 test('cold cancellation is not a bounded loaded peak and W4 projection is not full mapping',()=>{
   assert.equal(REAL_CELL_MAP['lifecycle.bounded-loading'],undefined);assert.equal(REAL_CELL_MAP['numeric.tensor-mapping'],undefined);

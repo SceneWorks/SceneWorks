@@ -530,13 +530,17 @@ export function validateClosure({ catalog = defaultCatalog(), realReceipts = [],
   if (unexpected.length) unproven.push({ cellId: unexpected.join(','), reason: `unexpected/fake real rows on an asymmetric matrix: ${unexpected.join(', ')}` });
   if (countMismatches.length) unproven.push({ cellId: 'execution-counts', reason: `conditional counts do not match: ${countMismatches.join('; ')}` });
   if (executions.conflicts.length) unproven.push({ cellId: 'unique-executions', reason: `conflicting duplicate job identity: ${executions.conflicts.map(conflict => conflict.jobId).join(', ')}` });
+  const executionInventoryComplete=missing.length===0&&unexpected.length===0&&countMismatches.length===0&&executions.conflicts.length===0;
+  const omissionPrerequisitesComplete=built.omittedCoverage.every(value=>value.ok);
+  const requiredReducedComplete=executionInventoryComplete&&omissionPrerequisitesComplete;
+  const catalogComplete=built.unproven.length===0;
   const defaultLimitations = [
-    'Only the measured-cheaper matrix backend runs the seven broad causal cases; the displaced backend exercises the encoded surface via its own cheap witness + case8 + peer matrix receipts, but omitted end-to-end AV contrasts remain explicitly unproven on that backend.',
+    selected?'Only the measured-cheaper matrix backend runs the seven broad causal cases; the displaced backend exercises the encoded surface via its own cheap witness + case8 + peer matrix receipts, but omitted end-to-end AV contrasts remain explicitly unproven on that backend.':'Both backends run the maximum reduced inventory; no asymmetric matrix omission is credited.',
     'Hardware/driver/runner combinations beyond the recorded inline anchors are not exhausted.',
     'Production combinations beyond the 25-case operational inventory remain limited; no metrics or peaks are inferred from counts.',
   ];
   return {
-    executionInventoryComplete:missing.length===0&&unexpected.length===0&&countMismatches.length===0&&executions.conflicts.length===0, ok: unproven.length === 0, status: unproven.length === 0 ? 'proven' : 'unproven',
+    executionInventoryComplete, requiredReducedComplete, catalogComplete, catalogUnproven:built.unproven, ok:requiredReducedComplete, status:requiredReducedComplete?(catalogComplete?'reduced-complete':'reduced-complete-with-catalog-disclosures'):'required-reduced-evidence-incomplete',
     inventory, coverage: built.coverage, omittedCoverage: built.omittedCoverage, unproven,
     counts: { ...counts, total: executedCases.length }, expectedCounts: { ...expectedCounts, total: expectedCounts['full-av'] + expectedCounts['actual-artifact-probe'] + expectedCounts['source-cancel'] },
     missing, unexpected, matrixDecision: matrixDecision ?? null, executions,

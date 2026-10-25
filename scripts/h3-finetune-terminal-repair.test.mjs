@@ -13,7 +13,7 @@ const casesTest='h3-finetune-terminal-cases.test.mjs',runtimeTest='h3-finetune-t
 const mutations=[
   ['linked DTO enum',C,casesTest,'review repair linked DTO',s=>edit(s,'Object.assign(importBody, { linkedRootId:',"Object.assign(importBody, { ownershipMode:'linked',linkedRootId:")],
   ['linked runtime enum',R,runtimeTest,'review repair linked runtime',s=>{assert.ok(s.includes('body.ownershipMode===undefined'));return s.replaceAll('body.ownershipMode===undefined','true');}],
-  ['actual LTX LoRA route',C,casesTest,'review repair LTX baseline',s=>edit(s,"path:'/api/v1/loras/import'","path:'/api/v1/models/import'")],
+  ['actual LTX LoRA route',C,casesTest,'review repair LTX baseline',s=>edit(s,"id:`${prefix}_adapter_import`,method:'POST',path:'/api/v1/loras/import'","id:`${prefix}_adapter_import`,method:'POST',path:'/api/v1/models/import'")],
   ['portable value mapping',C,casesTest,'review repair portable mapping',s=>edit(s,"['sceneworks-core',null,'minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions']","['sceneworks-worker',null,'video_jobs::minimax_h3_import_tests::native_and_sharded_plans_reach_the_real_h3_provider_load_seam']")],
   ['every successful closure',R,runtimeTest,'review repair all successful generalization',s=>edit(s,"assert.equal(matched.length,imported.length,'EVERY successful imported generation/replay needs its actual native load closure');",'/* unit_fake mutation: missing closure guard */')],
   ['empty readback closure',R,runtimeTest,'review repair readback rejects empty',s=>{
@@ -40,7 +40,7 @@ const mutations=[
 test('terminal repair source mutants are killed by executed focused assertions',async t=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'h3-repair-assertion-mutants-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const scripts=path.join(dir,'scripts');await mkdir(path.join(scripts,'ci'),{recursive:true});await mkdir(path.join(dir,'docs','testing'),{recursive:true});
-  const files=[A,C,R,'h3-finetune-terminal-reduced.mjs','h3-finetune-terminal-api.mjs',casesTest,runtimeTest,avTest,'select-windows-cargo-cache.mjs','ci/h3-import-native-proof.mjs'];
+  const files=[A,C,R,'h3-finetune-terminal-reduced.mjs','h3-finetune-terminal-stage.mjs','h3-finetune-terminal-api.mjs',casesTest,runtimeTest,avTest,'select-windows-cargo-cache.mjs','ci/h3-import-native-proof.mjs'];
   const originals=new Map();for(const name of files){const source=await readFile(new URL(`scripts/${name}`,root),'utf8');originals.set(name,source);await writeFile(path.join(scripts,name),source);}
   await writeFile(path.join(dir,'docs','testing','sc-26691-h3-cases.json'),await readFile(new URL('docs/testing/sc-26691-h3-cases.json',root)));
   const env={...process.env,HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(dir,'hf','hub'),SCENEWORKS_DATA_DIR:path.join(dir,'data'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};delete env.NODE_TEST_CONTEXT;

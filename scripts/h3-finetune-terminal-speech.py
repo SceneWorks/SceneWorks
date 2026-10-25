@@ -60,7 +60,7 @@ REVERSED_NAME = "speech-reversed.wav"
 RECEIPT_NAME = "speech-receipt.json"
 KNOWN_LEGAL = ("licenseId", "inheritedLicenseId", "attributionRequired")
 KNOWN_ACKNOWLEDGMENT = ("sha256", "acknowledged", "licenseId", "inheritedLicenseId", "inheritedAcknowledged", "attribution", "role")
-KNOWN_AUTHORITY = ("kind", "approvedBy", "approvedAt", "reference", "subjects", "acknowledged")
+KNOWN_AUTHORITY = ("operatorInput", "inputSha256", "kind", "approvedBy", "approvedAt", "reference", "subjects", "acknowledged")
 
 
 class SpeechStageError(RuntimeError):
@@ -223,14 +223,25 @@ def verify_stage_receipt(receipt, stage_root: str, expected=None, allow_unit_fak
     if not isinstance(authority, dict):
         _fail("license", "root licenseAuthority object required")
     kind = authority.get("kind")
-    if kind != "user-approved" and not (allow_unit_fake and kind == "unit_fake"):
-        _fail("license", "root licenseAuthority.kind must be 'user-approved'")
     if authority.get("acknowledged") is not True:
         _fail("license", "root licenseAuthority.acknowledged must be true")
-    _require_nonempty(authority.get("approvedBy"), "license", "licenseAuthority.approvedBy")
-    _require_nonempty(authority.get("reference"), "license", "licenseAuthority.reference")
-    if not isinstance(authority.get("approvedAt"), str) or not authority["approvedAt"].strip():
-        _fail("license", "licenseAuthority.approvedAt required")
+    if kind == "operator-scoped-binding":
+        operator = authority.get("operatorInput")
+        if not isinstance(operator, dict) or operator.get("acknowledged") is not True:
+            _fail("license", "explicit unchanged scoped operator input required")
+        if operator.get("proof_kind") == "unit_fake" and not allow_unit_fake:
+            _fail("license", "synthetic scoped approval is not real approval")
+        if "speech" not in operator.get("assetSets", []) or "CC-BY-4.0" not in operator.get("licenseIds", []):
+            _fail("license", "speech or its license is outside the approved scope")
+        if not re.fullmatch(r"[a-f0-9]{64}", str(authority.get("inputSha256", ""))):
+            _fail("license", "scoped input provenance hash required")
+    else:
+        if kind != "user-approved" and not (allow_unit_fake and kind == "unit_fake"):
+            _fail("license", "root licenseAuthority.kind must be 'user-approved'")
+        _require_nonempty(authority.get("approvedBy"), "license", "licenseAuthority.approvedBy")
+        _require_nonempty(authority.get("reference"), "license", "licenseAuthority.reference")
+        if not isinstance(authority.get("approvedAt"), str) or not authority["approvedAt"].strip():
+            _fail("license", "licenseAuthority.approvedAt required")
     if not isinstance(authority.get("subjects"), list):
         _fail("license", "licenseAuthority.subjects array required")
     files = receipt.get("files")

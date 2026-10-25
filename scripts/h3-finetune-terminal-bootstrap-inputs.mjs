@@ -270,5 +270,16 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
     }
     componentsByModel[modelId].push({ id: componentId, source: entry.repo, revision: entry.revision, sha256: record.observedSha256, path: record.finalPath, file: entry.file, bytes: record.actualBytes, tier, licenseAcknowledged: ack.acknowledged, explicitAcknowledgment: ack });
   }
+  // hf-hub cache lookup may require refs/<requested revision> even when the immutable
+  // snapshot exists. These are private cache-index bytes, not model components or refs/main.
+  const revisions = new Map(resolved.map(({ entry }) => [`${entry.repo}@${entry.revision}`, entry]));
+  for (const { repo, revision } of revisions.values()) {
+    const destination = `hf/hub/models--${repo.replaceAll('/', '--')}/refs/${revision}`;
+    await ownedDirectory(root, path.posix.dirname(destination));
+    const target = path.join(root, destination), bytes = Buffer.from(revision, 'ascii');
+    await writeFile(target, bytes, { flag: 'wx', mode: 0o600 });
+    inputs.push({ path: target, sha256: digest(bytes), role: 'cache-ref' });
+    seedFiles.push({ input: target, destination, mode: 'copy' });
+  }
   return { componentsByModel, seedFiles, inputs, config, referenceDir, componentRecords, referenceRevision: ref.referenceRevision };
 }

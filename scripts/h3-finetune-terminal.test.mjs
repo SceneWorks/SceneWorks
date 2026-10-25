@@ -199,7 +199,7 @@ test('H3 bridge preserves all standing dispatch keys, old flow selection and iso
 });
 test('H3 caller forwards only explicit request fields and the standing read token without duplicate execution logic',async()=>{
   const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),job=workflowJob(router,'h3-terminal');
-  for(const field of ['sceneworks_sha','inference_sha','expected_runner','plan_path','output_path','case_id'])assert.ok(job.includes(field+': ${{ fromJSON(inputs.campaign_run_id).'+field+' }}'));
+  for(const field of ['sceneworks_sha','inference_sha','expected_runner','plan_path','output_path','case_id'])assert.ok(new RegExp(field+': \\$\\{\\{ fromJSON\\(inputs\\.campaign_run_id\\)\\.'+field+'( \\|\\| \'\')? \\}\\}').test(job),field);
   assert.doesNotMatch(job,/runs-on:|run-case|cargo |permanent_pin|inference_revision|secrets: inherit/);
   assert.match(job,/SCENEWORKS_INFERENCE_READ_TOKEN: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| secrets\.INFERENCE_READ_TOKEN \}\}/);
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');assert.match(callee,/SCENEWORKS_INFERENCE_READ_TOKEN:\n        required: false/);assert.match(callee,/group: h3-finetune-terminal-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
@@ -286,6 +286,27 @@ test('asset staging is folded into the terminal delivery and runs the reduced 25
   assert.match(callee,/if: (?:\$\{\{ )?always\(\)/);
   assert.match(callee,/h3-terminal-stage-\$\{\{ inputs\.backend \}\}/);
   assert.match(callee,/if-no-files-found: warn/);
+});
+test('bootstrap request branches before the first plan read and skips restaging when prepared',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
+  const header=callee.slice(callee.indexOf('  workflow_call:'),callee.indexOf('permissions:'));
+  for(const field of ['plan_path','output_path'])assert.match(header,new RegExp(field+':\\n\\s+required: false\\n\\s+type: string'),field);
+  const cpu=callee.indexOf('      - name: Prepare private CPU-only conditioning and source-variant tools');
+  const bootstrap=callee.indexOf('      - name: Bootstrap the reduced terminal campaign when requested');
+  const ensure=callee.indexOf('      - name: Ensure selected assets and conditioning in this terminal route');
+  assert.ok(cpu>0&&bootstrap>cpu&&ensure>bootstrap,'CPU Torch preflight -> bootstrap -> ensure ordering');
+  const bootSlice=callee.slice(bootstrap,ensure);
+  for(const token of ['h3-finetune-terminal-bootstrap.mjs','bootstrapTerminal','request.bootstrap','sc-26691-h3-cases-v1','reduced-v1','componentSelections','legalAuthority','H3_PLAN_EFFECTIVE','H3_OUTPUT_EFFECTIVE','H3_BOOTSTRAP_PREPARED','GITHUB_OUTPUT','RUNNER_TEMP','GITHUB_RUN_ATTEMPT','H3_SCENEWORKS_SHA','H3_INFERENCE_SHA','set -euo pipefail'])assert.ok(bootSlice.includes(token),token);
+  assert.match(bootSlice,/prepared:\s*true|prepared,\s*true/);assert.match(bootSlice,/proof:\s*false|proof,\s*false/);
+  assert.doesNotMatch(bootSlice,/h3-finetune-terminal\.mjs"?\s+"?run-case|run-case/, 'bootstrap only prepares; it does not execute cases');
+  const ensureSlice=callee.slice(ensure,callee.indexOf('      - name: Derive explicit dense source variants'));
+  assert.ok(ensureSlice.indexOf('H3_BOOTSTRAP_PREPARED')>=0&&ensureSlice.indexOf('H3_BOOTSTRAP_PREPARED')<ensureSlice.indexOf('readFile('),'bootstrap branch must precede the first plan read');
+  for(const token of ['external plan_path is required when request.bootstrap is absent','stageRequested && !bootstrapPrepared','binding.status="bootstrap-prepared"','H3_OUTPUT_EFFECTIVE','H3_INFERENCE_SHA'])assert.ok(ensureSlice.includes(token),token);
+  assert.doesNotMatch(ensureSlice,/prepareIdentityControls\(/,'bootstrap path must not redo identity controls');
+  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
+  assert.equal(choices.length,13);assert.doesNotMatch(router,/\n  h3-bootstrap:\n/);
+  assert.match(callee,/timeout-minutes: 1440/);assert.match(callee,/budgetSeconds:86400/);
+  assert.match(callee,/H3_OUTPUT_EFFECTIVE/);
 });
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));

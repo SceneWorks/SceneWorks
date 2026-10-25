@@ -11,7 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
 import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
-export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases():requiredCases();}
+export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases(p.backend):requiredCases();}
 export function executionCases(p) {
   if(p.matrixDecision){validateMatrixDecision(p.matrixDecision);if(p.matrixDecision.status==='selected'){assert.ok(p.matrixAnchors,'measured inline anchors required before asymmetry');assert.deepEqual(p.matrixDecision,chooseMatrixBackend({anchors:p.matrixAnchors}),'matrix choice must derive from measured anchors');}}
   return p.cases.filter(c=>!(p.inventory==='reduced-v1'&&p.matrixDecision?.status==='selected'&&c.backend===p.matrixDecision.displacedBackend&&BROAD_MATRIX_CASES.includes(c.slug)));
@@ -652,7 +652,7 @@ export async function runCase(p, id, root, inferenceRoot) {
   else assert.equal(process.platform, 'win32');
   await verifyMatrixAdmission(p);
   const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
-  const caseDeadline=Math.min(Date.now()+c.timeoutSeconds*1000,budget?Date.parse(budget.deadline):Infinity);
+  const caseDeadline=Math.min(Date.now()+c.timeoutSeconds*1000,budget?Date.parse(budget.deadline)-300000:Infinity);
   await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot));
   assert.ok(Date.now()<caseDeadline,'single-case timeout expired during input validation');
   const dir = contained(p.output, c.id); await mkdir(dir, { recursive: true });
@@ -851,23 +851,23 @@ export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProce
   assert.ok(productRoot,'separate product checkout is required');await sourcePair(p,swRoot,productRoot);await laneBudget(p,backend);
   const retained=await loadRetainedProofIndex(p),existing=retained.find(v=>v.kind==='cheap-causal-witness'&&v.backend===backend&&v.adapterStack===true&&v.surfaceEvidence);
   if(existing)return {status:'reused-passed-receipt',proof:existing};
-  assert.equal(backend,'mlx','CUDA requires its completed hash-bound targeted witness receipt; do not repeat the full suite');
+  assert.ok(['mlx','cuda'].includes(backend));
   const native=p.nativeEvidence;assert.ok(native?.root&&native.sha);sha40(native.sha);
   const sourceCheck=async()=>{assert.equal((await exec('git',['rev-parse','HEAD'],{cwd:native.root})).stdout.trim(),native.sha);assert.equal((await exec('git',['status','--porcelain'],{cwd:native.root})).stdout.trim(),'');};await sourceCheck();
-  const dir=contained(p.output,'native-witnesses-mlx');await mkdir(dir);
+  const dir=contained(p.output,`native-witnesses-${backend}`);await mkdir(dir);
   const receiptPath=path.join(dir,'receipt.json'),log=path.join(dir,'native.log'),selectors=[CONDITIONING_WITNESS_SELECTOR,ADAPTER_WITNESS_SELECTOR];
-  const receipt={schema:1,status:'running',sourceSha:native.sha,productPin:p.inference,nativeEvidence:native,backend,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,configuration:{syntheticOnly:true,encodedSeamOnly:true,downloads:false,mlxTreeCapGiB:8},cases:[]};await save(receiptPath,receipt);
+  const receipt={schema:1,status:'running',sourceSha:native.sha,productPin:p.inference,nativeEvidence:native,backend,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,configuration:{syntheticOnly:true,encodedSeamOnly:true,downloads:false,...(backend==='mlx'?{mlxTreeCapGiB:8}:{})},cases:[]};await save(receiptPath,receipt);
   try{
     for(const leaf of ['hf','data','tmp'])await mkdir(path.join(dir,leaf));
-    const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${native.sha}-${backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',SCENEWORKS_DATA_DIR:path.join(dir,'data'),TMPDIR:path.join(dir,'tmp')};
-    const build=['cargo','test','--locked','--manifest-path',path.join(native.root,'Cargo.toml'),'-p','mlx-gen-minimax-h3','--test','integration','--no-run','--message-format=json'];
+    const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${native.sha}-${backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',...(backend==='cuda'?{RUSTC_WRAPPER:''}:{}),HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',SCENEWORKS_DATA_DIR:path.join(dir,'data'),TMPDIR:path.join(dir,'tmp')};
+    const build=['cargo','test','--locked','--manifest-path',path.join(native.root,'Cargo.toml'),'-p',backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(backend==='cuda'?['--features','cuda']:[]),'--test','integration','--no-run','--message-format=json'];
     await run(build,{cwd:native.root,env,logPath:path.join(dir,'build.log'),timeoutSeconds:3600});
     const binaries=[];for(const line of(await readFile(path.join(dir,'build.log'),'utf8')).split('\n')){try{const v=JSON.parse(line);if(v.reason==='compiler-artifact'&&v.target?.name==='integration'&&v.profile?.test&&v.executable)binaries.push(v.executable);}catch{}}
     assert.equal(new Set(binaries).size,1,'one exact native integration executable required');
-    const {observeMetalCase}=await import('./ci/h3-import-native-proof.mjs');observeMetalCase('inline-two-native-causal-witnesses',receipt,()=>{});await save(receiptPath,receipt);
+    if(backend==='mlx'){const {observeMetalCase}=await import('./ci/h3-import-native-proof.mjs');observeMetalCase('inline-two-native-causal-witnesses',receipt,()=>{});}else{assert.equal(env.CUDA_VISIBLE_DEVICES,'0');assert.equal(env.CUDA_DEVICE_ORDER,'PCI_BUS_ID');}await save(receiptPath,receipt);
     const args=[...selectors,'--exact','--ignored','--nocapture','--test-threads=1'];
-    const command=['python3.12','-I',path.join(swRoot,'scripts/ci/iris-mlx-real-weights/tree_guard.py'),'8','360',log,'--',binaries[0],...args];
-    await run(command,{cwd:swRoot,env,logPath:path.join(dir,'guard.log'),timeoutSeconds:420});
+    const command=backend==='mlx'?['python3.12','-I',path.join(swRoot,'scripts/ci/iris-mlx-real-weights/tree_guard.py'),'8','360',log,'--',binaries[0],...args]:[binaries[0],...args];
+    await run(command,{cwd:swRoot,env,logPath:backend==='mlx'?path.join(dir,'guard.log'):log,timeoutSeconds:420});
     const text=await readFile(log,'utf8');assert.equal(executedTests(text),2,'exactly the two approved ignored native witnesses must pass');for(const selector of selectors)assert.ok(text.includes(`test ${selector} ...`),'both exact witness names must actually execute');
     receipt.surfaceEvidence=validateNativeWitnessMarkers(text,{backend,testSelectors:selectors,adapters:true});await sourceCheck();receipt.status='passed';receipt.cases=selectors.map(name=>({name,exitCode:0,command:[binaries[0],...args],log:'native.log'}));await save(receiptPath,receipt);
     const proof={id:`native-encoded-surface-${backend}-${native.sha}`,kind:'cheap-causal-witness',status:'passed',repository:'inference',sourceSha:native.sha,backend,adapterStack:true,catalogIds:requiredCases().filter(c=>c.backend===backend&&c.group==='capability').map(c=>c.id),config:receipt.configuration,runRef:`actions:${receipt.runId}/${receipt.runAttempt}`,testSelectors:selectors,claim:'Actual native encoded conditioning and adapter-stack causal witnesses; no raw preprocessing or end-to-end AV claim.',limitations:['Encoded DiT seam only; omitted AV contrasts remain NOT proven.'],receiptInput:{path:receiptPath,sha256:await hashFile(receiptPath)},logInputs:[{path:log,sha256:await hashFile(log)}]};
@@ -886,7 +886,7 @@ export async function reducedCoverageReport(p,caseRecords,proofs=[]) {
   const mapping=buildCatalogCoverage({catalog:requiredCases(),realReceipts,proofIndex:proofs,matrixDecision:p.matrixDecision});
   const uniqueJobs=summarizeUniqueExecutions(executionRows);assert.equal(uniqueJobs.conflicts.length,0,'one real job cannot have conflicting identities');
   const unproven=mapping.unproven.map(item=>({...item,surfaceEvidence:item.cellId.includes('.capability.')?'Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend.':null}));
-  return {inventory:'reduced-v1',catalogCells:mapping.coverage.length,operationalCases:executionCases(p).length,manifestCases:p.cases.length,counts:catalogCoverageCounts(mapping.coverage),coverage:mapping.coverage,unproven,uniqueJobs,matrixDecision:p.matrixDecision??{status:'unresolved',reason:'No measured inline anchors yet; no backend assumed faster.'},retainedSurfaceEvidence:proofs.filter(v=>v.kind==='cheap-causal-witness').map(v=>({id:v.id,backend:v.backend,sourceSha:v.sourceSha,scope:v.surfaceEvidence})),nativeEvidence:p.nativeEvidence??null,productPin:p.inference,scope:'Actual-artifact probes prove selected projections, not full QKV/FFN mapping. Cold cancellation completes no native load and claims no peak. Native encoded witnesses do not prove raw preprocessing or omitted AV contrasts.'};
+  return {inventory:'reduced-v1',catalogCells:mapping.coverage.length,operationalCases:caseRecords.length,manifestCases:p.cases.length,counts:catalogCoverageCounts(mapping.coverage),coverage:mapping.coverage,unproven,uniqueJobs,matrixDecision:p.matrixDecision??{status:'unresolved',reason:'No measured inline anchors yet; no backend assumed faster.'},retainedSurfaceEvidence:proofs.filter(v=>v.kind==='cheap-causal-witness').map(v=>({id:v.id,backend:v.backend,sourceSha:v.sourceSha,scope:v.surfaceEvidence})),nativeEvidence:p.nativeEvidence??null,productPin:p.inference,scope:'Actual-artifact probes prove selected projections, not full QKV/FFN mapping. Cold cancellation completes no native load and claims no peak. Native encoded witnesses do not prove raw preprocessing or omitted AV contrasts.'};
 }
 export async function verifyCampaign(p) {
   validatePlan(p);
@@ -900,7 +900,7 @@ export async function verifyCampaign(p) {
       if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');await verifyReducedControls(r.plan,backend,{caseRoot:spec.caseRoot});}
     }
     validateDelivery(p);
-    if(p.inventory==='reduced-v1'){const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',...coverage};}
+    if(p.inventory==='reduced-v1'){const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',requiredReducedComplete:true,catalogComplete:coverage.unproven.length===0,...coverage};}
     return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: p.cases.length, inputVerification: 'actual native host readbacks; all retained evidence/AV reverified locally' };
   }
   const records=[];
@@ -914,7 +914,7 @@ export async function verifyCampaign(p) {
   }
   // Hardware evidence alone is not integrated delivery / tracker completion.
   validateDelivery(p);
-  if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');for(const backend of ['mlx','cuda'])await verifyReducedControls(p,backend);const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',...coverage};}
+  if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');for(const backend of ['mlx','cuda'])await verifyReducedControls(p,backend);const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',requiredReducedComplete:true,catalogComplete:coverage.unproven.length===0,...coverage};}
   return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: p.cases.length };
 }
 async function terminalCLI() {
