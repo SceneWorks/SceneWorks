@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
@@ -14,13 +15,49 @@ import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateU
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
-import { validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
+import { validateCudaRebaseRecord, validateOfficialPinTransition, validateOfficialPinObjects, sourceAuditDigest } from './lib/moss-edit-cuda-rebase.mjs';
+import { populationSha256, cratePopulationSha256 } from './scan-inference-provenance.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
 globalThis.fetch=async()=>{throw Error('LIVE_NETWORK_FORBIDDEN');};
 const temporary=label=>mkdtemp(resolve(tmpdir(),`moss-actions-${label}-`));
 const sourceRoot=fileURLToPath(new URL('../',import.meta.url));
 const coverage='moss_image_base+sft; bounded cache-context before bind; cache-dispatch; runtime load before media catalog; actual MOSS generate/edit calls after admission';
+test('official pin output permits only regenerated closure facts and exact audited source population',()=>{
+  const old='a'.repeat(40),next='b'.repeat(40),path='crates/media/candle-gen/candle-gen-moss-image/src/lib.rs',oldBlob='c'.repeat(40),newBlob='d'.repeat(40);
+  const manifest=(sha)=>`moss = { git = "https://github.com/SceneWorks/inference", rev = "${sha}" }\n`;
+  const before={},after={};
+  for(const name of ['Cargo.toml','crates/sceneworks-core/Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml']){before[name]=manifest(old);after[name]=manifest(next);}
+  before['Cargo.lock']=`source = "git+https://github.com/SceneWorks/inference?rev=${old}#${old}"\n`;
+  after['Cargo.lock']=`source = "git+https://github.com/SceneWorks/inference?rev=${next}#${next}"\n`;
+  for(const name of ['crates/sceneworks-worker/src/catalog_semantic_jobs.rs','crates/sceneworks-memory-adapter/src/lib.rs']){before[name]=`const PIN: &str = "${old}";\n`;after[name]=`const PIN: &str = "${next}";\n`;}
+  before['config/inference-provider-closures.json']=JSON.stringify({_comment:'provider closure',digestVersion:'v1',inferenceRevision:old,providers:{'candle:moss':{crate:'moss-crate',digest:'1'.repeat(64)}}});
+  after['config/inference-provider-closures.json']=JSON.stringify({_comment:'provider closure',digestVersion:'v1',inferenceRevision:next,providers:{'candle:moss':{crate:'moss-crate',digest:'2'.repeat(64)}}});
+  before['config/anchor-loader-closures.json']=JSON.stringify({_comment:'anchor closure',digestVersion:'v1',inferenceRevision:old,models:{'moss:candle':{entryPoints:[path],digest:'1'.repeat(64)}}});
+  after['config/anchor-loader-closures.json']=JSON.stringify({_comment:'anchor closure',digestVersion:'v1',inferenceRevision:next,models:{'moss:candle':{entryPoints:[path],digest:'2'.repeat(64)}}});
+  const header='# path\tgit_blob_sha1\tnormalized_marker_sha256\tsource_area\n',marker='e'.repeat(64),area='architecture:crates/media/candle-gen/candle-gen-moss-image';
+  before['config/inference-provenance-candidates.tsv']=`${header}${path}\t${oldBlob}\t${marker}\t${area}\n`;
+  after['config/inference-provenance-candidates.tsv']=`${header}${path}\t${newBlob}\t${marker}\t${area}\n`;
+  before['config/inference-crate-prefixes.txt']='.\n';after['config/inference-crate-prefixes.txt']='.\n';
+  const audit={_comment:'old source audit',inferenceRevision:old,artifacts:[],prospectiveDisclosures:[],provenanceScan:{revision:old,matchedFiles:1,populationSha256:populationSha256([{path,blob:oldBlob,markerSha256:marker,area}])},portedSourceAreas:[],crateCoverage:{revision:old,cratePrefixes:1,cratePopulationSha256:cratePopulationSha256(['.'])},crateDispositions:[],includeSites:[]};
+  audit.auditDigest=sourceAuditDigest(audit);before['config/inference-third-party-source.json']=JSON.stringify(audit);
+  const current=structuredClone(audit);current._comment=`Reviewed ${next.slice(0,8)} with 1 source and 1 crate`;current.inferenceRevision=next;current.provenanceScan.revision=next;current.provenanceScan.populationSha256=populationSha256([{path,blob:newBlob,markerSha256:marker,area}]);current.crateCoverage.revision=next;current.auditDigest=sourceAuditDigest(current);after['config/inference-third-party-source.json']=JSON.stringify(current);
+  const validate=()=>validateOfficialPinTransition({oldSourceSha:'f'.repeat(40),oldInferenceSha:old,inferenceSha:next,readOld:name=>before[name],readNew:name=>after[name],treeObjects:new Map([[path,newBlob]])});
+  assert.equal(validate().candidateCount,1);
+  for(const [name,changed] of [
+    ['config/inference-provider-closures.json',JSON.stringify({_comment:'provider closure',digestVersion:'v1',inferenceRevision:next,providers:{'candle:moss':{crate:'other-crate',digest:'2'.repeat(64)}}})],
+    ['config/inference-provenance-candidates.tsv',`${header}${path}\t${newBlob}\t${'f'.repeat(64)}\t${area}\n`],
+    ['crates/sceneworks-worker/src/catalog_semantic_jobs.rs',`${after['crates/sceneworks-worker/src/catalog_semantic_jobs.rs']}// unrelated source change\n`],
+    ['Cargo.toml',`${after['Cargo.toml']}# unrelated pin edit\n`],
+  ]){const original=after[name];after[name]=changed;assert.throws(validate);after[name]=original;}
+  const originalAudit=after['config/inference-third-party-source.json'];after['config/inference-third-party-source.json']=JSON.stringify({...current,auditDigest:'0'.repeat(64)});assert.throws(validate);after['config/inference-third-party-source.json']=originalAudit;
+  assert.throws(()=>validateOfficialPinTransition({oldSourceSha:'f'.repeat(40),oldInferenceSha:old,inferenceSha:next,readOld:name=>before[name],readNew:name=>after[name],treeObjects:new Map([[path,oldBlob]])}),/Git object/);
+});
+test('the eleven official pin outputs retain exact reviewed Git objects',()=>{
+  const objectAt=path=>execFileSync('git',['hash-object',path],{cwd:sourceRoot,encoding:'utf8'}).trim();
+  validateOfficialPinObjects(objectAt);
+  assert.throws(()=>validateOfficialPinObjects(path=>path==='config/inference-provider-closures.json'?'0'.repeat(40):objectAt(path)),/official pin output Git object changed/);
+});
 const identity={candidateId:'inert-candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),workerId:'actual-fixture-worker',gpuId:'1',binarySha256:'c'.repeat(64),producerSha256:'d'.repeat(64),coverage};
 const base=Date.parse('2026-10-24T12:00:00Z'),at=offset=>new Date(base+offset).toISOString();
 function journal(events=['startup_begin','ready_after_bounded_startup_probe','heartbeat'],custom={}) {
