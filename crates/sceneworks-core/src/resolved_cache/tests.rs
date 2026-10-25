@@ -2228,6 +2228,15 @@ fn a_produced_bundle_whose_declared_output_is_a_symlink_is_never_published() {
         outside.is_file(),
         "the refusal never touches what the link pointed at"
     );
+    assert!(
+        staging.join("index.json").is_symlink(),
+        "refusal teardown leaves the linked staging entry itself in place instead of following it"
+    );
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        b"bytes that live somewhere else",
+        "nothing outside the staging tree was modified by the refusal"
+    );
 }
 
 /// Released cache locks must be free IMMEDIATELY, even while a descriptor this process handed to a
