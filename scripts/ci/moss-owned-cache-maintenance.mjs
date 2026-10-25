@@ -18,6 +18,7 @@ export const OWNED_RUNS = Object.freeze([
   { run: '40167292776', candidate: 'sc-26752-final-r12', source: 'e6475176bf1cf07a46530adbe659aa0d6492c71a', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40167292776-1-cuda', runtimeSha: '47a25951ea0e1d6fd076802c2ca68421e36d90a296fa1813fc344e6d0a461355', cacheBinarySha256: '07cb4ef31caba2f875d6750c461715f880c79288201af88af11997e31809d69d', metadataRequired: true },
   { run: '40169818205', candidate: 'sc-26752-final-r13', source: 'ba6bdd824823f01f8c4dc435f9fad50f45f97893', inference: native, workspace: 'D:\\actions-runner\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40169818205-1-cuda', runtimeSha: '76554eb462c580cd6afa7b5102aaeaa434de85049fe1b6701fe7ba2347f6d61f', cacheBinarySha256: '09088a12b26968177adf5a6ead76b088be2f791e5756224497db4fb7d20cf8fd', metadataRequired: true },
   { run: '40174802721', candidate: 'sc-26752-final-r14', source: '12e1b364360b43b28e864879be4c68bb28a696bc', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40174802721-1-cuda', runtimeSha: '4082f9c28ae31aee7dda8e850d04b197d7741a01edbc3856aa53ddac6ba8a532', cacheBinarySha256: 'ab36062090356912f9131654fa5c3ec87ed808f5e0fc0cbd32e388773edb75c2', metadataRequired: true },
+  { run: '40181253824', candidate: 'sc-26752-final-r15', source: 'a0692191b09813fab859659bf382bd7c91a60140', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40181253824-1-cuda', runtimeSha: 'a4c17012e7143f8775809decbd72216a7c3114209bf91c3f7f0d9608f0585cc4', metadataRequired: true },
 ].map(item => Object.freeze({ ...item, attempt: 1, root: item.root ?? path.join(item.workspace, `moss-build-${item.run}-1-cuda`) })));
 // Bigint identities are serialized as decimal strings; never round Windows file IDs.
 export function entryIdentity(info) {
@@ -139,7 +140,7 @@ export async function copyCacheExclusive(from,to) {
   check(!existing,'cache destination already exists');
   await cp(from,to,{recursive:true,dereference:false,force:false,errorOnExist:true});
 }
-export async function maintain(env, io) {
+export async function maintain(env, io, {copyCache=true}={}) {
   const root = destination(env), target = path.join(root, 'target');
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, before: await io.volume(), candidates: [], operations: [] };
   validateTree(await io.inspect(root), root);
@@ -169,12 +170,13 @@ export async function maintain(env, io) {
     if(candidate.metadataRequired) {
       const metadata = validateHfObservation(await io.metadata(runtime), leaf, runtime);
       check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'owned HF metadata changed before cleanup');
-      io.report({stage:candidate.run==='40174802721'?'fixed-r14-readonly-metadata-before-hf-cleanup':candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
+      io.report({stage:candidate.run==='40181253824'?'fixed-r15-readonly-metadata-before-hf-cleanup':candidate.run==='40174802721'?'fixed-r14-readonly-metadata-before-hf-cleanup':candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
     }
     await io.remove(leaf); // Exact fixed HF leaf only; no root/cache/model-source wildcard.
     receipt.operations.push({ kind: 'remove-owned-hf', path: leaf, after: await io.volume() });
     io.report({ stage: 'hf-reclaimed', operation: receipt.operations.at(-1) });
   }
+  if(copyCache) {
   const original = receipt.candidates.find(item => item.run === '40174802721' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40169818205' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40167292776' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
   if (original.cache?.exists) {
     await io.stopped(original);
@@ -183,7 +185,7 @@ export async function maintain(env, io) {
     const dest = validateTree(await io.inspect(target), target);
     const freeBeforeCopy = await io.volume();
     // Completeness is a property of the projection, never of which target cache was selected.
-    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (['40163530825', '40167292776', '40169818205', '40174802721'].includes(item.run) && item.metadata?.completeProjection === true)));
+    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (['40163530825', '40167292776', '40169818205', '40174802721', '40181253824'].includes(item.run) && item.metadata?.completeProjection === true)));
     const projectionReserveBytes = Math.max(0, ...completeProjections.map(item => item.inventory.bytes));
     const rebuildReserveBytes = 4 * 1024 ** 3;
     const requiredFreeBytes = cacheInventory.bytes + projectionReserveBytes + rebuildReserveBytes;
@@ -206,18 +208,27 @@ export async function maintain(env, io) {
     }
   }
   if (original.cacheProbeError) receipt.cache = { state: 'unproved-cache-retained-without-copy', error: original.cacheProbeError };
+  } else receipt.cache={state:'hf-only-recovery-original-targets-retained-no-copy'};
   receipt.after = await io.volume();
   io.report({ ...receipt, stage: 'completed' });
   await io.ensure(root);
   await io.write(path.join(root, 'windows-maintenance.json'), `${JSON.stringify(receipt, null, 2)}\n`);
   return receipt;
 }
-if (process.argv[2] === '--moss-disk-maintenance') {
+export function validateHfOnlyEnvelope(env) {
+  const value=JSON.parse(env.MOSS_REFERENCE);
+  check(env.GITHUB_ACTIONS==='true'&&env.MOSS_SOURCE_SHA===env.GITHUB_SHA&&/^[a-f0-9]{40}$/.test(env.GITHUB_SHA)&&env.MOSS_REFERENCE_BACKEND==='mlx','fixed reference Actions source required');
+  check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase'&&['upload','execute'].includes(value.phase),'closed reference cleanup envelope required');
+  for(const key of ['artifact_id','artifact_run_id'])check(value.phase==='upload'?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact reference artifact identity required');
+  return value;
+}
+if (['--moss-disk-maintenance','--moss-disk-hf-only'].includes(process.argv[2])) {
   check(process.platform === 'win32', 'disk maintenance is Windows-only');
   const token = process.env.MOSS_MAINTENANCE_TOKEN;
   try {
+    if(process.argv[2]==='--moss-disk-hf-only')validateHfOnlyEnvelope(process.env);
     await maintain(process.env, { volume, inspect: inspectTree, metadata: observeHf, hash: async file => hashMetadataFile(file,entryIdentity(await lstat(file,{bigint:true}))), stopped: binding => stopped(binding, route => actionsApi(token, route)), read: readFile,
       remove: leaf => rm(leaf, { recursive: true, force: false }), copy: copyCacheExclusive, ensure: root => mkdir(root, { recursive: true }),
-      write: (file, bytes) => writeFile(file, bytes, { flag: 'wx' }), report: value => console.log(JSON.stringify(value)) });
+      write: (file, bytes) => writeFile(file, bytes, { flag: 'wx' }), report: value => console.log(JSON.stringify(value)) },{copyCache:process.argv[2]!=='--moss-disk-hf-only'});
   } catch (error) { console.error(JSON.stringify({ status: 'STOP', stage: 'owned-disk-maintenance', message: error.message })); process.exitCode = 1; }
 }

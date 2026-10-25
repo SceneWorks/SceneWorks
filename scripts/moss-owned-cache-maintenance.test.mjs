@@ -6,14 +6,14 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { OWNED_RUNS, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
-const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
+import { OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14, 15].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.source, status: 'completed', conclusion: 'failure' });
 const jobs = binding => [{ id: 1, run_id: Number(binding.run), status: 'completed', conclusion: 'failure' }];
 const tree = (root, exists = true) => ({ root, exists, safe: true, reparsePoints: 0, bytes: exists ? 100 : 0, fileCount: exists ? 2 : 0, files: [] });
-function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, destinationExists = false, freeBytes = 8 * 1024 ** 3, r10Cache = false, r12Cache = false, r12Hf = false, r13Cache = false, r13Hf = false, r14Cache = false, r14Hf = false } = {}) {
-  const roots = new Set(OWNED_RUNS.filter((item,index)=>(index!==4||r12Cache||r12Hf)&&(index!==5||r13Cache||r13Hf)&&(index!==6||r14Cache||r14Hf)).map(item => path.join(item.root, 'hf')));
+function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, destinationExists = false, freeBytes = 8 * 1024 ** 3, r10Cache = false, r12Cache = false, r12Hf = false, r13Cache = false, r13Hf = false, r14Cache = false, r14Hf = false, r15Hf = false } = {}) {
+  const roots = new Set(OWNED_RUNS.filter((item,index)=>(index!==4||r12Cache||r12Hf)&&(index!==5||r13Cache||r13Hf)&&(index!==6||r14Cache||r14Hf)&&(index!==7||r15Hf)).map(item => path.join(item.root, 'hf')));
   const from = path.join(OWNED_RUNS[r14Cache?6:r13Cache?5:r12Cache?4:r10Cache?3:2].root, 'target'), to = path.join(env.MOSS_ROOT, 'target');
   roots.add(from); if (destinationExists) roots.add(to);
   const mutations = [], stops = new Map(), reports = [], writes = [];
@@ -42,7 +42,7 @@ function fixture({ mutateRuntime, mutateInspect, activeAtMutation = false, desti
   return { io, mutations, reports, writes, roots, from, to };
 }
 test('actual immutable R4/R5/R6/R10/R12 runtime bytes bind only the stopped HF leaves', () => {
-  assert.deepEqual(OWNED_RUNS.map(item => item.run), ['40145054879', '40152001538', '40155160639', '40163530825', '40167292776', '40169818205', '40174802721']);
+  assert.deepEqual(OWNED_RUNS.map(item => item.run), ['40145054879', '40152001538', '40155160639', '40163530825', '40167292776', '40169818205', '40174802721', '40181253824']);
   for (const [index, binding] of OWNED_RUNS.entries()) {
     assert.equal(validateRuntime(binding, runtimes[index]).candidateId, binding.candidate);
     assert.throws(() => validateRuntime(binding, Buffer.concat([runtimes[index], Buffer.from(' ')])), /runtime bytes/);
@@ -259,4 +259,20 @@ test('R14 completeness is independent of R14/R10/R6 cache selection and needs ac
   }
   const complete=fixture({r14Cache:true});for(const binding of OWNED_RUNS.slice(0,6))complete.roots.delete(path.join(binding.root,'hf'));const seeded=await maintain(env,complete.io);assert.equal(seeded.cache.originalRun,OWNED_RUNS[6].run);assert.equal(seeded.cache.projectionReserveBytes,100);assert.ok(complete.mutations.some(item=>item[0]==='copy'));
   const low=fixture({r14Cache:true,freeBytes:1});await maintain(env,low.io);assert.equal(low.mutations.some(item=>item[0]==='copy'),false);
+});
+
+test('fixed R15 HF-only recovery binds actual runtime and repeats full metadata before only that leaf removal',async()=>{
+ const binding=OWNED_RUNS[7],runtime=validateRuntime(binding,runtimes[7]);assert.equal(runtimes[7].length,71286);assert.equal(binding.runtimeSha,'a4c17012e7143f8775809decbd72216a7c3114209bf91c3f7f0d9608f0585cc4');assert.equal(binding.source,'a0692191b09813fab859659bf382bd7c91a60140');assert.equal(runtime.hfHome,path.join(binding.root,'hf'));
+ const f=fixture({r15Hf:true}),remove=f.io.remove;f.io.remove=async leaf=>{if(leaf===runtime.hfHome){const proof=f.reports.find(item=>item.stage==='fixed-r15-readonly-metadata-before-hf-cleanup');assert.equal(proof.metadata.completeProjection,true);assert.equal(proof.runtimeSha256,binding.runtimeSha);}return remove(leaf);};const receipt=await maintain(env,f.io);assert.equal(f.roots.has(runtime.hfHome),false);assert.equal(receipt.candidates[7].cache,null);
+ for(const mutate of [bytes=>Buffer.concat([bytes,Buffer.from(' ')]),()=>Buffer.from('{}')]){const bad=fixture({r15Hf:true,mutateRuntime:(bytes,index)=>index===7?mutate(bytes):bytes});await assert.rejects(()=>maintain(env,bad.io));assert.deepEqual(bad.mutations,[]);}
+ const active=fixture({r15Hf:true,activeAtMutation:true});await assert.rejects(()=>maintain(env,active.io));assert.deepEqual(active.mutations,[]);
+});
+
+test('fixed reference HF-only recovery never copies or removes any target even with abundant headroom',async()=>{
+ const f=fixture({r15Hf:true,freeBytes:1024**4});const result=await maintain(env,f.io,{copyCache:false});assert.equal(result.cache.state,'hf-only-recovery-original-targets-retained-no-copy');assert.equal(f.mutations.some(x=>x[0]==='copy'),false);assert.ok(f.mutations.some(x=>x[1]===path.join(OWNED_RUNS[7].root,'hf')));assert.equal(f.roots.has(f.from),true);assert.equal(f.roots.has(f.to),false);
+});
+
+test('reference cleanup CLI requires exact Actions/source and the same closed reference artifact envelope',()=>{
+ const base={GITHUB_ACTIONS:'true',MOSS_SOURCE_SHA:'a'.repeat(40),GITHUB_SHA:'a'.repeat(40),MOSS_REFERENCE_BACKEND:'mlx',MOSS_REFERENCE:JSON.stringify({phase:'upload',artifact_id:null,artifact_run_id:null})};validateHfOnlyEnvelope(base);
+ for(const changes of [{GITHUB_ACTIONS:'false'},{GITHUB_SHA:'b'.repeat(40)},{MOSS_REFERENCE_BACKEND:'candle'},{MOSS_REFERENCE:'{}'},{MOSS_REFERENCE:JSON.stringify({phase:'upload',artifact_id:null,artifact_run_id:null,command:'id'})}])assert.throws(()=>validateHfOnlyEnvelope({...base,...changes}));
 });

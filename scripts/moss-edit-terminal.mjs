@@ -360,6 +360,17 @@ export async function retainMcpResults(mcp, job, outputs, dest, api) {
   }
   await save(resolve(dest, 'mcp-result-identities.json'), identities);
 }
+export async function submitReplay(api, originJobId, action, dest) {
+  requireThat(['duplicate', 'retry'].includes(action), 'unsupported replay action');
+  const path = `${jobPath(originJobId)}/${action}`, observation = {};
+  try {
+    return await api.request(path, { method: 'POST', body: { payloadChanges: {} }, observation });
+  } catch (error) {
+    // Retain only the bounded failed replay response; never request/auth headers or successful jobs.
+    if (observation.status >= 400 && observation.byteLength <= 64 * 1024) await save(resolve(dest, 'replay-response.json'), { method: 'POST', path, ...observation });
+    throw error;
+  }
+}
 async function run(configPath, id, admissionPath, uiCapture) {
   const state = await frozen(configPath), { config, root, plan, lock } = state;
   const row = plan.rows.find(r => r.id === id); requireThat(row, 'unknown frozen row');
@@ -390,7 +401,7 @@ async function run(configPath, id, admissionPath, uiCapture) {
         requireThat(cleanup.lockSha256 === digest(lock) && cleanup.canceledJobId === origin.jobId && cleanup.verdict === 'PASS' && cleanup.observer && cleanup.files?.length, 'actual owned cleanup proof required before retry/reentry');
         for (const entry of cleanup.files) requireThat((await fileIdentity(safePath(root,entry.file))).sha256 === entry.sha256, 'cleanup proof changed');
       }
-      submitted = await api.request(`${jobPath(origin.jobId)}/${row.action}`, { method: 'POST', body: {} }); jobId = submitted.id;
+      submitted = await submitReplay(api, origin.jobId, row.action, dest); jobId = submitted.id;
       await save(resolve(dest,'submission.json'),submitted);submissionSaved=true;
       requireThat(submitted.duplicateOfJobId === origin.jobId || submitted.sourceJobId === origin.jobId, 'duplicate not linked to actual original job');
     } else if (row.transport === 'mcp') {

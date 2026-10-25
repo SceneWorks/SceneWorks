@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor } from './moss-edit-terminal.mjs';
+import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, retainEditorSource, validateRetainedEditor } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
-import { mkdtemp, mkdir, writeFile, readFile, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -424,4 +424,50 @@ test('file identity rejects deterministic in-place mutation, replacement, trunca
     });
     try{await assert.rejects(()=>fileIdentity(path),/changed while hashing/);assert.equal(changed,true);}finally{mocked.mock.restore();}
   }
+});
+
+test('actual replay wire supplies the API required payloadChanges without changing the source payload', async t => {
+  const dest = await mkdtemp(resolve(tmpdir(), 'moss-replay-wire-'));
+  t.after(() => rm(dest, { recursive: true, force: true }));
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ path: url.pathname, method: options.method, body });
+    // DuplicateJobRequest in core/contracts.rs requires this object; {} is a decode failure.
+    if (!Object.hasOwn(body, 'payloadChanges') || body.payloadChanges === null || Array.isArray(body.payloadChanges) || typeof body.payloadChanges !== 'object') {
+      return new Response('{"detail":"missing field `payloadChanges`"}', { status: 422 });
+    }
+    return Response.json({ id: 'job_replay', duplicateOfJobId: 'job_original' }, { status: 201 });
+  });
+  const api = new Api('http://inert.invalid', 'test-only-secret');
+  await assert.rejects(api.request('/api/v1/jobs/job_original/duplicate', { method: 'POST', body: {} }), { status: 422 });
+  calls.length = 0;
+  for (const action of ['duplicate', 'retry']) {
+    assert.equal((await submitReplay(api, 'job_original', action, dest)).id, 'job_replay');
+  }
+  assert.deepEqual(calls, ['duplicate', 'retry'].map(action => ({ path: `/api/v1/jobs/job_original/${action}`, method: 'POST', body: { payloadChanges: {} } })));
+  assert.deepEqual(await readdir(dest), []);
+});
+
+test('failed replay retains exact bounded HTTP response without authentication or request capture', async t => {
+  const dest = await mkdtemp(resolve(tmpdir(), 'moss-replay-failure-'));
+  t.after(() => rm(dest, { recursive: true, force: true }));
+  const body = '{"detail":[{"type":"json_invalid","ctx":{"error":"missing field `payloadChanges`"}}]}\n';
+  t.mock.method(globalThis, 'fetch', async () => new Response(body, { status: 422, headers: { 'content-type': 'application/json', 'set-cookie': 'not-evidence' } }));
+  await assert.rejects(submitReplay(new Api('http://inert.invalid', 'test-only-secret'), 'job_original', 'duplicate', dest), { status: 422, responseBody: body });
+  const receipt = JSON.parse(await readFile(resolve(dest, 'replay-response.json'), 'utf8'));
+  assert.deepEqual(receipt, { method: 'POST', path: '/api/v1/jobs/job_original/duplicate', status: 422, contentType: 'application/json', byteLength: Buffer.byteLength(body), sha256: sha(body), body });
+  assert.equal(JSON.stringify(receipt).includes('test-only-secret'), false);
+  assert.equal(JSON.stringify(receipt).includes('not-evidence'), false);
+});
+
+test('transport failure and oversized response cannot create a replay HTTP receipt', async t => {
+  const dest = await mkdtemp(resolve(tmpdir(), 'moss-replay-transport-'));
+  t.after(() => rm(dest, { recursive: true, force: true }));
+  const api = new Api('http://inert.invalid');
+  const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('inert connection failure'); });
+  await assert.rejects(submitReplay(api, 'job_original', 'retry', dest), /inert connection failure/);
+  fetch.mock.mockImplementation(async () => new Response('x'.repeat(64 * 1024 + 1), { status: 422 }));
+  await assert.rejects(submitReplay(api, 'job_original', 'duplicate', dest), { status: 422 });
+  assert.deepEqual(await readdir(dest), []);
 });
