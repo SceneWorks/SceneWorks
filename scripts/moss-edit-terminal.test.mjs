@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
+import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, samplesBracketJob, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
@@ -102,6 +102,19 @@ test('whole-device sampled peak requires baseline/active/drain and sampler ident
   const samples = { version: VERSION, jobId: 'j', samplerSha256: 'e'.repeat(64), device: { uuid: 'actual' }, samples: ['baseline','active','drain'].map((phase,i) => ({ at: new Date(i*1000).toISOString(), phase, usedBytes: [10,30,12][i] })) };
   assert.equal(memorySummary(samples,'j').sampledPeakBytes,30); assert.throws(() => memorySummary({ ...samples, samples: samples.samples.slice(1) },'j'));
   assert.throws(() => memorySummary(samples,'other-job'));
+});
+test('whole-second job snapshots bracket millisecond device samples without admitting a late baseline', () => {
+  const job={ startedAt:'2026-10-25T14:25:02Z', completedAt:'2026-10-25T14:25:05Z' };
+  const samples={ samples:[
+    { phase:'baseline',at:'2026-10-25T14:25:02.284Z' },
+    { phase:'active',at:'2026-10-25T14:25:03.300Z' },
+    { phase:'drain',at:'2026-10-25T14:25:05.400Z' },
+  ] };
+  assert.equal(samplesBracketJob(samples,job),true);
+  assert.equal(samplesBracketJob(samples,{ ...job,startedAt:'2026-10-25T14:25:02.000Z' }),false);
+  assert.equal(samplesBracketJob({ samples:[{ ...samples.samples[0],at:'2026-10-25T14:25:03.000Z' },...samples.samples.slice(1)] },job),false);
+  assert.equal(samplesBracketJob({ samples:[samples.samples[0],samples.samples[2]] },job),false);
+  assert.equal(samplesBracketJob({ samples:samples.samples.slice(0,2) },job),false);
 });
 test('quality cannot pass from PNG production, a missing anchor or an averaged failure', () => {
   const row = primaryRows(inputs)[0], outputs = [{ sha256: 'f'.repeat(64) }];

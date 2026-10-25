@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile, copyFile, chmod, readdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
+import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, samplesBracketJob, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
 import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, postRowsGuardFrontier, postDmdGuardFrontier, correctedDmdRequest, lexicalParserRefusal, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
@@ -776,7 +776,8 @@ async function verify(configPath, retained = false) {
     } else assertRequestBinding(expected,request);
     if(row.transport.startsWith('ui-')) {
       const capture=await json(resolve(path,'ui-capture.json'));
-      requireThat(capture.version===VERSION&&capture.rowId===row.id&&capture.lockSha256===digest(state.lock)&&capture.bindingSha256===digest(binding)&&capture.network.response.id===job.id&&digest(capture.network.request)===digest(request)&&capture.actions?.length&&capture.progress?.some(item=>item.id===job.id&&item.status==='running'),'retained actual product UI POST/actions/running evidence changed');
+      if(row.transport!=='ui-editor')assertRequestBinding(request,capture.network.request);
+      requireThat(capture.version===VERSION&&capture.rowId===row.id&&capture.lockSha256===digest(state.lock)&&capture.bindingSha256===digest(binding)&&capture.network.response.id===job.id&&(row.transport!=='ui-editor'||digest(capture.network.request)===digest(request))&&capture.actions?.length&&capture.progress?.some(item=>item.id===job.id&&item.status==='running'),'retained actual product UI POST/actions/running evidence changed');
       for(const phase of ['before','after'])requireThat((await fileIdentity(resolve(path,`ui-${phase}.png`))).sha256===capture.screenshots?.find(item=>item.phase===phase)?.sha256,'retained actual UI screenshot changed');
       for(const name of uiGuards(row)){const observation=uiGuard(capture,name);requireThat((await fileIdentity(resolve(path,`ui-guard-${name}.png`))).sha256===observation.screenshot.sha256,'retained UI refusal screenshot changed');}
       if(row.action==='seeded-recipe')validateSeededRecipeSelection(row,request,capture.history,await json(resolve(state.root,'rows',row.replayOf,'receipt.json')),await json(resolve(state.root,'rows',row.replayOf,'asset-2.json')));
@@ -797,7 +798,7 @@ async function verify(configPath, retained = false) {
     const raw=(await readFile(safePath(path,samples.raw.file),'utf8')).trimEnd().split('\n').map(line=>JSON.parse(line));
     requireThat(raw.length===samples.samples.length&&raw.every((item,index)=>item.device.uuid===receipt.device.uuid&&item.raw&&canonical({at:item.at,phase:item.phase,usedBytes:item.usedBytes})===canonical(samples.samples[index])),'raw whole-device observations differ from reported samples');
     const memory = memorySummary(samples, job.id);
-    requireThat(Date.parse(samples.samples[0].at) <= Date.parse(job.startedAt) && Date.parse(samples.samples.at(-1).at) >= Date.parse(job.completedAt ?? job.canceledAt) && samples.samples.some(s => s.phase === 'active' && Date.parse(s.at) >= Date.parse(job.startedAt) && Date.parse(s.at) <= Date.parse(job.completedAt ?? job.canceledAt)), 'whole-device samples did not bracket actual worker execution');
+    requireThat(samplesBracketJob(samples,job), 'whole-device samples did not bracket actual worker execution');
     if (row.anchors) {
       const reviewPath=historicalOnly?resolve(state.config.historicalQualityReviewRoot,'rows',row.id,'quality-review.json'):resolve(path,'quality-review.json'),review=await json(reviewPath);
       const verdict=qualityComparison?compareQualityRow(row,review,(await fileIdentity(reviewPath)).sha256,receipt.outputs,qualityComparison):reviewVerdict(row,review,receipt.outputs);

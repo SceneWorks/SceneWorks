@@ -518,6 +518,13 @@ export function memorySummary(samples, jobId) {
   requireThat(entries.every((s,i) => i === 0 || Date.parse(entries[i-1].at) < Date.parse(s.at)) && entries[0].phase === 'baseline' && entries.at(-1).phase === 'drain', 'memory sample time/phase ordering invalid');
   return { kind: 'sampled-whole-device-usage-not-admission-estimate', baselineBytes: entries.find(s => s.phase === 'baseline').usedBytes, sampledPeakBytes: Math.max(...entries.map(s => s.usedBytes)), drainBytes: entries.findLast(s => s.phase === 'drain').usedBytes, sampleCount: entries.length, samplerSha256: samples.samplerSha256 };
 }
+export function samplesBracketJob(samples,job) {
+  const entries=samples.samples,start=Date.parse(job.startedAt),end=Date.parse(job.completedAt??job.canceledAt);
+  // The product snapshot stores whole-second job times; the source-owned sampler
+  // records milliseconds and starts its baseline before UI/API submission.
+  const startLimit=start+(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(job.startedAt)?999:0);
+  return Number.isFinite(start)&&Number.isFinite(end)&&entries?.[0]?.phase==='baseline'&&Date.parse(entries[0].at)<=startLimit&&Date.parse(entries.at(-1).at)>=end&&entries.some(item=>item.phase==='active'&&Date.parse(item.at)>=start&&Date.parse(item.at)<=end);
+}
 export function reviewVerdict(row, review, outputs) {
   requireThat(review.version === VERSION && review.rowId === row.id && review.reviewer && review.reviewedAt && review.outputSha256?.length === outputs.length && canonical(review.outputSha256) === canonical(outputs.map(o => o.sha256)), 'quality review not bound to actual outputs');
   requireThat(Array.isArray(review.anchors) && canonical(review.anchors.map(a => a.name)) === canonical(row.anchors), 'quality review omitted/changed a frozen anchor');
