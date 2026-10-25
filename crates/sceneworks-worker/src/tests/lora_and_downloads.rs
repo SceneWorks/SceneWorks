@@ -3381,7 +3381,7 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     let mut job = h3_import_job(&fixture, &upload);
                     let base = Value::Object(sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3").unwrap().clone());
                     let config_row = sceneworks_core::minimax_h3_import::import_config_download(&base, "q4", std::env::consts::OS).unwrap();
-                    let config_cache = huggingface_repo_cache_path(&fixture.settings.data_dir, config_row["repo"].as_str().unwrap()).unwrap()
+                    let config_cache = sceneworks_core::hf_home::huggingface_repo_cache_path(&fixture.settings.data_dir, config_row["repo"].as_str().unwrap()).unwrap()
                         .join("snapshots").join(config_row["revision"].as_str().unwrap())
                         .join(config_row["files"][0].as_str().unwrap());
                     assert!(config_cache.starts_with(&fixture.settings.data_dir));
