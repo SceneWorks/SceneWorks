@@ -34,12 +34,13 @@ export function assertRecordedAssertion({actual,expected,operator='equals'}){
     assert.ok(typeof actual==='string'&&typeof expected==='string'&&expected.length>0&&actual.includes(expected),'actual refusal did not contain the expected specific reason');
   }else{assert.equal(operator,'equals','unknown assertion operator');assert.deepEqual(actual,expected);}
 }
-export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {} } = {}) {
+export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity } = {}) {
   const base = new URL(s.baseUrl);
   assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
   assert.ok(s.timeoutSeconds > 0 && s.timeoutSeconds <= 7200);
   assert.ok(s.caseId && Array.isArray(s.steps) && s.steps.length > 0);
-  const deadline = now() + s.timeoutSeconds * 1000, captures = {}, transcript = [];
+  assert.ok(deadlineMs===Infinity||Number.isFinite(deadlineMs)&&deadlineMs>now(),'explicit case deadline expired');
+  const deadline = Math.min(now() + s.timeoutSeconds * 1000,deadlineMs), captures = {}, transcript = [];
   let activeJob;
   const record = async r => { transcript.push(r); await onRecord(r); };
   async function request(method, route, body, expectedStatus) {

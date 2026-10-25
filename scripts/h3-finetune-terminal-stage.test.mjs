@@ -32,7 +32,7 @@ function authorityFor(files, kind = 'unit_fake') {
   return { kind, acknowledged: true, approvedBy: 'unit_fake test only', reference: 'synthetic consent, never real approval', approvedAt: '2026-10-25T00:00:00Z', subjects: files.map(file => ({ role: 'source', sha256: file.expectedSha256, acknowledged: true, licenseId: file.legal?.licenseId })) };
 }
 function stageEnv(hfHome, overrides = {}) {
-  return { GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1', HF_HOME: hfHome, HOME: hfHome, RUNNER_NAME: 'nax-macos-2', ...overrides };
+  return { GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1', HF_HOME: hfHome, HOME: hfHome, RUNNER_NAME: 'nax-macos-2', H3_TERMINAL_ROUTE: overrides.RUNNER_NAME?.startsWith('cuda-')?'h3-terminal-cuda':'h3-terminal-mlx', ...overrides };
 }
 function streamResponse(chunks, { status = 200, headers = {}, onChunk } = {}) {
   return {
@@ -682,7 +682,7 @@ function outputInfoIsPositive(receipt, fixture) {
 test('reference fixtures refuse real injected execution, incomplete stage ownership and existing outputs', async t => {
   const { root, evidence } = await stagedRootFixture(t, 'ref-guard-'), book = await loadCasebook();
   const tools = { ffmpeg: '/unit_fake/ffmpeg', ffprobe: '/unit_fake/ffprobe' };
-  const env = { PATH: '/unit_fake/bin', RUNNER_NAME: 'nax-macos-2', H3_STAGE_BACKEND: 'mlx', GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
+  const env = { PATH: '/unit_fake/bin', RUNNER_NAME: 'nax-macos-2', H3_STAGE_BACKEND: 'mlx', H3_TERMINAL_ROUTE:'h3-terminal-mlx', GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
   await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, execute: referenceExecute(), tools, allowUnitFake: false, env, platform: 'darwin' }), /unit_fake only/);
   await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, book, allowUnitFake: false, env, platform: 'darwin' }), /cannot inject book data/);
   const running = await stagedRootFixture(t, 'ref-running-');

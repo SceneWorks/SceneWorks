@@ -151,7 +151,7 @@ test('API assertions fail on dropped selected-model propagation and external ser
 });
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /workflow_dispatch:/); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);
+  assert.match(workflow, /workflow_call:/); assert.doesNotMatch(workflow,/^  workflow_dispatch:/m,'only the existing registered terminal routes may call asset ensure'); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);
   assert.match(workflow, /rw-chroma/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /SCENEWORKS_INFERENCE_READ_TOKEN/); assert.match(workflow, /stationary_pair_authorized/);
   assert.doesNotMatch(workflow, /registration_only|pkill|flock|gpu.token/i);
@@ -250,15 +250,31 @@ test('source UI proof is explicit hosted Chromium only, independent of model pin
   const rootGroup=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1],inputs={starvector_terminal_operation:'h3-ui-proof'};
   assert.equal(workflowExpression(rootGroup,inputs),'h3-ui-hosted-unit_fake_101-1');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-ui-hosted-unit_fake_102-1');assert.equal(workflowExpression(rootGroup,inputs,{run_attempt:'2'}),'h3-ui-hosted-unit_fake_101-2');assert.equal(workflowExpression(cancel,inputs),false);
 });
-test('asset staging route is positive manual-only, cache-first and never a model campaign',async()=>{
-  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),job=workflowJob(router,'h3-stage'),selected=/^    if: (.+)$/m.exec(job)[1];
-  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());for(const value of ['h3-stage-mlx','h3-stage-cuda'])assert.equal(choices.filter(v=>v===value).length,1);
-  for(const operation of [undefined,'','unknown',...choices])for(const event of ['push','pull_request','merge_group','schedule','workflow_dispatch'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation},{event_name:event}),event==='workflow_dispatch'&&['h3-stage-mlx','h3-stage-cuda'].includes(operation));
-  const group=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1];for(const operation of ['h3-stage-mlx','h3-stage-cuda']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(group,inputs),'h3-assets-stage-unit_fake_101-1');assert.equal(workflowExpression(group,inputs,{run_id:'unit_fake_102'}),'h3-assets-stage-unit_fake_102-1');}
-  assert.match(job,/timeout-minutes: 240/);assert.ok(job.includes('ref: ${{ github.sha }}'));assert.ok(job.includes('H3_STAGE_SOURCE_SHA: ${{ github.sha }}'));assert.ok(job.includes('persist-credentials: false'));
-  assert.ok(job.indexOf('Probe exact builtin and community snapshots')<job.indexOf('Stage every explicitly selected asset'));for(const set of ['builtin-shards','builtin-ref-shards','community-shards-fl2va','community-shards-ref2va'])assert.ok(job.includes(set));
-  for(const token of ['runStage','inspect_only=true','h3-finetune-terminal-stage.mjs','expected-assets-not-integrity-proof.json','pyarrow==19.0.1','h3-finetune-terminal-speech.py','prepareReferenceFixtures','if-no-files-found: error','set -euo pipefail'])assert.ok(job.includes(token),token);
-  assert.match(job,/if: \$\{\{ always\(\) \}\}/);assert.doesNotMatch(job,/run-case|stationary_pair_authorized|cargo (?:test|build)|gpu.token|cudaDeviceEvidence|secrets: inherit/);
+test('asset staging is folded into the terminal delivery and runs the reduced 25/backend inventory',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
+  const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
+  assert.deepEqual(choices,['standard','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-admission-proof','h3-ui-proof','h3-terminal-mlx','h3-terminal-cuda']);
+  for(const value of ['h3-stage-mlx','h3-stage-cuda'])assert.equal(choices.filter(v=>v===value).length,0,`${value} selector removed`);
+  assert.doesNotMatch(router,/\n  h3-stage:\n/);assert.doesNotMatch(router,/h3-assets-stage-/);
+  const caller=workflowJob(router,'h3-terminal');assert.ok(caller.includes('campaign_request: ${{ inputs.campaign_run_id }}'));
+  const terminal=workflowJob(callee,'terminal');
+  const ensure=callee.indexOf('      - name: Ensure selected assets and conditioning in this terminal route');
+  const resolve=callee.indexOf('      - name: Resolve the reduced operational case set for this backend');
+  const validate=callee.indexOf('      - name: Validate explicit inputs before any product execution');
+  const run=callee.indexOf('      - name: Execute or reverify the reduced operational cases');
+  assert.ok(ensure>0&&resolve>ensure&&validate>resolve&&run>validate,'ensure -> reduced-case resolve -> validate -> run ordering');
+  const ensureSlice=callee.slice(ensure,resolve);
+  for(const token of ['runStage','h3-finetune-terminal-stage.mjs','prepareReferenceFixtures','receipt.identityControls','expected-assets-not-integrity-proof.json','stage-binding.json','bound-plan.json','blocked_by_allowed_roots','H3_PLAN_EFFECTIVE','license_authority','set -euo pipefail'])assert.ok(ensureSlice.includes(token),token);
+  assert.doesNotMatch(ensureSlice,/run-case|acknowledged:\s*true|licenseAcknowledged:\s*true/,'staging must not synthesize license consent or execute cases');
+  for(const token of ['pyarrow==19.0.1','h3-finetune-terminal-speech.py','h3-finetune-terminal-float-variants.py'])assert.ok(callee.includes(token),token);
+  const resolveSlice=callee.slice(resolve,validate);
+  for(const token of ['h3-finetune-terminal.mjs','executionCases','validatePlan','case-ids.json','25','18'])assert.ok(resolveSlice.includes(token),token);
+  const runSlice=callee.slice(run);
+  for(const token of ['H3_TERMINAL_CASES','run-case','H3_TERMINAL_SKIP_RUN','H3_PLAN_EFFECTIVE'] )assert.ok(runSlice.includes(token),token);
+  assert.doesNotMatch(runSlice,/CASE_ID" "\$GITHUB_WORKSPACE\/sceneworks" "\$GITHUB_WORKSPACE\/inference"\n/, 'single-case invocation replaced by the reduced loop');
+  assert.match(callee,/if: (?:\$\{\{ )?always\(\)/);
+  assert.match(callee,/h3-terminal-stage-\$\{\{ inputs\.backend \}\}/);
+  assert.match(callee,/if-no-files-found: warn/);
 });
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
@@ -341,10 +357,27 @@ test('refusal lifecycle and arithmetic fixtures need executed input proof, not i
     delete f.e.testInputSha256; await f.save(); await assert.rejects(f.verify(), /test input identity/);
   }
 });
+test('whole-lane budget persists its original deadline across cases and dispatches',async t=>{
+  const {p}=await fixture(t);const {laneBudget}=await import('./h3-finetune-terminal.mjs');const start=Date.parse('2026-10-25T00:00:00Z');
+  const first=await laneBudget(p,'mlx',{now:start});assert.equal(first.remainingSeconds,86400);
+  const resumed=await laneBudget(p,'mlx',{now:start+3600000,startedAt:'2026-10-26T00:00:00Z'});assert.equal(resumed.remainingSeconds,82800);assert.equal(resumed.startedAt,first.startedAt);
+  await assert.rejects(laneBudget(p,'mlx',{now:start+86400001}),/original 24-hour/);
+});
+test('inline source binding rewrites the actual scenario and input hash together without creating consent',async t=>{
+  const {p,c,dir}=await fixture(t);p.proof_kind='unit_fake';
+  const {mkdir}=await import('node:fs/promises'),{bindStagedCampaignPlan}=await import('./h3-finetune-terminal-cases.mjs');
+  const root=path.join(dir,'sc26691-private','101-1');await mkdir(root,{recursive:true});const source=c.inputs[0],target=path.join(root,'model.bin');await writeFile(target,await readFile(source.path));
+  const scenarioPath=path.join(dir,'original-scenario.json'),scenario={caseId:c.id,steps:[{body:{sourcePath:source.path,licenseAcknowledged:false}}]};await writeFile(scenarioPath,JSON.stringify(scenario));
+  c.runtime={scenario:scenarioPath,port:43210,gpuId:'unit_fake'};c.inputs.push({path:scenarioPath,sha256:await hashFile(scenarioPath),role:'scenario'});c.declaredSourceBindings=[{licenseAuthority:{kind:'unit_fake',acknowledged:false,reference:'NOT real approval'}}];
+  const receiptPath=path.join(root,'h3-stage-receipt.json');await writeFile(receiptPath,JSON.stringify({proof_kind:'unit_fake',status:'completed',files:[{status:'completed',finalPath:target,expectedBytes:11,actualBytes:11,expectedSha256:source.sha256,observedSha256:source.sha256}]}));
+  const result=await bindStagedCampaignPlan(p,{receiptPath,root,backend:'mlx',allowUnitFake:true}),bound=result.plan.cases.find(v=>v.id===c.id),actual=JSON.parse(await readFile(bound.runtime.scenario,'utf8'));
+  assert.equal(actual.steps[0].body.sourcePath,target);assert.equal(actual.steps[0].body.licenseAcknowledged,false);assert.deepEqual(bound.declaredSourceBindings,c.declaredSourceBindings);
+  assert.equal(bound.inputs.find(v=>v.role==='scenario').sha256,await hashFile(bound.runtime.scenario));assert.deepEqual(JSON.parse(await readFile(scenarioPath,'utf8')),scenario);assert.equal(result.plan.proof_kind,'unit_fake');
+});
 test('three individual source mutations are killed by executed assertions, not syntax errors', async t => {
   const { dir } = await fixture(t);
   const original = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
-  for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
+  for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
   for (const [needle, pattern] of [
     ['assert.equal(e.inference, p.inference);', 'receipt mutation rejects wrong source revision'],
     ["assert.equal(+m[3], 0, 'ignored tests are not evidence');", 'test execution evidence rejects ignored'],

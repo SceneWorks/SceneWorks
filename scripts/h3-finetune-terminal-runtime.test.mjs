@@ -383,6 +383,27 @@ test('review repair cache coverage rejects three cold runs and unchanged staged 
   const applied=events.find(e=>e.event==='generation_memory_policy_applied'&&e.jobId===bundle.captures.staged_av0_done.id);applied.stream_transformer_blocks=false;assert.throws(()=>verifyCacheCoverage(bundle,scenario,byJob,events),/bounded transformer/);applied.stream_transformer_blocks=true;
   const before=events.find(e=>e.event==='generation_memory_policy_applied'&&e.jobId===warm.job.id);Object.assign(before,{stream_transformer_blocks:true,window_size:2});assert.throws(()=>verifyCacheCoverage(bundle,scenario,byJob,events),/not a staged transition/);
 });
+test('locator normalization compares retained bytes not fresh UUIDs and preserves reference order',async()=>{
+  const {normalizedControlRequest:normalize}=await import('./h3-finetune-terminal-runtime.mjs');
+  const request={projectId:'project-A',model:'model-A',prompt:'literal prompt',seed:42,referenceAssetIds:['image-A','image-B'],referenceAudioAssetIds:[]};
+  const identity={checkpointSha256:semantic,topology:'full',quantization:'int8',components:[]},metadata={type:'image',mimeType:'image/png',width:32,height:32};
+  const context={runtimeIdentity:identity,declaredSourceBindings:[{model:{modelId:'model-A'},adapters:[]}],conditioningBindings:[{projectId:'project-A',assetId:'image-A',sha256:'a'.repeat(64),metadata},{projectId:'project-A',assetId:'image-B',sha256:'b'.repeat(64),metadata}]};
+  const original=normalize(request,context),otherRequest={...request,projectId:'fresh-project',model:'fresh-model',referenceAssetIds:['fresh-image-1','fresh-image-2']},other={...context,declaredSourceBindings:[{model:{modelId:'fresh-model'},adapters:[]}],conditioningBindings:context.conditioningBindings.map((v,i)=>({...v,projectId:'fresh-project',assetId:otherRequest.referenceAssetIds[i]}))};
+  assert.deepEqual(normalize(otherRequest,other),original,'same bytes with different UUIDs must compare equal');
+  const changed=structuredClone(context);changed.conditioningBindings[0].sha256='c'.repeat(64);assert.notDeepEqual(normalize(request,changed),original,'different bytes with the same UUID must not compare equal');
+  assert.notDeepEqual(normalize({...request,referenceAssetIds:[...request.referenceAssetIds].reverse()},context),original,'reference order is creative control, not a locator');
+  assert.notDeepEqual(normalize({...request,prompt:'different literal prompt'},context),original);assert.equal(original.prompt,'literal prompt');
+});
+test('reduced cross-case controls consume three distinct actual jobs and reject source or seed drift',async t=>{
+  const f=await fixture(t),{verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');
+  const cases=[1,5,8].map(index=>({id:`mlx.reduced.unit-${index}`,backend:'mlx',index,kind:'full-av',sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.001}}));
+  const base={projectId:'unit_fake',model:'imported_unit_fake',seed:1,advanced:{steps:4},width:576,height:320,referenceAudioAssetIds:['unit_a','unit_b']};
+  const bundles=new Map();for(const c of cases){const dir=path.join(f.root,c.id);await mkdir(dir);const request={...base,...(c.index===8?{referenceAudioAssetIds:[]}:{}),advanced:{...base.advanced}},job={id:`unit-job-${c.index}`,status:'completed',payload:request},bundle={bindings:[{job,runtimeIdentity:{checkpointSha256:f.digest,samplingPolicy:{steps:4}},media:{av:'unit_fake.mp4'}}],requests:[{route:'/api/v1/video/jobs',request,result:{id:job.id}}]};bundles.set(c.index,bundle);await writeFile(path.join(dir,'source-job-output.json'),JSON.stringify(bundle));}
+  const plan={...f.p,cases},decode=async()=>({unit_fake:true}),delta=async(_a,b)=>b.includes('unit-8')?0.1:0;
+  const result=await verifyReducedControls(plan,'mlx',{decode,delta});assert.equal(result.length,1);assert.equal(result[0].baselineJobId,'unit-job-1');assert.equal(result[0].repeatedJobId,'unit-job-5');assert.equal(result[0].interventionJobId,'unit-job-8');
+  const changed=bundles.get(8);changed.requests[0].request.seed=2;await writeFile(path.join(f.root,cases[2].id,'source-job-output.json'),JSON.stringify(changed));await assert.rejects(verifyReducedControls(plan,'mlx',{decode,delta}),/non-intervened creative control/);
+  changed.requests[0].request.seed=1;changed.bindings[0].job.id='unit-job-1';await writeFile(path.join(f.root,cases[2].id,'source-job-output.json'),JSON.stringify(changed));await assert.rejects(verifyReducedControls(plan,'mlx',{decode,delta}),/reuse the baseline job ID/);
+});
 test('single author-declared hybrid does not require a fictional companion checkpoint',()=>{
   const c=requiredCases().find(v=>v.id==='mlx.capability.hybrid');
   const model={modelId:'imported_single_hybrid',sourcePath:'/unit_fake/model',sha256:semantic,baseModel:'minimax_h3',partition:'hybrid',topology:'pruned',hybridBinding:{kind:'single-checkpoint',declarationSource:'unit_fake author declaration'},componentTier:'q4',components:[{sha256:semantic,source:'unit_fake',revision:inf,licenseAcknowledged:true}],supportedModes:['text_to_video','image_to_video','reference_to_video']};

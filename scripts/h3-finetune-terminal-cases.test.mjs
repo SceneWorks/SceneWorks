@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { operationalCases } from './h3-finetune-terminal-reduced.mjs';
 import { requiredCases, ARTIFACTS, SOURCE, hashFile, sensitivityDecision, compareControlMedia } from './h3-finetune-terminal.mjs';
 import { caseBook, concretePlan, buildScenario, nativeCommands, referenceCommand, prepareCases, finalizeCampaignPlan, prepareControlledLoKr, fixtureBindings } from './h3-finetune-terminal-cases.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
@@ -41,7 +42,7 @@ test('casebook source metadata binds all four exact frozen artifact identities',
   assert.equal(new Set(caseBook.artifacts.map(a => a.expectedSha256)).size, 4);
 });
 test('plan derives full inventory from existing canonical contract, including last-only', () => {
-  const p = concretePlan(root, '/owned-native-source', '/owned-stage');
+  const p = concretePlan(root, '/owned-native-source', '/owned-stage',{inventory:'catalog-regression'});
   assert.deepEqual(p.cases.map(c => c.id), requiredCases().map(c => c.id));
   assert.equal(p.cases.filter(c => c.artifact).length, 8);
   for (const backend of ['mlx', 'cuda']) assert.ok(p.cases.some(c => c.id === `${backend}.capability.last-frame-only`));
@@ -51,7 +52,7 @@ test('plan derives full inventory from existing canonical contract, including la
 });
 test('actual preparation CLI returns data without a top-level-await import cycle or any native command',()=>{
   const r=spawnSync(process.execPath,[path.join(root,'scripts/h3-finetune-terminal.mjs'),'case-plan',root,'/unit_fake/native','/unit_fake/stage'],{encoding:'utf8',timeout:10000});
-  assert.equal(r.status,0,r.stderr);const p=JSON.parse(r.stdout);assert.equal(p.kind,'preparation-not-campaign-evidence');assert.deepEqual(p.cases.map(c=>c.id),requiredCases().map(c=>c.id));
+  assert.equal(r.status,0,r.stderr);const p=JSON.parse(r.stdout);assert.equal(p.kind,'preparation-not-campaign-evidence');assert.deepEqual(p.cases.map(c=>c.id),operationalCases().map(c=>c.id));
 });
 test('native commands use actual provider package, single integration binary, exact ignored cases and unfiltered listing', () => {
   for (const backend of ['mlx', 'cuda']) for (const check of ['convrot', 'pruned-interpolation', 'w4a8']) {
@@ -172,7 +173,7 @@ test('cold generation source-preparation cancellation installs, restarts cold, s
   const restart = s.lifecycleActions.find(v => v.kind === 'restart'); assert.equal(restart.beforeStep, 'synthetic_av0');
   const cancel = s.lifecycleActions.find(v => v.kind === 'source-cancel');
   assert.equal(cancel.beforeStep, 'synthetic_cancelled'); assert.equal(cancel.generationCapture, 'synthetic_av0/id'); assert.equal(cancel.modelCapture, 'synthetic_installed/result/modelId');
-  const c = concretePlan(root, '/unit_fake/native', '/unit_fake/stage').cases.find(v => v.id === 'mlx.lifecycle.generation-source-prep-cancel');
+  const c = concretePlan(root, '/unit_fake/native', '/unit_fake/stage',{inventory:'catalog-regression'}).cases.find(v => v.id === 'mlx.lifecycle.generation-source-prep-cancel');
   assert.ok(!Object.hasOwn(c, 'blockedPrerequisite'), 'the source-blocked prerequisite must be replaced by the actual contract'); assert.ok(c.scenario);
   assert.throws(() => buildScenario(named('lifecycle', 'generation-source-prep-cancel'), params(), [{ ...execution(), reuseInstalled: true }]), /managed imported installation/);
 });
@@ -240,9 +241,9 @@ test('complete canonical preparation writes executable scenarios without executi
   const parent = await mkdtemp(path.join(os.tmpdir(), 'sc26691-complete-prep-')); t.after(() => rm(parent, { recursive: true, force: true }));
   const native=path.join(parent,'unit_fake_native');await mkdir(path.join(native,'tests','fixtures'),{recursive:true});
   for(const mechanism of ['convrot','pruned-interpolation','w4a8'])await writeFile(path.join(native,caseBook.numeric[mechanism].fixture),JSON.stringify({proof_kind:'unit_fake',cases:[]}));
-  const out = path.join(parent, 'candidate'), p = { ...params(), proof_kind:'unit_fake', sceneworks: revision, inference: revision, swRoot: root, inferenceRoot: native, bindings: {} };
+  const out = path.join(parent, 'candidate'), p = { ...params(), inventory:'catalog-regression', proof_kind:'unit_fake', sceneworks: revision, inference: revision, swRoot: root, inferenceRoot: native, bindings: {} };
   p.identificationControlReceipt=path.join(parent,'identity-controls.json');await writeFile(p.identificationControlReceipt,JSON.stringify({kind:'unit_fake_metadata_only'}));
-  const plan = concretePlan(root, native, out);
+  const plan = concretePlan(root, native, out,{inventory:'catalog-regression'});
   for (const c of plan.cases.filter(c => c.scenario)) {
     const check = c.id.split('.').slice(2).join('.'); let es = [execution()];
     if (c.artifact) es[0].model.sha256 = caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256;
@@ -296,8 +297,37 @@ test('review repair LTX baseline imports an existing LoRA and selects its compat
   const generation=submissions(scenario)[0];assert.equal(generation.body.model,'ltx_2_5');assert.deepEqual(generation.body.loras,[{id:'owned_ltx_lora',weight:1}]);assert.deepEqual(scenario.steps.find(s=>s.id==='synthetic_adapter_selected').assert[0].contains,{id:'owned_ltx_lora',baseModel:'ltx_2_5'});
   e.ltxAdapter.baseModel='ltx_2_3';assert.throws(()=>buildScenario(named('generalization','ltx-add-select-generate'),params(),[e]),/compatible LTX base/);
 });
+function reducedExecution(c) {
+  const hybrid=c.assetSet==='hybrid',independent=c.assetSet==='independent',e=execution(hybrid?'hybrid':independent?'fl2va':'ref2va',c.index===1||c.index===2||c.index>=5&&c.index<=12?'full':'pruned');
+  const artifact=/^artifact\.(\d)-/.exec(c.modelKey);if(artifact)e.model.sha256=caseBook.artifacts[Number(artifact[1])].expectedSha256;
+  if(hybrid){e.model.sha256=caseBook.stagingAssets.hybrid[0].expectedSha256;e.model.hybridBinding={kind:'single-checkpoint',declarationSource:'unit_fake frozen declaration'};}
+  if(independent){e.model.sha256=caseBook.stagingAssets.pulpcut[0].expectedSha256;e.model.lineage={source:caseBook.stagingAssets.pulpcut[0].repo,revision:caseBook.stagingAssets.pulpcut[0].revision};}
+  e.mode=({'text':'text_to_video','image':'image_to_video','last-frame-only':'image_to_video','first-last-frame':'first_last_frame','reference':'reference_to_video','ordered-mixed':'reference_to_video'})[c.conditioning]??'reference_to_video';
+  const recipeId=({'fl-turbo-4v01':'minimax_h3_turbo_4step_v01','fl-turbo-8':'minimax_h3_turbo_8step','fl-turbo-4v1.0-768':'minimax_h3_turbo_4step_768p'})[c.adapterRecipe]??([1,3,5,6,7,8,9,10,11,12,13,14].includes(c.index)?'minimax_h3_ref2v_turbo_4step':null);
+  if(recipeId){const r=caseBook.sampling.turbo.find(v=>v.id===recipeId);Object.assign(e.sampling,{steps:r.steps,schedulerShift:r.schedulerShift,audioSchedulerShift:r.audioSchedulerShift,width:r.trainingShortEdge*2,height:r.trainingShortEdge});if(c.index!==12)e.adapters=[{id:r.id,kind:'lora',role:'accelerator',sha256:hash,source:'unit_fake source',revision,compatibilitySource:'unit_fake compatibility',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true}];}
+  if([3,13].includes(c.index))e.adapters.push({id:'unit_fake_lokr',kind:'lokr',sha256:hash,source:'unit_fake generated fixture',revision,compatibilitySource:'unit_fake compatibility',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true});
+  if(c.index===4){Object.assign(e.model,{sourceFormat:'native-single',sourcePath:'/synthetic-only/opaque.bin',originalPath:'/synthetic-only/original.safetensors',originalSha256:e.model.sha256});Object.assign(e,{ownershipMode:'linked',linkedRootId:'unit_fake_root',linkedRelativePath:'opaque.bin'});}
+  grant(e);if(c.index!==4)return [e];
+  const negative=structuredClone(e);negative.label='negative';negative.model.modelId='imported_negative';negative.model.sourcePath='/synthetic-only/different.bin';negative.model.sha256='f'.repeat(64);negative.identityControl={kind:'different-bytes-negative',expectedSourceSha256:e.model.sha256};delete negative.ownershipMode;delete negative.linkedRootId;delete negative.linkedRelativePath;return [e,grant(negative)];
+}
+test('default operational plan contains 22 single AV submissions, two probes and one actual cancel per backend',()=>{
+  const p=params();p.identificationControlReceipt='/synthetic-only/identity-controls.json';
+  const plan=concretePlan(root,'/unit_fake/native','/unit_fake/output');assert.equal(plan.inventory,'reduced-v1');assert.equal(plan.cases.length,50);assert.equal(plan.regressionCatalog.length,84);
+  for(const c of plan.cases.filter(c=>c.kind!=='actual-artifact-probe')){
+    const scenario=buildScenario(c,p,reducedExecution(c));assert.equal(submissions(scenario).length,1,c.id);assert.equal(scenario.comparisons.length,0,'controls share actual baseline jobs across cases, not hidden fan-out');
+    if(c.index===4){assert.equal(scenario.steps.filter(s=>s.path==='/api/v1/models/import').length,2);assert.ok(scenario.identificationControl);}
+    if(c.kind==='source-cancel')assert.ok(!scenario.steps.some(s=>s.id==='synthetic_av0_done'));
+  }
+});
+test('reduced recipes alter only intended conditioning and reject wrong frozen sources or absent accelerators',()=>{
+  const cases=operationalCases('mlx'),p=params(),get=index=>cases.find(c=>c.index===index),body=index=>submissions(buildScenario(get(index),p,reducedExecution(get(index))))[0].body;
+  const baseline=body(1);for(const [index,field]of [[6,'referenceAssetIds'],[7,'sourceClipAssetIds'],[8,'referenceAudioAssetIds']]){const changed=body(index);assert.deepEqual(changed[field],[]);for(const other of ['referenceAssetIds','sourceClipAssetIds','referenceAudioAssetIds'].filter(v=>v!==field))assert.deepEqual(changed[other],baseline[other]);}
+  for(const [index,field]of [[9,'referenceAssetIds'],[10,'sourceClipAssetIds'],[11,'referenceAudioAssetIds']])assert.deepEqual(body(index)[field],[...baseline[field]].reverse());
+  const wrong=reducedExecution(get(1));wrong[0].model.sha256='0'.repeat(64);assert.throws(()=>buildScenario(get(1),p,wrong),/frozen content/);
+  const noAdapter=reducedExecution(get(3));noAdapter[0].adapters=[];assert.throws(()=>buildScenario(get(3),p,noAdapter),/accelerator/);
+});
 test('review repair portable mapping binds exact value-bearing QKV FFN codec on both backends',()=>{
-  const plan=concretePlan(root,'/owned-native','/owned-output');for(const backend of ['mlx','cuda']){const commands=plan.cases.find(c=>c.id===`${backend}.numeric.tensor-mapping`).numericProof.supportingCommands;assert.equal(commands.length,1);assert.ok(commands[0].includes('--lib')&&commands[0].includes('--exact'));assert.ok(!commands[0].includes('--ignored'));assert.ok(commands[0].includes('minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions'));assert.ok(!commands[0].some(v=>v.includes('native_and_sharded_plans_reach_the_real_h3_provider_load_seam')));}
+  const plan=concretePlan(root,'/owned-native','/owned-output',{inventory:'catalog-regression'});for(const backend of ['mlx','cuda']){const commands=plan.cases.find(c=>c.id===`${backend}.numeric.tensor-mapping`).numericProof.supportingCommands;assert.equal(commands.length,1);assert.ok(commands[0].includes('--lib')&&commands[0].includes('--exact'));assert.ok(!commands[0].includes('--ignored'));assert.ok(commands[0].includes('minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions'));assert.ok(!commands[0].some(v=>v.includes('native_and_sharded_plans_reach_the_real_h3_provider_load_seam')));}
 });
 test('review repair every import including cancel and interruption needs explicit scoped legal authority',()=>{
   for(const [group,check]of [['capability','text'],['generalization','native-single'],['lifecycle','cancel'],['lifecycle','interruption-retry'],['lifecycle','restart-replay']]){const e=execution('fl2va');e.mode='text_to_video';e.model.sourceFormat='native-single';delete e.licenseAuthority;assert.throws(()=>buildScenario(named(group,check),params(),[e]),/license acknowledgment authority/,`${group}.${check}`);}
