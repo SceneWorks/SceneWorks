@@ -12,7 +12,7 @@ export function pointer(value, p) {
     return v[key];
   }, value);
 }
-function expand(value, captures) {
+export function expand(value, captures) {
   if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 1 && Object.hasOwn(value, '$concat')) {
     assert.ok(Array.isArray(value.$concat));
     return value.$concat.map(v => { const part = expand(v, captures); assert.ok(typeof part === 'string'); return part; }).join('');
@@ -26,7 +26,7 @@ function expand(value, captures) {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expand(v, captures)]));
   return value;
 }
-export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {} } = {}) {
+export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {} } = {}) {
   const base = new URL(s.baseUrl);
   assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
   assert.ok(s.timeoutSeconds > 0 && s.timeoutSeconds <= 7200);
@@ -41,12 +41,13 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
     const response = await fetchImpl(url, { method, headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) });
     const text = await response.text();
     const result = text ? JSON.parse(text) : null;
-    await record({ method, route, status: response.status, result });
+    await record({ method, route, request: body, status: response.status, result });
     assert.equal(response.status, expectedStatus, `${method} ${route}: ${text.slice(0, 400)}`);
     return result;
   }
   try {
     for (const step of s.steps) {
+      await beforeStep({ step, captures });
       assert.ok(!Object.hasOwn(captures, step.id), 'duplicate step id');
       let result;
       if (step.waitJob) {
@@ -54,7 +55,7 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
         activeJob = jobId;
         for (;;) {
           result = await request('GET', `/api/v1/jobs/${encodeURIComponent(jobId)}`, undefined, 200);
-          if (['completed', 'failed', 'cancelled', 'canceled'].includes(result.status)) break;
+          if (['completed', 'failed', 'cancelled', 'canceled', 'interrupted'].includes(result.status)) break;
           await sleep(Math.min(1000, Math.max(0, deadline - now())));
         }
         assert.equal(result.status, step.expectedJobStatus ?? 'completed', 'job did not complete as expected');

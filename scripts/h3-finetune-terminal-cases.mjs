@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
-import { requiredCases, SOURCE, ARTIFACTS } from './h3-finetune-terminal.mjs';
+import { requiredCases, SOURCE, ARTIFACTS, hashFile, validatePlan } from './h3-finetune-terminal.mjs';
 export const caseBook = JSON.parse(await readFile(new URL('../docs/testing/sc-26691-h3-cases.json', import.meta.url), 'utf8'));
 const clone = structuredClone;
 const cap = name => ({ $capture: name });
@@ -48,7 +48,7 @@ function cargo(root, backend, [pkg, target, selector], list = false) {
   if (target) argv.push('--test', target);
   else argv.push('--lib');
   argv.push('--');
-  if (selector) argv.push(selector);
+  if (selector && !list) argv.push(selector);
   argv.push(...(list ? ['--list'] : ['--nocapture', '--test-threads=1']));
   return argv;
 }
@@ -75,6 +75,24 @@ export function referenceCommand(root, check, referenceDir, outputDir) {
   if (check === 'w4a8') cmd.push('--receipt', path.join(outputDir, 'w4a8-reference-receipt.json'));
   return cmd;
 }
+export async function prepareControlledLoKr(spec,directory) {
+  assert.ok(path.isAbsolute(directory));
+  assert.match(spec.target??'',/^transformer_blocks\.\d+\.attn\.to_(q|k|v|out)$/,'explicit supported body target required, not an AdaLN filter');
+  hex(spec.sourceCheckpointSha256);hex(spec.sourceContractSha256);assert.ok(spec.sourceDeclaration,'actual source/shape declaration required');
+  const [out,input]=spec.shape??[];assert.ok([out,input].every(v=>Number.isSafeInteger(v)&&v>0));
+  assert.ok(Number.isSafeInteger(spec.seed)&&spec.seed>=0&&spec.seed<=0xffffffff);assert.ok(Number.isFinite(spec.amplitude)&&spec.amplitude>0);
+  const factor=n=>{for(let k=Math.floor(Math.sqrt(n));k>0;k--)if(n%k===0)return k;};
+  const a=factor(out),b=out/a,c=factor(input),d=input/c,shapes=[[a,c],[b,d]];
+  const elements=a*c+b*d;assert.ok(elements*4<=2*1024*1024,'this CPU conditioning fixture must remain small; no dense whole-model delta');
+  let state=spec.seed>>>0;const next=()=>{state=(Math.imul(state,1664525)+1013904223)>>>0;return (state/4294967296*2-1)*spec.amplitude;};
+  const tensors=shapes.map(shape=>{const bytes=Buffer.alloc(shape[0]*shape[1]*4);let nonzero=false;for(let i=0;i<bytes.length/4;i++){const value=Math.fround(next());assert.ok(Number.isFinite(value),'generated factor must be finite F32');nonzero ||= value!==0;bytes.writeFloatLE(value,i*4);}assert.ok(nonzero,'generated factors must have a nonzero compatibility effect');return bytes;});
+  const header={__metadata__:{format:'pt',networkType:'lokr',rank:String(a),alpha:String(a),sc26691_provenance:'controlled-generated-body-only; NOT a public trained adapter',sourceCheckpointSha256:spec.sourceCheckpointSha256,sourceContractSha256:spec.sourceContractSha256}};let offset=0;
+  for(const [i,suffix] of ['lokr_w1','lokr_w2'].entries()){header[`${spec.target}.${suffix}`]={dtype:'F32',shape:shapes[i],data_offsets:[offset,offset+tensors[i].length]};offset+=tensors[i].length;}
+  const text=Buffer.from(JSON.stringify(header)),padding=(8-text.length%8)%8,padded=Buffer.concat([text,Buffer.alloc(padding,32)]),size=Buffer.alloc(8);size.writeBigUInt64LE(BigInt(padded.length));
+  await mkdir(directory);const file=path.join(directory,'controlled-body-lokr.safetensors');await writeFile(file,Buffer.concat([size,padded,...tensors]),{flag:'wx'});
+  const provenance={kind:'prepared-generated-input-not-campaign-proof',...(spec.proof_kind==='unit_fake'?{proof_kind:'unit_fake'}:{}),trained:false,license:'CC0-1.0 newly generated factor values; inherited base-model terms still apply to model execution',sourceCheckpointSha256:spec.sourceCheckpointSha256,sourceContractSha256:spec.sourceContractSha256,sourceDeclaration:spec.sourceDeclaration,target:spec.target,shape:spec.shape,factorShapes:shapes,seed:spec.seed,amplitude:spec.amplitude,tensorNames:Object.keys(header).filter(k=>k!=='__metadata__'),sha256:await hashFile(file),meaning:'Every generated factor/delta is retained. This does not trim, convert or make claims about a public trained adapter. Native target/shape compatibility and effect on the real checkpoint must be proved by the authorized case.'};
+  await writeFile(path.join(directory,'provenance.json'),JSON.stringify(provenance,null,2)+'\n',{flag:'wx'});return {file,provenance};
+}
 export function concretePlan(swRoot, inferenceRoot, stageRoot) {
   for (const r of [swRoot, inferenceRoot, stageRoot]) assert.ok(path.isAbsolute(r), 'absolute coordinator staging paths required');
   assert.deepEqual(caseBook.source, SOURCE);
@@ -89,12 +107,16 @@ export function concretePlan(swRoot, inferenceRoot, stageRoot) {
       const scenario = path.join(stageRoot, `${c.id}.scenario.json`);
       const transcript = path.join(stageRoot, `${c.id}.api.json`);
       const apiCommand = ['node', path.join(swRoot, 'scripts/h3-finetune-terminal-api.mjs'), scenario, transcript];
-      if (c.group === 'numeric' && check !== 'tensor-mapping') return {
-        ...c, ...nativeCommands(inferenceRoot, c.backend, check),
-        referenceCommand: referenceCommand(inferenceRoot, check, path.join(stageRoot, `reference-${check}`), path.join(stageRoot, c.id)),
-        reference: caseBook.numeric[check],
-        captureGap: 'Structured embedded fixture comparisons exist; flat terminal numeric arrays are NOT exported. Regenerate outside sources and compare to embedded fixture before compiling final clean pair. Do not overwrite pinned fixtures or manufacture candidate arrays.',
-      };
+      if (c.group === 'numeric') {
+        const mechanism=check==='tensor-mapping'?'convrot':check;
+        const native=nativeCommands(inferenceRoot,c.backend,mechanism), authority=caseBook.numeric[mechanism];
+        return {...c,...native,referenceRevision:authority.referenceRevision,
+          numericProof:{kind:'native-pinned-fixture',mechanism,package:c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',tests:authority.selectors??[authority.selector],...(check==='tensor-mapping'?{supportingCommands:[cargo(swRoot,c.backend,['sceneworks-core','minimax_h3_import',caseBook.numeric['tensor-mapping'].selector]),cargo(swRoot,c.backend,fixtureBindings.generalization['native-single'])]}:{})},
+          referenceCommand:referenceCommand(inferenceRoot,mechanism,path.join(stageRoot,`reference-${mechanism}`),path.join(stageRoot,c.id)),reference:authority,
+          adapterCommand:['node',path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'numeric',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot],
+          referenceMeaning:'Native GPU assertions against the existing precomputed independent hash-bound CPU reference fixture; not upstream CUDA execution. No extra flat-vector export requirement.',
+        };
+      }
       const binding = c.group === 'numeric'
         ? ['sceneworks-core', 'minimax_h3_import', caseBook.numeric['tensor-mapping'].selector]
         : fixtureBindings[c.group]?.[check];
@@ -144,7 +166,10 @@ function validateExecution(e, c) {
   if (e.family !== 'ltx') {
     assert.equal(e.model.baseModel, bases[e.model.partition], 'explicit compatible base/partition pair required');
     assert.ok(['full', 'pruned'].includes(e.model.topology), 'topology and operation partition are separate: hybrid is not a pruning topology');
-    if (e.model.partition === 'hybrid') { assert.ok(e.model.companion?.source, 'explicit hybrid companion lineage required'); hex(e.model.companion?.sha256); }
+    if (e.model.partition === 'hybrid') {
+      if (e.model.hybridBinding?.kind === 'single-checkpoint') assert.ok(e.model.hybridBinding.declarationSource, 'single hybrid checkpoint requires explicit source declaration, not shape inference');
+      else { assert.ok(e.model.companion?.source, 'explicit hybrid checkpoint declaration or companion lineage required'); hex(e.model.companion?.sha256); }
+    }
     assert.ok(e.model.supportedModes?.includes(e.mode), 'operation must come from the resolved imported contract');
     assert.ok(e.model.partition === 'hybrid' || (e.mode === 'reference_to_video' ? e.model.partition === 'ref2va' : e.model.partition === 'fl2va'), 'declared partition does not support this operation');
   }
@@ -160,6 +185,8 @@ function validateExecution(e, c) {
     hex(a.sha256); assert.ok(a.id && a.source && a.revision && a.compatibilitySource && a.licenseAcknowledged === true);
     assert.equal(a.topology, e.model.topology, 'adapter topology must match source, not just dimensions');
     assert.equal(a.partition, e.model.partition);
+    const recipe=caseBook.sampling.turbo.find(r=>r.id===a.id);
+    if(recipe){for(const key of ['steps','schedulerShift','audioSchedulerShift'])assert.equal(s[key],recipe[key],`selected accelerator must use its declared trained ${key}`);assert.equal(Math.min(s.width,s.height),recipe.trainingShortEdge);}
   }
 }
 function conditioning(check, assets) {
@@ -194,13 +221,13 @@ function assertCoverage(c, executions) {
   }
   if (check === 'hybrid') {
     for (const mode of ['text_to_video', 'image_to_video', 'reference_to_video']) assert.ok(executions.some(e => e.mode === mode && e.model.partition === 'hybrid'), `hybrid must exercise ${mode}`);
-    for (const e of executions) assert.ok(e.model.companion && e.model.companion.source && e.model.companion.sha256, 'explicit hybrid companion lineage required');
+    for (const e of executions) assert.ok((e.model.hybridBinding?.kind === 'single-checkpoint' && e.model.hybridBinding.declarationSource) || (e.model.companion?.source && e.model.companion.sha256), 'explicit single-checkpoint hybrid declaration or companion lineage required');
   }
 }
 export function buildScenario(c, p, executions) {
   assert.ok(requiredCases().some(expected => expected.id === c.id));
   assert.ok(executions?.length > 0, 'actual staged execution binding required');
-  assert.ok(p.projectId && Number.isInteger(p.seed) && typeof p.requestedGpu === 'string' && p.requestedGpu.length > 0);
+  assert.ok(p.projectId && Number.isSafeInteger(p.seed) && p.seed>=0 && typeof p.requestedGpu === 'string' && p.requestedGpu.length > 0);
   assert.ok(p.timeoutSeconds > 0 && p.timeoutSeconds <= 7200);
   const u = new URL(p.baseUrl); assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(u.hostname));
   assertCoverage(c, executions);
@@ -215,11 +242,12 @@ export function buildScenario(c, p, executions) {
     assert.equal(new Set(executions.map(e => e.model.sha256)).size, 1, 'equivalent ownership must use the same source bytes');
   }
   if (check === 'cold-warm-staged') for (const label of ['cold', 'warm', 'staged']) assert.ok(executions.some(e => e.label === label), `missing ${label} execution; stage/cache state must also be observed, not inferred from the label`);
-  const steps = [], comparisons = [];
+  const steps = clone(p.setupSteps ?? []), comparisons = [], lifecycleActions = [];
   for (const e of executions) {
     validateExecution(e, c);
     const prefix = e.label;
     const importBody = { modelId: e.model.modelId, name: `sc26691 ${prefix}`, sourcePath: e.model.sourcePath, expectedSha256: e.model.sha256, baseModel: e.model.baseModel, licenseAcknowledged: true };
+    if(e.importSource){assert.equal(e.importSource.kind,'huggingFace');assert.notEqual(e.ownershipMode,'linked','choose the actual managed HF or approved linked source, not contradictory locators');assert.match(e.importSource.revision??'',/^[a-f0-9]{40}$/);importBody.source=clone(e.importSource);delete importBody.sourcePath;if(c.artifact){assert.equal(e.importSource.repo,SOURCE.repo);assert.equal(e.importSource.revision,SOURCE.revision);assert.deepEqual(e.importSource.files,[c.artifact]);}}
     if (e.model.sourceKind === 'directory') delete importBody.expectedSha256; // No invented directory digest; retain per-file closure in preparation plan.
     if (e.family !== 'ltx') importBody.minimaxH3Partition = e.model.partition;
     if (e.ownershipMode === 'linked') {
@@ -227,8 +255,8 @@ export function buildScenario(c, p, executions) {
       delete importBody.sourcePath;
       Object.assign(importBody, { ownershipMode: 'linked', linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath });
     }
-    if (check === 'restart-replay') {
-      assert.ok(e.replayJobId && e.reuseInstalled, 'supply actual pre-restart completed job ID from task-owned persistent state');
+    if (check === 'restart-replay' && e.replayJobId) {
+      assert.ok(e.reuseInstalled, 'explicit phased replay requires an actual previously owned persisted job');
       steps.push({ id: `${prefix}_original`, method: 'GET', path: `/api/v1/jobs/${encodeURIComponent(e.replayJobId)}`, expectedStatus: 200, assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
       steps.push({ id: `${prefix}_replay`, method: 'POST', path: `/api/v1/jobs/${encodeURIComponent(e.replayJobId)}/duplicate`, body: {}, expectedStatus: 201, assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed)] });
       steps.push({ id: `${prefix}_replayed`, waitJob: cap(`${prefix}_replay/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
@@ -237,8 +265,9 @@ export function buildScenario(c, p, executions) {
     if (!e.reuseInstalled) {
       steps.push({ id: `${prefix}_import`, method: 'POST', path: '/api/v1/models/import', body: importBody, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
       if (['cancel', 'interruption-retry'].includes(check)) {
+        if(check==='interruption-retry')lifecycleActions.push({kind:'interrupt-import',beforeStep:`${prefix}_cancel`,jobCapture:`${prefix}_import/id`});
         steps.push({ id: `${prefix}_cancel`, method: 'POST', path: route('/api/v1/jobs/', cap(`${prefix}_import/id`), '/cancel'), expectedStatus: 200 });
-        steps.push({ id: `${prefix}_cancelled`, waitJob: cap(`${prefix}_import/id`), expectedJobStatus: 'cancelled', assert: [eq('/status', 'cancelled')] });
+        steps.push({ id: `${prefix}_cancelled`, waitJob: cap(`${prefix}_import/id`), expectedJobStatus: 'canceled', assert: [eq('/status', 'canceled')] });
         if (check === 'interruption-retry') {
           steps.push({ id: `${prefix}_retry`, method: 'POST', path: route('/api/v1/jobs/', cap(`${prefix}_import/id`), '/retry'), body: {}, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
           steps.push({ id: `${prefix}_retried`, waitJob: cap(`${prefix}_retry/id`), assert: [eq('/result/modelId', e.model.modelId)] });
@@ -252,7 +281,12 @@ export function buildScenario(c, p, executions) {
     const variants = conditioning(requestedCheck, p.assets ?? {});
     if (['turbo', 'lora', 'lokr'].includes(check)) {
       // Hold checkpoint, seed, NFE, shifts and geometry fixed; remove ONLY adapters.
-      variants.splice(1, variants.length, { ...variants[0], loras: [] });
+      const accelerator=a=>a.role==='accelerator'||caseBook.sampling.turbo.some(r=>r.id===a.id);
+      let targets=(e.adapters??[]).filter(a=>check==='turbo'?accelerator(a):a.kind===check&&!accelerator(a));
+      if(check==='lora'&&!targets.length)targets=(e.adapters??[]).filter(a=>a.kind==='lora');
+      assert.ok(targets.length,'selected adapter mechanism must have a real controlled target');
+      const removed=new Set(targets.map(a=>a.id));
+      variants.splice(1, variants.length, { ...variants[0], loras: selectedAdapters.filter(a=>!removed.has(a.id)) });
       variants[0] = { ...variants[0], loras: selectedAdapters };
     }
     // Real repeated-baseline floor, then one mechanism intervention at a time.
@@ -261,20 +295,27 @@ export function buildScenario(c, p, executions) {
       const id = `${prefix}_av${i}`, s = e.sampling;
       const body = {
         projectId: p.projectId, model: e.reuseInstalled ? e.model.modelId : cap(`${prefix}_installed/result/modelId`), mode: e.mode,
-        prompt: 'A red cube slides right across a white table, synchronized soft impacts.', seed: p.seed,
+        prompt: e.prompt ?? (['audio-reference','ordered-multimodal'].includes(requestedCheck) ? 'A person faces the camera and says, "We are glad to welcome you today and share a clear account of the work we have finished." Natural continuous speech, steady camera, synchronized voice audio.' : 'A red cube slides right across a white table, synchronized soft impacts.'), seed: p.seed,
         requestedGpu: p.requestedGpu, duration: s.duration, fps: s.fps, width: s.width, height: s.height,
         advanced: { ...(s.advanced ?? {}), ...(e.family === 'ltx' ? {} : { mlxQuantize: { bf16: 0, q4: 4, q8: 8 }[e.model.componentTier] }), steps: s.steps, ...(s.schedulerShift === undefined ? {} : { schedulerShift: s.schedulerShift }), ...(s.audioSchedulerShift === undefined ? {} : { audioSchedulerShift: s.audioSchedulerShift }) },
         loras: selectedAdapters, ...variant,
       };
       steps.push({ id, method: 'POST', path: '/api/v1/video/jobs', body, expectedStatus: 201,
-        assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed), eq('/payload/mode', e.mode)] });
+        assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed), eq('/payload/mode', e.mode), eq('/payload/advanced/steps',s.steps), eq('/payload/width',s.width), eq('/payload/height',s.height), eq('/payload/fps',s.fps), eq('/payload/duration',s.duration)] });
       steps.push({ id: `${id}_done`, waitJob: cap(`${id}/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
     }
+    if (check === 'restart-replay') {
+      assert.ok(!e.reuseInstalled, 'self-contained restart first creates its actual owned model/job');
+      const id=`${prefix}_replay`;
+      lifecycleActions.push({kind:'restart',beforeStep:id});
+      steps.push({id,method:'POST',path:route('/api/v1/jobs/',cap(`${prefix}_av0/id`),'/duplicate'),body:{},expectedStatus:201,assert:[eq('/payload/model',e.model.modelId),eq('/payload/seed',p.seed)]});
+      steps.push({id:`${id}_done`,waitJob:cap(`${id}/id`),assert:[eq('/status','completed'),eq('/payload/model',e.model.modelId)]});
+    }
     if (check === 'removal') steps.push({ id: `${prefix}_removed`, method: 'DELETE', path: `/api/v1/models/${encodeURIComponent(e.model.modelId)}?permanent=true`, expectedStatus: 200, assert: [eq('/id', e.model.modelId), eq('/removedManifestEntry', true)] });
-    if (c.group === 'capability') comparisons.push({ label: prefix, baseline: `${prefix}_av0_done`, repeatedBaseline: `${prefix}_av1_done`, interventions: variantsToRun.slice(2).map((v, i) => ({ job: `${prefix}_av${i + 2}_done`, stream: check === 'audio-reference' || JSON.stringify(v.referenceAudioAssetIds) !== JSON.stringify(variants[0].referenceAudioAssetIds) ? 'audio' : 'video' })), stream: check === 'audio-reference' ? 'audio' : 'video', thresholds: clone(p.sensitivity), command: ['node', 'scripts/h3-finetune-terminal.mjs', 'compare-control', 'BASELINE_AV_FROM_ACTUAL_JOB', 'REPEATED_AV_FROM_ACTUAL_JOB', 'INTERVENTION_AV_FROM_ACTUAL_JOB', check === 'audio-reference' ? 'audio' : 'video', String(p.sensitivity.minimumControlDelta), String(p.sensitivity.maximumBaselineDelta)], policy: 'Bind checkpoint/source closure + seed + complete sampling/config; decode both AV streams. Measure repeated-baseline RMSE B. Predeclare intervention threshold T and require intervention RMSE > max(T,3*B). If noise floor is unstable, acceptance is unresolved, not any-hash-difference success.' });
+    if (c.group === 'capability') comparisons.push({ label: prefix, baseline: `${prefix}_av0_done`, repeatedBaseline: `${prefix}_av1_done`, interventions: variantsToRun.slice(2).map((v, i) => ({ job: `${prefix}_av${i + 2}_done`, allowedChanges: [...new Set([...Object.keys(variants[0]),...Object.keys(v)])].filter(k=>JSON.stringify(variants[0][k])!==JSON.stringify(v[k])), stream: check === 'audio-reference' || JSON.stringify(v.referenceAudioAssetIds) !== JSON.stringify(variants[0].referenceAudioAssetIds) ? 'audio' : 'video' })), stream: check === 'audio-reference' ? 'audio' : 'video', thresholds: clone(p.sensitivity), command: ['node', 'scripts/h3-finetune-terminal.mjs', 'compare-control', 'BASELINE_AV_FROM_ACTUAL_JOB', 'REPEATED_AV_FROM_ACTUAL_JOB', 'INTERVENTION_AV_FROM_ACTUAL_JOB', check === 'audio-reference' ? 'audio' : 'video', String(p.sensitivity.minimumControlDelta), String(p.sensitivity.maximumBaselineDelta)], policy: 'Bind checkpoint/source closure + seed + complete sampling/config; decode both AV streams. Measure repeated-baseline RMSE B. Predeclare intervention threshold T and require intervention RMSE > max(T,3*B). If noise floor is unstable, acceptance is unresolved, not any-hash-difference success.' });
   }
   assert.equal(new Set(steps.map(s => s.id)).size, steps.length, 'execution labels must be unique');
-  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons };
+  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons, lifecycleActions };
 }
 // Deliberately not a run-case plan: no invented evidence.json or successful runtime metrics.
 export async function prepareCases(parameters, destination) {
@@ -290,8 +331,42 @@ export async function prepareCases(parameters, destination) {
   // Exclusive directory: no overwrite/recovery of another campaign candidate.
   await mkdir(destination);
   for (const c of requiredCases().filter(c => c.group === 'numeric')) await mkdir(path.join(destination, c.id));
-  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
+  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, importSource: e.importSource, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
   await writeFile(path.join(destination, 'case-plan.json'), JSON.stringify({ ...plan, cases, responsibleTask: 'sc-26691', sceneworks: parameters.sceneworks, inference: parameters.inference }, null, 2) + '\n', { flag: 'wx' });
   for (const [id, scenario] of scenarios) await writeFile(path.join(destination, `${id}.scenario.json`), JSON.stringify(scenario, null, 2) + '\n', { flag: 'wx' });
   return { cases: plan.cases.length, scenarios: scenarios.length, status: 'prepared-not-executed', unresolvedInterfaces: plan.unresolvedInterfaces };
+}
+// Bind an already materialized casebook to ACTUAL staged input identities. No model bytes are read
+// here; the authorized runner independently streams every declared input before/after execution.
+export async function finalizeCampaignPlan(parameters, preparedRoot) {
+  const book=JSON.parse(await readFile(path.join(preparedRoot,'case-plan.json'),'utf8'));
+  assert.equal(book.sceneworks,parameters.sceneworks);assert.equal(book.inference,parameters.inference);
+  assert.ok(path.isAbsolute(parameters.output) && parameters.nextAuthorizedAction?.length>10);
+  const filename=path.join(preparedRoot,'campaign-plan.json'),cases=[];
+  for(const template of book.cases) {
+    const c={...template,evidence:'evidence.json',timeoutSeconds:parameters.timeoutSeconds,inputs:clone(parameters.caseInputs?.[template.id]??[]),loadHostBudgetBytes:parameters.budgets?.[template.backend]?.hostBytes,loadDeviceBudgetBytes:parameters.budgets?.[template.backend]?.deviceBytes};
+    const cfg={...(parameters.runtime??{}),...(parameters.backends?.[c.backend]?.runtime??{}),...(parameters.caseRuntime?.[c.id]??{})};
+    if(c.numericProof){
+      const mechanism=c.numericProof.mechanism, fixture=path.join(parameters.inferenceRoot,caseBook.numeric[mechanism].fixture);
+      c.inputs.push({path:fixture,sha256:await hashFile(fixture),role:'numeric-fixture'});
+      assert.ok(c.inputs.some(i=>i.role==='reference'),'stage actual pinned external reference blobs for native arithmetic');
+      c.runtime={deviceId:cfg.deviceId};c.command=['node',path.join(parameters.swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'numeric',filename,c.id,parameters.swRoot,parameters.inferenceRoot];
+    } else if(c.scenario || cfg.scenario){
+      c.scenario=cfg.scenario??c.scenario;
+      c.inputs.push({path:c.scenario,sha256:await hashFile(c.scenario),role:'scenario'});
+      for(const source of c.declaredSourceBindings??[]){
+        assert.ok(c.inputs.some(i=>i.role==='checkpoint'&&i.sha256===source.model.sha256),'stage each selected actual checkpoint closure');
+        for(const component of [...(source.model.components??[]),...(source.adapters??[])])assert.ok(c.inputs.some(i=>i.sha256===component.sha256),'stage each actual bound component/adapter');
+      }
+      c.runtime={...cfg,scenario:c.scenario};c.command=['node',path.join(parameters.swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'api',filename,c.id,parameters.swRoot,parameters.inferenceRoot];
+      const sensitivity=parameters.backends?.[c.backend]?.sensitivity??parameters.sensitivity;
+      if(c.group==='capability'){c.minimumControlDelta=sensitivity.minimumControlDelta;c.controlStream=c.id.endsWith('.audio-reference')?'audio':'video';}
+    } else {
+      c.command=c.commands[0];c.fixtureProof={kind:'source-bound-assertions',deviceId:cfg.deviceId};
+      assert.ok(c.inputs.length,'bind the existing source fixture/program inputs, not a fictional model load');
+    }
+    cases.push(c);
+  }
+  const plan={version:1,source:SOURCE,sceneworks:parameters.sceneworks,inference:parameters.inference,output:parameters.output,responsibleTask:'sc-26691',nextAuthorizedAction:parameters.nextAuthorizedAction,cases,...(parameters.proof_kind==='unit_fake'?{proof_kind:'unit_fake'}:{})};validatePlan(plan);
+  await writeFile(filename,JSON.stringify(plan,null,2)+'\n',{flag:'wx'});return {plan:filename,cases:cases.length,status:'bound-not-executed'};
 }

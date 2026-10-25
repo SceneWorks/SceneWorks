@@ -97,6 +97,17 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: h3-${{ inputs.case_id }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ inputs.output_path }}/${{ inputs.case_id }}/
+          # Receipts/media only. App/cache/build state lives outside the case directory;
+          # also exclude accidentally staged checkpoint payloads from evidence publication.
+          path: |
+            ${{ inputs.output_path }}/${{ inputs.case_id }}/
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/service/**
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/target/**
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/fixture-target/**
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/*.safetensors
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/*.gguf
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/*.bin
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/*.pt
+            !${{ inputs.output_path }}/${{ inputs.case_id }}/**/*.pth
           if-no-files-found: error
           retention-days: 30

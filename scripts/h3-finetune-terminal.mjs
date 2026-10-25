@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
@@ -30,12 +30,14 @@ export function requiredCases() {
     ...Object.entries(SURFACE).flatMap(([group, checks]) => checks.map(check => ({ id: `${backend}.${group}.${check}`, backend, group }))),
   ]);
 }
+const absolutePath = v => typeof v === 'string' && (path.posix.isAbsolute(v) || path.win32.isAbsolute(v));
 const sha40 = v => assert.match(v ?? '', /^[a-f0-9]{40}$/);
 const sha64 = v => assert.match(v ?? '', /^[a-f0-9]{64}$/);
 const positive = v => assert.ok(Number.isFinite(v) && v > 0, 'positive measured value required');
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
 // Final delivery links arrive after hardware execution; they are not execution inputs.
 const digest = ({ delivery: _delivery, ...inputs }) => createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
+export const executionPlanDigest = digest;
 export async function hashFile(p) {
   const h = createHash('sha256');
   for await (const chunk of createReadStream(p)) h.update(chunk);
@@ -49,7 +51,7 @@ export function validatePlan(p) {
   assert.equal(p.version, 1);
   sha40(p.sceneworks); sha40(p.inference);
   assert.deepEqual(p.source, SOURCE);
-  assert.ok(path.isAbsolute(p.output), 'external absolute output required');
+  assert.ok(absolutePath(p.output), 'external absolute output required');
   assert.ok(p.responsibleTask === 'sc-26691');
   assert.ok(typeof p.nextAuthorizedAction === 'string' && p.nextAuthorizedAction.length > 10);
   assert.equal(p.cases.length, requiredCases().length, 'complete acceptance inventory required');
@@ -60,10 +62,17 @@ export function validatePlan(p) {
     assert.ok(Number.isInteger(c.timeoutSeconds) && c.timeoutSeconds > 0 && c.timeoutSeconds <= 7200);
     assert.ok(Array.isArray(c.command) && c.command.length > 0 && c.command.every(s => typeof s === 'string'));
     assert.ok(Array.isArray(c.inputs) && c.inputs.length > 0);
-    for (const input of c.inputs) { sha64(input.sha256); assert.ok(path.isAbsolute(input.path)); }
+    for (const input of c.inputs) { sha64(input.sha256); assert.ok(absolutePath(input.path)); }
     assert.ok(typeof c.evidence === 'string' && c.evidence.length > 0);
     positive(c.loadHostBudgetBytes); positive(c.loadDeviceBudgetBytes);
-    if (c.group === 'numeric') {
+    if (c.runtime?.scenario) {
+      assert.ok(absolutePath(c.runtime.scenario) && c.inputs.some(i => i.path === c.runtime.scenario && i.role === 'scenario'), 'actual bound API scenario required');
+      assert.ok(Number.isInteger(c.runtime.port) && c.runtime.port > 1024 && c.runtime.port <= 65535 && typeof c.runtime.gpuId === 'string', 'owned service port/device configuration required');
+    }
+    if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
+      sha40(c.referenceRevision);
+      assert.ok(c.numericProof.tests?.length && c.inputs.some(i => i.role === 'numeric-fixture') && c.inputs.some(i => i.role === 'reference'), 'actual native comparisons and pinned fixture/reference inputs required');
+    } else if (c.group === 'numeric') {
       sha40(c.referenceRevision); compareNumeric([0], [0], c.tolerance);
       assert.ok(Array.isArray(c.referenceCommand) && c.referenceCommand.length > 0 && c.referenceCommand.every(s => typeof s === 'string'));
       assert.ok(typeof c.referenceOutput === 'string' && c.referenceOutput.length > 0);
@@ -86,8 +95,13 @@ export async function sourcePair(p, root, inferenceRoot) {
     assert.ok(rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel), 'outputs must be outside source trees');
   }
 }
-export async function verifyInputs(c) {
-  for (const input of c.inputs) assert.equal(await hashFile(input.path), input.sha256, `content changed: ${input.path}`);
+export async function verifyInputs(c, allowedRoots) {
+  const roots = allowedRoots ? await Promise.all(allowedRoots.map(async root => ({ logical: path.resolve(root), actual: await realpath(root) }))) : undefined;
+  const below = (root, file) => { const rel = path.relative(root, file); return rel && !rel.startsWith('..') && !path.isAbsolute(rel); };
+  for (const input of c.inputs) {
+    if (roots) { const candidate = path.resolve(input.path); assert.ok(roots.some(r => below(r.logical, candidate) || below(r.actual, candidate)), 'input outside task staging or paired source roots'); const actual = await realpath(candidate); assert.ok(roots.some(r => below(r.actual, actual)), 'input symlink escapes task/source roots'); }
+    assert.equal(await hashFile(input.path), input.sha256, `content changed: ${input.path}`);
+  }
 }
 export function verifyFrozenArtifact(c, catalog) {
   assert.equal(catalog.sha, SOURCE.revision, 'wrong frozen HF revision');
@@ -228,6 +242,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
   for (const [key, value] of Object.entries(canonical)) assert.equal(c[key], value, 'case reclassification cannot weaken acceptance');
   const e = await json(contained(dir, c.evidence));
   assert.equal(e.status, 'executed');
+  assert.notEqual(e.proof_kind, 'unit_fake', 'unit_fake cannot be campaign evidence');
   assert.equal(e.sceneworks, p.sceneworks); assert.equal(e.inference, p.inference);
   assert.equal(e.caseId, c.id); assert.equal(e.backend, c.backend);
   assert.ok(e.hardware?.device && e.hardware?.driver, 'physical hardware identity required');
@@ -298,7 +313,19 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${assertions.length}`), 'API driver did not complete');
       files.push({ path: e.apiTranscript, sha256: await hashFile(contained(dir, e.apiTranscript)) });
     } else executedTests(log);
-    if (c.group === 'numeric') {
+    if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
+      const { validateComparisonProof } = await import('./h3-finetune-terminal-runtime.mjs');
+      const proof = await json(contained(dir, e.nativeComparison));
+      assert.equal(proof.sceneworks, p.sceneworks); assert.equal(proof.inference, p.inference);
+      contained(await realpath(p.output), await realpath(proof.binary.path));
+      assert.equal(await hashFile(proof.binary.path), proof.binary.sha256, 'compiled native binary changed');
+      for (const input of [...proof.fixtures, ...proof.referenceBlobs]) assert.equal(await hashFile(input.path), input.sha256);
+      let nativeLog = '';
+      for (const run of proof.runs) { const text = await readFile(contained(dir, run.log), 'utf8'); nativeLog += text + '\n'; }
+      for (const item of proof.supporting ?? []) assert.equal(executedTests(await readFile(contained(dir, item.log), 'utf8')), item.passed);
+      numeric = validateComparisonProof(c, proof, nativeLog);
+      files.push({ path: e.nativeComparison, sha256: await hashFile(contained(dir, e.nativeComparison)) });
+    } else if (c.group === 'numeric') {
       sha40(e.reference?.revision); sha64(e.reference?.sha256);
       assert.equal(e.reference.revision, c.referenceRevision, 'reference revision drift');
       assert.ok(c.inputs.some(i => i.role === 'reference' && i.sha256 === e.reference.sha256), 'unpinned executable reference');
@@ -312,7 +339,13 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       files.push({ path: e.numeric.candidate, sha256: await hashFile(candidatePath) }, { path: e.numeric.reference, sha256: await hashFile(referencePath) });
     }
   }
-  return { evidenceSha256: await hashFile(contained(dir, c.evidence)), processLogSha256: createHash('sha256').update(log).digest('hex'), files, av, numeric };
+  let runtime;
+  if (e.runtimeBindings) {
+    assert.equal(e.runtimeBindings, 'source-job-output.json');
+    const { verifyAPIBindings } = await import('./h3-finetune-terminal-runtime.mjs');
+    runtime = await verifyAPIBindings(p, c, dir, decode, delta);
+  }
+  return { evidenceSha256: await hashFile(contained(dir, c.evidence)), processLogSha256: createHash('sha256').update(log).digest('hex'), files, ...(av ? { av } : {}), ...(numeric ? { numeric } : {}), ...(runtime ? { runtime } : {}) };
 }
 // No shell interpolation. The process must implement cooperative timeout/cancel (native GPU
 // execution must not be killed mid-command-buffer); Actions is the final job timeout boundary.
@@ -330,13 +363,14 @@ export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds }) {
   } finally { clearTimeout(timer); await new Promise(resolve => output.end(resolve)); }
 }
 export async function runCase(p, id, root, inferenceRoot) {
+  assert.notEqual(p.proof_kind, 'unit_fake', 'unit_fake plan is not campaign authorization');
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'native campaign execution is Actions-only');
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`, 'explicit final pair authorization required');
   validatePlan(p); await sourcePair(p, root, inferenceRoot);
   const c = p.cases.find(c => c.id === id); assert.ok(c, 'unknown case');
   if (c.backend === 'mlx') { assert.equal(process.platform, 'darwin'); assert.equal(process.env.RUNNER_NAME, 'nax-macos-2'); }
   else assert.equal(process.platform, 'win32');
-  await verifyInputs(c);
+  await verifyInputs(c, [p.output, root, inferenceRoot]);
   const dir = contained(p.output, c.id); await mkdir(dir, { recursive: true });
   const identity = { planSha256: digest(p), caseId: id, command: c.command, sceneworks: p.sceneworks, inference: p.inference, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, responsibleTask: p.responsibleTask, timeoutSeconds: c.timeoutSeconds, nextAuthorizedAction: p.nextAuthorizedAction };
   const statePath = path.join(dir, 'execution.json');
@@ -353,12 +387,18 @@ export async function runCase(p, id, root, inferenceRoot) {
   try {
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
     const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(c.timeoutSeconds) }, timeoutSeconds: c.timeoutSeconds };
-    if (c.group === 'numeric') {
+    if (c.group === 'numeric' && c.numericProof?.kind !== 'native-pinned-fixture') {
       await runProcess(c.referenceCommand, { ...options, logPath: path.join(dir, 'reference.log') });
       await save(path.join(dir, 'reference-execution.json'), { command: c.referenceCommand, revision: c.referenceRevision, outputSha256: await hashFile(contained(dir, c.referenceOutput)) });
     }
-    await runProcess(c.command, { ...options, logPath: path.join(dir, 'process.log') });
-    await sourcePair(p, root, inferenceRoot); await verifyInputs(c);
+    let command = c.command;
+    if (c.runtime?.scenario || c.numericProof?.kind === 'native-pinned-fixture' || c.fixtureProof?.kind === 'source-bound-assertions') {
+      const adapterPlan = path.join(dir, 'adapter-plan.json'); await save(adapterPlan, p);
+      command = [process.execPath, path.join(root, 'scripts/h3-finetune-terminal-runtime.mjs'), c.numericProof?.kind === 'native-pinned-fixture' ? 'numeric' : c.fixtureProof?.kind === 'source-bound-assertions' ? 'fixture' : 'api', adapterPlan, id, root, inferenceRoot];
+      await save(path.join(dir, 'adapter-command.json'), { command, responsibleTask: p.responsibleTask });
+    }
+    await runProcess(command, { ...options, logPath: path.join(dir, 'process.log') });
+    await sourcePair(p, root, inferenceRoot); await verifyInputs(c, [p.output, root, inferenceRoot]);
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
     const receipt = { ...identity, status: 'passed', completed: new Date().toISOString(), verified };
     await save(statePath, receipt); return receipt;
@@ -379,8 +419,87 @@ export function validateDelivery(p) {
   assert.ok(Array.isArray(d.limitations) && d.limitations.length === 0, 'unresolved limitations are not a pass');
   // These are recorded readbacks, not an authorization to merge or mutate the tracker.
 }
+export function validateBackendReadback(p, backend, r, { allowUnitFake = false } = {}) {
+  assert.equal(r.kind, 'backend-content-readback');
+  assert.ok(r.proof_kind === 'campaign_content_reverified' || (allowUnitFake && r.proof_kind === 'unit_fake'), 'unit_fake readback is not campaign evidence');
+  assert.equal(r.backend, backend); validatePlan(r.plan); if (!allowUnitFake) assert.notEqual(r.plan.proof_kind, 'unit_fake');
+  assert.equal(r.plan.sceneworks, p.sceneworks); assert.equal(r.plan.inference, p.inference); assert.deepEqual(r.plan.source, p.source);
+  assert.equal(r.planSha256, digest(r.plan)); assert.ok(r.verificationRunId && r.verificationRunAttempt);
+  const expected = requiredCases().filter(c => c.backend === backend);
+  assert.equal(r.cases.length, expected.length); assert.equal(new Set(r.cases.map(c => c.id)).size, expected.length);
+  for (const c of expected) {
+    const row = r.cases.find(v => v.id === c.id), planned = r.plan.cases.find(v => v.id === c.id);
+    assert.ok(row && row.runId && row.runAttempt && row.verified?.files?.length); sha64(row.executionSha256);
+    assert.deepEqual(row.sourceInputs, planned.inputs); assert.equal(row.planSha256, r.planSha256);
+  }
+  return r;
+}
+export async function backendComplete(p, backend) {
+  const selected = p.cases.filter(v => v.backend === backend); assert.ok(selected.length);
+  for (const c of selected) {
+    let r; try { r = await json(path.join(contained(p.output, c.id), 'execution.json')); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+    if (r.status !== 'passed' || r.planSha256 !== digest(p)) return false;
+  }
+  return true;
+}
+export async function verifyBackend(p, backend, root, inferenceRoot) {
+  validatePlan(p); const { authorized } = await import('./h3-finetune-terminal-runtime.mjs');
+  const selected = p.cases.filter(c => c.backend === backend); assert.ok(selected.length); authorized(p, selected[0]);
+  await sourcePair(p, root, inferenceRoot); const cases = [];
+  for (const c of selected) {
+    await verifyInputs(c, [p.output, root, inferenceRoot]); const dir = contained(p.output, c.id), executionPath = path.join(dir, 'execution.json'), r = await json(executionPath);
+    assert.equal(r.status, 'passed'); assert.equal(r.planSha256, digest(p)); assert.ok(r.runId && r.runAttempt);
+    const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
+    assert.deepEqual(verified, r.verified);
+    cases.push({ id: c.id, runId: r.runId, runAttempt: r.runAttempt, planSha256: r.planSha256, executionSha256: await hashFile(executionPath), sourceInputs: c.inputs, verified });
+  }
+  await sourcePair(p, root, inferenceRoot);
+  const r = { kind: 'backend-content-readback', proof_kind: 'campaign_content_reverified', backend, plan: p, planSha256: digest(p), verificationRunId: process.env.GITHUB_RUN_ID, verificationRunAttempt: process.env.GITHUB_RUN_ATTEMPT, readAt: new Date().toISOString(), cases };
+  validateBackendReadback(p, backend, r);
+  const filename = path.join(p.output, `backend-readback-${backend}.json`);
+  try { await writeFile(filename, JSON.stringify(r, null, 2) + '\n', { flag: 'wx' }); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; const previous = validateBackendReadback(p, backend, await json(filename)); assert.deepEqual(previous.cases, r.cases); return { path: filename, readback: previous }; }
+  return { path: filename, readback: r };
+}
+export async function verifyPortableCase(p, c, dir, row) {
+  assert.equal(await hashFile(path.join(dir, 'execution.json')), row.executionSha256, 'downloaded execution record differs from backend readback');
+  const execution = await json(path.join(dir, 'execution.json')); assert.equal(execution.status, 'passed'); assert.equal(execution.planSha256, row.planSha256); assert.equal(execution.runId, row.runId); assert.equal(execution.runAttempt, row.runAttempt); assert.deepEqual(execution.verified, row.verified);
+  const v = row.verified, log = await readFile(path.join(dir, 'process.log'), 'utf8');
+  assert.equal(createHash('sha256').update(log).digest('hex'), v.processLogSha256);
+  const e = await json(contained(dir, c.evidence)); assert.equal(e.status, 'executed'); assert.notEqual(e.proof_kind, 'unit_fake');
+  assert.deepEqual([e.sceneworks, e.inference], [p.sceneworks, p.inference]); assert.equal(e.caseId, c.id); assert.equal(e.backend, c.backend);
+  assert.equal(await hashFile(contained(dir, c.evidence)), v.evidenceSha256);
+  for (const file of v.files) assert.equal(await hashFile(contained(dir, file.path)), file.sha256, 'downloaded supporting evidence drift');
+  if (e.av) { const media = await decodeAV(contained(dir, e.av)); if (v.av) assert.equal(media.sha256, v.av.sha256); }
+  if (c.group === 'artifact') verifyFrozenArtifact(c, await json(contained(dir, 'source-catalog.json')));
+  if (e.runtimeBindings) {
+    const { verifyAPIBindings } = await import('./h3-finetune-terminal-runtime.mjs');
+    assert.deepEqual(await verifyAPIBindings(p, c, dir, decodeAV, decodedDelta, { contentReadback: true }), v.runtime);
+  } else if (c.group === 'capability') {
+    await decodeAV(contained(dir, e.control.av));
+    assert.ok(await decodedDelta(contained(dir, e.av), contained(dir, e.control.av), c.controlStream) >= c.minimumControlDelta);
+  }
+  if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
+    const { validateComparisonProof } = await import('./h3-finetune-terminal-runtime.mjs');
+    const proof = await json(contained(dir, e.nativeComparison)); let actual = '';
+    for (const run of proof.runs) actual += await readFile(contained(dir, run.log), 'utf8') + '\n';
+    assert.deepEqual(validateComparisonProof(c, proof, actual), v.numeric);
+  } else if (c.group === 'numeric') compareNumeric(await json(contained(dir, e.numeric.candidate)), await json(contained(dir, e.numeric.reference)), c.tolerance);
+  else if (e.apiTranscript) { const t = await json(contained(dir, e.apiTranscript)); assert.equal(t.caseId, c.id); const a = t.transcript.filter(r => r.assertion); assert.ok(a.length); for (const item of a) assert.deepEqual(item.actual, item.expected); assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${a.length}`)); }
+  else if (!['artifact','capability'].includes(c.group)) executedTests(log);
+  return { id: c.id, inputContentReverifiedOn: c.backend, evidenceReverifiedLocally: true };
+}
 export async function verifyCampaign(p) {
   validatePlan(p);
+  if (p.backendReadbacks) {
+    for (const backend of ['mlx', 'cuda']) {
+      const spec = p.backendReadbacks[backend]; assert.ok(spec?.path && spec.caseRoot, 'both native backend content readbacks and retained case files required');
+      const r = validateBackendReadback(p, backend, await json(spec.path));
+      for (const row of r.cases) await verifyPortableCase(r.plan, r.plan.cases.find(c => c.id === row.id), contained(spec.caseRoot, row.id), row);
+    }
+    validateDelivery(p);
+    return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: requiredCases().length, inputVerification: 'actual native host readbacks; all retained evidence/AV reverified locally' };
+  }
   for (const c of p.cases) {
     await verifyInputs(c);
     const dir = contained(p.output, c.id), r = await json(path.join(dir, 'execution.json'));
@@ -392,7 +511,7 @@ export async function verifyCampaign(p) {
   validateDelivery(p);
   return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: p.cases.length };
 }
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+async function terminalCLI() {
   const [mode, planFile, ...args] = process.argv.slice(2);
   try {
     if (mode === 'list') console.log(JSON.stringify({ source: SOURCE, cases: requiredCases() }, null, 2));
@@ -405,12 +524,28 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     } else if (mode === 'prepare-cases') {
       const { prepareCases } = await import('./h3-finetune-terminal-cases.mjs');
       console.log(JSON.stringify(await prepareCases(await json(planFile), args[0]), null, 2));
+    } else if (mode === 'prepare-lokr') {
+      const { prepareControlledLoKr } = await import('./h3-finetune-terminal-cases.mjs');
+      console.log(JSON.stringify(await prepareControlledLoKr(await json(planFile), args[0]), null, 2));
+    } else if (mode === 'bind-plan') {
+      const { finalizeCampaignPlan } = await import('./h3-finetune-terminal-cases.mjs');
+      console.log(JSON.stringify(await finalizeCampaignPlan(await json(planFile), args[0]), null, 2));
     } else {
       const p = validatePlan(await json(planFile));
-      if (mode === 'run-case') console.log(JSON.stringify(await runCase(p, args[0], args[1], args[2])));
+      if (mode === 'run-case') {
+        const receipt = await runCase(p, args[0], args[1], args[2]), c = p.cases.find(v => v.id === args[0]);
+        if (await backendComplete(p, c.backend)) {
+          const filename = path.join(p.output, `backend-readback-${c.backend}.json`); let previous;
+          try { previous = validateBackendReadback(p, c.backend, await json(filename)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          if (previous) assert.equal(previous.planSha256, digest(p)); else await verifyBackend(p, c.backend, args[1], args[2]);
+          await copyFile(filename, path.join(contained(p.output, c.id), 'backend-readback.json'));
+        }
+        console.log(JSON.stringify(receipt));
+      } else if (mode === 'verify-backend') console.log(JSON.stringify(await verifyBackend(p, args[0], args[1], args[2])));
       else if (mode === 'verify') console.log(JSON.stringify(await verifyCampaign(p)));
       else if (mode === 'check-plan') console.log(`complete inventory: ${p.cases.length} cases; no execution claimed`);
-      else throw new Error('usage: h3-finetune-terminal.mjs list | case-plan SW_ROOT INFERENCE_ROOT STAGE_ROOT | prepare-cases PARAMETERS NEW_STAGE_ROOT | compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify PLAN');
+      else throw new Error('usage: h3-finetune-terminal.mjs list | case-plan SW_ROOT INFERENCE_ROOT STAGE_ROOT | prepare-cases PARAMETERS NEW_STAGE_ROOT | bind-plan PARAMETERS PREPARED_ROOT | prepare-lokr SPEC NEW_DIRECTORY | compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify-backend PLAN mlx|cuda SW_ROOT INFERENCE_ROOT | verify PLAN');
     }
   } catch (e) { console.error(e.message); process.exitCode = 1; }
 }
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) terminalCLI();

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, rm, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, access } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { requiredCases, ARTIFACTS, SOURCE, sensitivityDecision, compareControlMedia } from './h3-finetune-terminal.mjs';
-import { caseBook, concretePlan, buildScenario, nativeCommands, referenceCommand, prepareCases, fixtureBindings } from './h3-finetune-terminal-cases.mjs';
+import { spawnSync } from 'node:child_process';
+import { requiredCases, ARTIFACTS, SOURCE, hashFile, sensitivityDecision, compareControlMedia } from './h3-finetune-terminal.mjs';
+import { caseBook, concretePlan, buildScenario, nativeCommands, referenceCommand, prepareCases, finalizeCampaignPlan, prepareControlledLoKr, fixtureBindings } from './h3-finetune-terminal-cases.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 // All identities below are explicitly synthetic test data, never staged model identity.
@@ -46,6 +47,10 @@ test('plan derives full inventory from existing canonical contract, including la
   for (const c of p.cases) assert.ok(c.commands.length > 0 && c.commands.every(argv => argv.every(v => typeof v === 'string')));
   assert.ok(!Object.hasOwn(p, 'sceneworks') && !Object.hasOwn(p, 'inference'), 'no invented future stationary SHA');
   assert.ok(!JSON.stringify(p).includes('produce-evidence'), 'no nonexistent producer');
+});
+test('actual preparation CLI returns data without a top-level-await import cycle or any native command',()=>{
+  const r=spawnSync(process.execPath,[path.join(root,'scripts/h3-finetune-terminal.mjs'),'case-plan',root,'/unit_fake/native','/unit_fake/stage'],{encoding:'utf8',timeout:10000});
+  assert.equal(r.status,0,r.stderr);const p=JSON.parse(r.stdout);assert.equal(p.kind,'preparation-not-campaign-evidence');assert.deepEqual(p.cases.map(c=>c.id),requiredCases().map(c=>c.id));
 });
 test('native commands use actual provider package, single integration binary, exact ignored cases and unfiltered listing', () => {
   for (const backend of ['mlx', 'cuda']) for (const check of ['convrot', 'pruned-interpolation', 'w4a8']) {
@@ -108,6 +113,11 @@ test('eight artifact scenarios refuse stock substitution and use explicit ref2va
     e.model.sha256 = hash; assert.throws(() => buildScenario(c, params(), [e]));
   }
 });
+test('frozen HF artifact import uses actual source schema and retains exact revision/file lineage',()=>{
+  const c=requiredCases().find(v=>v.id==='mlx.artifact.0'),e=execution();e.model.sha256=caseBook.artifacts[0].expectedSha256;e.importSource={kind:'huggingFace',repo:SOURCE.repo,revision:SOURCE.revision,files:[c.artifact]};
+  const s=buildScenario(c,params(),[e]);assert.deepEqual(s.steps[0].body.source,e.importSource);assert.ok(!s.steps[0].body.sourcePath);
+  e.importSource.revision='3'.repeat(40);assert.throws(()=>buildScenario(c,params(),[e]));
+});
 test('wrong partition/base, unsupported modes, missing components, one-step and missing assets fail preparation', () => {
   for (const mutate of [e => e.model.baseModel = 'minimax_h3', e => e.model.supportedModes = [], e => e.model.components = [], e => e.sampling.steps = 1, e => e.model.components[0].licenseAcknowledged = false]) {
     const e = execution(); mutate(e); assert.throws(() => buildScenario(named('capability', 'audio-reference'), params(), [e]));
@@ -127,7 +137,17 @@ test('full/pruned/hybrid adapter representatives and every declared turbo recipe
     es[0].adapters[0].topology = 'other'; assert.throws(() => buildScenario(named('capability', kind), params(), es));
   }
 });
-test('hybrid plan requires explicit companion and exercises text, image and reference routes', () => {
+test('LoKr contrast can retain a valid trained accelerator instead of confounding the adapter effect',()=>{
+  const es=['full','pruned','hybrid'].map(cell=>{
+    const e=execution(cell==='hybrid'?'hybrid':'ref2va',cell==='pruned'?'pruned':'full');e.label=cell;e.mode='reference_to_video';if(cell==='hybrid')e.model.hybridBinding={kind:'single-checkpoint',declarationSource:'unit_fake source'};
+    Object.assign(e.sampling,{steps:4,schedulerShift:12,audioSchedulerShift:3,width:960,height:544});
+    const common={sha256:hash,source:'unit_fake',revision,compatibilitySource:'unit_fake',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true};
+    e.adapters=[{...common,id:'minimax_h3_ref2v_turbo_4step',kind:'lora',role:'accelerator'},{...common,id:'controlled_lokr',kind:'lokr'}];return e;
+  });
+  const bodies=submissions(buildScenario(named('capability','lokr'),params(),es)).map(s=>s.body);
+  for(let i=0;i<bodies.length;i+=3){assert.equal(bodies[i].loras.length,2);assert.deepEqual(bodies[i+2].loras,[{id:'minimax_h3_ref2v_turbo_4step',weight:1}]);assert.deepEqual(bodies[i].advanced,bodies[i+2].advanced);}
+});
+test('hybrid plan requires an explicit source binding and exercises text, image and reference routes', () => {
   const es = ['text_to_video', 'image_to_video', 'reference_to_video'].map((mode, i) => {
     const e = execution('hybrid', 'full'); e.label = `route${i}`; e.mode = mode; e.model.companion = { source: 'synthetic companion', sha256: hash }; return e;
   });
@@ -138,7 +158,7 @@ test('cancel/retry uses actual job handlers and never fabricates a successful na
   const e = { label: 'cancel', model: { modelId: 'imported_cancel', sourcePath: '/synthetic/input', sha256: hash, baseModel: 'minimax_h3_ref', partition: 'ref2va' } };
   for (const check of ['cancel', 'interruption-retry']) {
     const s = buildScenario(named('lifecycle', check), params(), [e]);
-    assert.equal(submissions(s).length, 0); assert.ok(s.steps.some(s => s.expectedJobStatus === 'cancelled'));
+    assert.equal(submissions(s).length, 0); assert.ok(s.steps.some(s => s.expectedJobStatus === 'canceled'));
     assert.equal(s.steps.some(s => s.path?.$concat?.includes('/retry')), check === 'interruption-retry');
   }
 });
@@ -200,8 +220,10 @@ test('decoded sensitivity rejects hash-only change, sub-threshold effects and no
 });
 test('complete canonical preparation writes executable scenarios without executing commands or inventing receipts', async t => {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'sc26691-complete-prep-')); t.after(() => rm(parent, { recursive: true, force: true }));
-  const out = path.join(parent, 'candidate'), p = { ...params(), sceneworks: revision, inference: revision, swRoot: root, inferenceRoot: '/synthetic-native', bindings: {} };
-  const plan = concretePlan(root, '/synthetic-native', out);
+  const native=path.join(parent,'unit_fake_native');await mkdir(path.join(native,'tests','fixtures'),{recursive:true});
+  for(const mechanism of ['convrot','pruned-interpolation','w4a8'])await writeFile(path.join(native,caseBook.numeric[mechanism].fixture),JSON.stringify({proof_kind:'unit_fake',cases:[]}));
+  const out = path.join(parent, 'candidate'), p = { ...params(), proof_kind:'unit_fake', sceneworks: revision, inference: revision, swRoot: root, inferenceRoot: native, bindings: {} };
+  const plan = concretePlan(root, native, out);
   for (const c of plan.cases.filter(c => c.scenario)) {
     const check = c.id.split('.').slice(2).join('.'); let es = [execution()];
     if (c.artifact) es[0].model.sha256 = caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256;
@@ -233,7 +255,25 @@ test('complete canonical preparation writes executable scenarios without executi
   assert.equal(result.scenarios,plan.cases.filter(c=>c.scenario).length);
   for (const c of plan.cases.filter(c=>c.scenario)) assert.equal(JSON.parse(await readFile(c.scenario,'utf8')).caseId,c.id);
   await assert.rejects(access(path.join(out,'evidence.json')));
+  const reference=path.join(parent,'unit_fake-reference.txt');await writeFile(reference,'unit_fake reference, not executable upstream');
+  p.output=parent;p.nextAuthorizedAction='Unit fake only; NEVER dispatch or authorize a campaign';p.budgets={mlx:{hostBytes:1000,deviceBytes:2000},cuda:{hostBytes:1000,deviceBytes:2000}};p.runtime={port:43210,gpuId:'unit_fake',deviceId:'unit_fake'};p.caseInputs={};
+  for(const c of plan.cases){p.caseInputs[c.id]=[{path:reference,sha256:await hashFile(reference),role:'reference'}];for(const e of p.bindings[c.id]??[])p.caseInputs[c.id].push({path:path.join(parent,'unit_fake_unstaged_payload'),sha256:e.model.sha256,role:'checkpoint',artifact:c.artifact},{path:path.join(parent,'unit_fake_unstaged_component'),sha256:hash,role:'component'});}
+  const finalized=await finalizeCampaignPlan(p,out),bound=JSON.parse(await readFile(finalized.plan,'utf8'));
+  assert.equal(bound.proof_kind,'unit_fake');assert.equal(bound.cases.length,requiredCases().length);
+  for(const c of bound.cases.filter(c=>c.group==='numeric')){assert.equal(c.numericProof.kind,'native-pinned-fixture');assert.ok(!c.referenceOutput,'no invented flat-array export gate');}
+  assert.ok(bound.cases.some(c=>c.fixtureProof?.kind==='source-bound-assertions'));
+  await assert.rejects(finalizeCampaignPlan(p,out),/EEXIST/);
   await assert.rejects(prepareCases(p,out),/EEXIST/);
+});
+test('controlled LoKr input preserves both complete factors and labels generated rather than trained evidence',async t=>{
+  const parent=await mkdtemp(path.join(os.tmpdir(),'sc26691-lokr-unit-fake-'));t.after(()=>rm(parent,{recursive:true,force:true}));
+  const spec={proof_kind:'unit_fake',target:'transformer_blocks.0.attn.to_q',shape:[96,64],sourceCheckpointSha256:hash,sourceContractSha256:hash,sourceDeclaration:'unit_fake source contract, not a real checkpoint',seed:12345,amplitude:0.05};
+  const generated=await prepareControlledLoKr(spec,path.join(parent,'input')),bytes=await readFile(generated.file),size=Number(bytes.readBigUInt64LE(0)),header=JSON.parse(bytes.subarray(8,8+size).toString('utf8'));
+  assert.equal(header.__metadata__.networkType,'lokr');assert.equal(header.__metadata__.rank,header.__metadata__.alpha);assert.equal(generated.provenance.trained,false);assert.equal(generated.provenance.proof_kind,'unit_fake');
+  assert.deepEqual(Object.keys(header).filter(k=>k!=='__metadata__').sort(),['transformer_blocks.0.attn.to_q.lokr_w1','transformer_blocks.0.attn.to_q.lokr_w2']);assert.deepEqual(generated.provenance.factorShapes,[[8,8],[12,8]]);
+  assert.ok(bytes.subarray(8+size).some(v=>v!==0));assert.equal(generated.provenance.sha256,await hashFile(generated.file));
+  const again=await prepareControlledLoKr(spec,path.join(parent,'repeat'));assert.equal(again.provenance.sha256,generated.provenance.sha256);
+  await assert.rejects(prepareControlledLoKr({...spec,target:'transformer_blocks.0.adaln_proj.linear'},path.join(parent,'bad')));await assert.rejects(prepareControlledLoKr(spec,path.join(parent,'input')),/EEXIST/);
 });
 test('prepare fails before creating output when final pair or concrete bindings are missing', async t => {
   const parent = await mkdtemp(path.join(os.tmpdir(), 'sc26691-prep-test-')); t.after(() => rm(parent, { recursive: true, force: true }));
