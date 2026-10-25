@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
-import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, postRowsGuardFrontier, lexicalParserRefusal, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import {loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
@@ -547,20 +547,27 @@ export function validateWorkerRefusal(specification,request,job,endpoint,backend
   assertRequestBinding(request,job.payload);checkJob({backend,expected:'failed',outputCount:0},request,job,endpoint.workerGpuId);
   requireThat(job.workerId===endpoint.workerId&&job.startedAt&&job.updatedAt&&specification.errorIncludes.every(text=>job.error?.includes(text)),'actual budget failure/worker/timing/no-output evidence missing or different');
 }
-async function guard(configPath, name, backend, admissionPath) {
+async function guard(configPath, name, backend, admissionPath, recoveryOrdinal=null) {
   const state = await frozen(configPath); requireThat(state.plan.requiredGuardCases.includes(name), 'unallocated refusal');
   const specification = state.config.guardRequests[name], admitted = await admission(admissionPath, state, backend);
-  const path = resolve(state.root, 'guards', `${backend}-${name}`);
+  const recovering=recoveryOrdinal!==null,parserGuard=name==='training-shift-nonfinite';
+  if(recovering) {
+    requireThat(backend==='mlx'&&name==='training-shift-nonfinite'&&Number.isSafeInteger(recoveryOrdinal)&&recoveryOrdinal>=7&&state.config.repair?.retryOrdinal===recoveryOrdinal,'only the authenticated post-row lexical refusal may retry');
+    const frontier=await postRowsGuardFrontier(state.root,state.plan,digest(state.lock),digest(state.binding),specification,{allowLater:true});
+    requireThat(canonical(frontier)===canonical(state.config.repair.postRowsGuard),'post-row guard retry changed the original failed refusal');
+  }
+  const path = resolve(state.root, 'guards', `${backend}-${name}${recovering?`-retry-${recoveryOrdinal}`:''}`);
   const request = specification.upload ? {projectId:state.binding.endpoint.projectId,upload:specification.upload} : specification.rawJson === undefined ? replaceInputs({ request: specification.request, refs: specification.refs ?? [] }, await json(resolve(state.root, `uploaded-${backend}.json`)), state.config.backends[backend].projectId) : specification.rawJson;
   const requestSha256 = typeof request === 'string' ? sha(Buffer.from(request)) : digest(request);
-  const ticket = await reserveAttempt(state.root,backend,`guard-${name}`,{lockSha256:digest(state.lock),bindingSha256:digest(state.binding),requestSha256});
+  const ticket = await reserveAttempt(state.root,backend,`guard-${name}${recovering?`-retry-${recoveryOrdinal}`:''}`,{lockSha256:digest(state.lock),bindingSha256:digest(state.binding),requestSha256});
   try {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await mkdir(path, { mode: 0o700 });
   if (typeof request === 'string') await writeFile(resolve(path,'request.raw.json'),request,{flag:'wx',mode:0o600});
   else await save(resolve(path, 'request.json'), request);
   if(specification.upload)await writeFile(resolve(path,'request.npy'),await readFile(safePath(state.root,specification.upload.file)),{flag:'wx',mode:0o600});
   await save(resolve(path, 'admission.json'), admitted);
-  const api=client(state.config,backend),queued=await submitGuard(api,specification,request,path);let workerJob=null;
+  const api=client(state.config,backend),queued=await submitGuard(api,parserGuard?{...specification,expectedStatus:422}:specification,request,path);let workerJob=null;
+  if(parserGuard)lexicalParserRefusal(specification,await json(resolve(path,'response.json')));
   if(queued) {
     requireThat(['device-budget-before-load','corrupt-adapter'].includes(name),'worker refusal is forbidden for other malformed inputs');
     try {
@@ -569,7 +576,7 @@ async function guard(configPath, name, backend, admissionPath) {
     }catch(error){error.jobId=queued.id;throw error;}
   }
   const responseFile=workerJob?'queued-response.json':'response.json',responseSha256=(await fileIdentity(resolve(path,responseFile))).sha256;
-  await save(resolve(path, 'receipt.json'), { version: VERSION, lockSha256: digest(state.lock), bindingSha256:digest(state.binding), case: name, backend, route:specification.upload?`/api/v1/projects/${encode(request.projectId)}/assets`:'/api/v1/image/jobs', contentType:specification.upload?'multipart/form-data':'application/json', rawJson:typeof request==='string', status: 'AWAITING_NO_PROVIDER_LOAD_PROOF', requestSha256,responseFile,responseSha256,assetSnapshotSha256:specification.upload?{before:(await fileIdentity(resolve(path,'assets-before.json'))).sha256,after:(await fileIdentity(resolve(path,'assets-after.json'))).sha256}:null, jobId:workerJob?.id??null,jobSha256:workerJob?digest(workerJob):null, probe: specification.noProviderLoadProbe });
+  await save(resolve(path, 'receipt.json'), { version: VERSION, lockSha256: digest(state.lock), bindingSha256:digest(state.binding), case: name, backend, route:specification.upload?`/api/v1/projects/${encode(request.projectId)}/assets`:'/api/v1/image/jobs', contentType:specification.upload?'multipart/form-data':'application/json', rawJson:typeof request==='string', status: 'AWAITING_NO_PROVIDER_LOAD_PROOF', requestSha256,responseFile,responseSha256,assetSnapshotSha256:specification.upload?{before:(await fileIdentity(resolve(path,'assets-before.json'))).sha256,after:(await fileIdentity(resolve(path,'assets-after.json'))).sha256}:null, jobId:workerJob?.id??null,jobSha256:workerJob?digest(workerJob):null, probe: specification.noProviderLoadProbe,...(parserGuard?{parserStatusAdjudication:{frozenExpectedStatus:400,observedStatus:422,...(recovering?{originalAttemptSha256:state.config.repair.postRowsGuard.attemptSha256}:{})}}:{}) });
   await resolveAttempt(ticket,'EXPECTED_REFUSAL');
   } catch(error) { await failAttempt(ticket,error,error.jobId??null); throw error; }
 }
@@ -622,10 +629,24 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
       for(let ordinal=2;ordinal<=(repair.retryOrdinal??1);ordinal++) {
         const current=await json(resolve(state.root,`continuation-retry-${ordinal}.json`)),priorPath=resolve(state.root,`continuation-prior-${ordinal}-inventory.json`),prior=await json(priorPath);
         requireThat(current.ordinal===ordinal&&current.name===retry.name&&current.previousToolingSha===previous.toolingSha&&current.toolingSha!==(previous.toolingSha)&&current.originalRunId===retry.originalRunId&&current.originalAttempt===retry.originalAttempt&&current.candidateId===retry.candidateId&&current.sourceSha===retry.sourceSha&&current.inferenceSha===retry.inferenceSha&&current.originalInventorySha256===repair.inventorySha256&&current.lockSha256===digest(state.lock)&&current.uiAttemptSha256===digest(start)&&current.checkpointInventorySha256===(await fileIdentity(priorPath)).sha256&&prior.version===1&&prior.actualRunId===current.failedRunId&&prior.attempt===current.failedAttempt&&prior.artifactId===current.failedArtifactId&&prior.toolingSha===previous.toolingSha&&prior.productSha===retry.sourceSha&&prior.originalRunId===retry.originalRunId&&prior.originalAttempt===retry.originalAttempt&&prior.files?.length>=300,'chained failed-attempt artifact or tooling identity changed');
-        const heldLock=await fileIdentity(resolve(state.root,`continuation-prior-${ordinal}-dispatch.lock`));
-        requireThat(heldLock.sha256===current.dispatchLockSha256&&prior.files.find(item=>item.file==='evidence/attempts/mlx/dispatch.lock')?.sha256===heldLock.sha256,'chained original submission mutex changed');
+        if(current.postRowsGuard) {
+          requireThat(repair.retryOrdinal===ordinal&&canonical(repair.postRowsGuard)===canonical(current.postRowsGuard),'post-row guard launch differs from the sealed latest retry');
+          requireThat(ordinal>=7&&current.dispatchLockSha256===undefined&&!prior.files.some(item=>item.file==='evidence/attempts/mlx/dispatch.lock'),'post-row guard retry invented an active submission mutex');
+        } else {
+          const heldLock=await fileIdentity(resolve(state.root,`continuation-prior-${ordinal}-dispatch.lock`));
+          requireThat(heldLock.sha256===current.dispatchLockSha256&&prior.files.find(item=>item.file==='evidence/attempts/mlx/dispatch.lock')?.sha256===heldLock.sha256,'chained original submission mutex changed');
+        }
         await assertH18CheckpointFiles(state.root,prior,{retained:true,archiveTag:`prior-${ordinal}`});
-        if(current.submittedRecovery) {
+        if(current.postRowsGuard) {
+          const name='training-shift-nonfinite',specification=state.config.guardRequests[name],binding=validateBinding(await json(resolve(state.root,'bindings/mlx.json')),state.lock,'mlx');
+          const frontier=await postRowsGuardFrontier(state.root,state.plan,digest(state.lock),digest(binding),specification,{allowLater:true});
+          const priorPaths=new Set(prior.files.map(item=>item.file));
+          requireThat(canonical(current.postRowsGuard)===canonical(frontier)&&!current.submittedRecovery&&!current.pendingUiAttemptRowId&&state.plan.rows.filter(item=>item.backend==='mlx').every(item=>priorPaths.has(`evidence/rows/${item.id}/receipt.json`))&&state.plan.requiredGuardCases.slice(0,18).every(item=>priorPaths.has(`evidence/guards/mlx-${item}/receipt.json`)&&priorPaths.has(`evidence/guards/mlx-${item}/no-provider-load.json`))&&['request.raw.json','admission.json','response.json'].every(item=>priorPaths.has(`evidence/guards/mlx-${name}/${item}`))&&priorPaths.has(`evidence/attempts/mlx/guard-${name}.start.json`)&&priorPaths.has(`evidence/attempts/mlx/guard-${name}.failure.json`)&&!priorPaths.has(`evidence/guards/mlx-${name}/receipt.json`)&&!state.plan.requiredGuardCases.slice(19).some(item=>priorPaths.has(`evidence/attempts/mlx/guard-${item}.start.json`)),'only the exact failed lexical refusal may enter post-row recovery');
+          const record=await json(resolve(state.root,'external/lexical-parser-status-recovery.json')),prefix=`guards/mlx-${name}-retry-${ordinal}`,dir=resolve(state.root,prefix),retryAttempt=resolve(state.root,'attempts/mlx',`guard-${name}-retry-${ordinal}`);
+          const [raw,response,receipt,proof,resolution]=await Promise.all([readFile(resolve(dir,'request.raw.json'),'utf8'),json(resolve(dir,'response.json')),json(resolve(dir,'receipt.json')),json(resolve(dir,'no-provider-load.json')),json(`${retryAttempt}.resolution.json`)]);
+          lexicalParserRefusal(specification,response);
+          requireThat(record.version===VERSION&&record.name==='lexical-parser-status-recovery'&&record.ordinal===ordinal&&record.case===name&&record.backend==='mlx'&&record.lockSha256===digest(state.lock)&&record.path===prefix&&canonical(record.original)===canonical(frontier)&&raw===specification.rawJson&&record.retryRequestSha256===(await fileIdentity(resolve(dir,'request.raw.json'))).sha256&&record.retryResponseSha256===(await fileIdentity(resolve(dir,'response.json'))).sha256&&record.retryReceiptSha256===(await fileIdentity(resolve(dir,'receipt.json'))).sha256&&record.retryNoLoadSha256===(await fileIdentity(resolve(dir,'no-provider-load.json'))).sha256&&record.retryResolutionSha256===(await fileIdentity(`${retryAttempt}.resolution.json`)).sha256&&canonical(receipt.parserStatusAdjudication)===canonical({frozenExpectedStatus:400,observedStatus:422,originalAttemptSha256:frontier.attemptSha256})&&receipt.lockSha256===digest(state.lock)&&receipt.bindingSha256===digest(binding)&&receipt.requestSha256===sha(raw)&&receipt.responseSha256===record.retryResponseSha256&&receipt.jobId===null&&proof.requestSha256===receipt.requestSha256&&proof.lockSha256===digest(state.lock)&&proof.case===name&&proof.backend==='mlx'&&resolution.state==='EXPECTED_REFUSAL','fresh source-bound lexical refusal/adjudication changed');
+        } else if(current.submittedRecovery) {
           const known=current.submittedRecovery,id=known.rowId,row=state.plan.rows.find(item=>item.id===id),dir=resolve(state.root,'rows',id),attempt=resolve(state.root,'attempts/mlx');
           requireThat(row?.expected==='canceled'&&row.transport==='rest'&&row.cancelAtDenoise===true&&prior.files.some(item=>item.file===`evidence/rows/${id}/submission.json`)&&!prior.files.some(item=>[`evidence/rows/${id}/receipt.json`,`evidence/rows/${id}/terminal-job.json`,`evidence/attempts/mlx/${id}.resolution.json`].includes(item.file)),'recovered cancellation was not a single unresolved submitted job');
           const [submitted,request,admitted,observed,response,origin,job,readback,receipt,proof,resolution]=await Promise.all([
@@ -654,8 +675,8 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
     for(const entry of proof.rawEvidence)requireThat(canonical(await fileIdentity(safePath(state.root,entry.file)))===canonical({byteLength:entry.byteLength,sha256:entry.sha256}),'recovery raw evidence changed');
     return true;
 }
-export function acceptedRecoveryFailure(acceptedRecovery,backend,name) {
-  return acceptedRecovery&&backend==='mlx'&&name==='advanced-mlx-sft.failure.json';
+export function acceptedRecoveryFailure(acceptedRecovery,backend,name,postRowsGuard=false) {
+  return acceptedRecovery&&backend==='mlx'&&(name==='advanced-mlx-sft.failure.json'||(postRowsGuard&&name==='guard-training-shift-nonfinite.failure.json'));
 }
 async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
@@ -671,7 +692,7 @@ async function verify(configPath, retained = false) {
       const start = await json(resolve(state.root,'attempts',backend,name));
       requireThat(start.lockSha256 === digest(state.lock) && start.bindingSha256 === digest(binding),'attempt belongs to another frozen candidate/backend binding');
     }
-    requireThat(!attempts.some(name => name.endsWith('.failure.json') && !acceptedRecoveryFailure(acceptedRecovery,backend,name)),'recorded failed submission attempt remains failed even after safe reconciliation');
+    requireThat(!attempts.some(name => name.endsWith('.failure.json') && !acceptedRecoveryFailure(acceptedRecovery,backend,name,Boolean(state.config.repair?.postRowsGuard))),'recorded failed submission attempt remains failed even after safe reconciliation');
     await assertDispatchClear(state.root,backend);
   });
   for (const row of state.plan.rows) await requireEvidence(row.id, async () => {
@@ -735,11 +756,12 @@ async function verify(configPath, retained = false) {
     summaries.push({ rowId: row.id, jobId: job.id, backend: row.backend, verdict: 'PASS', outputs: receipt.outputs.map(o => o.sha256), memory });
   });
   for (const backend of ['mlx', 'cuda']) for (const name of state.plan.requiredGuardCases) await requireEvidence(`${backend}/${name}`, async () => {
-    const path = resolve(state.root, 'guards', `${backend}-${name}`), receipt = await json(resolve(path, 'receipt.json')), proof = await json(resolve(path, 'no-provider-load.json'));
+    const lexicalRecovery=acceptedRecovery&&backend==='mlx'&&name==='training-shift-nonfinite'&&Boolean(state.config.repair?.postRowsGuard),path = resolve(state.root, 'guards', `${backend}-${name}${lexicalRecovery?`-retry-${state.config.repair.retryOrdinal}`:''}`), receipt = await json(resolve(path, 'receipt.json')), proof = await json(resolve(path, 'no-provider-load.json'));
     const binding = validateBinding(await json(resolve(state.root,'bindings',`${backend}.json`)),state.lock,backend);
     requireThat(receipt.bindingSha256 === digest(binding),'refusal belongs to another backend execution binding');
     const request = await readFile(resolve(path,receipt.rawJson?'request.raw.json':'request.json'));
     const specification=state.config.guardRequests[name];
+    if(name==='training-shift-nonfinite')requireThat(receipt.rawJson===true&&request.toString('utf8')===specification.rawJson,'lexical refusal changed the exact frozen NaN request');
     requireThat((await fileIdentity(safePath(path,receipt.responseFile))).sha256===receipt.responseSha256,'actual refusal HTTP response bytes changed');
     requireThat((receipt.rawJson?sha(request):digest(JSON.parse(request)))===receipt.requestSha256&&receipt.contentType===(specification.upload?'multipart/form-data':'application/json'),'retained exact refusal request bytes/content type changed');
     if(specification.upload) {
@@ -755,7 +777,7 @@ async function verify(configPath, retained = false) {
       requireThat(job.id===receipt.jobId&&queued.job.id===job.id&&queued.http.status===201&&sha(queued.http.body)===queued.http.sha256&&Buffer.byteLength(queued.http.body)===queued.http.byteLength&&canonical(JSON.parse(queued.http.body))===canonical(queued.job)&&digest(job)===receipt.jobSha256,'queued/terminal worker-refusal identities changed');
       validateWorkerRefusal(specification,JSON.parse(request),job,binding.endpoint,backend);
     } else {
-      const response=await json(resolve(path,'response.json'));requireThat(!receipt.jobId&&response.status===specification.expectedStatus&&specification.errorIncludes.every(text=>response.body?.includes(text)),'actual strict HTTP refusal differs from frozen case');
+      const response=await json(resolve(path,'response.json')),parserGuard=name==='training-shift-nonfinite';requireThat(!receipt.jobId&&(parserGuard?lexicalParserRefusal(specification,response):response.status===specification.expectedStatus)&&specification.errorIncludes.every(text=>response.body?.includes(text))&&(!parserGuard||canonical(receipt.parserStatusAdjudication)===canonical({frozenExpectedStatus:400,observedStatus:422,...(lexicalRecovery?{originalAttemptSha256:state.config.repair.postRowsGuard.attemptSha256}:{})})),'actual strict HTTP refusal differs from frozen case');
       requireThat(response.http?.status===response.status&&response.http.body===response.body&&sha(response.http.body)===response.http.sha256&&Buffer.byteLength(response.http.body)===response.http.byteLength,'actual refusal HTTP response body/status/hash were not retained');
     }
     requireThat(receipt.lockSha256 === digest(state.lock) && proof.version === VERSION && proof.lockSha256 === digest(state.lock) && proof.case === name && proof.backend === backend && proof.requestSha256 === receipt.requestSha256 && proof.method === OBSERVATION_METHOD && receipt.probe === OBSERVATION_METHOD && proof.observer && proof.rawEvidence?.length, 'missing source-bound refusal-before-MOSS-boundary evidence');
@@ -795,6 +817,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'recover-completed' && args.length === 2) return recoverCompletedRow(...args);
   if (command === 'recover-canceled' && args.length === 2) return recoverCanceledRow(...args);
   if (command === 'guard' && args.length === 4) return guard(...args);
+  if (command === 'guard-retry' && args.length === 5) return guard(...args.slice(0,4),Number(args[4]));
   if (command === 'compare-cache' && args.length === 2) return compareCache(...args);
   if (command === 'reconcile' && args.length === 4) return reconcile(...args);
   if (command === 'verify' && args.length === 1) return verify(...args);

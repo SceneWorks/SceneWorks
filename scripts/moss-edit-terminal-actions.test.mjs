@@ -9,7 +9,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
-import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
@@ -175,7 +175,45 @@ test('last-row retry preserves 24 verified predecessors and rejects any second d
   assert.deepEqual(await filesUnder(resolve(evidence,'rows')),prior.filter(item=>item.file.startsWith('rows/')).map(item=>({...item,file:item.file.slice(5)})));
   await assertDispatchClear(evidence,'mlx');
 });
-const stoppedH21='/Volumes/Models/sceneworks-terminal-sc-26752/moss-execute-40198829729-1-mlx';
+test('post-row frontier preserves 25 receipts, 18 proofs and the exact unresolved lexical refusal',async t=>{
+  const root=await temporary('post-row-guard');t.after(()=>rm(root,{recursive:true,force:true}));
+  const lockSha256='a'.repeat(64),bindingSha256='b'.repeat(64),name='training-shift-nonfinite';
+  const guards=[...Array.from({length:18},(_,i)=>`prior-${i}`),name,...Array.from({length:10},(_,i)=>`later-${i}`)];
+  const plan={rows:Array.from({length:25},(_,i)=>({id:`row-${i}`,backend:'mlx'})),requiredGuardCases:guards};
+  for(const row of plan.rows)await save(resolve(root,'rows',row.id,'receipt.json'),{rowId:row.id,backend:'mlx',execution:'VERIFIED',lockSha256,bindingSha256});
+  for(const prior of guards.slice(0,18)) {
+    const dir=resolve(root,'guards',`mlx-${prior}`),requestSha256=sha(prior);
+    await save(resolve(dir,'receipt.json'),{case:prior,backend:'mlx',lockSha256,bindingSha256,requestSha256});
+    await save(resolve(dir,'no-provider-load.json'),{case:prior,backend:'mlx',lockSha256,requestSha256,method:OBSERVATION_METHOD});
+  }
+  const rawJson='{"advanced":{"mossImage":{"training_shift":NaN}}}',specification={rawJson,expectedStatus:400,errorIncludes:['Failed to parse the request body as JSON']};
+  const body=JSON.stringify({detail:[{type:'json_invalid',loc:['body',0],msg:'JSON decode error',ctx:{error:'Failed to parse the request body as JSON: advanced.mossImage.training_shift: expected value'}}]});
+  const response={status:422,body,http:{status:422,body,sha256:sha(body),byteLength:Buffer.byteLength(body)},transportError:null};
+  const dir=resolve(root,'guards',`mlx-${name}`),start={id:`guard-${name}`,backend:'mlx',lockSha256,bindingSha256,requestSha256:sha(rawJson)};
+  await mkdir(dir,{recursive:true});await writeFile(resolve(dir,'request.raw.json'),rawJson);await save(resolve(dir,'response.json'),response);await save(resolve(dir,'admission.json'),{lockSha256});
+  await save(resolve(root,'attempts/mlx',`guard-${name}.start.json`),start);
+  await save(resolve(root,'attempts/mlx',`guard-${name}.failure.json`),{attemptSha256:digest(start),state:'UNRESOLVED',jobId:null,httpStatus:422,message:'product API returned HTTP 422'});
+  const frontier=await postRowsGuardFrontier(root,plan,lockSha256,bindingSha256,specification);
+  assert.equal(frontier.guardStartIndex,18);assert.equal(frontier.requestSha256,sha(rawJson));
+  assert.equal(lexicalParserRefusal(specification,response),true);
+  for(const altered of [{...response,status:400},{...response,body:body.replace('json_invalid','different')},{...response,http:{...response.http,status:500}}])assert.throws(()=>lexicalParserRefusal(specification,altered));
+  await save(resolve(root,'attempts/mlx/guard-later-0.start.json'),{id:'guard-later-0'});
+  await assert.rejects(()=>postRowsGuardFrontier(root,plan,lockSha256,bindingSha256,specification),/later guard/);
+  await rm(resolve(root,'attempts/mlx/guard-later-0.start.json'));
+  await assert.rejects(()=>assertDispatchClear(root,'mlx'),{code:'MOSS_AWAITING_RESOLUTION'});
+  assert.deepEqual(await reconcileParserRefusal(root,plan,lockSha256,bindingSha256,specification),frontier);
+  await assertDispatchClear(root,'mlx');
+  assert.equal((await postRowsGuardFrontier(root,plan,lockSha256,bindingSha256,specification,{allowLater:true})).attemptSha256,frontier.attemptSha256);
+  const retry=await reserveAttempt(root,'mlx','guard-training-shift-nonfinite-retry-7',{lockSha256,bindingSha256,requestSha256:sha(rawJson)}),retryDir=resolve(root,'guards','mlx-training-shift-nonfinite-retry-7');
+  await mkdir(retryDir,{recursive:true});
+  const api={request:async(_route,{observation})=>{Object.assign(observation,response.http);const error=Error('source parser refused');error.status=422;error.responseBody=body;throw error;}};
+  await submitGuard(api,{...specification,expectedStatus:422},rawJson,retryDir);
+  assert.equal(lexicalParserRefusal(specification,await json(resolve(retryDir,'response.json'))),true);
+  await resolveAttempt(retry,'EXPECTED_REFUSAL');await assertDispatchClear(root,'mlx');
+  await save(resolve(dir,'receipt.json'),{case:name});
+  await assert.rejects(()=>postRowsGuardFrontier(root,plan,lockSha256,bindingSha256,specification,{allowLater:true}),/already resolved/);
+});
+const stoppedH21='/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/actual-h21-continuation-artifact';
 test('actual stopped H21 frontier is exactly the unsubmitted last MLX UI row',{skip:!existsSync(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-3/failure.json'))},async()=>{
   const evidence=resolve(stoppedH21,'evidence'),lock=await json(resolve(evidence,'protocol.lock.json')),plan=await json(resolve(evidence,'cases.json')),binding=await json(resolve(evidence,'bindings/mlx.json'));
   const capture=await json(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-3/failure.json'));
@@ -183,9 +221,10 @@ test('actual stopped H21 frontier is exactly the unsubmitted last MLX UI row',{s
   assert.equal(validateFailedUiCapture(capture,digest(lock),{rowId:'seeded-mlx-latents-replay'}),true);
   assert.equal(capture.imageJobPosts.length,0);assert.equal(capture.submissions.length,0);
 });
-test('actual stopped H23 catalog-gated retry still has no row 25 submission',{skip:!existsSync(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-4/failure.json'))},async()=>{
-  const evidence=resolve(stoppedH21,'evidence'),lock=await json(resolve(evidence,'protocol.lock.json')),plan=await json(resolve(evidence,'cases.json')),binding=await json(resolve(evidence,'bindings/mlx.json'));
-  const capture=await json(resolve(stoppedH21,'captures/seeded-mlx-latents-replay-retry-4/failure.json'));
+const stoppedH23='/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/actual-h23-continuation-artifact';
+test('actual stopped H23 catalog-gated retry still has no row 25 submission',{skip:!existsSync(resolve(stoppedH23,'captures/seeded-mlx-latents-replay-retry-4/failure.json'))},async()=>{
+  const evidence=resolve(stoppedH23,'evidence'),lock=await json(resolve(evidence,'protocol.lock.json')),plan=await json(resolve(evidence,'cases.json')),binding=await json(resolve(evidence,'bindings/mlx.json'));
+  const capture=await json(resolve(stoppedH23,'captures/seeded-mlx-latents-replay-retry-4/failure.json'));
   assert.deepEqual((await retryRemainingRows(evidence,plan,digest(lock),digest(binding))).map(row=>row.id),['seeded-mlx-latents-replay']);
   assert.equal(validateFailedUiCapture(capture,digest(lock),{rowId:'seeded-mlx-latents-replay'}),true);
   assert.match(capture.error,/replay form did not stabilize[\s\S]*Steps/);

@@ -413,7 +413,10 @@ export async function assertDispatchClear(root, backend) {
   for (const name of names.filter(n => n.endsWith('.start.json'))) {
     const start = await json(resolve(directory,name)), stem = name.slice(0,-'.start.json'.length);
     const resolution = await optionalJson(resolve(directory,`${stem}.resolution.json`));
-    if (!(resolution?.attemptSha256 === digest(start) && ['TERMINAL_VERIFIED','EXPECTED_REFUSAL','UPLOAD_COMPLETE','COORDINATOR_RECONCILED'].includes(resolution.state))) {
+    const parserProof=resolution?.state==='SOURCE_PARSER_REFUSAL'&&backend==='mlx'&&stem==='guard-training-shift-nonfinite'?await optionalJson(resolve(directory,`${stem}.reconciliation.json`)):null;
+    const parserFailure=parserProof?await optionalJson(resolve(directory,`${stem}.failure.json`)):null;
+    const parserValid=parserProof?.version===VERSION&&parserProof.kind==='source-parser-refusal-before-dispatch'&&parserProof.backend===backend&&parserProof.case==='training-shift-nonfinite'&&parserProof.attemptSha256===digest(start)&&parserProof.lockSha256===start.lockSha256&&parserProof.bindingSha256===start.bindingSha256&&parserProof.jobId===null&&parserFailure?.jobId===null&&parserFailure?.httpStatus===422&&parserProof.failureSha256===digest(parserFailure)&&resolution.proofSha256===digest(parserProof);
+    if (!(resolution?.attemptSha256 === digest(start) && (['TERMINAL_VERIFIED','EXPECTED_REFUSAL','UPLOAD_COMPLETE','COORDINATOR_RECONCILED'].includes(resolution.state)||parserValid))) {
       const error = new Error(`unresolved ${backend} submission attempt ${stem}; authoritative reconciliation required`);
       error.code='MOSS_AWAITING_RESOLUTION';throw error;
     }

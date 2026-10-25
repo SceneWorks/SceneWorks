@@ -139,6 +139,9 @@ test('R16 recovery adjudication binds original bytes, completed job and only the
   assert.equal(await validateRecoveryAdjudication(state,inventorySha256),true);
   assert.equal(acceptedRecoveryFailure(true,'mlx',`${id}.failure.json`),true);
   assert.equal(acceptedRecoveryFailure(true,'mlx','later-mlx.failure.json'),false);
+  assert.equal(acceptedRecoveryFailure(true,'mlx','guard-training-shift-nonfinite.failure.json'),false);
+  assert.equal(acceptedRecoveryFailure(true,'mlx','guard-training-shift-nonfinite.failure.json',true),true);
+  assert.equal(acceptedRecoveryFailure(true,'cuda','guard-training-shift-nonfinite.failure.json',true),false);
   assert.equal(acceptedRecoveryFailure(true,'cuda',`${id}.failure.json`),false);
   assert.equal(acceptedRecoveryFailure(false,'mlx',`${id}.failure.json`),false);
   await writeFile(resolve(dir,'recovery-job-readback.json'),JSON.stringify({...readback,id:'different-job'}));

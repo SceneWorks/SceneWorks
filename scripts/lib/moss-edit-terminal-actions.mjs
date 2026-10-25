@@ -112,6 +112,43 @@ export async function retryRemainingRows(evidenceRoot,plan,lockSha256,bindingSha
   }
   return rows.slice(index);
 }
+export function lexicalParserRefusal(specification,response) {
+  requireThat(specification?.expectedStatus===400&&typeof specification.rawJson==='string'&&canonical(specification.errorIncludes)===canonical(['Failed to parse the request body as JSON']),'only the frozen lexical training-shift refusal may be adjudicated');
+  let body;try{body=JSON.parse(response?.body);}catch{}
+  const detail=body?.detail;
+  requireThat(response?.status===422&&response.transportError===null&&response.http?.status===422&&response.http.body===response.body&&response.http.sha256===sha(response.body)&&response.http.byteLength===Buffer.byteLength(response.body)&&Array.isArray(detail)&&detail.length===1&&detail[0]?.type==='json_invalid'&&canonical(detail[0].loc)===canonical(['body',0])&&detail[0].msg==='JSON decode error'&&detail[0].ctx?.error?.includes('Failed to parse the request body as JSON: advanced.mossImage.training_shift:'),'actual lexical parser refusal was not the source-owned HTTP 422 JSON error');
+  return true;
+}
+export async function postRowsGuardFrontier(evidenceRoot,plan,lockSha256,bindingSha256,specification,{allowLater=false}={}) {
+  const rows=plan.rows.filter(row=>row.backend==='mlx'),guards=plan.requiredGuardCases;
+  requireThat(rows.length===25&&guards.length===29&&guards[18]==='training-shift-nonfinite','post-row guard frontier differs from the frozen plan');
+  for(const row of rows) {
+    const receipt=await json(resolve(evidenceRoot,'rows',row.id,'receipt.json'));
+    requireThat(receipt.rowId===row.id&&receipt.backend==='mlx'&&receipt.execution==='VERIFIED'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256,`verified MLX predecessor ${row.id} changed`);
+  }
+  for(const name of guards.slice(0,18)) {
+    const dir=resolve(evidenceRoot,'guards',`mlx-${name}`),receipt=await json(resolve(dir,'receipt.json')),proof=await json(resolve(dir,'no-provider-load.json'));
+    requireThat(receipt.case===name&&receipt.backend==='mlx'&&receipt.lockSha256===lockSha256&&receipt.bindingSha256===bindingSha256&&proof.case===name&&proof.backend==='mlx'&&proof.lockSha256===lockSha256&&proof.requestSha256===receipt.requestSha256&&proof.method==='source-bound-moss-boundaries/v1',`completed MLX guard ${name} changed`);
+  }
+  const name=guards[18],dir=resolve(evidenceRoot,'guards',`mlx-${name}`),attempt=resolve(evidenceRoot,'attempts/mlx');
+  const [raw,response,admission,start,failure]=await Promise.all([
+    readFile(resolve(dir,'request.raw.json'),'utf8'),json(resolve(dir,'response.json')),json(resolve(dir,'admission.json')),
+    json(resolve(attempt,`guard-${name}.start.json`)),json(resolve(attempt,`guard-${name}.failure.json`))]);
+  lexicalParserRefusal(specification,response);
+  requireThat(raw===specification.rawJson&&start.id===`guard-${name}`&&start.backend==='mlx'&&start.lockSha256===lockSha256&&start.bindingSha256===bindingSha256&&start.requestSha256===sha(raw)&&admission.lockSha256===lockSha256&&failure.attemptSha256===digest(start)&&failure.state==='UNRESOLVED'&&failure.jobId===null&&failure.httpStatus===422&&failure.message==='product API returned HTTP 422','original lexical guard request/refusal/failed attempt changed');
+  for(const file of [`guards/mlx-${name}/receipt.json`,`guards/mlx-${name}/no-provider-load.json`,`attempts/mlx/dispatch.lock`])requireThat(!await optionalJson(resolve(evidenceRoot,file)),`unresolved lexical guard already resolved: ${file}`);
+  const resolution=await optionalJson(resolve(attempt,`guard-${name}.resolution.json`)),proof=await optionalJson(resolve(attempt,`guard-${name}.reconciliation.json`));
+  if(allowLater)requireThat(resolution?.state==='SOURCE_PARSER_REFUSAL'&&resolution.attemptSha256===digest(start)&&proof?.version===VERSION&&proof.kind==='source-parser-refusal-before-dispatch'&&proof.backend==='mlx'&&proof.case===name&&resolution.proofSha256===digest(proof)&&proof.attemptSha256===digest(start)&&proof.lockSha256===lockSha256&&proof.bindingSha256===bindingSha256&&proof.jobId===null&&proof.responseSha256===(await fileIdentity(resolve(dir,'response.json'))).sha256&&proof.requestSha256===sha(raw)&&proof.failureSha256===digest(failure),'historical parser refusal was not explicitly reconciled');
+  else requireThat(!resolution&&!proof,'unresolved lexical guard already resolved');
+  if(!allowLater)for(const later of guards.slice(19))for(const file of [`guards/mlx-${later}/receipt.json`,`attempts/mlx/guard-${later}.start.json`])requireThat(!await optionalJson(resolve(evidenceRoot,file)),`later guard ${later} already touched`);
+  return {name,guardStartIndex:18,attemptSha256:digest(start),failureSha256:digest(failure),responseSha256:(await fileIdentity(resolve(dir,'response.json'))).sha256,requestSha256:sha(raw)};
+}
+export async function reconcileParserRefusal(evidenceRoot,plan,lockSha256,bindingSha256,specification) {
+  const frontier=await postRowsGuardFrontier(evidenceRoot,plan,lockSha256,bindingSha256,specification),name=frontier.name,attempt=resolve(evidenceRoot,'attempts/mlx'),proof={version:VERSION,kind:'source-parser-refusal-before-dispatch',backend:'mlx',case:name,lockSha256,bindingSha256,attemptSha256:frontier.attemptSha256,failureSha256:frontier.failureSha256,requestSha256:frontier.requestSha256,responseSha256:frontier.responseSha256,jobId:null};
+  await save(resolve(attempt,`guard-${name}.reconciliation.json`),proof);
+  await save(resolve(attempt,`guard-${name}.resolution.json`),{version:VERSION,state:'SOURCE_PARSER_REFUSAL',attemptSha256:frontier.attemptSha256,proofSha256:digest(proof)});
+  return frontier;
+}
 export async function submittedCanceledRemainingRows(evidenceRoot,plan,lockSha256,bindingSha256,checkpoint,root) {
   const rows=plan.rows.filter(row=>row.backend==='mlx');
   requireThat(rows.length===25,'frozen MLX row count changed');

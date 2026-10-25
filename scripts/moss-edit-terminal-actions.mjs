@@ -9,7 +9,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
-import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
@@ -397,10 +397,15 @@ export async function validateContinuation(config) {
     const historical=await json(resolve(config.root,'continuation-start.json')),adjudication=await json(resolve(config.root,'evidence/recovery-adjudication.json'));
     requireThat(historical.toolingSha===H18_RETRY_TOOLING_SHA&&historical.inventorySha256===R16_ORIGINAL_INVENTORY_SHA256&&historical.lockSha256===digest(lock)&&adjudication.toolingSha===H18_RETRY_TOOLING_SHA&&adjudication.jobId==='job_4ccba4f5dc5d78aa0991ca4df750cb65'&&adjudication.lockSha256===digest(lock),'H18 completed-job recovery/adjudication changed');
     let pending;for(const row of rows)if(!await optional(resolve(config.root,'evidence/rows',row.id,'receipt.json'))){pending=row;break;}
-    let capture=null,recovery=null;
+    let capture=null,recovery=null,guardFrontier=null;
     if(chained&&pending?.expected==='canceled'&&await optional(resolve(config.root,'evidence/rows',pending.id,'submission.json'))) {
       const submitted=await submittedCanceledRemainingRows(resolve(config.root,'evidence'),plan,digest(lock),digest(binding),checkpoint,config.root);
       remaining=submitted.remaining;recovery=submitted.recovery;
+    } else if(chained&&!pending) {
+      const guards=await json(resolve(config.root,'evidence/resolved-guards.json'));
+      guardFrontier=await postRowsGuardFrontier(resolve(config.root,'evidence'),plan,digest(lock),digest(binding),guards['training-shift-nonfinite']);
+      requireThat(!checkpoint.files.some(item=>item.file==='evidence/attempts/mlx/dispatch.lock'),'post-row failed guard retained an active submission mutex');
+      remaining=[];
     } else {
       if(chained)capturePath=`captures/${pending?.id}${ordinal===2?'-retry':`-retry-${ordinal-1}`}/failure.json`;
       capture=await json(resolve(config.root,capturePath));
@@ -408,7 +413,7 @@ export async function validateContinuation(config) {
       remaining=await retryRemainingRows(resolve(config.root,'evidence'),plan,digest(lock),digest(binding));
     }
     requireThat(!await optional(resolve(config.root,ordinal===1?'continuation-retry-start.json':`continuation-retry-${ordinal}-start.json`))&&!await optional(resolve(config.root,'execution-continuation.json')),'continuation retry already started or completed');
-    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,recovery,ordinal,previousToolingSha,pendingRowId:capture?.rowId};
+    retry={checkpoint,checkpointIdentity,historical,adjudication,capture,recovery,guardFrontier,ordinal,previousToolingSha,pendingRowId:capture?.rowId};
   } else {
     await assertOriginalEvidence(resolve(config.root,'evidence'),manifest,{exact:true});
     remaining=await continuationRemainingRows(resolve(config.root,'evidence'),plan);
@@ -439,13 +444,13 @@ export async function executeBackend(config) {
     if(config.continuation.retry) {
       const tag=original.retry.ordinal===1?'h18':`prior-${original.retry.ordinal}`;
       await copyFile(config.continuation.retry.inventoryPath,resolve(config.root,`evidence/continuation-${tag}-inventory.json`),constants.COPYFILE_EXCL);
-      await copyFile(resolve(config.root,'evidence/attempts/mlx/dispatch.lock'),resolve(config.root,`evidence/continuation-${tag}-dispatch.lock`),constants.COPYFILE_EXCL);
+      if(!original.retry.guardFrontier)await copyFile(resolve(config.root,'evidence/attempts/mlx/dispatch.lock'),resolve(config.root,`evidence/continuation-${tag}-dispatch.lock`),constants.COPYFILE_EXCL);
       for(const item of original.retry.checkpoint.files.filter(item=>!item.file.startsWith('evidence/'))) {
         const destination=safePath(resolve(config.root,'evidence',`continuation-${tag}-root`),item.file);
         await mkdir(dirname(destination),{recursive:true,mode:0o700});
         await copyFile(safePath(config.root,item.file),destination,constants.COPYFILE_EXCL);
       }
-      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256,uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),...(original.retry.recovery?{submittedRecovery:original.retry.recovery}:{}),...(original.retry.pendingRowId&&original.retry.ordinal>=4?{pendingUiAttemptRowId:original.retry.pendingRowId,pendingUiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx',`${original.retry.pendingRowId}.start.json`)))}:{}),at:new Date().toISOString()};
+      const retryStart={version:VERSION,name:'r16-checker-recovery-selector-retry',ordinal:original.retry.ordinal,originalRunId:config.continuation.originalRunId,originalAttempt:config.continuation.originalAttempt,failedRunId:original.retry.checkpoint.actualRunId,failedAttempt:original.retry.checkpoint.attempt,failedArtifactId:original.retry.checkpoint.artifactId,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,previousToolingSha:original.retry.previousToolingSha,toolingSha:config.continuation.toolingSha,originalInventorySha256:original.manifestIdentity.sha256,checkpointInventorySha256:original.retry.checkpointIdentity.sha256,...(original.retry.guardFrontier?{postRowsGuard:original.retry.guardFrontier}:{dispatchLockSha256:(await fileIdentity(resolve(config.root,'evidence',`continuation-${tag}-dispatch.lock`))).sha256}),uiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx/advanced-mlx-sft-replay.start.json'))),lockSha256:digest(original.lock),...(original.retry.recovery?{submittedRecovery:original.retry.recovery}:{}),...(original.retry.pendingRowId&&original.retry.ordinal>=4?{pendingUiAttemptRowId:original.retry.pendingRowId,pendingUiAttemptSha256:digest(await json(resolve(config.root,'evidence/attempts/mlx',`${original.retry.pendingRowId}.start.json`)))}:{}),at:new Date().toISOString()};
       const file=original.retry.ordinal===1?'continuation-retry.json':`continuation-${retrySuffix}.json`;
       await save(resolve(config.root,original.retry.ordinal===1?'continuation-retry-start.json':`continuation-${retrySuffix}-start.json`),retryStart);
       await save(resolve(config.root,'evidence',file),retryStart);
@@ -494,8 +499,8 @@ export async function executeBackend(config) {
     const toolingRoot=config.toolingRoot??config.continuation?.toolingRoot,toolingFiles=repairTooling?Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'}).map(([name,path])=>[name,resolve(toolingRoot,'scripts',path)])):null;
     const tooling=repairTooling?{sourceRoot:toolingRoot,head:config.toolingSha??config.continuation.toolingSha,source:treeIdentity(toolingRoot),files:toolingFiles,identities:Object.fromEntries(await Promise.all(Object.entries(toolingFiles).map(async([name,path])=>[name,await fileIdentity(path)])))}:null;
     const retry=continuing?original.retry:await latestRetry(resolve(config.root,'evidence'));
-    const launch=continuing?{...original.launch,guardRequests:config.guardRequests,repair:{name:'r16-checker-recovery',originalRoot:config.root,inventorySha256:original.manifestIdentity.sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal}:{})}}:await launcher(config,config.projectId);
-    if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
+    const launch=continuing?{...original.launch,guardRequests:config.guardRequests,repair:{name:'r16-checker-recovery',originalRoot:config.root,inventorySha256:original.manifestIdentity.sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal,...(retry.guardFrontier?{postRowsGuard:retry.guardFrontier}:{})}:{})}}:await launcher(config,config.projectId);
+    if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,...(retry.postRowsGuard?{postRowsGuard:retry.postRowsGuard}:{})}:{})};
     const launchPath=resolve(config.root,continuing?(config.continuation.retry?`continuation-${retrySuffix}-launch.json`:'continuation-launch.json'):'launch.json');await save(launchPath,launch);
     if(!continuing) {if(config.backend==='mlx')await freeze(launchPath);else await bind(launchPath);}
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
@@ -562,7 +567,10 @@ export async function executeBackend(config) {
         await appendFile(resolve(config.root,continuing?(original.retry?`progress-continuation-${retrySuffix}.jsonl`:'progress-continuation.jsonl'):'progress.jsonl'),`${JSON.stringify({rowId:row.id,phase:'verified',jobId:receipt.jobId,at:new Date().toISOString()})}\n`);
       }catch(error){await measurement.stop('UNRESOLVED',samplerSha256).catch(()=>{});throw error;}
     }
-    for(const name of state.plan.requiredGuardCases) {
+    if(original?.retry?.guardFrontier)await reconcileParserRefusal(state.root,state.plan,digest(state.lock),digest(state.binding),launch.guardRequests[original.retry.guardFrontier.name]);
+    for(const [guardIndex,name] of state.plan.requiredGuardCases.entries()) {
+      if(original?.retry?.guardFrontier&&guardIndex<original.retry.guardFrontier.guardStartIndex)continue;
+      const retryGuard=original?.retry?.guardFrontier?.name===name;
       requireThat(launch.guardRequests[name].noProviderLoadProbe===OBSERVATION_METHOD,'every refusal must freeze the actual source-bound MOSS journal probe');
       let coldRestart=null;
       if(['device-budget-before-load','corrupt-adapter'].includes(name)&&launch.guardRequests[name].expectedTerminal==='failed') {
@@ -571,8 +579,8 @@ export async function executeBackend(config) {
       const mutation=await adapterRefusalState(config,name,launch.guardRequests[name]);
       try {
       const before=await actualJournal(config,expectedJournal),beforeAt=new Date().toISOString();
-      await harness(config,['guard',launchPath,name,config.backend,await deviceReceipt(config,state,`guard-${name}`)],`guard-${name}`);
-      const afterAt=new Date().toISOString(),after=await actualJournal(config,expectedJournal,afterAt),directory=resolve(state.root,'guards',`${config.backend}-${name}`);
+      await harness(config,[retryGuard?'guard-retry':'guard',launchPath,name,config.backend,await deviceReceipt(config,state,`guard-${name}${retryGuard?`-${retrySuffix}`:''}`),...(retryGuard?[String(original.retry.ordinal)]:[])],`guard-${name}`);
+      const afterAt=new Date().toISOString(),after=await actualJournal(config,expectedJournal,afterAt),directory=resolve(state.root,'guards',`${config.backend}-${name}${retryGuard?`-retry-${original.retry.ordinal}`:''}`);
       await writeFile(resolve(directory,'journal-before.jsonl'),before,{flag:'wx',mode:0o600});await writeFile(resolve(directory,'journal-after.jsonl'),after,{flag:'wx',mode:0o600});await cp(paths.toolchain,resolve(directory,'toolchain.json'),{errorOnExist:true,force:false});
       const receipt=await json(resolve(directory,'receipt.json')),rawEvidence=[];
       if(coldRestart)await save(resolve(directory,'cold-worker-restart.json'),coldRestart);
@@ -582,6 +590,11 @@ export async function executeBackend(config) {
       if(coldRestart)rawEvidence.push({file:'cold-worker-restart.json',...await fileIdentity(resolve(directory,'cold-worker-restart.json'))});
       await save(resolve(directory,'no-provider-load.json'),{version:VERSION,lockSha256:digest(state.lock),case:name,backend:config.backend,requestSha256:receipt.requestSha256,method:OBSERVATION_METHOD,
         observer:'actual source-bound instrumented native worker',beforeAt,afterAt,jobId:receipt.jobId??null,beforeFile:'journal-before.jsonl',afterFile:'journal-after.jsonl',toolchainFile:'toolchain.json',rawEvidence,observation:noLoadComparison(before,after,expectedJournal,{beforeAt,afterAt,jobId:receipt.jobId??null})});
+      if(retryGuard) {
+        const prefix=`guards/mlx-${name}-retry-${original.retry.ordinal}`;
+        await save(resolve(state.root,'external','lexical-parser-status-recovery.json'),{version:VERSION,name:'lexical-parser-status-recovery',ordinal:original.retry.ordinal,case:name,backend:'mlx',lockSha256:digest(state.lock),original:original.retry.guardFrontier,
+          retryRequestSha256:(await fileIdentity(resolve(directory,'request.raw.json'))).sha256,retryResponseSha256:(await fileIdentity(resolve(directory,'response.json'))).sha256,retryReceiptSha256:(await fileIdentity(resolve(directory,'receipt.json'))).sha256,retryNoLoadSha256:(await fileIdentity(resolve(directory,'no-provider-load.json'))).sha256,retryResolutionSha256:(await fileIdentity(resolve(state.root,'attempts/mlx',`guard-${name}-retry-${original.retry.ordinal}.resolution.json`))).sha256,path:prefix});
+      }
       }finally{await mutation.restore();}
     }
     // Stop only the processes this controller spawned. No global census/ownership gate.
@@ -603,7 +616,7 @@ export async function finalize(config) {
     const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
     const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
     const retry=await latestRetry(root);
-    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,historicalExecutionToolingSha:'2cd0363d59cb3eb0989bbb708000b6ffc907932a',executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
+    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,historicalExecutionToolingSha:'2cd0363d59cb3eb0989bbb708000b6ffc907932a',executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,...(retry.postRowsGuard?{postRowsGuard:retry.postRowsGuard}:{})}:{})};
   }
   await save(launchPath,launch);
   for(const entry of await filesUnder(config.reviewRoot)) {
