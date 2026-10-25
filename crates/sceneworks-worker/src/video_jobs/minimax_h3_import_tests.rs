@@ -616,14 +616,17 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
             total_gb: 0.1,
         }),
     ] {
-        let rendered = ArmProbe::default();
-        let raw = drive_candle_imported_minimax_h3(&settings, &rendered, &request, budget)
+        // The cached generator retains the original probe, so observe a fresh GENERATE rather
+        // than requiring its loader to run again. Clear the prior request before every call:
+        // an earlier successful render must never satisfy this iteration's admission proof.
+        probe.request.lock().unwrap().take();
+        let raw = drive_candle_imported_minimax_h3(&settings, &probe, &request, budget)
             .unwrap_or_else(|error| {
                 panic!("the stock row must not refuse an imported source: {error}")
             });
         assert!(
-            rendered.spec.lock().unwrap().is_some(),
-            "the imported render reached the provider under actual source-aware admission"
+            probe.request.lock().unwrap().take().is_some(),
+            "this imported render reached provider generation under actual source-aware admission"
         );
         assert_eq!(
             raw["importPlan"]["checkpointId"],
