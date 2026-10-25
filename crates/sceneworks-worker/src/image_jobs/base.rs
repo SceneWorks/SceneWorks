@@ -7303,6 +7303,60 @@ mod metrics_settings_tests {
         ));
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_edit_completion_metrics_do_not_invent_q8_for_the_r15_request_shape() {
+        // Actual R15 MLX edit shape: no quant field, BF16 native components, 30 steps/CFG4,
+        // shift5, 768x512 and seed173. Exercise the same helper used after event consumption,
+        // rather than supplying an already-correct label to image_settings_metrics.
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let req = request(json!({
+                "model": model, "mode": "edit_image", "prompt": "Change only the blue bottle body and blue cap to deep red.",
+                "negativePrompt": "", "width": 768, "height": 512, "count": 1, "seed": 173,
+                "referenceAssetIds": ["asset_reference"],
+                "advanced": {"steps": 30, "guidanceScale": 4, "schedulerShift": 5,
+                    "mossImage": {"acceleration": "off", "uncond_skip_layers": []},
+                    "mossImageEdit": {"reference_max_edge": 512, "use_kv_cache": true}}
+            }));
+            let metrics = build_image_metrics(&req, Some(30), 1, None);
+            assert_eq!(metrics.quant_label.as_deref(), Some("bf16"));
+            assert_eq!(metrics.quant_bits, None);
+            assert_eq!(metrics.model.as_deref(), Some(model));
+            assert_eq!(metrics.steps, Some(30));
+            assert_eq!(metrics.image_count, Some(1));
+            assert_eq!(
+                (metrics.width, metrics.height, metrics.seed),
+                (Some(768), Some(512), Some(173))
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn ordinary_moss_dmd_completion_keeps_generic_quant_metrics_semantics() {
+        use gen_core::moss_image::{MossDmdPrecision, MossImageAcceleration, MossImageOptions};
+        for precision in [MossDmdPrecision::UnmergedBf16, MossDmdPrecision::FullFp32] {
+            let options = MossImageOptions {
+                acceleration: MossImageAcceleration::Dmd(precision),
+                ..Default::default()
+            };
+            let req = request(
+                json!({"model": "moss_image_sft", "mode": "text_to_image", "prompt": "mist",
+                "advanced": {"mossImage": options}}),
+            );
+            let expected = effective_quant_label(&req, None);
+            let metrics = build_image_metrics(&req, Some(8), 1, None);
+            assert_eq!(metrics.quant_label, expected.0);
+            assert_eq!(metrics.quant_bits, expected.1.map(|bits| bits as u32));
+        }
+    }
+
     #[test]
     fn default_run_reports_effective_settings_not_blank() {
         let req = request(json!({
@@ -14816,6 +14870,14 @@ fn image_settings_metrics(
     quant_bits: Option<i64>,
     image_count: u32,
 ) -> GenerationMetrics {
+    // MOSS edit loads its frozen BF16 transformer/text encoder contract with no quantization.
+    // The generic resolver's omitted-setting Q8 default is not an executed tier for this lane.
+    let (quant_label, quant_bits) =
+        if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+            (Some("bf16".to_owned()), None)
+        } else {
+            (quant_label, quant_bits)
+        };
     let adv = &request.advanced;
     let string_or = |key: &str, default: &str| -> Option<String> {
         Some(
