@@ -9,6 +9,8 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
+import { sealPrivateHf, transferPrivateHf, releasePrivateHf } from './lib/moss-private-hf.mjs';
+import { lstat, realpath } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
@@ -146,14 +148,12 @@ test('private HF projection dereferences exact source bytes without changing sha
   const root=await temporary('packages'),source=resolve(root,'source'),run=resolve(root,'run'),bytes=Buffer.from('frozen model bytes');await mkdir(source);await writeFile(resolve(source,'weights'),bytes);
   const config={root:run,hfHome:resolve(run,'hf'),packageSource:source,packageFiles:[{file:'weights',sha256:sha(bytes)}]};await isolatePackages(config);await writeFile(resolve(config.hfHome,'weights'),'owned negative state');assert.deepEqual(await readFile(resolve(source,'weights')),bytes);
 });
-test('installer omits unavailable source adapter and execution copies only the authenticated installed projection',async()=>{
-  const root=await temporary('installed-projection'),source=resolve(root,'shared'),installed=resolve(root,'build/hf'),buildRoot=resolve(root,'build'),runRoot=resolve(root,'execute'),backbone=Buffer.from('exact backbone'),adapter=Buffer.from('exact installed adapter');
-  await mkdir(source);await mkdir(installed,{recursive:true});await writeFile(resolve(source,'backbone'),backbone);await writeFile(resolve(installed,'backbone'),backbone);await writeFile(resolve(installed,'adapter'),adapter);
-  const packageFiles=[{file:'backbone',sha256:sha(backbone)},{file:'adapter',sha256:sha(adapter)}],build={root:buildRoot,hfHome:resolve(buildRoot,'projection/hf'),packageSource:source,packageFiles,editAdapterFiles:['adapter']};build.root=resolve(buildRoot,'projection');
-  await isolatePackages(build,{omitAdapter:true});assert.deepEqual(await readFile(resolve(build.hfHome,'backbone')),backbone);await assert.rejects(()=>readFile(resolve(build.hfHome,'adapter')),{code:'ENOENT'});await assert.rejects(()=>readFile(resolve(source,'adapter')),{code:'ENOENT'});
-  const run={root:runRoot,hfHome:resolve(runRoot,'hf'),packageSource:source,packageFiles};await isolatePackages(run,{installedInventory:{hfHome:installed,files:packageFiles}});assert.deepEqual(await readFile(resolve(run.hfHome,'adapter')),adapter);
-  await assert.rejects(()=>isolatePackages({...run,root:resolve(root,'wrong'),hfHome:resolve(root,'wrong/hf')},{installedInventory:{hfHome:installed,files:[packageFiles[0]]}}),/every frozen package/);
-  await writeFile(resolve(installed,'adapter'),'tampered');await assert.rejects(()=>isolatePackages({...run,root:resolve(root,'tampered'),hfHome:resolve(root,'tampered/hf')},{installedInventory:{hfHome:installed,files:packageFiles}}),/source package file differs/);assert.deepEqual(await readFile(resolve(source,'backbone')),backbone);
+test('installer omits unavailable source adapter and refuses copying installed projections',async()=>{
+  const root=await temporary('installed-projection'),source=resolve(root,'shared'),buildRoot=resolve(root,'build'),backbone=Buffer.from('exact backbone');
+  await mkdir(source);await writeFile(resolve(source,'backbone'),backbone);
+  const packageFiles=[{file:'backbone',sha256:sha(backbone)},{file:'adapter',sha256:sha('adapter')}],build={root:buildRoot,hfHome:resolve(buildRoot,'hf'),packageSource:source,packageFiles,editAdapterFiles:['adapter']};
+  await isolatePackages(build,{omitAdapter:true});assert.deepEqual(await readFile(resolve(build.hfHome,'backbone')),backbone);await assert.rejects(()=>readFile(resolve(build.hfHome,'adapter')),{code:'ENOENT'});
+  await assert.rejects(()=>isolatePackages(build,{installedInventory:{hfHome:source,files:packageFiles}}),/without copying/);
 });
 test('raw JSON API transport sends exact NaN spelling and retains actual HTTP refusal',async()=>{
   const original=globalThis.fetch,rawJson='{"training_shift":NaN}';let observed;
@@ -331,4 +331,59 @@ test('adapter refusal rejects shared symlink, hardlink and escaped parent projec
     await assert.rejects(()=>adapterRefusalState(config,'missing-adapter',{adapterFile:file}),/private regular|escaped/);
     assert.deepEqual(await readFile(resolve(shared,'adapter')),bytes);
   }
+});
+
+async function privateHfFixture(t) {
+  const base=await realpath(await temporary('private-handoff'));t.after(()=>rm(base,{recursive:true,force:true}));
+  const parent=resolve(base,'moss-sc-26752'),buildRoot=resolve(parent,'moss-build-123-1-mlx'),root=resolve(parent,'moss-execute-123-1-mlx');
+  await mkdir(buildRoot,{recursive:true});await mkdir(root);
+  const common={sourceRoot:resolve(base,'checkout/source'),candidateId:'candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),backend:'mlx',packageSource:resolve(base,'shared'),packageFiles:Array.from({length:43},(_,i)=>({file:`hub/model/file-${i}`,sha256:sha(`bytes-${i}`)}))};
+  const build={...common,root:buildRoot,hfHome:resolve(buildRoot,'hf')},run={...common,root,hfHome:resolve(root,'hf')};
+  for(const [i,item] of common.packageFiles.entries()){await mkdir(resolve(build.hfHome,'hub/model'),{recursive:true});await writeFile(resolve(build.hfHome,item.file),`bytes-${i}`);}
+  await save(resolve(buildRoot,'runtime.json'),build);const owner=await sealPrivateHf(build),installed={hfHome:build.hfHome,files:owner.files};
+  return {base,build,run,installed,owner};
+}
+test('all 43 installed packages transfer by rename, retaining original receipts and exclusive adapter ownership',async t=>{
+  const {build,run,installed}=await privateHfFixture(t),original=await readFile(resolve(build.root,'hf-owner.json')),before=await lstat(resolve(build.hfHome,installed.files[0].file));
+  const receipt=await transferPrivateHf(run,installed,{sha256:sha('original packages receipt'),byteLength:12});
+  assert.equal(receipt.before.length,43);assert.deepEqual(receipt.before,receipt.after);assert.equal((await lstat(resolve(run.hfHome,installed.files[0].file))).ino,before.ino);assert.equal((await lstat(resolve(run.hfHome,installed.files[0].file))).nlink,1);
+  await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});assert.deepEqual(await readFile(resolve(build.root,'hf-owner.json')),original);assert.equal(installed.hfHome,build.hfHome);
+  run.editAdapterFiles=[installed.files[0].file];const mutation=await adapterRefusalState(run,'missing-adapter',{adapterFile:installed.files[0].file});await mutation.restore();
+  await releasePrivateHf(run);await assert.rejects(()=>lstat(run.hfHome),{code:'ENOENT'});assert.equal((await json(resolve(run.root,'hf-final-integrity.json'))).files.length,43);assert.deepEqual(await readFile(resolve(build.root,'hf-owner.json')),original);
+});
+test('HF transfer rejects existing destination, wrong run/source/pin/candidate, changed bytes and escaped paths before mutation',async t=>{
+  for(const kind of ['destination','run','source','pin','candidate','bytes','escape','link','hardlink','ancestor','descendant','runtime','inventory']) {
+    const {base,build,run,installed}=await privateHfFixture(t);let config=run,input=installed;
+    if(kind==='destination')await mkdir(run.hfHome);
+    if(kind==='run')input={...installed,hfHome:resolve(base,'moss-sc-26752/moss-build-124-1-mlx/hf')};
+    if(kind==='source')config={...run,sourceSha:'c'.repeat(40)};
+    if(kind==='pin')config={...run,inferenceSha:'c'.repeat(40)};
+    if(kind==='candidate')config={...run,candidateId:'other'};
+    if(kind==='bytes')await writeFile(resolve(build.hfHome,installed.files[0].file),'tampered');
+    if(kind==='escape')config={...run,root:resolve(base,'unrelated/moss-execute-123-1-mlx'),hfHome:resolve(base,'unrelated/moss-execute-123-1-mlx/hf')};
+    if(kind==='link'){await symlink(build.hfHome,resolve(run.root,'linked'));input={...installed,hfHome:resolve(run.root,'linked')};}
+    if(kind==='descendant')await symlink(resolve(base,'shared'),resolve(build.hfHome,'extra-link'));
+    if(kind==='ancestor'){await rm(resolve(build.hfHome,'hub/model'),{recursive:true});await mkdir(resolve(base,'external'));await symlink(resolve(base,'external'),resolve(build.hfHome,'hub/model'));}
+    if(kind==='hardlink')await link(resolve(build.hfHome,installed.files[0].file),resolve(base,'shared-link'));
+    if(kind==='runtime')await writeFile(resolve(build.root,'runtime.json'),JSON.stringify({...build,port:1}));
+    if(kind==='inventory')input={...installed,files:installed.files.slice(1)};
+    await assert.rejects(()=>transferPrivateHf(config,input,{}),undefined,kind);assert.ok(await lstat(build.hfHome));
+  }
+});
+test('HF release refuses altered bytes, wrong ownership and escaped/shared cleanup targets',async t=>{
+  const {build,run,installed}=await privateHfFixture(t);await transferPrivateHf(run,installed,{});
+  for(const config of [{...run,hfHome:build.hfHome},{...run,candidateId:'other'},{...run,root:resolve(run.root,'..'),hfHome:resolve(run.root,'../hf')}])await assert.rejects(()=>releasePrivateHf(config));
+  await writeFile(resolve(run.hfHome,installed.files[0].file),'corrupt');await assert.rejects(()=>releasePrivateHf(run),/hash mismatch/);assert.ok(await lstat(run.hfHome));await assert.rejects(()=>lstat(resolve(run.root,'hf-released.json')),{code:'ENOENT'});
+});
+test('durable MOSS storage lives outside checkout cleanup and release follows owned worker shutdown',async()=>{
+  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
+  for(const line of workflow.split('\n').filter(line=>/^\s+MOSS_(ROOT|BUILDS|BUNDLE):/.test(line)))assert.match(line,/github.workspace.*\/\.\.\/moss-sc-26752\/moss-/);
+  assert.match(controller,/await transferPrivateHf\(config/);assert.doesNotMatch(controller,/isolatePackages\(config,\{installedInventory/);
+  assert.ok(controller.indexOf('await stack.stop();stopped=true;')<controller.indexOf('await releasePrivateHf(config)'));assert.ok(controller.indexOf("await exportState(config,resolve(config.root,'handoff'))")<controller.indexOf('await releasePrivateHf(config)'));
+});
+
+test('same-volume private handoff follows original authenticated listener path without assuming routing labels',async t=>{
+  const {base,run,build,installed}=await privateHfFixture(t),oldOwner=await readFile(resolve(build.root,'hf-owner.json'));
+  const current={...run,sourceRoot:resolve(base,'other-listener/checkout/source'),root:resolve(base,'other-listener/moss-sc-26752/moss-execute-123-1-mlx'),hfHome:resolve(base,'other-listener/moss-sc-26752/moss-execute-123-1-mlx/hf')};
+  await mkdir(current.root,{recursive:true});const receipt=await transferPrivateHf(current,installed,{});assert.equal(receipt.from,build.hfHome);assert.equal(receipt.to,current.hfHome);assert.deepEqual(await readFile(resolve(build.root,'hf-owner.json')),oldOwner);await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});
 });

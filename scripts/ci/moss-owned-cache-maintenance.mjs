@@ -20,7 +20,7 @@ export function destination(env) {
   check(!OWNED_RUNS.some(item => item.run === env.GITHUB_RUN_ID), 'cannot reclaim the executing run');
   check(/^[a-f0-9]{40}$/.test(env.MOSS_SOURCE_SHA ?? '') && /^[a-f0-9]{40}$/.test(env.MOSS_INFERENCE_SHA ?? ''), 'missing current source identity');
   check(/^D:\\actions-runner(?:-[234])?\\_work\\SceneWorks\\SceneWorks$/i.test(path.normalize(env.GITHUB_WORKSPACE ?? '')), 'unexpected Windows workspace');
-  const root = path.join(env.GITHUB_WORKSPACE, `moss-build-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-cuda`);
+  const root = path.join(env.GITHUB_WORKSPACE, '..', 'moss-sc-26752', `moss-build-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-cuda`);
   check(normal(env.MOSS_ROOT ?? '') === normal(root), 'current run root mismatch');
   return root;
 }

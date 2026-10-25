@@ -12,6 +12,8 @@ import { command, sourceIdentity, filesUnder, contained, nativeDevice, sampler, 
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
+import { sealPrivateHf, transferPrivateHf, releasePrivateHf } from './lib/moss-private-hf.mjs';
+
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
 async function npmCommand(args,options) {
@@ -33,13 +35,10 @@ export function runtimeConfig(bundle,{sourceRoot,inferenceRoot,root,backend,buil
 }
 export async function isolatePackages(config,{omitAdapter=false,installedInventory=null}={}) {
   requireThat(config.hfHome===resolve(config.root,'hf')&&config.packageSource!==config.hfHome,'native jobs require their own HF projection; shared caches are read-only');
-  if(installedInventory) {
-    const identities=items=>items.map(({file,sha256})=>({file,sha256}));
-    requireThat(!omitAdapter&&typeof installedInventory.hfHome==='string'&&installedInventory.hfHome!==config.hfHome&&canonical(identities(installedInventory.files))===canonical(identities(config.packageFiles)),'installed projection must match every frozen package identity');
-  }
+  requireThat(!installedInventory,'installed private HF must transfer ownership without copying');
   for(const item of config.packageFiles) {
     if(omitAdapter&&(config.editAdapterFiles??[]).includes(item.file))continue;
-    const source=safePath(installedInventory?.hfHome??config.packageSource,item.file);requireThat((await fileIdentity(source)).sha256===item.sha256,'source package file differs from immutable input inventory');
+    const source=safePath(config.packageSource,item.file);requireThat((await fileIdentity(source)).sha256===item.sha256,'source package file differs from immutable input inventory');
     const target=safePath(config.hfHome,item.file);await mkdir(dirname(target),{recursive:true,mode:0o700});await cp(source,target,{dereference:true,errorOnExist:true,force:false});
   }
 }
@@ -267,6 +266,7 @@ export async function buildBackend(config) {
     requireThat(identity.sha256===item.sha256,'native package bytes differ from frozen model/package identities');packages.push({...item,...identity});
   }
   await save(resolve(out,'packages.json'),{hfHome:config.hfHome,files:packages});
+  await sealPrivateHf(config);
   const toolchain={node:(await execFile(process.execPath,['--version'])).stdout,rust:(await execFile('rustc',['-Vv'])).stdout,
     observationProducerSha256:(await fileIdentity(resolve(config.sourceRoot,'crates/sceneworks-worker/src/moss_terminal_observation.rs'))).sha256,
     installation,browser:await browserIdentity(config),features,sources,buildCommand:['cargo','build','--release','--locked','-p','sceneworks-rust-api','--features',features]};
@@ -312,7 +312,7 @@ async function deviceReceipt(config,state,label) {
 export async function executeBackend(config) {
   const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,config.backend,'inventory.json')),config.backend,await sourceIdentity(config));
   const installedPath=resolve(config.buildRoot,config.backend,'packages.json');requireThat(canonical(await fileIdentity(installedPath))===canonical(inventory.files.packages),'installed package inventory differs from source-bound native build');
-  await isolatePackages(config,{installedInventory:await json(installedPath)});
+  await transferPrivateHf(config,await json(installedPath),inventory.files.packages);
   await verifyBuild(config);const paths=buildPaths(config);config.apiBinary=paths.apiBinary;
   // Each execution phase is fresh. An interrupted phase retains immutable attempts;
   // do not start another stack and replay submissions under the same candidate.
@@ -410,6 +410,7 @@ export async function executeBackend(config) {
     // Stop only the processes this controller spawned. No global census/ownership gate.
     await stack.stop();stopped=true;
     if(config.backend==='mlx')await exportState(config,resolve(config.root,'handoff'));
+    await releasePrivateHf(config);
     await save(resolve(config.root,'execution.json'),{version:VERSION,lockSha256:digest(state.lock),backend:config.backend,renders:25,refusals:29,execution:'COMPLETE',acceptance:'AWAITING_ALL_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW'});
   }finally{if(!stopped)await stack.stop();delete process.env.MOSS_EDIT_ACTIONS_TOKEN;}
 }

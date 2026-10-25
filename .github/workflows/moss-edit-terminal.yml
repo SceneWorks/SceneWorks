@@ -120,7 +120,7 @@ env:
   MOSS_BUNDLE_SHA: ${{ inputs.bundle_manifest_sha256 }}
   MOSS_SOURCE: ${{ github.workspace }}/source
   MOSS_INFERENCE: ${{ github.workspace }}/inference
-  MOSS_BUNDLE: ${{ github.workspace }}/moss-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+  MOSS_BUNDLE: ${{ github.workspace }}/../moss-sc-26752/moss-bundle-${{ github.run_id }}-${{ github.run_attempt }}
   CARGO_BUILD_JOBS: '2'
   CARGO_PROFILE_RELEASE_STRIP: none
 jobs:
@@ -155,7 +155,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 15
     env:
-      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-cuda
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-cuda
     steps:
       # No uses steps: run before another job prepares/downloads its action dependencies.
       - name: Reclaim only verified stopped MOSS copies and conditionally copy the R6 build cache
@@ -187,8 +187,8 @@ jobs:
     timeout-minutes: 180
     env:
       MOSS_BACKEND: ${{ matrix.backend }}
-      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
-      MOSS_ROOT: ${{ github.workspace }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
+      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
       CUDA_COMPUTE_CAP: '120'
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
@@ -284,8 +284,8 @@ jobs:
     timeout-minutes: 720
     env:
       MOSS_BACKEND: mlx
-      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-mlx
-      MOSS_ROOT: ${{ github.workspace }}/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-mlx
+      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-mlx
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-mlx
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -349,8 +349,8 @@ jobs:
     timeout-minutes: 720
     env:
       MOSS_BACKEND: cuda
-      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-cuda
-      MOSS_ROOT: ${{ github.workspace }}/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-cuda
+      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-cuda
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-cuda
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -417,8 +417,8 @@ jobs:
     timeout-minutes: 30
     env:
       MOSS_BACKEND: cuda
-      MOSS_BUILDS: ${{ github.workspace }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-review
-      MOSS_ROOT: ${{ github.workspace }}/moss-review-${{ github.run_id }}-${{ github.run_attempt }}
+      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-review
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-review-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
