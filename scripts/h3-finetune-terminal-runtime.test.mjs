@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access } from 'node:fs/promises';
-import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,requireGenerationSourceCancelContract,verifyOwnershipEquivalence,verifyCacheCoverage,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
 import { hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -17,38 +17,43 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
   const scenarioPath=path.join(root,'scenario.json');
   const c={...requiredCases().find(c=>c.id===`${backend}.${group}.${check}`),timeoutSeconds:30,evidence:'evidence.json',inputs:[{path:input,sha256:digest,role:'checkpoint'},{path:component,sha256:componentHash,role:'component'}],loadHostBudgetBytes:100000,loadDeviceBudgetBytes:100000,minimumControlDelta:0.01,controlStream:'video',runtime:{port:43210,gpuId:'unit_fake_gpu',deviceId:'unit_fake_device',scenario:scenarioPath,sampleIntervalMs:1}};
   const p={proof_kind:'unit_fake',sceneworks:sw,inference:inf,source:SOURCE,output:root,responsibleTask:'sc-26691'};
-  const execution={label:'test',mode:'image_to_video',model:{modelId:'imported_unit_fake',sourcePath:input,sha256:digest,baseModel:'minimax_h3',partition:'fl2va',topology:'full',componentTier:'q4',supportedModes:['image_to_video'],components:[{sha256:componentHash,source:'unit_fake',revision:inf,licenseAcknowledged:true}]},sampling:{contractSource:'unit_fake recipe',steps:50,width:576,height:320,fps:24,duration:5.1667}};
-  const parameters={baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake_project',requestedGpu:'unit_fake_gpu',timeoutSeconds:30,seed:42,assets:{imageA:'unit_fake_red',imageB:'unit_fake_blue'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.005}};
-  const scenario=(group==='capability'||(group==='lifecycle'&&check==='cancel'))?buildScenario(c,parameters,[execution]):{baseUrl:parameters.baseUrl,caseId:c.id,timeoutSeconds:30,steps:[{id:'import',method:'POST',path:'/api/v1/models/import',body:{modelId:'imported_unit_fake',sourcePath:input},expectedStatus:201,assert:[{pointer:'/payload/modelId',equals:'imported_unit_fake'}]},{id:'installed',waitJob:{$capture:'import/id'},assert:[{pointer:'/result/modelId',equals:'imported_unit_fake'}]}]};
+  const execution={licenseAuthority:{kind:'unit_fake',acknowledged:true,approvedBy:'unit_fake only',reference:'synthetic consent, never real approval',approvedAt:'2026-10-25T00:00:00Z',subjects:[{role:'source',sha256:digest},{role:'component',sha256:componentHash}]},label:'test',mode:'image_to_video',model:{modelId:'imported_unit_fake',sourcePath:input,sha256:digest,baseModel:'minimax_h3',partition:'fl2va',topology:'full',componentTier:'q4',supportedModes:['image_to_video'],components:[{sha256:componentHash,source:'unit_fake',revision:inf,licenseAcknowledged:true}]},sampling:{contractSource:'unit_fake recipe',steps:50,width:576,height:320,fps:24,duration:5.1667}};
+  const parameters={proof_kind:'unit_fake',baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake_project',requestedGpu:'unit_fake_gpu',timeoutSeconds:30,seed:42,assets:{imageA:'unit_fake_red',imageB:'unit_fake_blue'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.005}};
+  const scenario=(group==='capability'||(group==='lifecycle'&&check==='cancel'))?buildScenario(c,parameters,[execution]):{baseUrl:parameters.baseUrl,caseId:c.id,timeoutSeconds:30,steps:[{id:'import',method:'POST',path:'/api/v1/models/import',body:{modelId:'imported_unit_fake',sourcePath:input,licenseAcknowledged:true},expectedStatus:201,assert:[{pointer:'/payload/modelId',equals:'imported_unit_fake'}]},{id:'installed',waitJob:{$capture:'import/id'},assert:[{pointer:'/result/modelId',equals:'imported_unit_fake'}]}]};
   await writeFile(scenarioPath,JSON.stringify(scenario));c.inputs.push({path:scenarioPath,sha256:await hashFile(scenarioPath),role:'scenario'});
-  if(group==='capability')c.declaredSourceBindings=[execution];
+  c.declaredSourceBindings=[execution];
   return {root,dir,native,input,digest,component,componentHash,p,c,scenario,execution,parameters};
 }
+async function replaceScenario(f,c,executions,parameters=f.parameters){
+  Object.assign(f.c,c);f.c.declaredSourceBindings=executions;f.scenario=buildScenario(f.c,parameters,executions);await writeFile(f.c.runtime.scenario,JSON.stringify(f.scenario));f.c.inputs.find(v=>v.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);return f.scenario;
+}
 function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
-  let pid=7000,jobNo=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
+  let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
   const spawnOwned=(argv,env,cwd,logPath)=>{
     const kind=argv[0]===process.execPath?'guardian':env.SCENEWORKS_WORKER_ONLY==='1'?'worker':'api';
     serviceDir=path.dirname(env.SCENEWORKS_CONFIG_DIR);let code=null,logs='';let resolveExit;const done=new Promise(r=>resolveExit=r);
     const child={pid:++pid,kind,env,argv,logPath,exitCode:()=>code,log:()=>logs,append:v=>{logs+=JSON.stringify(v)+'\n';},close:()=>{if(code!==null)return;code=0;resolveExit({code:0,signal:null});},stdin:{end:()=>{calls.push(['end',kind,child.pid]);child.close();if(kind==='guardian')for(const c of children.filter(c=>c.kind==='api'&&c.env.SCENEWORKS_PARENT_PID===String(child.pid)))c.close();}},signal:s=>{assert.equal(s,'SIGTERM');assert.ok([...jobs.values()].every(j=>['completed','canceled','failed'].includes(j.status)),'no signal before cooperative completion');calls.push(['signal',kind,child.pid,s]);child.close();},exit:async()=>{const result=await done;await writeFile(logPath,logs,{flag:'wx'});return result;}};
-    children.push(child);calls.push(['spawn',kind,child.pid]);if(kind==='worker')activeWorker=child;return child;
+    children.push(child);calls.push(['spawn',kind,child.pid]);if(kind==='worker'){activeWorker=child;nativeLoadCount=0;}return child;
   };
   const deps={proof_kind:'unit_fake',platform:'darwin',sleep:pause,spawnOwned,requireFreePort:async port=>{calls.push(['free',port]);},listenerPid:async()=>wrongListener?99999:children.filter(c=>c.kind==='api'&&c.exitCode()===null).at(-1)?.pid,
     runProcess:async(argv,options)=>{calls.push(['build',argv]);assert.ok(argv.includes('sceneworks-rust-api'));const binary=path.join(options.env.CARGO_TARGET_DIR,'debug','sceneworks-rust-api');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary, never executable');await writeFile(options.logPath,'unit_fake build log',{flag:'wx'});},
     hardware:async()=>({device:'unit_fake CPU fake, not native hardware',driver:'unit_fake'}),
-    decode:async file=>({sha256:await hashFile(file),proof_kind:'unit_fake',streams:[{codec_type:'video',width:576,height:320},{codec_type:'audio',proof_kind:'unit_fake'}]}),
+    decode:async file=>({sha256:await hashFile(file),proof_kind:'unit_fake',streams:[{codec_type:'video',codec_name:'h264',width:576,height:320,avg_frame_rate:'24/1',r_frame_rate:'24/1',nb_read_frames:'124',nb_frames:'124',duration:String(124/24),start_time:'0'},{codec_type:'audio',codec_name:'aac',sample_rate:'32000',channels:2,nb_read_frames:'162',duration:String(124/24),start_time:'0',proof_kind:'unit_fake'}]}),
     delta:async(a,b)=> (await readFile(a,'utf8'))===(await readFile(b,'utf8'))?0:0.1,
     sample:async service=>({at:new Date().toISOString(),pid:service.worker.pid,host:100,device:200,deviceCounterAt:new Date().toISOString(),method:backend==='mlx'?'mlx-allocator-cumulative-high-water':'sampled-device-used',deviceId:'unit_fake_device'}),
     fetch:async(url,options)=>{
       calls.push(['request',url.pathname,options.method]);assert.ok(options.headers['X-SceneWorks-Token']);let value,status=200;
       if(url.pathname==='/api/v1/health')value={status:'ok',service:'sceneworks-api'};
       else if(url.pathname==='/api/v1/workers'){const active=[...jobs.values()].find(j=>!['completed','canceled','failed','interrupted'].includes(j.status));value=[{id:activeWorker.env.SCENEWORKS_WORKER_ID,status:active?'busy':'idle',currentJobId:active?.id??null,lastSeenAt:new Date(++heartbeat).toISOString()}];}
+      else if(url.pathname==='/api/v1/models/library-roots')value={roots:[{rootId:'unit_fake_root',path:f.root}]};
       else if(url.pathname==='/api/v1/models/import'){const body=JSON.parse(options.body);const id=`import-${++jobNo}`;value={id,status:'queued',payload:body};jobs.set(id,{id,status:'queued',payload:body,result:{modelId:body.modelId}});status=201;}
       else if(url.pathname==='/api/v1/video/jobs'){
         const body=JSON.parse(options.body),id=`video-${++jobNo}`,assetId=`asset-${jobNo}`,project=path.join(serviceDir,'data','projects','unit_fake.sceneworks');
         await mkdir(project,{recursive:true});const file=`${assetId}.mp4`;await writeFile(path.join(project,file),body.sourceAssetId??body.prompt??'unit_fake_video');
         const asset={id:assetId,projectId:body.projectId,type:'video',file:{path:file},recipe:{rawSettings:{proof_kind:'unit_fake'}}};assets.set(assetId,asset);
         const job={id,status:'completed',projectId:body.projectId,payload:{...body,generationSetId:id},result:{assetIds:[assetId]}};jobs.set(id,job);value={...job,status:'queued'};status=201;
-        activeWorker.append({event:'h3_import_prepared_load',jobId:id,provider:'unit_fake_native',backend:'unit_fake_gpu',native_backend:f.c.backend,seal_validated:true,cache_state:'Cold',identity:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:semantic,assembly:{family:'minimax-h3',partition:'fl2va',sourceEncoding:'unit_fake-convrot',components:{}},sourceFiles:[{path:f.input,sha256:f.digest}]},prepared_sources:[{path:f.input,sha256:f.digest},{path:f.component,sha256:f.componentHash}],operation:body.mode,seed:body.seed,steps:body.advanced.steps,scheduler_shift:null});
+        activeWorker.append({event:'h3_import_prepared_load',jobId:id,provider:'unit_fake_native',backend:'unit_fake_gpu',native_backend:f.c.backend,seal_validated:true,retains_dit_weights:false,cache_state:nativeLoadCount++===0?'Cold':'Warm',identity:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:semantic,assembly:{family:'minimax-h3',partition:'fl2va',sourceEncoding:'unit_fake-convrot',components:{},componentClosure:[{revision:inf,files:[{relativePath:'component',sha256:'sha256:'+f.componentHash,sizeBytes:19}]}]},sourceFiles:[{path:f.input,sha256:f.digest}]},prepared_sources:[{path:f.input,sha256:f.digest},{path:f.component,sha256:f.componentHash}],operation:body.mode,seed:body.seed,steps:body.advanced.steps,scheduler_shift:null});
+        const constrained=Boolean(activeWorker.env.SCENEWORKS_MLX_MEMORY_CAP_GB||activeWorker.env.SCENEWORKS_CUDA_VRAM_CAP_GB);activeWorker.append({event:'generation_memory_policy_applied',jobId:id,scope_configured:true,stage_residency:'Sequential',stream_transformer_blocks:constrained,window_size:constrained?2:null,window_component:constrained?'dit':null,strategy:constrained?'unit_fake_btr':'unit_fake_default'});
       } else if(url.pathname.includes('/assets/'))value=assets.get(url.pathname.split('/').at(-1));
       else if(url.pathname.startsWith('/api/v1/projects/'))value={id:'unit_fake_project',path:path.join(serviceDir,'data','projects','unit_fake.sceneworks')};
       else if(url.pathname.endsWith('/duplicate')){const original=jobs.get(url.pathname.split('/').at(-2));assert.ok(original);return deps.fetch(new URL('/api/v1/video/jobs',url),{...options,body:JSON.stringify(original.payload)});}
@@ -128,7 +133,7 @@ test('foreign listener is never contacted or signalled',async t=>{
 });
 test('exact cached HF imports preserve real API lineage and refuse absent private snapshot bytes before transport',async t=>{
   const f=await fixture(t),repo='unit_fake/model',revision=inf,file='model.safetensors';f.c.runtime.seedFiles=[{input:f.input,destination:`hf/hub/models--unit_fake--model/snapshots/${revision}/${file}`,mode:'hardlink'}];
-  const fake=fakeRuntime(f),service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),step={method:'POST',path:'/api/v1/models/import',body:{source:{kind:'huggingFace',repo,revision,files:[file]},expectedSha256:f.digest}};
+  const fake=fakeRuntime(f),service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),step={method:'POST',path:'/api/v1/models/import',body:{modelId:f.execution.model.modelId,licenseAcknowledged:true,source:{kind:'huggingFace',repo,revision,files:[file]},expectedSha256:f.digest}};
   await service.checkStep(step,{});assert.equal(fake.calls.filter(v=>v[0]==='request'&&v[1]==='/api/v1/models/import').length,0);
   await assert.rejects(service.checkStep({...step,body:{...step.body,source:{...step.body.source,files:['absent.safetensors']}}},{}));assert.equal(await hashFile(f.input),f.digest);await service.stop();
 });
@@ -168,18 +173,18 @@ test('native load normalizer rejects stock checkpoint, wrong job and unverified 
   const wrong=structuredClone(event);wrong.identity.sourceFiles[0].sha256=semantic;assert.throws(()=>loadIdentity(wrong,job,f.c.inputs));assert.throws(()=>loadIdentity(event,{...job,id:'wrong'},f.c.inputs));
 });
 test('CUDA observed bound and MLX fresh post-case cumulative counter retain honest attribution',async t=>{
-  const f=await fixture(t),service={worker:{pid:12345},c:{backend:'cuda'}};let n=0;
+  const f=await fixture(t),service={epochs:[{workerPid:12345}],worker:{pid:12345},c:{backend:'cuda'}};let n=0;
   const observations=new ProcessObservations(service,{intervalMs:1,sleepImpl:pause,sample:async()=>({at:new Date().toISOString(),pid:12345,host:10,device:20+ ++n,method:'sampled-device-used',deviceId:'unit_fake_device'})}).start();await pause();
   const metrics=await observations.finish();validatePeakMetrics(metrics,{backend:'cuda',loadHostBudgetBytes:1000,loadDeviceBudgetBytes:1000});assert.equal(metrics.observations.device.attribution.includesOtherProcesses,true);assert.ok(metrics.observations.loadDevice.bounds.includes('observed-device-global-bound'));
   assert.equal(metrics.loadDevicePeakBytes,metrics.devicePeakBytes);
 });
 test('missing device initialization preserves real-shaped host loading samples, never substitutes zero',async()=>{
-  const service={worker:{pid:12345},jobs:new Set(),c:{backend:'mlx',loadHostBudgetBytes:10000,loadDeviceBudgetBytes:10000}};let n=0;
+  const service={epochs:[{workerPid:12345}],worker:{pid:12345},jobs:new Set(),c:{backend:'mlx',loadHostBudgetBytes:10000,loadDeviceBudgetBytes:10000}};let n=0;
   const observations=new ProcessObservations(service,{intervalMs:1,sleepImpl:pause,sample:async()=>({at:new Date().toISOString(),pid:12345,host:++n===1?999:10,device:n===1?null:20,deviceUnavailable:n===1?'not initialized':undefined,deviceCounterAt:new Date().toISOString(),method:'mlx-allocator-cumulative-high-water',deviceId:'unit_fake_device'})}).start();await pause();const metrics=await observations.finish();
   assert.equal(metrics.hostPeakBytes,999);assert.equal(metrics.devicePeakBytes,20);assert.ok(metrics.observations.device.samples.every(s=>s.bytes===20));assert.ok(observations.gaps.length>0);
 });
 test('explicit campaign RSS bound requests cooperative cancellation, never a native process kill',async()=>{
-  const calls=[];let status='running';const service={worker:{pid:12345},jobs:new Set(['owned']),c:{backend:'cuda',loadHostBudgetBytes:5,loadDeviceBudgetBytes:1000},request:async(method,route)=>{calls.push([method,route]);if(method==='POST')status='canceled';return {id:'owned',status};}};
+  const calls=[];let status='running';const service={epochs:[{workerPid:12345}],worker:{pid:12345},jobs:new Set(['owned']),c:{backend:'cuda',loadHostBudgetBytes:5,loadDeviceBudgetBytes:1000},request:async(method,route)=>{calls.push([method,route]);if(method==='POST')status='canceled';return {id:'owned',status};}};
   const observations=new ProcessObservations(service,{intervalMs:1,sleepImpl:pause,sample:async()=>({at:new Date().toISOString(),pid:12345,host:10,device:20,method:'sampled-device-used',deviceId:'unit_fake_device'})}).start();await pause();await assert.rejects(observations.finish(),/bound exceeded/);
   assert.equal(status,'canceled');assert.deepEqual(calls,[['GET','/api/v1/jobs/owned'],['POST','/api/v1/jobs/owned/cancel']]);assert.ok(observations.budgetExceeded);
 });
@@ -206,10 +211,58 @@ test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero usi
   await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env,exec}),/manual device zero/);
   for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'1'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'}])await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env:bad,exec}),/manual CUDA proof/);
 });
+test('cold generation-preparation cancellation is explicitly blocked, never passed by labels or invented callback counts',async()=>{
+  for(const fake of [undefined,{state:'passed'},{acquisition:'MemoryMemo',hashed_bytes:0},{callbacks:999,progress:'cold',leasesReleased:true}])assert.throws(()=>requireGenerationSourceCancelContract(fake),/BLOCKED.*actual native typed byte observer/);
+  const pending=requiredCases().filter(c=>c.id.endsWith('.generation-source-prep-cancel'));assert.deepEqual(pending.map(c=>c.backend),['mlx','cuda']);for(const c of pending)await assert.rejects(validateEvidence({},c,'/unit_fake_unread','test result: ok. 1 passed; 0 failed; 0 ignored;'),/BLOCKED/);
+});
+test('review repair linked runtime accepts omitted ownership and refuses fictional enum before transport',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f),service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  const body={modelId:f.execution.model.modelId,linkedRootId:'unit_fake_root',linkedRelativePath:path.basename(f.input),licenseAcknowledged:true};
+  try{await service.checkStep({method:'POST',path:'/api/v1/models/import',body},{});await assert.rejects(service.checkStep({method:'POST',path:'/api/v1/models/import',body:{...body,ownershipMode:'linked'}},{}),/omitted/);}finally{await service.stop();}
+});
+test('review repair all successful generalization and replay executions require actual load events',async t=>{
+  for(const check of ['generalization.native-single','lifecycle.restart-replay']){
+    const f=await fixture(t);f.execution.model.sourceFormat='native-single';await replaceScenario(f,requiredCases().find(v=>v.id===`mlx.${check}`),[f.execution]);
+    const fake=fakeRuntime(f),launch=fake.deps.spawnOwned;fake.deps.spawnOwned=(...args)=>{const child=launch(...args),append=child.append;child.append=value=>{if(value.event!=='h3_import_prepared_load')append(value);};return child;};
+    await assert.rejects(executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps),/EVERY successful imported generation/);
+  }
+});
+test('review repair readback rejects empty or fabricated native history even with completed AV',async t=>{
+  const f=await fixture(t);f.execution.model.sourceFormat='native-single';await replaceScenario(f,requiredCases().find(v=>v.id==='mlx.generalization.native-single'),[f.execution]);const fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  const file=path.join(f.dir,'source-job-output.json'),bundle=JSON.parse(await readFile(file,'utf8'));bundle.bindings=[];await writeFile(file,JSON.stringify(bundle));
+  await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/missing an actual native closure/);
+});
+test('review repair copied closure metadata cannot replace authentic retained worker trace',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);await writeFile(path.join(f.dir,'worker-1.log'),'');
+  await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/authentic worker/);
+});
+test('review repair request-bound AV validator runs on the real output-binding path',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f),decode=fake.deps.decode;fake.deps.decode=async file=>{const decoded=await decode(file);decoded.streams[0].nb_read_frames='1';return decoded;};
+  await assert.rejects(executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps),/frames but the request resolved/);
+});
+test('review repair managed linked equivalence compares actual semantic assembly and both output streams',async t=>{
+  const f=await fixture(t),linked=structuredClone(f.execution);linked.label='linked';linked.model.modelId='imported_linked';Object.assign(linked,{ownershipMode:'linked',linkedRootId:'unit_fake_root',linkedRelativePath:path.basename(f.input)});
+  const scenario=await replaceScenario(f,requiredCases().find(v=>v.id==='mlx.lifecycle.managed-linked-equivalence'),[f.execution,linked],{...f.parameters,equivalence:{maximumBaselineDelta:0.001,maximumVideoDelta:0.001,maximumAudioDelta:0.001}});
+  const fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);const bundle=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8')),byJob=new Map(bundle.bindings.map(v=>[v.job.id,v]));
+  assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).ownershipEquivalence.length,2);
+  const changed=byJob.get(bundle.captures.linked_av0_done.id),original=structuredClone(changed.runtimeIdentity.quantization.observedAssembly);changed.runtimeIdentity.quantization.observedAssembly.components={different:'bytes'};
+  await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,fake.deps.delta),/semantic component/);changed.runtimeIdentity.quantization.observedAssembly=original;
+  await writeFile(path.join(f.dir,changed.media.av),'different linked output');await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,async(a,b)=>a.includes('output-0')&&b.includes('output-2')?0.1:0),/not equivalent/);
+  await assert.rejects(verifyOwnershipEquivalence(bundle,scenario,byJob,f.dir,fake.deps.decode,async()=>0.1),/baseline noise/);
+});
+test('review repair cache coverage rejects three cold runs and unchanged staged policy',async t=>{
+  const f=await fixture(t),executions=['cold','warm','staged'].map(label=>({...structuredClone(f.execution),label,reuseInstalled:label!=='cold',...(label==='staged'?{memoryCap:{kind:'mlx-memory-gb',value:1}}:{})}));
+  const scenario=await replaceScenario(f,requiredCases().find(v=>v.id==='mlx.lifecycle.cold-warm-staged'),executions),fake=fakeRuntime(f);const result=await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);validatePeakMetrics(result.evidence.metrics,f.c);assert.equal(result.evidence.metrics.kind,'owned-worker-epochs');const wrongEpoch=structuredClone(result.evidence.metrics);wrongEpoch.epochs[1].pid=wrongEpoch.epochs[0].pid;assert.throws(()=>validatePeakMetrics(wrongEpoch,f.c));
+  const bundle=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8')),byJob=new Map(bundle.bindings.map(v=>[v.job.id,v])),events=[];for(const epoch of bundle.epochs)for(const line of(await readFile(path.join(f.dir,`worker-${epoch.epoch}.log`),'utf8')).split('\n')){try{events.push(JSON.parse(line));}catch{}}
+  const verified=await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true});assert.equal(verified.cacheCoverage.cacheLayer,'generator-metadata-not-DiT-residency');
+  const warm=byJob.get(bundle.captures.warm_av0_done.id);warm.event.cache_state='Cold';assert.throws(()=>verifyCacheCoverage(bundle,scenario,byJob,events),/actually hit/);warm.event.cache_state='Warm';
+  const applied=events.find(e=>e.event==='generation_memory_policy_applied'&&e.jobId===bundle.captures.staged_av0_done.id);applied.stream_transformer_blocks=false;assert.throws(()=>verifyCacheCoverage(bundle,scenario,byJob,events),/bounded transformer/);applied.stream_transformer_blocks=true;
+  const before=events.find(e=>e.event==='generation_memory_policy_applied'&&e.jobId===warm.job.id);Object.assign(before,{stream_transformer_blocks:true,window_size:2});assert.throws(()=>verifyCacheCoverage(bundle,scenario,byJob,events),/not a staged transition/);
+});
 test('single author-declared hybrid does not require a fictional companion checkpoint',()=>{
   const c=requiredCases().find(v=>v.id==='mlx.capability.hybrid');
   const model={modelId:'imported_single_hybrid',sourcePath:'/unit_fake/model',sha256:semantic,baseModel:'minimax_h3',partition:'hybrid',topology:'pruned',hybridBinding:{kind:'single-checkpoint',declarationSource:'unit_fake author declaration'},componentTier:'q4',components:[{sha256:semantic,source:'unit_fake',revision:inf,licenseAcknowledged:true}],supportedModes:['text_to_video','image_to_video','reference_to_video']};
-  const executions=model.supportedModes.map((mode,i)=>({label:`hybrid${i}`,model,mode,sampling:{contractSource:'unit_fake',steps:50,width:576,height:320,duration:5.1667,fps:24}}));
-  const scenario=buildScenario(c,{baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake',seed:1,requestedGpu:'unit_fake',timeoutSeconds:30,assets:{imageA:'red',imageB:'blue',voiceA:'speech',voiceB:'reversed'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.001}},executions);
+  const executions=model.supportedModes.map((mode,i)=>({licenseAuthority:{kind:'unit_fake',acknowledged:true,approvedBy:'unit fake',reference:'synthetic only',approvedAt:'2026-10-25T00:00:00Z',subjects:['source','component'].map(role=>({role,sha256:semantic}))},label:`hybrid${i}`,model,mode,sampling:{contractSource:'unit_fake',steps:50,width:576,height:320,duration:5.1667,fps:24}}));
+  const scenario=buildScenario(c,{proof_kind:'unit_fake',baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake',seed:1,requestedGpu:'unit_fake',timeoutSeconds:30,assets:{imageA:'red',imageB:'blue',voiceA:'speech',voiceB:'reversed'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.001}},executions);
   assert.ok(scenario.steps.length);assert.ok(!model.companion);
 });

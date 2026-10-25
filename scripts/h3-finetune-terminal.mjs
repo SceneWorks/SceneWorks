@@ -22,7 +22,7 @@ export const SURFACE = {
   numeric: ['tensor-mapping', 'convrot', 'pruned-interpolation', 'w4a8'],
   capability: ['text', 'image', 'first-last-frame', 'last-frame-only', 'video', 'ordered-multimodal', 'audio-reference', 'hybrid', 'turbo', 'lora', 'lokr'],
   generalization: ['renamed', 'independent-finetune', 'native-single', 'sharded-diffusers', 'dense-f16', 'dense-bf16', 'dense-f32', 'existing-families', 'ltx-add-select-generate', 'compatible-base'],
-  lifecycle: ['managed-linked-equivalence', 'restart-replay', 'source-drift', 'interruption-retry', 'removal', 'cancel', 'relink-rescan', 'leases', 'duplicate', 'bounded-loading', 'cold-warm-staged', 'provenance-license'],
+  lifecycle: ['managed-linked-equivalence', 'restart-replay', 'source-drift', 'interruption-retry', 'removal', 'cancel', 'generation-source-prep-cancel', 'relink-rescan', 'leases', 'duplicate', 'bounded-loading', 'cold-warm-staged', 'provenance-license'],
 };
 export function requiredCases() {
   return ['mlx', 'cuda'].flatMap(backend => [
@@ -148,7 +148,220 @@ export async function decodeAV(file, command = exec) {
     positive(Number(stream.nb_read_frames)); positive(Number(stream.duration));
   }
   await command('ffmpeg', ['-v', 'error', '-xerror', '-i', file, '-map', '0:v:0', '-map', '0:a:0', '-f', 'null', '-'], { timeout: 300000, maxBuffer: 1048576 });
-  return { sha256: await hashFile(file), streams };
+  return { sha256: await hashFile(file), streams, video: streams.find(s => s.codec_type === 'video'), audio: streams.find(s => s.codec_type === 'audio') };
+}
+// ---------------------------------------------------------------------------
+// Request-bound AV acceptance (terminal review finding 14).
+//
+// `decodeAV` proves the file decodes; it does NOT prove the file is the media
+// the request asked for. A complete 4-frame clip decodes and is "positive", so
+// every length/geometry trap below used to pass. These are ports of the SAME
+// resolved ladders the engine is handed, not a second implementation:
+//
+//   * temporal lattice and raw frame count:
+//     crates/sceneworks-core/src/video_request.rs
+//       `raw_frame_count` (427-438) rounds `duration * fps`,
+//       `video_frame_count` (486-496) selects the family arm,
+//       `MINIMAX_H3_LEGAL_FRAME_COUNTS` (523-525) = 124..345 step 17,
+//       `MINIMAX_H3_FPS` (529) = 24,
+//       `minimax_h3_frame_count` (556-563) aligns UP to the next rung,
+//       `ltx_frame_count` (573-587) nearest 8k+1 (min 9),
+//       `wan_frame_count` (593-596) floor 4k+1 (min 5),
+//       `mochi_frame_count` (610-620) nearest 6k+1 (min 7).
+//   * spatial grid: `dimension_multiple_of` (1721-1730) defaults to 32;
+//     `config/manifests/builtin.models.jsonc` declares 32 for MiniMax-H3
+//     (the SIZE_MULTIPLE the VAE/DiT enforce) and 64 for LTX-2.3/2.5.
+//   * audio coverage: MiniMax-H3 is 32 kHz stereo and the engine fits the
+//     waveform to the picture at `round(frames / fps * 32000)` samples per
+//     channel (inference `mlx-gen-minimax-h3/src/audio_config.rs:48`,
+//     `AUDIO_SAMPLE_RATE = 32_000`; SceneWorks
+//     `crates/sceneworks-worker/src/video_jobs/tests.rs:15144-15166`).
+//   * mux rule: `audio_mux_args` (video_jobs/mod.rs:1691-1767) encodes AAC and
+//     bounds the file at `frames / fps` with `-t`, so decoded audio may differ
+//     from the picture only by the codec's own frame/padding quantum — one AAC
+//     frame (1024 samples) — not by an arbitrary slack.
+// ---------------------------------------------------------------------------
+export const MINIMAX_H3_LEGAL_FRAME_COUNTS = Object.freeze([124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]);
+export const MINIMAX_H3_FPS = 24;
+export const MINIMAX_H3_AUDIO_SAMPLE_RATE = 32_000;
+export const MINIMAX_H3_AUDIO_CHANNELS = 2;
+const DEFAULT_SPATIAL_STRIDE = 32; // core `DEFAULT_DIMENSION_MULTIPLE`
+const LTX_SPATIAL_STRIDE = 64;     // LTX-2.3/2.5 `requiresDimensionsMultipleOf`
+const isLtxModel = model => typeof model === 'string' && model.startsWith('ltx');
+const isMochiModel = model => typeof model === 'string' && model.startsWith('mochi');
+const isMinimaxH3Model = model => typeof model === 'string' && model.startsWith('minimax_h3');
+export const rawFrameCount = (duration, fps) => Math.max(1, Math.round(Number(duration) * Number(fps)));
+export const minimaxH3FrameCount = raw => MINIMAX_H3_LEGAL_FRAME_COUNTS.find(legal => legal >= raw) ?? MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.length - 1];
+export function ltxFrameCount(raw) {
+  const frameCount = Math.max(9, raw), lower = frameCount - ((frameCount - 1) % 8), upper = lower + 8;
+  if (lower < 9) return upper;
+  return frameCount - lower <= upper - frameCount ? lower : upper;
+}
+export const wanFrameCount = raw => Math.max(5, Math.max(1, raw) - ((Math.max(1, raw) - 1) % 4));
+export function mochiFrameCount(raw) {
+  const frameCount = Math.max(7, raw), lower = frameCount - ((frameCount - 1) % 6), upper = lower + 6;
+  return frameCount - lower <= upper - frameCount ? lower : upper;
+}
+// Mirrors `video_frame_count`: LTX, Mochi and MiniMax-H3 are explicit arms and the
+// fallback is Wan, exactly as the Rust ladder documents.
+export function videoFrameCount(model, raw) {
+  if (isLtxModel(model)) return ltxFrameCount(raw);
+  if (isMochiModel(model)) return mochiFrameCount(raw);
+  if (isMinimaxH3Model(model)) return minimaxH3FrameCount(raw);
+  return wanFrameCount(raw);
+}
+// True only for a value the engine's own lattice admits (`17n+5` + 5-15 s clamp
+// for H3, `8k+1`, `6k+1`, `4k+1` for the others).
+export function isLegalFrameCount(model, frames) {
+  if (!Number.isInteger(frames) || frames <= 0) return false;
+  if (isLtxModel(model)) return frames >= 9 && (frames - 1) % 8 === 0;
+  if (isMochiModel(model)) return frames >= 7 && (frames - 1) % 6 === 0;
+  if (isMinimaxH3Model(model)) return MINIMAX_H3_LEGAL_FRAME_COUNTS.includes(frames);
+  return frames >= 5 && (frames - 1) % 4 === 0;
+}
+const spatialStride = (model, contract) => Number.isInteger(contract.spatialStride) && contract.spatialStride > 0
+  ? contract.spatialStride
+  : isLtxModel(model) ? LTX_SPATIAL_STRIDE : DEFAULT_SPATIAL_STRIDE;
+// Encoder frame quanta that legitimately move a stream's decoded duration/start.
+// AAC/MP3/AC-3 have fixed samples-per-frame; Opus defaults to 20 ms packets; PCM
+// and the lossless codecs encode sample-exact durations. `null` means "no
+// source-derived rule", which the validator refuses rather than guessing.
+export function audioFrameSamples(codec, sampleRate) {
+  switch (codec) {
+    case 'aac': return 1024;
+    case 'mp3': return 1152;
+    case 'ac3': case 'eac3': return 1536;
+    case 'opus': return Math.round(Number(sampleRate) * 0.02);
+    case 'pcm_s16le': case 'pcm_s24le': case 'pcm_s32le': case 'pcm_f32le': case 'pcm_f64le': case 'flac': case 'alac': return 1;
+    default: return null;
+  }
+}
+const finiteNumber = (value, what) => {
+  const number = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+  assert.ok(typeof number === 'number' && Number.isFinite(number), `${what} required`);
+  return number;
+};
+// "24/1" -> 24. `0/0` (VFR / unknown) returns null so callers can refuse it.
+function rational(value) {
+  const match = /^(\d+)\/(\d+)$/.exec(String(value ?? ''));
+  if (!match || Number(match[2]) === 0) return null;
+  return Number(match[1]) / Number(match[2]);
+}
+function resolvedAudioRequirement(model, contract) {
+  const declared = contract.audio;
+  if (declared !== undefined) {
+    assert.ok(declared && typeof declared === 'object', 'resolved contract audio must be an object');
+    assert.equal(typeof declared.required, 'boolean', 'resolved contract audio.required must be declared');
+    return declared;
+  }
+  if (isMinimaxH3Model(model)) return { required: true, sampleRate: MINIMAX_H3_AUDIO_SAMPLE_RATE, channels: MINIMAX_H3_AUDIO_CHANNELS, codec: 'aac' };
+  if (isLtxModel(model)) return { required: true }; // 24 kHz core / 48 kHz with BWE: caller must resolve it.
+  return { required: false };
+}
+/**
+ * Pure request-bound acceptance for a decoded media job.
+ *
+ * @param {object} decoded            `decodeAV` result: `{ streams }`.
+ * @param {object} request            queued job payload (model, fps, width, height, duration).
+ * @param {object} resolvedContract   resolved model contract:
+ *   { model, fps, width, height, frameCount?, spatialStride?, maxPixels?,
+ *     audio?: { required, sampleRate?, channels?, codec?, frameSamples? } }
+ *
+ * Throws unless the decoded streams are exactly the media the request resolved
+ * to. Returns the resolved lattice facts as the verification receipt.
+ */
+export function validateAVAgainstRequest(decoded, request, resolvedContract) {
+  assert.ok(decoded && Array.isArray(decoded.streams), 'decoded AV streams required');
+  assert.ok(request && typeof request === 'object', 'resolved request required');
+  assert.ok(resolvedContract && typeof resolvedContract === 'object', 'resolved AV contract required');
+  const model = resolvedContract.model ?? request.model;
+  assert.ok(typeof model === 'string' && model.length > 0, 'resolved model id required');
+  const fps = finiteNumber(resolvedContract.fps ?? request.fps, 'resolved fps');
+  assert.ok(Number.isInteger(fps) && fps > 0, 'resolved fps must be a positive integer');
+  assert.equal(finiteNumber(request.fps, 'request fps'), fps, 'request fps differs from the resolved contract');
+  const width = finiteNumber(resolvedContract.width ?? request.width, 'resolved width');
+  const height = finiteNumber(resolvedContract.height ?? request.height, 'resolved height');
+  for (const [axis, value] of [['width', width], ['height', height]]) {
+    assert.ok(Number.isInteger(value) && value > 0, `resolved ${axis} must be a positive integer`);
+    assert.equal(finiteNumber(request[axis], `request ${axis}`), value, `request ${axis} differs from the resolved contract`);
+  }
+  const duration = finiteNumber(request.duration, 'request duration');
+  assert.ok(duration > 0, 'request duration must be positive');
+  // The engine REFUSES out-of-window H3 durations rather than clamping them
+  // (`duration_limit_error`); the manifest's 5.1667..14.375 menu is 4-decimal
+  // rounding of 124/24..345/24, hence the 1e-4 menu-rounding epsilon.
+  const lastH3Rung = MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.length - 1];
+  const hardMin = resolvedContract.hardMinDuration ?? (isMinimaxH3Model(model) ? MINIMAX_H3_LEGAL_FRAME_COUNTS[0] / MINIMAX_H3_FPS : undefined);
+  const hardMax = resolvedContract.hardMaxDuration ?? (isMinimaxH3Model(model) ? lastH3Rung / MINIMAX_H3_FPS : undefined);
+  if (hardMin !== undefined) assert.ok(duration >= finiteNumber(hardMin, 'contract hardMinDuration') - 1e-4, `request duration ${duration}s is below the renderable minimum`);
+  if (hardMax !== undefined) assert.ok(duration <= finiteNumber(hardMax, 'contract hardMaxDuration') + 1e-6, `request duration ${duration}s is above the renderable maximum; the engine refuses rather than shortens`);
+  const stride = spatialStride(model, resolvedContract);
+  for (const [axis, value] of [['width', width], ['height', height]]) assert.equal(value % stride, 0, `resolved ${axis} ${value} is off the model's ${stride}px spatial grid`);
+  if (resolvedContract.maxPixels !== undefined) {
+    const maxPixels = finiteNumber(resolvedContract.maxPixels, 'resolved maxPixels');
+    assert.ok(maxPixels > 0 && width * height <= maxPixels, `resolved canvas ${width}x${height} exceeds the model's ${maxPixels}px area budget`);
+  }
+  // The request's own lattice snap is authoritative; a supplied contract frame
+  // count can only AGREE with it, never loosen it.
+  const frameCount = videoFrameCount(model, rawFrameCount(duration, fps));
+  assert.ok(isLegalFrameCount(model, frameCount), `resolved frame count ${frameCount} is not on ${model}'s temporal lattice`);
+  if (resolvedContract.frameCount !== undefined) assert.equal(finiteNumber(resolvedContract.frameCount, 'resolved frameCount'), frameCount, 'resolved frameCount is not the request lattice snap');
+  const video = decoded.streams.find(stream => stream.codec_type === 'video');
+  assert.ok(video, 'actual decoded video stream required');
+  const decodedFrameCount = finiteNumber(video.nb_read_frames, 'decoded video frame count');
+  assert.ok(Number.isInteger(decodedFrameCount) && decodedFrameCount > 0, 'decoded video frame count must be a positive integer');
+  assert.equal(decodedFrameCount, frameCount, `decoded video holds ${decodedFrameCount} frames but the request resolved to ${frameCount}`);
+  if (video.nb_frames !== undefined && video.nb_frames !== 'N/A') assert.equal(finiteNumber(video.nb_frames, 'container frame count'), frameCount, 'container frame count differs from the resolved lattice');
+  const avgFps = rational(video.avg_frame_rate), realFps = rational(video.r_frame_rate);
+  assert.ok(avgFps !== null, 'decoded average frame rate required');
+  assert.ok(realFps !== null, 'decoded real frame rate required (constant-rate stream)');
+  assert.ok(Math.abs(avgFps - fps) < 1e-9, `decoded average fps ${avgFps} differs from the resolved ${fps}`);
+  assert.ok(Math.abs(realFps - fps) < 1e-9, `decoded real fps ${realFps} differs from the resolved ${fps} (not a constant-rate stream)`);
+  for (const [axis, expected] of [['width', width], ['height', height]]) assert.equal(finiteNumber(video[axis], `decoded ${axis}`), expected, `decoded ${axis} differs from the resolved ${expected}`);
+  const frameDuration = 1 / fps;
+  const expectedDuration = frameCount / fps;
+  const decodedDuration = finiteNumber(video.duration, 'decoded video duration');
+  assert.ok(decodedDuration > 0, 'decoded video duration must be positive');
+  // The container's timestamp quantum is one video frame; the exact frame count
+  // above is what makes a short clip impossible, this only binds its timestamps.
+  assert.ok(Math.abs(decodedDuration - expectedDuration) <= frameDuration + 1e-9, `decoded video lasts ${decodedDuration}s but the resolved ${frameCount} frames at ${fps}fps are ${expectedDuration}s`);
+  const videoStart = finiteNumber(video.start_time ?? 0, 'decoded video start time');
+  assert.ok(Math.abs(videoStart) <= frameDuration + 1e-9, `decoded video starts at ${videoStart}s, not the request origin`);
+  const requirement = resolvedAudioRequirement(model, resolvedContract);
+  const audio = decoded.streams.find(stream => stream.codec_type === 'audio');
+  if (requirement.required) assert.ok(audio, 'missing decoded audio stream required by the resolved contract');
+  const report = { model, fps, width, height, frameCount, durationSeconds: expectedDuration, video: { duration: decodedDuration, startTime: videoStart, codec: video.codec_name ?? null }, audio: null };
+  if (!audio) return report;
+  const codec = audio.codec_name;
+  assert.ok(typeof codec === 'string' && codec.length > 0, 'decoded audio codec required');
+  const sampleRate = finiteNumber(audio.sample_rate, 'decoded audio sample rate');
+  const channels = finiteNumber(audio.channels, 'decoded audio channels');
+  assert.ok(Number.isInteger(sampleRate) && sampleRate > 0, 'decoded audio sample rate must be a positive integer');
+  assert.ok(Number.isInteger(channels) && channels > 0, 'decoded audio channels must be a positive integer');
+  if (requirement.sampleRate !== undefined) assert.equal(sampleRate, finiteNumber(requirement.sampleRate, 'contract audio sample rate'), 'decoded audio sample rate differs from the resolved contract');
+  if (requirement.channels !== undefined) assert.equal(channels, finiteNumber(requirement.channels, 'contract audio channels'), 'decoded audio channels differ from the resolved contract');
+  if (requirement.codec !== undefined) assert.equal(codec, requirement.codec, 'decoded audio codec differs from the resolved contract');
+  const declaredFrameSamples = requirement.frameSamples !== undefined ? finiteNumber(requirement.frameSamples, 'contract audio frameSamples') : undefined;
+  const frameSamples = declaredFrameSamples ?? audioFrameSamples(codec, sampleRate);
+  assert.ok(Number.isInteger(frameSamples) && frameSamples > 0, `no source-derived padding rule for audio codec ${codec}; declare contract.audio.frameSamples`);
+  // One codec frame + one sample is the real padding quantum after `-t` trims to
+  // the picture. Anything shorter means the soundtrack does not cover the clip;
+  // anything longer means it was not bounded to the picture.
+  const audioTolerance = (frameSamples + 1) / sampleRate;
+  const expectedAudioSamples = Math.round(expectedDuration * sampleRate);
+  const audioDuration = finiteNumber(audio.duration, 'decoded audio duration');
+  assert.ok(audioDuration > 0, 'decoded audio duration must be positive');
+  assert.ok(Math.abs(audioDuration - expectedDuration) <= audioTolerance, `decoded audio lasts ${audioDuration}s but the resolved picture is ${expectedDuration}s (${expectedAudioSamples} samples; tolerance ${audioTolerance}s)`);
+  const audioStart = finiteNumber(audio.start_time ?? 0, 'decoded audio start time');
+  assert.ok(Math.abs(audioStart - videoStart) <= Math.max(audioTolerance, frameDuration) + 1e-9, `decoded audio starts at ${audioStart}s while video starts at ${videoStart}s`);
+  report.audio = { codec, sampleRate, channels, duration: audioDuration, startTime: audioStart, expectedSamples: expectedAudioSamples, toleranceSeconds: audioTolerance, frameSamples };
+  return report;
+}
+// The single call a completed-media job should make: decode (real ffprobe count +
+// full ffmpeg decode in production) and then bind it to the resolved request.
+export async function decodeAndValidateAV(file, request, resolvedContract, command = exec) {
+  const decoded = await decodeAV(file, command);
+  return { decoded, verification: validateAVAgainstRequest(decoded, request, resolvedContract) };
 }
 export function sensitivityDecision(interventionDelta, repeatedBaselineDelta, minimumDelta, maximumBaselineDelta) {
   positive(minimumDelta);
@@ -170,7 +383,7 @@ export async function decodedDelta(a, b, stream, command = exec) {
     const args = stream === 'video'
       ? ['-an', '-vf', 'fps=1,scale=16:16', '-pix_fmt', 'rgb24', '-f', 'rawvideo']
       : ['-vn', '-ac', '1', '-ar', '8000', '-f', 'f32le'];
-    const { stdout } = await command('ffmpeg', ['-v', 'error', '-xerror', '-i', file, '-t', '8', ...args, 'pipe:1'], { encoding: 'buffer', timeout: 300000, maxBuffer: 1048576 });
+    const { stdout } = await command('ffmpeg', ['-v', 'error', '-xerror', '-i', file, ...args, 'pipe:1'], { encoding: 'buffer', timeout: 300000, maxBuffer: 1048576 });
     if (stream === 'video') return [...stdout].map(v => v / 255);
     assert.equal(stdout.length % 4, 0);
     return Array.from({ length: stdout.length / 4 }, (_, i) => stdout.readFloatLE(i * 4));
@@ -187,6 +400,12 @@ const contained = (base, name) => {
   return p;
 };
 export function validatePeakMetrics(metrics, c) {
+  if(metrics?.kind==='owned-worker-epochs'){
+    assert.ok(metrics.epochs?.length>=2&&new Set(metrics.epochs.map(epoch=>epoch.pid)).size===metrics.epochs.length,'distinct actual worker epochs required');
+    for(const epoch of metrics.epochs){assert.ok(!epoch.metrics.kind,'epoch measurements must be directly attributed observations');validatePeakMetrics(epoch.metrics,c);for(const observation of Object.values(epoch.metrics.observations)){assert.equal(observation.attribution.pid,epoch.pid);for(const sample of observation.samples)assert.equal(sample.pid,epoch.pid,'epoch sample belongs to a different PID');}}
+    for(const key of ['hostPeakBytes','devicePeakBytes','loadHostPeakBytes','loadDevicePeakBytes'])assert.equal(metrics[key],Math.max(...metrics.epochs.map(epoch=>epoch.metrics[key])),'aggregate must be the maximum across distinct process epochs, not their sum');
+    return;
+  }
   const hostMethods = ['sampled-process-rss', 'os-rss-high-water'];
   const deviceMethods = ['sampled-process-cuda-used', 'sampled-device-used', 'sampled-native-allocated', 'native-allocated-high-water', 'mlx-allocator-cumulative-high-water'];
   for (const [name, bytesKey] of [['host', 'hostPeakBytes'], ['device', 'devicePeakBytes'], ['loadHost', 'loadHostPeakBytes'], ['loadDevice', 'loadDevicePeakBytes']]) {
@@ -237,6 +456,7 @@ export function normalizeLoadEvent(raw) {
   return { kind: 'prepared-native-load-closure', jobId: fields.jobId, providerId: fields.provider, backend: fields.native_backend, deviceLabel: fields.backend, identity: parse(fields.identity), prepared_sources: parse(fields.prepared_sources), seed: fields.seed, operation: fields.operation, steps: optionNumber(fields.steps), schedulerShift: optionNumber(fields.scheduler_shift), cacheState: fields.cache_state };
 }
 export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta = decodedDelta) {
+  if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
   const canonical = requiredCases().find(item => item.id === c.id);
   assert.ok(canonical, 'unknown acceptance case');
   for (const [key, value] of Object.entries(canonical)) assert.equal(c[key], value, 'case reclassification cannot weaken acceptance');
@@ -385,6 +605,7 @@ export async function runCase(p, id, root, inferenceRoot) {
   }
   await save(statePath, { ...identity, status: 'running', started: new Date().toISOString() });
   try {
+    if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
     const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(c.timeoutSeconds) }, timeoutSeconds: c.timeoutSeconds };
     if (c.group === 'numeric' && c.numericProof?.kind !== 'native-pinned-fixture') {
@@ -439,6 +660,7 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
   assert.equal(r.plan.sceneworks, p.sceneworks); assert.equal(r.plan.inference, p.inference); assert.deepEqual(r.plan.source, p.source);
   assert.equal(r.planSha256, digest(r.plan)); assert.ok(r.verificationRunId && r.verificationRunAttempt);
   const expected = requiredCases().filter(c => c.backend === backend);
+  assert.ok(allowUnitFake||!expected.some(c=>c.id.endsWith('.generation-source-prep-cancel')),'BLOCKED: native cold-preparation cancellation evidence contract is not implemented; backend cannot be certified complete');
   assert.equal(r.cases.length, expected.length); assert.equal(new Set(r.cases.map(c => c.id)).size, expected.length);
   for (const c of expected) {
     const row = r.cases.find(v => v.id === c.id), planned = r.plan.cases.find(v => v.id === c.id);
@@ -450,6 +672,7 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
 export async function backendComplete(p, backend) {
   const selected = p.cases.filter(v => v.backend === backend); assert.ok(selected.length);
   for (const c of selected) {
+    if(c.id.endsWith('.generation-source-prep-cancel'))return false; // Actual observer/ack contract is pending; labels or forged success rows cannot complete a backend.
     let r; try { r = await json(path.join(contained(p.output, c.id), 'execution.json')); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
     if (r.status !== 'passed' || r.planSha256 !== digest(p)) return false;
   }
@@ -475,6 +698,7 @@ export async function verifyBackend(p, backend, root, inferenceRoot) {
   return { path: filename, readback: r };
 }
 export async function verifyPortableCase(p, c, dir, row) {
+  if(c.id.endsWith('.generation-source-prep-cancel')){const {requireGenerationSourceCancelContract}=await import('./h3-finetune-terminal-runtime.mjs');requireGenerationSourceCancelContract();}
   assert.equal(await hashFile(path.join(dir, 'execution.json')), row.executionSha256, 'downloaded execution record differs from backend readback');
   const execution = await json(path.join(dir, 'execution.json')); assert.equal(execution.status, 'passed'); assert.equal(execution.planSha256, row.planSha256); assert.equal(execution.runId, row.runId); assert.equal(execution.runAttempt, row.runAttempt); assert.deepEqual(execution.verified, row.verified);
   const v = row.verified, log = await readFile(path.join(dir, 'process.log'), 'utf8');

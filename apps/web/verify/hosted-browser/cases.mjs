@@ -1,7 +1,7 @@
 // sc-26687 S8 browser cases. Every case drives the REAL production frontend through
 // its rendered controls and asserts the request the app actually serialized. Nothing
 // here calls a component helper, an oracle, or injects UI state.
-import { IMPORTED_MODEL_REF } from "../../verify-fixtures.mjs";
+import { IMPORTED_MODEL_REF, MINIMAX_REF, MANAGED_REPAIR_REQUEST } from "../../verify-fixtures.mjs";
 
 const SHORT = 5000;
 const LONG = 15000;
@@ -12,8 +12,9 @@ function assert(condition, message) {
   if (!condition) throw new CaseAssertionError(message);
 }
 
+const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
 function equal(actual, expected, message) {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+  if (JSON.stringify(canonical(actual)) !== JSON.stringify(canonical(expected))) {
     throw new CaseAssertionError(`${message}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
   }
 }
@@ -173,11 +174,31 @@ async function caseModelManagerReimport(page, recorder) {
   const reopenedUrl = await form.getByLabel(/^Source URL$/).inputValue();
   equal(reopenedName, "Edited name", "the edited import draft name must survive dismiss/reopen");
   equal(reopenedUrl, "https://example.test/new.safetensors", "the edited import draft URL must survive dismiss/reopen");
+  // Interact with a real rendered control over explicitly SYNTHETIC fixture terms.
+  // No storage injection and no acceptance of actual upstream terms or download.
+  const baseCard=cardFor(page,MINIMAX_REF.name);
+  await baseCard.getByText('Synthetic fixture terms only.',{exact:false}).waitFor({state:'visible',timeout:LONG});
+  await baseCard.getByRole('checkbox',{name:/I have read and accept this model/}).check();
+  await form.getByRole('button',{name:'Repair selected model',exact:true}).waitFor({state:'visible',timeout:LONG});
+  const repairedResponse=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/v1/models/my_h3/repair'&&response.request().method()==='POST');
+  await form.getByRole('button',{name:'Repair selected model',exact:true}).click();
+  const response=await repairedResponse;equal(response.status(),201,'existing-selection repair must queue through the actual endpoint');
+  const repairJob=await response.json();equal(repairJob.payload.modelId,'my_h3','repair preserves the original selection even after name edit');
+  const repair=await waitForRequest(recorder,'POST','/api/v1/models/my_h3/repair');equal(repair.body,MANAGED_REPAIR_REQUEST,'repair serializes exact actual managed DTO without internal routing flags');
+  equal(matchingRequests(recorder,'POST','/api/v1/models/import'),[],'repair must not create another same-name model');
+  equal(matchingRequests(recorder,'POST','/api/v1/models/my_h3/download'),[],'repair must not silently substitute download');
+  await page.getByText('Import queued for my_h3.',{exact:true}).waitFor({state:'visible',timeout:LONG});
+  const catalogResponse=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/models'&&r.request().method()==='GET');
+  await page.reload();const catalog=await(await catalogResponse).json();
+  equal(catalog.filter(model=>model.id==='my_h3').length,1,'exactly the original selection remains');equal(catalog.find(model=>model.id==='my_h3').name,'Edited name','repair updated the original selection rather than creating a new ID');
+  await waitForApp(page);await modelsTab(page);await cardFor(page,'Edited name').waitFor({state:'visible',timeout:LONG});
 
   return {
     evidence: {
       metadata: { typeValue, familyValue, baseValue, partitionValue, seededName },
       draft: { name: reopenedName, url: reopenedUrl },
+      repairRequest:repair.body, repairJob, stableSelectionId:'my_h3',
+      repairPosts:matchingRequests(recorder,'POST','/api/v1/models/my_h3/repair').length,
       importPosts: 0,
       downloadPosts: 0,
     },

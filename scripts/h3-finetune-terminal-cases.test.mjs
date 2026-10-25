@@ -11,12 +11,13 @@ import { runScenario } from './h3-finetune-terminal-api.mjs';
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 // All identities below are explicitly synthetic test data, never staged model identity.
 const hash = '1'.repeat(64), revision = '2'.repeat(40);
-const params = () => ({ baseUrl: 'http://127.0.0.1:43210', projectId: 'synthetic-project', seed: 314159, requestedGpu: 'synthetic-device', timeoutSeconds: 300, sensitivity: { minimumControlDelta: 0.01, maximumBaselineDelta: 0.001 },
+const params = () => ({ proof_kind:'unit_fake', baseUrl: 'http://127.0.0.1:43210', projectId: 'synthetic-project', seed: 314159, requestedGpu: 'synthetic-device', timeoutSeconds: 300, equivalence:{maximumBaselineDelta:0.001,maximumVideoDelta:0.001,maximumAudioDelta:0.001}, sensitivity: { minimumControlDelta: 0.01, maximumBaselineDelta: 0.001 },
   assets: { imageA: 'img-red', imageB: 'img-blue', clipA: 'clip-forward', clipB: 'clip-flipped', voiceA: 'public-speech', voiceB: 'reversed-public-speech' } });
 function execution(partition = 'ref2va', topology = 'full') {
-  return { label: 'synthetic', model: { modelId: 'imported_synthetic', sourcePath: '/synthetic-only/model.safetensors', sha256: hash, baseModel: partition === 'ref2va' ? 'minimax_h3_ref' : 'minimax_h3', partition, topology, supportedModes: ['text_to_video', 'image_to_video', 'first_last_frame', 'reference_to_video'], componentTier: 'q4', components: [{ sha256: hash, source: 'synthetic', revision, licenseAcknowledged: true }] },
+  return { label: 'synthetic', licenseAuthority:{kind:'unit_fake',acknowledged:true,approvedBy:'synthetic-test-authority',reference:'unit_fake consent only; NOT real approval',approvedAt:'2026-10-25T00:00:00Z',subjects:['source','component','adapter'].map(role=>({role,sha256:hash}))}, model: { modelId: 'imported_synthetic', sourcePath: '/synthetic-only/model.safetensors', sha256: hash, baseModel: partition === 'ref2va' ? 'minimax_h3_ref' : 'minimax_h3', partition, topology, supportedModes: ['text_to_video', 'image_to_video', 'first_last_frame', 'reference_to_video'], componentTier: 'q4', components: [{ sha256: hash, source: 'synthetic', revision, licenseAcknowledged: true }] },
     mode: partition === 'ref2va' ? 'reference_to_video' : 'text_to_video', sampling: { steps: 50, duration: 5.1667, fps: 24, width: 576, height: 320, contractSource: 'synthetic declared recipe only' } };
 }
+const grant=e=>{e.licenseAuthority={kind:'unit_fake',acknowledged:true,approvedBy:'synthetic-test-only',reference:'NOT real consent',approvedAt:'2026-10-25T00:00:00Z',subjects:[{role:'source',sha256:(e.family==='ltx'?e.ltxAdapter:e.model).sha256},...(e.model.components??[]).map(v=>({role:'component',sha256:v.sha256})),...(e.adapters??[]).map(v=>({role:'adapter',sha256:v.sha256}))]};return e;};
 const named = (group, check, backend = 'mlx') => requiredCases().find(c => c.id === `${backend}.${group}.${check}`);
 const submissions = s => s.steps.filter(x => x.path === '/api/v1/video/jobs');
 function mockAPI() {
@@ -107,14 +108,14 @@ test('ordered multimodal cases reverse and drop each list independently, includi
 });
 test('eight artifact scenarios refuse stock substitution and use explicit ref2va base lineage', () => {
   for (const c of requiredCases().filter(c => c.group === 'artifact')) {
-    const e = execution(); e.model.sha256 = caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256;
+    const e = execution(); e.model.sha256 = caseBook.artifacts.find(a => a.artifact === c.artifact).expectedSha256;grant(e);
     const s = buildScenario(c, params(), [e]); assert.equal(submissions(s).length, 1);
     assert.equal(s.steps[0].body.baseModel, 'minimax_h3_ref'); assert.equal(s.steps[0].body.minimaxH3Partition, 'ref2va');
     e.model.sha256 = hash; assert.throws(() => buildScenario(c, params(), [e]));
   }
 });
 test('frozen HF artifact import uses actual source schema and retains exact revision/file lineage',()=>{
-  const c=requiredCases().find(v=>v.id==='mlx.artifact.0'),e=execution();e.model.sha256=caseBook.artifacts[0].expectedSha256;e.importSource={kind:'huggingFace',repo:SOURCE.repo,revision:SOURCE.revision,files:[c.artifact]};
+  const c=requiredCases().find(v=>v.id==='mlx.artifact.0'),e=execution();e.model.sha256=caseBook.artifacts[0].expectedSha256;e.importSource={kind:'huggingFace',repo:SOURCE.repo,revision:SOURCE.revision,files:[c.artifact]};grant(e);
   const s=buildScenario(c,params(),[e]);assert.deepEqual(s.steps[0].body.source,e.importSource);assert.ok(!s.steps[0].body.sourcePath);
   e.importSource.revision='3'.repeat(40);assert.throws(()=>buildScenario(c,params(),[e]));
 });
@@ -155,7 +156,7 @@ test('hybrid plan requires an explicit source binding and exercises text, image 
   delete es[0].model.companion; assert.throws(() => buildScenario(named('capability', 'hybrid'), params(), es));
 });
 test('cancel/retry uses actual job handlers and never fabricates a successful native model load', () => {
-  const e = { label: 'cancel', model: { modelId: 'imported_cancel', sourcePath: '/synthetic/input', sha256: hash, baseModel: 'minimax_h3_ref', partition: 'ref2va' } };
+  const e=execution();e.label='cancel';delete e.mode;delete e.sampling;
   for (const check of ['cancel', 'interruption-retry']) {
     const s = buildScenario(named('lifecycle', check), params(), [e]);
     assert.equal(submissions(s).length, 0); assert.ok(s.steps.some(s => s.expectedJobStatus === 'canceled'));
@@ -183,9 +184,9 @@ test('lifecycle fixture-only cases refuse to masquerade as a generation scenario
 test('managed/linked equivalence and cold/warm/staged require each actual execution binding', () => {
   assert.throws(() => buildScenario(named('lifecycle', 'managed-linked-equivalence'), params(), [execution()]));
   assert.throws(() => buildScenario(named('lifecycle', 'cold-warm-staged'), params(), [execution()]));
-  const a = execution(), b = execution(); b.label = 'linked'; b.ownershipMode = 'linked'; b.linkedRootId = 'owned-root'; b.linkedRelativePath = 'source.safetensors';
+  const a = execution(), b = execution(); b.label = 'linked'; b.model.modelId='imported_linked'; b.ownershipMode = 'linked'; b.linkedRootId = 'owned-root'; b.linkedRelativePath = 'source.safetensors';
   const s = buildScenario(named('lifecycle', 'managed-linked-equivalence'), params(), [a,b]);
-  const linked = s.steps.find(s => s.id === 'linked_import').body; assert.equal(linked.ownershipMode, 'linked'); assert.ok(!Object.hasOwn(linked, 'sourcePath'));
+  const linked = s.steps.find(s => s.id === 'linked_import').body; assert.equal(linked.ownershipMode, undefined); assert.ok(!Object.hasOwn(linked, 'sourcePath'));
 });
 test('assets carry executable CPU ffmpeg recipes and pinned public speech provenance, no personal assets', () => {
   for (const key of ['imageA','imageB','clipA','clipB','tone']) assert.equal(caseBook.assets[key].command[0], 'ffmpeg');
@@ -243,16 +244,16 @@ test('complete canonical preparation writes executable scenarios without executi
           e.adapters=[{id:r.id??`synthetic_${check}`,kind:check==='turbo'?'lora':check,sha256:hash,source:'synthetic',revision,compatibilitySource:'synthetic',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true}]; return e; });
       }
     }
-    if (check==='ltx-add-select-generate') { es[0].family='ltx'; es[0].model.baseModel='ltx_2_3'; }
+    if (check==='ltx-add-select-generate') { es[0].family='ltx'; es[0].model.modelId=es[0].model.baseModel='ltx_2_3';es[0].model.outputAudioSampleRate=48000;es[0].ltxAdapter={id:'unit_fake_ltx_adapter',sourcePath:'/synthetic-only/adapter.safetensors',sha256:hash,baseModel:'ltx_2_3'}; }
     if (check==='independent-finetune') es[0].model.lineage={source:'synthetic independent',revision};
     if (check==='renamed') Object.assign(es[0].model,{originalPath:'/synthetic-only/original.safetensors',originalSha256:hash});
     if (['native-single','sharded-diffusers'].includes(check)) es[0].model.sourceFormat=check;
     if (check==='sharded-diffusers') Object.assign(es[0].model,{sourceKind:'directory',files:[{path:'/synthetic-only/shard.safetensors',sha256:hash}]});
     if (check.startsWith('dense-')) es[0].model.sourceFormat=check.slice(6);
     if (check==='restart-replay') { es[0].reuseInstalled=true; es[0].replayJobId='synthetic-before-restart'; }
-    if (check==='managed-linked-equivalence') { const b=execution(); b.label='linked'; b.ownershipMode='linked'; b.linkedRootId='synthetic-root'; b.linkedRelativePath='model.safetensors'; es.push(b); }
-    if (check==='cold-warm-staged') es=['cold','warm','staged'].map(label=>({...execution(),label,reuseInstalled:label!=='cold'}));
-    p.bindings[c.id]=es;
+    if (check==='managed-linked-equivalence') { const b=execution(); b.label='linked'; b.model.modelId='imported_linked'; b.ownershipMode='linked'; b.linkedRootId='synthetic-root'; b.linkedRelativePath='model.safetensors'; es.push(b); }
+    if (check==='cold-warm-staged') es=['cold','warm','staged'].map(label=>({...execution(),label,reuseInstalled:label!=='cold',...(label==='staged'?{memoryCap:{kind:c.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb',value:1}}:{})}));
+    p.bindings[c.id]=es.map(grant);
   }
   const result=await prepareCases(p,out);
   assert.equal(result.status,'prepared-not-executed'); assert.equal(result.cases,requiredCases().length);
@@ -261,13 +262,33 @@ test('complete canonical preparation writes executable scenarios without executi
   await assert.rejects(access(path.join(out,'evidence.json')));
   const reference=path.join(parent,'unit_fake-reference.txt');await writeFile(reference,'unit_fake reference, not executable upstream');
   p.output=parent;p.nextAuthorizedAction='Unit fake only; NEVER dispatch or authorize a campaign';p.budgets={mlx:{hostBytes:1000,deviceBytes:2000},cuda:{hostBytes:1000,deviceBytes:2000}};p.runtime={port:43210,gpuId:'unit_fake',deviceId:'unit_fake'};p.caseInputs={};
-  for(const c of plan.cases){p.caseInputs[c.id]=[{path:reference,sha256:await hashFile(reference),role:'reference'}];for(const e of p.bindings[c.id]??[])p.caseInputs[c.id].push({path:path.join(parent,'unit_fake_unstaged_payload'),sha256:e.model.sha256,role:'checkpoint',artifact:c.artifact},{path:path.join(parent,'unit_fake_unstaged_component'),sha256:hash,role:'component'});}
+  for(const c of plan.cases){p.caseInputs[c.id]=[{path:reference,sha256:await hashFile(reference),role:'reference'}];for(const e of p.bindings[c.id]??[])p.caseInputs[c.id].push({path:path.join(parent,'unit_fake_unstaged_payload'),sha256:e.family==='ltx'?e.ltxAdapter.sha256:e.model.sha256,role:e.family==='ltx'?'adapter':'checkpoint',artifact:c.artifact},{path:path.join(parent,'unit_fake_unstaged_component'),sha256:hash,role:'component'});}
   const finalized=await finalizeCampaignPlan(p,out),bound=JSON.parse(await readFile(finalized.plan,'utf8'));
   assert.equal(bound.proof_kind,'unit_fake');assert.equal(bound.cases.length,requiredCases().length);
   for(const c of bound.cases.filter(c=>c.group==='numeric')){assert.equal(c.numericProof.kind,'native-pinned-fixture');assert.ok(!c.referenceOutput,'no invented flat-array export gate');}
   assert.ok(bound.cases.some(c=>c.fixtureProof?.kind==='source-bound-assertions'));
   await assert.rejects(finalizeCampaignPlan(p,out),/EEXIST/);
   await assert.rejects(prepareCases(p,out),/EEXIST/);
+});
+test('review repair linked DTO omits ownership and retains exact root/path authority',()=>{
+  const managed=execution(),linked=execution();linked.label='linked';linked.model.modelId='imported_linked';Object.assign(linked,{ownershipMode:'linked',linkedRootId:'root',linkedRelativePath:'model.safetensors'});
+  const scenario=buildScenario(named('lifecycle','managed-linked-equivalence'),params(),[managed,linked]);const body=scenario.steps.find(s=>s.id==='linked_import').body;
+  assert.ok(!Object.hasOwn(body,'ownershipMode'));assert.ok(!Object.hasOwn(body,'sourcePath'));assert.deepEqual([body.linkedRootId,body.linkedRelativePath],['root','model.safetensors']);assert.equal(submissions(scenario).length,4);assert.ok(scenario.ownershipEquivalence?.thresholds);
+});
+test('review repair LTX baseline imports an existing LoRA and selects its compatible stock base',()=>{
+  const e=execution();e.family='ltx';e.model.modelId=e.model.baseModel='ltx_2_5';e.model.outputAudioSampleRate=48000;e.ltxAdapter={id:'owned_ltx_lora',sourcePath:'/owned/adapter.safetensors',sha256:hash,baseModel:'ltx_2_5'};grant(e);
+  const scenario=buildScenario(named('generalization','ltx-add-select-generate'),params(),[e]);assert.ok(!scenario.steps.some(s=>s.path==='/api/v1/models/import'));
+  const imported=scenario.steps.find(s=>s.path==='/api/v1/loras/import');assert.equal(imported.body.family,'ltx-video');assert.equal(imported.body.baseModel,'ltx_2_5');assert.equal(imported.body.expectedSha256,hash);
+  const generation=submissions(scenario)[0];assert.equal(generation.body.model,'ltx_2_5');assert.deepEqual(generation.body.loras,[{id:'owned_ltx_lora',weight:1}]);assert.deepEqual(scenario.steps.find(s=>s.id==='synthetic_adapter_selected').assert[0].contains,{id:'owned_ltx_lora',baseModel:'ltx_2_5'});
+  e.ltxAdapter.baseModel='ltx_2_3';assert.throws(()=>buildScenario(named('generalization','ltx-add-select-generate'),params(),[e]),/compatible LTX base/);
+});
+test('review repair portable mapping binds exact value-bearing QKV FFN codec on both backends',()=>{
+  const plan=concretePlan(root,'/owned-native','/owned-output');for(const backend of ['mlx','cuda']){const commands=plan.cases.find(c=>c.id===`${backend}.numeric.tensor-mapping`).numericProof.supportingCommands;assert.equal(commands.length,1);assert.ok(commands[0].includes('--lib')&&commands[0].includes('--exact'));assert.ok(!commands[0].includes('--ignored'));assert.ok(commands[0].includes('minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions'));assert.ok(!commands[0].some(v=>v.includes('native_and_sharded_plans_reach_the_real_h3_provider_load_seam')));}
+});
+test('review repair every import including cancel and interruption needs explicit scoped legal authority',()=>{
+  for(const [group,check]of [['capability','text'],['generalization','native-single'],['lifecycle','cancel'],['lifecycle','interruption-retry'],['lifecycle','restart-replay']]){const e=execution('fl2va');e.mode='text_to_video';e.model.sourceFormat='native-single';delete e.licenseAuthority;assert.throws(()=>buildScenario(named(group,check),params(),[e]),/license acknowledgment authority/,`${group}.${check}`);}
+  for(const role of ['source','component','adapter']){const e=execution();e.adapters=[{id:'licensed',kind:'lora',sha256:hash,source:'synthetic',revision,compatibilitySource:'synthetic',topology:'full',partition:'ref2va',licenseAcknowledged:true}];grant(e);e.licenseAuthority.subjects=e.licenseAuthority.subjects.filter(s=>s.role!==role);assert.throws(()=>buildScenario(named('lifecycle','cancel'),params(),[e]),/license authority/);}
+  const e=execution();e.licenseAuthority.acknowledged=false;assert.throws(()=>buildScenario(named('lifecycle','cancel'),params(),[e]),/license acknowledgment authority/);e.licenseAuthority.acknowledged=true;assert.throws(()=>buildScenario(named('lifecycle','cancel'),{...params(),proof_kind:undefined},[e]),/synthetic consent/);
 });
 test('controlled LoKr input preserves both complete factors and labels generated rather than trained evidence',async t=>{
   const parent=await mkdtemp(path.join(os.tmpdir(),'sc26691-lokr-unit-fake-'));t.after(()=>rm(parent,{recursive:true,force:true}));

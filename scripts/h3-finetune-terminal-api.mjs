@@ -64,12 +64,15 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
         const requestedRoute = expand(step.path, captures);
         result = await request(step.method, requestedRoute, expand(step.body, captures), step.expectedStatus);
         // Submission identity is durable before waiting, including replay/retry failure recovery.
-        if (step.method === 'POST' && result?.id && (['/api/v1/models/import', '/api/v1/video/jobs'].includes(requestedRoute) || /^\/api\/v1\/jobs\/[^/]+\/(retry|duplicate)$/.test(requestedRoute))) activeJob = result.id;
+        if (step.method === 'POST' && result?.id && (['/api/v1/models/import','/api/v1/loras/import', '/api/v1/video/jobs'].includes(requestedRoute) || /^\/api\/v1\/jobs\/[^/]+\/(retry|duplicate)$/.test(requestedRoute))) activeJob = result.id;
       }
       captures[step.id] = result;
       for (const check of step.assert ?? []) {
-        const actual = pointer(result, check.pointer), expected = expand(check.equals, captures);
-        assert.deepEqual(actual, expected, `assertion ${step.id}${check.pointer}`);
+        const actual = pointer(result, check.pointer), expected = expand(check.contains ?? check.equals, captures);
+        if(Object.hasOwn(check,'contains')){
+          assert.ok(Array.isArray(actual) && expected && Object.keys(expected).length>0,'nonempty typed catalog selection required');
+          assert.ok(actual.some(row=>Object.entries(expected).every(([key,value])=>JSON.stringify(row?.[key])===JSON.stringify(value))),`assertion ${step.id}${check.pointer}: selected compatible adapter absent`);
+        }else assert.deepEqual(actual, expected, `assertion ${step.id}${check.pointer}`);
         await record({ assertion: `${step.id}${check.pointer}`, actual, expected });
       }
     }

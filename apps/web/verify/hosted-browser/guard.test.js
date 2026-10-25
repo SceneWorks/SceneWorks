@@ -16,6 +16,25 @@ import {
   resolveArtifactDir,
 } from "./guard.mjs";
 import { CASES } from "./cases.mjs";
+import { Readable } from 'node:stream';
+import {verifyMiddleware,MANAGED_REPAIR_REQUEST,MINIMAX_REF} from '../../verify-fixtures.mjs';
+
+async function fixtureCall(method,url,body){
+  const request=Readable.from(body===undefined?[]:[JSON.stringify(body)]);request.method=method;request.url=url;
+  const response={statusCode:200,setHeader(){},end(value){this.value=JSON.parse(value);}};
+  await verifyMiddleware()(request,response,()=>{throw new Error('API fixture must never forward');});return {status:response.statusCode,body:response.value};
+}
+describe('actual managed repair fixture contract, no server or real legal authority',()=>{
+  it('refuses wrong-selection repair and accepts only exact stable-ID repair DTO',async()=>{
+    await fixtureCall('POST','/api/__verify/reset');
+    const invalid=await fixtureCall('POST','/api/v1/models/my_h3/repair',{...MANAGED_REPAIR_REQUEST,modelId:'renamed_new_model'});expect(invalid.status).toBe(422);
+    const repaired=await fixtureCall('POST','/api/v1/models/my_h3/repair',MANAGED_REPAIR_REQUEST);expect(repaired.status).toBe(201);expect(repaired.body.payload.modelId).toBe('my_h3');
+    const catalog=await fixtureCall('GET','/api/v1/models');expect(catalog.body.filter(model=>model.id==='my_h3')).toHaveLength(1);expect(catalog.body.find(model=>model.id==='my_h3').name).toBe('Edited name');
+  });
+  it('serves explicitly synthetic consent terms and does not authorize real upstream licenses',()=>{
+    expect(MINIMAX_REF.licenseUrl).toBe('https://example.test/synthetic-license');expect(MINIMAX_REF.licenseNotice).toContain('not acceptance of any real model license');expect(MINIMAX_REF.requiresLicenseAcknowledgment).toBe(true);
+  });
+});
 
 const HOSTED_ENV = {
   CI: "true",

@@ -8,6 +8,7 @@
 // exactly as the authoritative frontend fixtures do, so the studio sees the real
 // limits/declarations rather than a retyped copy.
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
@@ -33,7 +34,10 @@ export function shippedModels() {
 
 const { shipped } = shippedModels();
 export const MINIMAX = shipped("minimax_h3");
-export const MINIMAX_REF = shipped("minimax_h3_ref");
+// Closed-fixture authorization only: real upstream terms are NOT accepted by this test.
+// The actual rendered consent control must be clicked before the mock repair submits.
+export const MINIMAX_REF = { ...shipped("minimax_h3_ref"), installState:"missing", usable:false, downloadable:true, gated:false, requiresLicenseAcknowledgment:true, licenseName:"SYNTHETIC TEST LICENSE — not real approval", licenseUrl:"https://example.test/synthetic-license", licenseNotice:"Synthetic fixture terms only. This checkbox is not acceptance of any real model license." };
+export const MANAGED_REPAIR_REQUEST = {ownershipMode:"managed",type:"video",name:"Edited name",family:"minimax-h3",baseModel:"minimax_h3_ref",minimaxH3Partition:"ref2va",source:{kind:"url",url:"https://example.test/new.safetensors"},modelId:"my_h3",licenseAcknowledged:true};
 
 // The repair card fixture is the authoritative unit fixture (ModelManagerScreen.importedRepair):
 // a synthetic user import with no builtin licence fields, so the repair button is the ONLY
@@ -194,7 +198,7 @@ export const ASSETS = [
 
 let state;
 function reset() {
-  state = { requests: [], jobs: [], eventSourceOpens: 0 };
+  state = { requests: [], jobs: [], eventSourceOpens: 0, repairedModel:null };
 }
 reset();
 
@@ -268,7 +272,7 @@ export function verifyMiddleware() {
     }
     if (path === "/api/v1/projects") return json(200, [{ id: "project-1", name: "Noir" }]);
     if (/^\/api\/v1\/projects\/[^/]+\/assets$/.test(path)) return json(200, ASSETS);
-    if (path === "/api/v1/models") return json(200, MODELS);
+    if (path === "/api/v1/models") return json(200, MODELS.map(model=>model.id==='my_h3'&&state.repairedModel?state.repairedModel:model));
     if (path === "/api/v1/loras") return json(200, []);
     if (path === "/api/v1/jobs") return json(200, state.jobs);
     if (path === "/api/v1/training/targets" || path === "/api/v1/training/presets") return json(200, []);
@@ -309,6 +313,11 @@ export function verifyMiddleware() {
       };
       state.jobs.push(job);
       return json(200, job);
+    }
+    if(path==='/api/v1/models/my_h3/repair'&&method==='POST'){
+      if(!isDeepStrictEqual(body,MANAGED_REPAIR_REQUEST))return json(422,{detail:'synthetic repair requires the exact actual DTO and original modelId'});
+      state.repairedModel={...REPAIR_MODEL,name:body.name,installState:'installed',usable:true,repairActions:[]};
+      const job={id:'managed-repair-job',type:'model_import',status:'queued',payload:{...body},result:{modelId:'my_h3'}};state.jobs.push(job);return json(201,job);
     }
     if (path === "/api/v1/models/import" && method === "POST") {
       const job = { id: "import-job", type: "model_import", status: "queued", payload: { ...(body ?? {}) } };

@@ -3,15 +3,15 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import net from 'node:net';
-import { randomUUID } from 'node:crypto';
+import { randomUUID,createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, compareControlMedia } from './h3-finetune-terminal.mjs';
+import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
-import { caseBook } from './h3-finetune-terminal-cases.mjs';
+import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -43,6 +43,9 @@ async function confined(root, value) {
   const within=(base,p)=>{const rel=path.relative(base,p);return rel && !rel.startsWith('..') && !path.isAbsolute(rel);};
   assert.ok(within(logical,candidate)||within(r,candidate),'path must remain below owned directory');
   const p=await realpath(candidate);inside(r,p);return p;
+}
+export function requireGenerationSourceCancelContract(){
+  const error=new Error('BLOCKED: cold generation-source-prep cancellation requires the actual native typed byte observer, agreed SW event contract, and detached-preparation/lease-release acknowledgment. Planned source identity is not a completed seal. No label, callback count, memo hit or canceled render is proof.');error.code='H3_NATIVE_OBSERVER_PENDING';throw error;
 }
 export function authorized(p, c) {
   assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
@@ -83,7 +86,7 @@ export function validateComparisonProof(c, proof, log, { allowUnitFake = false }
   if(c.id.endsWith('.tensor-mapping')) {
     assert.ok(c.numericProof.supportingCommands?.length,'tensor mapping also requires its existing source-layout/provider fixture assertions');
     assert.deepEqual(proof.supporting?.map(v=>v.command),c.numericProof.supportingCommands);
-    for(const item of proof.supporting)assert.ok(item.passed>0);
+    for(const item of proof.supporting){assert.equal(item.passed,1);assert.ok(item.command.includes('--exact')&&!item.command.includes('--ignored'),'portable value-bearing mapping assertion must execute exactly, not be ignored');assert.ok(item.command.includes('minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions'),'QKV/FFN exact-byte codec coverage is mandatory on both backends');}
   }
   const escaped=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
   for(const name of proof.tests) assert.match(log,new RegExp(`(?:^|\\n)test ${escaped(name)} \\.\\.\\.`),'named native test was not selected/executed');
@@ -133,7 +136,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   for(const [index,command] of (n.supportingCommands??[]).entries()) {
     assert.equal(command[0],'cargo');assert.ok(command.includes('test')&&command.includes(path.join(swRoot,'Cargo.toml')),'supporting assertions must use this paired SceneWorks source');
     const log=`mapping-support-${index}.log`;await runner(command,{...opts,cwd:swRoot,logPath:path.join(dir,log)});
-    const text=await readFile(path.join(dir,log),'utf8');supporting.push({command,log,passed:executedTests(text)});
+    const text=await readFile(path.join(dir,log),'utf8');assert.equal(executedTests(text),1);assert.ok(!/\bSKIP\b/.test(text));assert.ok(text.includes('test minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions ...'),'exact portable QKV/FFN value assertion did not execute');supporting.push({command,log,passed:1});
   }
   const fixtureCases=[];
   for(const input of fixtureInputs) { const f=await json(input.path); for(const [i,v] of (f.cases??[]).entries()) fixtureCases.push({fixtureSha256:input.sha256,id:v.id??{index:i,group:v.group,dtype:v.dtype}}); }
@@ -185,8 +188,9 @@ async function listenerPid(port) {
 }
 export function privateEnvironment(runDir,runtime,token) {
   const env={}; // No inherited user HF settings/tokens, credentials, proxies or application roots.
-  for(const key of ['PATH','RUSTUP_TOOLCHAIN','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TEMP','TMP','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','CUDA_DEVICE_ORDER','MLX_METAL_DEVICE_INDEX','SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','LD_LIBRARY_PATH','DYLD_LIBRARY_PATH']) if(process.env[key]!==undefined)env[key]=process.env[key];
+  for(const key of ['PATH','RUSTUP_TOOLCHAIN','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TEMP','TMP','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','CUDA_DEVICE_ORDER','MLX_METAL_DEVICE_INDEX','SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','SCENEWORKS_CUDA_VRAM_CAP_GB','SCENEWORKS_MLX_MEMORY_CAP_GB','LD_LIBRARY_PATH','DYLD_LIBRARY_PATH']) if(process.env[key]!==undefined)env[key]=process.env[key];
   Object.assign(env,{SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(runtime.port),SCENEWORKS_API_URL:`http://127.0.0.1:${runtime.port}`,SCENEWORKS_DATA_DIR:path.join(runDir,'data'),SCENEWORKS_CONFIG_DIR:path.join(runDir,'config'),SCENEWORKS_JOBS_DB_PATH:path.join(runDir,'data','cache','jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,SCENEWORKS_RUN_UTILITY_INPROCESS:'0',SCENEWORKS_UTILITY_WORKERS:'1',SCENEWORKS_WORKER_ID:`sc26691-${path.basename(runDir)}`,SCENEWORKS_GPU_ID:runtime.gpuId,SCENEWORKS_BACKEND_MLX_ENABLED:runtime.backend==='mlx'?'1':'0',SCENEWORKS_BACKEND_CANDLE_ENABLED:runtime.backend==='cuda'?'1':'0',SCENEWORKS_LOG_FORMAT:'json',SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS:'120',RUST_LOG:'info,sceneworks=debug',HF_HOME:path.join(runDir,'hf'),HF_HUB_CACHE:path.join(runDir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(runDir,'hf','hub'),TRANSFORMERS_CACHE:path.join(runDir,'hf','transformers'),XDG_CACHE_HOME:path.join(runDir,'cache'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'});
+  if(runtime.memoryCap){assert.equal(runtime.memoryCap.kind,runtime.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb');assert.ok(Number.isFinite(runtime.memoryCap.value)&&runtime.memoryCap.value>0);env[runtime.backend==='cuda'?'SCENEWORKS_CUDA_VRAM_CAP_GB':'SCENEWORKS_MLX_MEMORY_CAP_GB']=String(runtime.memoryCap.value);}
   return env;
 }
 export class OwnedService {
@@ -195,6 +199,8 @@ export class OwnedService {
   }
   async initialize() {
     if(!this.fake){authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await verifyInputs(this.c,[this.p.output,this.swRoot,this.inferenceRoot]);}
+    assert.ok(this.c.declaredSourceBindings?.length,'every API case requires declared source and legal authority inputs');
+    for(const source of this.c.declaredSourceBindings)assertLicenseAuthority(source,{allowUnitFake:this.fake});
     const r=this.c.runtime;
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
@@ -248,7 +254,7 @@ export class OwnedService {
     await this.assertOwner();assert.ok(!this.api || this.stopped,'refuse second live service');
     await (this.deps.requireFreePort??requireFreePort)(this.c.runtime.port); // No HTTP probe of a pre-existing/user API.
     const launch=this.deps.spawnOwned??spawnOwned, epoch=++this.generation;
-    const env=privateEnvironment(this.runDir,{...this.c.runtime,backend:this.c.backend},this.token);
+    const env=privateEnvironment(this.runDir,{...this.c.runtime,memoryCap:this.memoryCap??this.c.runtime.memoryCap,backend:this.c.backend},this.token);
     this.guardian=launch([process.execPath,'-e',"process.stdin.resume();process.stdin.on('end',()=>process.exit(0));"],env,this.swRoot,path.join(this.dir,`guardian-${epoch}.log`));
     assert.ok(this.guardian.pid>1);env.SCENEWORKS_PARENT_PID=String(this.guardian.pid);
     this.api=launch([this.binary],env,this.swRoot,path.join(this.dir,`api-${epoch}.log`));assert.ok(this.api.pid>1);
@@ -312,7 +318,18 @@ export class OwnedService {
   async checkStep(step,captures) {
     if(step.waitJob)return;
     const route=expand(step.path,captures),body=expand(step.body,captures);
+    if(step.method==='POST'&&route==='/api/v1/jobs'&&['model_import','lora_import','model_download','lora_download'].includes(body?.type))throw new Error('generic job submission cannot bypass source-bound import/license authority checks');
+    if(step.method==='POST'&&/^\/api\/v1\/models\/[^/]+\/(?:download|license)$/.test(route)){
+      const modelId=decodeURIComponent(route.split('/')[4]),source=this.c.declaredSourceBindings.find(v=>v.model.modelId===modelId||v.model.baseModel===modelId);assert.ok(source,'component acquisition/acknowledgment requires declared source authority');assertLicenseAuthority(source,{allowUnitFake:this.fake});if(body?.componentId)assert.ok(source.model.components.some(component=>component.id===body.componentId),'undeclared inherited component acquisition');
+    }
+    if(step.method==='POST'&&route==='/api/v1/loras/import'){
+      const selected=this.c.declaredSourceBindings.find(v=>v.family==='ltx'&&v.ltxAdapter.id===body.loraId);assert.ok(selected,'undeclared LTX adapter import');assertLicenseAuthority(selected,{allowUnitFake:this.fake});
+      assert.equal(body.licenseAcknowledged,selected.licenseAuthority.acknowledged);assert.equal(body.expectedSha256,selected.ltxAdapter.sha256);assert.equal(body.baseModel,selected.model.modelId);assert.ok(!body.repo&&!body.sourceUrl,'LTX baseline uses its actual staged adapter, not an implicit download');await confined(this.p.output,body.sourcePath);
+    }
     if(step.method==='POST'&&route==='/api/v1/models/import') {
+      assert.ok(body.ownershipMode===undefined||body.ownershipMode==='managed','linked ownership must be omitted; the only ownership enum is managed');
+      const selected=this.c.declaredSourceBindings.find(v=>v.model.modelId===body.modelId);assert.ok(selected,'undeclared imported source');assertLicenseAuthority(selected,{allowUnitFake:this.fake});assert.equal(body.licenseAcknowledged,selected.licenseAuthority.acknowledged);
+      if(body.linkedRootId||body.linkedRelativePath)assert.ok(body.ownershipMode===undefined&&!body.sourcePath&&!body.source,'linked root/path requires omitted ownershipMode and no managed locator');
       assert.ok(!body.repo && !body.sourceUrl && body.source?.kind!=='url','use an explicit staged local/linked source or exact cached Hugging Face source, never an implicit URL download');
       if(body.source?.kind==='huggingFace') {
         const {repo,revision,files}=body.source;assert.match(repo??'',/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);assert.match(revision??'',/^[a-f0-9]{40}$/);assert.ok(Array.isArray(files)&&files.length&&files.every(f=>typeof f==='string'),'exact staged HF file inventory required');
@@ -322,9 +339,9 @@ export class OwnedService {
       }
       const source=body.sourcePath??body.source?.path??body.source?.stagedPath;if(source)await confined(this.p.output,source);
       else {
-        assert.ok(body.ownershipMode==='linked'&&body.linkedRootId&&body.linkedRelativePath,'explicit staged local/linked source required');
+        assert.ok(body.ownershipMode===undefined&&body.linkedRootId&&body.linkedRelativePath,'actual linked DTO requires root/path with ownership omitted');
         const roots=await this.request('GET','/api/v1/models/library-roots'),root=roots.roots.find(r=>r.rootId===body.linkedRootId);assert.ok(root,'owned approved linked root required');
-        await confined(this.p.output,root.path);await confined(root.path,path.resolve(root.path,body.linkedRelativePath));
+        if(await realpath(root.path)!==await realpath(this.p.output))await confined(this.p.output,root.path);await confined(root.path,path.resolve(root.path,body.linkedRelativePath));
       }
     }
     if(route.startsWith('/api/v1/models/library-roots')&&body?.path)await confined(this.p.output,body.path);
@@ -343,7 +360,8 @@ export class OwnedService {
         const id=action.jobCapture.split('/').reduce((v,k)=>v[k],captures),records=await json(path.join(this.dir,this.drainRecords.at(-1))),job=records.find(v=>v.id===id);
         assert.ok(job?.payload?.modelId && !job.payload.model,'interruption target must be this owned import, not a native render');assert.ok(['cancelled','canceled'].includes(job.status),'missed import interruption is unresolved, not successful proof');
       }
-      await this.start();return {kind:action.kind,epochs:this.epochs};
+      if(action.memoryCap)this.memoryCap=structuredClone(action.memoryCap);
+      await this.start();return {kind:action.kind,epochs:this.epochs,...(action.memoryCap?{memoryCap:structuredClone(action.memoryCap)}:{})};
     }
     assert.equal(action.kind,'replace-owned-source');await this.drain();
     const target=await confined(this.runDir,path.resolve(this.runDir,action.path));assert.ok(this.seeded.has(target),'mutation only of an explicitly seeded private source copy');assert.equal(await hashFile(target),action.expectedSha256);
@@ -389,11 +407,18 @@ export class ProcessObservations {
     const deadline=Date.now()+15000;let last,counterBarrier;
     do {try{last=await this.sample(this.service);if(Number.isFinite(last.device)){if(this.service.c.backend!=='mlx')break;if(counterBarrier===undefined)counterBarrier=last.deviceCounterAt;else if(last.deviceCounterAt!==counterBarrier)break;}}catch(error){this.gaps.push({at:new Date().toISOString(),error:error.message});}assert.ok(Date.now()<deadline,'no fresh post-completion native counter; cannot bound lazy loading/decode');await this.sleepImpl(250);}while(true);
     this.samples.push(last);await this.checkBudget(last);assert.ok(!this.budgetExceeded,'observed campaign bound exceeded; cooperative cancellation requested');this.ended=new Date().toISOString();assert.ok(this.samples.length>=2,'actual observation series required');
-    const pid=this.service.worker.pid, deviceId=last.deviceId, cumulative=last.method==='mlx-allocator-cumulative-high-water';
-    assert.ok(this.samples.every(s=>s.pid===pid && s.method===last.method && s.deviceId===deviceId),'do not misattribute different worker lifetimes/devices to a single peak window');
-    const make=(device,phase)=>({method:device?last.method:'sampled-process-rss',sampled:device&&cumulative?false:true,intervalMs:observedInterval(this.samples,device,this.intervalMs),targetPauseMs:this.intervalMs,samples:this.samples.filter(s=>Number.isFinite(device?s.device:s.host)).map(s=>({at:s.at,probeStartedAt:s.probeStartedAt,bytes:device?s.device:s.host,...(device&&s.deviceCounterAt?{counterWrittenAt:s.deviceCounterAt}:{})})),blindspots:[...this.gaps.map(g=>`${g.at}: ${g.error}`),'intervalMs is the maximum observed valid-sample gap including probe latency; targetPauseMs is only the configured delay. Host/device reads occur within the retained probeStartedAt..at window. Process sampling may miss transients; process-lifetime allocator counters include prior allocations and allocator-only attribution.'],window:{start:this.started,end:this.ended,phase,coverage:phase==='loading'?'full-case-load-inclusive':'full-case'},bounds:[...(phase==='loading'?['full-case-load-inclusive-upper-bound']:[]),...(device&&!cumulative?['observed-device-global-bound']:[])],attribution:{scope:device?(cumulative?'process-lifetime':'device'):'process',pid,deviceId:device?deviceId:undefined,includesPriorAllocations:device&&cumulative,includesOtherProcesses:device&&!cumulative,meaning:device?(cumulative?'Existing owned worker gpu_telemetry.json peakBytes, fresh after completion; process-lifetime MLX allocator highwater, not phase-local or residency delta':'Observed device-global used-memory samples; includes other processes, not model-attributable allocation'):'RSS of the owned single worker process, API/other processes excluded'}});
-    const hostPeakBytes=Math.max(...this.samples.map(s=>s.host)),devicePeakBytes=Math.max(...this.samples.filter(s=>Number.isFinite(s.device)).map(s=>s.device));assert.ok(hostPeakBytes>0&&devicePeakBytes>0);
+    const summarize=samples=>{
+    const last=samples.at(-1),pid=samples[0].pid, deviceId=last.deviceId, cumulative=last.method==='mlx-allocator-cumulative-high-water';
+    assert.ok(samples.every(s=>s.pid===pid && s.method===last.method && s.deviceId===deviceId),'do not misattribute different worker lifetimes/devices to a single peak window');
+    const make=(device,phase)=>({method:device?last.method:'sampled-process-rss',sampled:device&&cumulative?false:true,intervalMs:observedInterval(samples,device,this.intervalMs),targetPauseMs:this.intervalMs,samples:samples.filter(s=>Number.isFinite(device?s.device:s.host)).map(s=>({at:s.at,pid:s.pid,probeStartedAt:s.probeStartedAt,bytes:device?s.device:s.host,...(device&&s.deviceCounterAt?{counterWrittenAt:s.deviceCounterAt}:{})})),blindspots:[...this.gaps.map(g=>`${g.at}: ${g.error}`),'intervalMs is the maximum observed valid-sample gap including probe latency; targetPauseMs is only the configured delay. Host/device reads occur within the retained probeStartedAt..at window. Process sampling may miss transients; process-lifetime allocator counters include prior allocations and allocator-only attribution.'],window:{start:this.started,end:this.ended,phase,coverage:phase==='loading'?'full-case-load-inclusive':'full-case'},bounds:[...(phase==='loading'?['full-case-load-inclusive-upper-bound']:[]),...(device&&!cumulative?['observed-device-global-bound']:[])],attribution:{scope:device?(cumulative?'process-lifetime':'device'):'process',pid,deviceId:device?deviceId:undefined,includesPriorAllocations:device&&cumulative,includesOtherProcesses:device&&!cumulative,meaning:device?(cumulative?'Existing owned worker gpu_telemetry.json peakBytes, fresh after completion; process-lifetime MLX allocator highwater, not phase-local or residency delta':'Observed device-global used-memory samples; includes other processes, not model-attributable allocation'):'RSS of the owned single worker process, API/other processes excluded'}});
+    const hostPeakBytes=Math.max(...samples.map(s=>s.host)),devicePeakBytes=Math.max(...samples.filter(s=>Number.isFinite(s.device)).map(s=>s.device));assert.ok(hostPeakBytes>0&&devicePeakBytes>0);
     return {hostPeakBytes,devicePeakBytes,loadHostPeakBytes:hostPeakBytes,loadDevicePeakBytes:devicePeakBytes,observations:{host:make(false,'case'),device:make(true,'case'),loadHost:make(false,'loading'),loadDevice:make(true,'loading')}};
+    };
+    const groups=[...new Set(this.samples.map(sample=>sample.pid))].map(pid=>{assert.ok(this.service.epochs.some(epoch=>epoch.workerPid===pid),"observations must belong to actual owned worker epochs");return {pid,metrics:summarize(this.samples.filter(sample=>sample.pid===pid))};});
+    if(groups.length===1)return groups[0].metrics;
+    const aggregate={kind:"owned-worker-epochs",epochs:groups,meaning:"Maximum observed upper bound across non-overlapping owned worker epochs; each process lifetime/counter remains separately attributed, never summed or relabeled as one PID."};
+    for(const key of ["hostPeakBytes","devicePeakBytes","loadHostPeakBytes","loadDevicePeakBytes"])aggregate[key]=Math.max(...groups.map(group=>group.metrics[key]));
+    return aggregate;
   }
 }
 export function loadIdentity(event,job,inputs) {
@@ -405,8 +430,17 @@ export function loadIdentity(event,job,inputs) {
   const checkpoint=inputs.find(i=>i.role==='checkpoint' && closure.identity.sourceFiles.some(s=>s.sha256===i.sha256));assert.ok(checkpoint,'actual observed source closure must contain verified imported checkpoint');
   for(const f of closure.identity.sourceFiles)assert.ok(inputs.some(i=>i.sha256===f.sha256),'observed source not in verified input closure');
   const assembly=closure.identity.assembly;assert.ok(assembly && typeof assembly==='object');
+  assert.ok(assembly.componentClosure?.length,'actual immutable inherited component closure is required');
+  for(const component of assembly.componentClosure){assert.match(component.revision??'',/^[a-f0-9]{40}$/);assert.ok(component.files?.length,'component content closure cannot be empty');for(const file of component.files){assert.match(file.sha256??'',/^sha256:[a-f0-9]{64}$/,'schema2 component digest must be an actual typed SHA256 commitment');assert.ok(inputs.some(i=>i.role==='component'&&i.sha256===file.sha256.slice(7)),'every inherited component file/profile must match verified staged bytes');}}
   const pins=role=>closure.prepared_sources.filter(s=>inputs.some(i=>i.role===role&&i.sha256===s.sha256));
   return {checkpointSha256:checkpoint.sha256,planId:closure.identity.planId,semanticDigest:closure.identity.semanticDigest,topology:assembly.adalnPruning??{kind:'no-pruning-binding-in-observed-assembly'},quantization:{sourceEncoding:assembly.sourceEncoding??null,observedAssembly:assembly},components:pins('component'),adapters:pins('adapter'),operation:closure.operation,samplingPolicy:{steps:closure.steps,schedulerShift:closure.schedulerShift},seed:closure.seed};
+}
+export function resolvedMediaContract(c,job){
+  const selected=c.declaredSourceBindings?.find(v=>v.model.modelId===job.payload.model);assert.ok(selected,'actual media requires its declared source/base contract');
+  const model=selected.family==='ltx'?selected.model.modelId:selected.model.baseModel;
+  const audio=selected.family==='ltx'?{required:true,sampleRate:selected.model.outputAudioSampleRate,channels:2,codec:'aac'}:{required:true,sampleRate:32000,channels:2,codec:'aac'};
+  if(selected.family==='ltx')assert.ok([24000,48000].includes(audio.sampleRate),'LTX core/BWE output sample rate must be source-resolved, not guessed');
+  return {model,fps:job.payload.fps,width:job.payload.width,height:job.payload.height,audio};
 }
 export async function bindCompletedMedia(service,job,dir,name,decode=decodeAV) {
   assert.equal(job.status,'completed');const ids=job.result?.assetIds??job.result?.assets?.map(a=>a.id);assert.ok(ids?.length,'completed actual result asset IDs required');
@@ -417,26 +451,71 @@ export async function bindCompletedMedia(service,job,dir,name,decode=decodeAV) {
     const project=await service.request('GET',`/api/v1/projects/${encodeURIComponent(asset.projectId)}`);assert.equal(project.id,asset.projectId);
     const projectRoot=await confined(service.runDir,project.path),source=await confined(projectRoot,path.resolve(projectRoot,asset.file.path));
     const av=`${name}-${bound.length}${path.extname(source)}`,dest=inside(dir,av);await copyFile(source,dest);const decoded=await decode(dest);
+    validateAVAgainstRequest(decoded,job.payload,resolvedMediaContract(service.c,job));
     const video=decoded.streams?.find(s=>s.codec_type==='video');assert.ok(video,'actual decoded video metadata required');
     for(const axis of ['width','height'])if(job.payload?.[axis]!==undefined)assert.equal(video[axis],job.payload[axis],'decoded canvas differs from the resolved queued geometry');
     bound.push({jobId:job.id,assetId:id,projectId:asset.projectId,source,av,sha256:await hashFile(dest),decoded,asset});
   }
   assert.ok(bound.length,'no actual synchronized video asset in the completed job');return bound;
 }
+export function semanticAssembly(value){
+  if(Array.isArray(value))return value.map(semanticAssembly);
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key,v])=>!['checkpointId','planId','rootId','linkedRootId','ownershipMode'].includes(key)&&!(typeof v==='string'&&path.isAbsolute(v)&&/path$/i.test(key))).map(([key,v])=>[key,semanticAssembly(v)]));
+  return value;
+}
+export async function verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode=decodeAV,delta){
+  const spec=scenario.ownershipEquivalence;assert.ok(spec,'actual controlled ownership comparison is required');
+  const find=(label,index)=>{const captured=bundle.captures?.[`${label}_av${index}_done`],binding=byJob.get(captured?.id);assert.ok(binding,'ownership comparison lacks actual repeated job/native/output binding');assert.deepEqual(captured,binding.job);return binding;};
+  const managed=[find(spec.managed,0),find(spec.managed,1)],linked=[find(spec.linked,0),find(spec.linked,1)];
+  const base=managed[0];
+  for(const binding of [...managed,...linked]){
+    assert.equal(binding.runtimeIdentity.checkpointSha256,base.runtimeIdentity.checkpointSha256);
+    assert.deepEqual(semanticAssembly(binding.runtimeIdentity.quantization.observedAssembly),semanticAssembly(base.runtimeIdentity.quantization.observedAssembly),'ownership changed resolved semantic component/conditioning assembly');
+    const actual=creativePayload(submittedPayload(bundle.requests??[],binding.job)),expected=creativePayload(submittedPayload(bundle.requests??[],base.job));delete actual.model;delete expected.model;assert.deepEqual(actual,expected,'ownership comparison changed creative controls');
+  }
+  const results=[];
+  for(const stream of ['video','audio']){
+    const maximum=spec.thresholds?.[stream==='video'?'maximumVideoDelta':'maximumAudioDelta'],noiseLimit=spec.thresholds?.maximumBaselineDelta;
+    assert.ok([maximum,noiseLimit].every(v=>Number.isFinite(v)&&v>=0),'predeclared ownership/noise bounds required');
+    const difference=async(a,b)=>(delta??decodedDelta)(inside(dir,a.media.av),inside(dir,b.media.av),stream);
+    for(const pair of [managed,linked])assert.ok(await difference(...pair)<=noiseLimit,'ownership repeated-baseline noise exceeds predeclared bound');
+    const differenceAcrossOwnership=await difference(managed[0],linked[0]);assert.ok(differenceAcrossOwnership<=maximum,'managed/linked decoded output is not equivalent');results.push({stream,difference:differenceAcrossOwnership,maximum});
+  }
+  return results;
+}
+export const tracedJobId=event=>(event.fields??event).jobId??event.span?.jobId??event.spans?.find(span=>span.jobId)?.jobId;
+export function verifyCacheCoverage(bundle,scenario,byJob,observed){
+  const spec=scenario.cacheCoverage;assert.ok(spec,'cache coverage requires source-bound execution contract');
+  const find=name=>{const job=bundle.captures?.[name],binding=byJob.get(job?.id);assert.ok(binding,'cache phase lacks actual completed job/source/output');assert.deepEqual(binding.job,job);return binding;};
+  const [cold,warm,staged]=[find(spec.cold),find(spec.warm),find(spec.staged)];
+  assert.equal(normalizeLoadEvent(cold.event).cacheState,'Cold','cold must actually miss generator metadata cache');assert.equal(normalizeLoadEvent(warm.event).cacheState,'Warm','warm must actually hit generator metadata cache');
+  for(const binding of [cold,warm,staged]){assert.equal((binding.event.fields??binding.event).retains_dit_weights,false,'metadata warmth must not masquerade as retained DiT weights');assert.equal(binding.runtimeIdentity.checkpointSha256,cold.runtimeIdentity.checkpointSha256);assert.equal(binding.runtimeIdentity.semanticDigest,cold.runtimeIdentity.semanticDigest);assert.deepEqual(creativePayload(submittedPayload(bundle.requests??[],binding.job)),creativePayload(submittedPayload(bundle.requests??[],cold.job)),'cache/staging changed creative request');}
+  const policy=binding=>{const record=observed.find(event=>(event.fields??event).event==='generation_memory_policy_applied'&&tracedJobId(event)===binding.job.id);assert.ok(record,'actual configured per-job memory policy event required');const fields=record.fields??record;assert.equal(fields.scope_configured,true);assert.ok(fields.strategy&&fields.stage_residency!==undefined);return fields;};
+  const before=policy(warm),after=policy(staged);policy(cold);
+  assert.equal(after.stream_transformer_blocks,true,'staged run must actually configure bounded transformer residency');assert.ok(Number.isInteger(after.window_size)&&after.window_size>0&&after.window_component,'actual configured window/component required');
+  assert.ok(before.stream_transformer_blocks!==true||!Number.isFinite(before.window_size)||after.window_size<before.window_size,'unchanged sequential/resident policy is not a staged transition');
+  assert.ok(bundle.actions.some(action=>action.kind==='restart'&&action.memoryCap),'constrained staging must be bound to actual owned-worker restart/cap input');
+  return {cacheLayer:'generator-metadata-not-DiT-residency',coldJobId:cold.job.id,warmJobId:warm.job.id,stagedJobId:staged.job.id,policyBefore:before,policyAfter:after};
+}
 export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUnitFake=false,contentReadback=false}={}) {
   const bundle=await json(inside(dir,'source-job-output.json'));
   assert.ok(bundle.proof_kind==='campaign_native'||(allowUnitFake&&bundle.proof_kind==='unit_fake'),'unit_fake is never campaign proof');
+  assert.ok(c.declaredSourceBindings?.length,'declared input authority cannot be absent during readback');for(const source of c.declaredSourceBindings)assertLicenseAuthority(source,{allowUnitFake});
+  const scenarioInput=c.inputs.find(i=>i.role==='scenario'&&i.path===c.runtime.scenario);assert.ok(scenarioInput&&typeof bundle.scenarioText==='string');assert.equal(createHash('sha256').update(bundle.scenarioText).digest('hex'),scenarioInput.sha256,'actual scenario bytes differ from bound input');const scenario=JSON.parse(bundle.scenarioText);assert.equal(scenario.caseId,c.id);
   assert.equal(bundle.build.sceneworks,p.sceneworks);assert.equal(bundle.build.inference,p.inference);
   if(!contentReadback){await confined(p.output,bundle.build.binary);assert.equal(await hashFile(bundle.build.binary),bundle.build.sha256,'owned service binary drift');}
   const lifecycle=await json(inside(dir,'service-lifecycle.json'));for(const record of lifecycle.drains)assert.equal(await hashFile(inside(dir,record.path)),record.sha256,'owned cancellation/restart record drift');
   if(c.id.endsWith('.restart-replay'))assert.ok(bundle.epochs.length>=2 && bundle.actions.some(v=>v.kind==='restart'),'restart/replay requires actual owned restart records');
   if(c.id.endsWith('.interruption-retry'))assert.ok(bundle.epochs.length>=2 && bundle.actions.some(v=>v.kind==='interrupt-import'),'import interruption/retry requires actual owned cooperative cancellation/restart records');
+  const observed=[];
+  for(const epoch of bundle.epochs)for(const kind of ['api','worker'])for(const line of (await readFile(inside(dir,`${kind}-${epoch.epoch}.log`),'utf8')).split('\n')){try{const event=JSON.parse(line);if((event.fields??event).event)observed.push(event);}catch{}}
   const byJob=new Map();
   for(const binding of bundle.bindings) {
+    assert.ok(observed.some(event=>JSON.stringify(event)===JSON.stringify(binding.event)),'native closure must occur in retained authentic worker/API trace, not copied/fabricated binding metadata');
     const identity=loadIdentity(binding.event,binding.job,c.inputs);assert.deepEqual(identity,binding.runtimeIdentity);
     const selected=c.declaredSourceBindings?.find(v=>v.model.modelId===binding.job.payload.model);
     if(c.declaredSourceBindings){
-      assert.ok(selected,'completed job selected an undeclared/stock model');assert.equal(identity.checkpointSha256,selected.model.sha256);
+      assert.ok(selected,'completed job selected an undeclared/stock model');assert.equal(identity.checkpointSha256,selected.model.sha256);assert.equal(normalizeLoadEvent(binding.event).identity.assembly.partition,selected.model.partition,'actual native partition differs from declared import');if(selected.model.topology==='pruned')assert.ok(normalizeLoadEvent(binding.event).identity.assembly.adalnPruning,'pruned declaration requires actual pruned assembly');
       const request=bundle.requests?.find(r=>r.result.id===binding.job.id&&r.route==='/api/v1/video/jobs')?.request;
       const requested=request?.loras??binding.job.payload.loras??[];
       const adapters=requestedAdapterBindings(selected.adapters??[],requested),prepared=normalizeLoadEvent(binding.event).prepared_sources;
@@ -444,10 +523,13 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
       for(const input of identity.adapters)assert.ok(adapters.some(a=>a.sha256===input.sha256),'unrequested adapter leaked into native cache/load');
     }
     assert.equal(normalizeLoadEvent(binding.event).backend,c.backend);assert.equal(binding.media.jobId,binding.job.id);
-    assert.equal(await hashFile(inside(dir,binding.media.av)),binding.media.sha256);await decode(inside(dir,binding.media.av));byJob.set(binding.job.id,binding);
+    assert.equal(await hashFile(inside(dir,binding.media.av)),binding.media.sha256);validateAVAgainstRequest(await decode(inside(dir,binding.media.av)),binding.job.payload,resolvedMediaContract(c,binding.job));byJob.set(binding.job.id,binding);
   }
+  for(const job of bundle.jobs.filter(j=>j.status==='completed'&&j.payload?.model?.startsWith('imported_')))assert.ok(byJob.has(job.id)&&bundle.media.some(m=>m.jobId===job.id),'completed imported generation/replay is missing an actual native closure/output binding');
   for(const media of bundle.media) {
+    if(bundle.jobs.find(j=>j.id===media.jobId)?.payload?.model?.startsWith('imported_'))assert.ok(byJob.has(media.jobId),'imported output cannot pass with zero load events');
     assert.equal(await hashFile(inside(dir,media.av)),media.sha256);const decoded=await decode(inside(dir,media.av)),job=bundle.jobs.find(v=>v.id===media.jobId);assert.ok(job?.status==='completed');
+    validateAVAgainstRequest(decoded,job.payload,resolvedMediaContract(c,job));
     const video=decoded.streams?.find(s=>s.codec_type==='video');assert.ok(video);for(const axis of ['width','height'])if(job.payload?.[axis]!==undefined)assert.equal(video[axis],job.payload[axis]);
   }
   const comparisons=await json(inside(dir,'comparisons.json'));
@@ -459,17 +541,19 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     const actual=await compareControlMedia(inside(dir,b.media.av),inside(dir,r.media.av),inside(dir,i.media.av),comparison.stream,comparison.minimumDelta,comparison.maximumBaselineDelta,decode,delta);
     if(!contentReadback)for(const key of ['interventionDelta','repeatedBaselineDelta','threshold'])assert.equal(actual[key],comparison[key],'retained sensitivity differs from actual decoded media'); // Portable decoding rechecks declared bounds, not a host-specific ffmpeg scalar golden.
   }
-  return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length};
+  const ownership=c.id.endsWith('.managed-linked-equivalence')?await verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode,delta):undefined;
+  const cache=c.id.endsWith('.cold-warm-staged')?verifyCacheCoverage(bundle,scenario,byJob,observed):undefined;
+  return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
 }
 export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const service=await new OwnedService(p,c,swRoot,inferenceRoot,dir,deps).initialize();
   const observations=new ProcessObservations(service,{sample:deps.sample??processSample,sleepImpl:deps.sleep??sleep,intervalMs:c.runtime.sampleIntervalMs??250}).start();
   const records=[],actions=[],bound=[],traceEvents=[];let result,metrics,error;
   try {
-    const scenario=await json(c.runtime.scenario);assert.equal(scenario.caseId,c.id);assert.equal(scenario.baseUrl,service.baseUrl,'scenario must target newly owned service');
+    const scenarioText=await readFile(c.runtime.scenario,'utf8'),scenario=JSON.parse(scenarioText);assert.equal(scenario.caseId,c.id);assert.equal(scenario.baseUrl,service.baseUrl,'scenario must target newly owned service');
     result=await runScenario(scenario,{fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
       records.push(r);
-      if(r.result?.id && r.method==='POST' && (r.route==='/api/v1/models/import'||r.route==='/api/v1/video/jobs'||/\/(retry|duplicate)$/.test(r.route)))service.jobs.add(r.result.id);
+      if(r.result?.id && r.method==='POST' && (r.route==='/api/v1/models/import'||r.route==='/api/v1/loras/import'||r.route==='/api/v1/video/jobs'||/\/(retry|duplicate)$/.test(r.route)))service.jobs.add(r.result.id);
       await writeFile(path.join(dir,'api-transcript.json'),JSON.stringify({caseId:c.id,proof_kind:service.fake?'unit_fake':'campaign_native',transcript:records},null,2));
     }});
     if(c.id.endsWith('.cancel')) {
@@ -487,11 +571,11 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     for(const epoch of service.epochs.slice(0,-1))for(const kind of ['api','worker'])traceLogs.push(await readFile(path.join(dir,`${kind}-${epoch.epoch}.log`),'utf8'));
     for(const text of traceLogs)for(const line of text.split('\n')){try{const event=JSON.parse(line);if((event.fields??event).event==='h3_import_prepared_load')traceEvents.push(event);}catch{}}
     const loads=bound.map(b=>({media:b,job:jobs.find(j=>j.id===b.jobId),event:traceEvents.find(t=>(t.fields??t).jobId===b.jobId)}));
-    const successful=['artifact','capability'].includes(c.group)||/\.(bounded-loading|cold-warm-staged)$/.test(c.id);
-    const matched=loads.filter(v=>v.event);if(successful)assert.equal(matched.length,loads.length,'each actual generation needs observed native load closure');
-    if(successful)assert.ok(matched.length>0,'no actual successful model execution');
+    const imported=loads.filter(v=>v.job.payload.model?.startsWith('imported_'));
+    const matched=imported.filter(v=>v.event);assert.equal(matched.length,imported.length,'EVERY successful imported generation/replay needs its actual native load closure');
+    if(scenario.steps.some(s=>s.path==='/api/v1/video/jobs'||typeof s.path==='string'&&s.path.endsWith('/duplicate')))assert.ok(loads.length>0,'no actual successful model execution');
     const proofs=matched.map(v=>({...v,runtimeIdentity:loadIdentity(v.event,v.job,c.inputs)}));
-    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
+    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,scenarioText,captures:result.captures,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
     const comparisons=[];
     for(const spec of scenario.comparisons??[]) {
       const find=name=>{const job=result.captures[name];const value=proofs.find(p=>p.job.id===job?.id);assert.ok(value,'actual completed comparison job/load/output binding missing');return value;};
@@ -516,7 +600,8 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   try{const [mode,planPath,id,swRoot,inferenceRoot]=process.argv.slice(2);const p=await json(planPath),c=p.cases.find(v=>v.id===id);assert.ok(c);authorized(p,c);const dir=process.env.H3_CASE_DIR;assert.equal(process.env.H3_CASE_ID,id);assert.ok(dir);await confined(p.output,dir);
-    if(mode==='numeric'){const r=await executeNativeComparison(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
+    if(mode==='generation-source-prep-cancel')requireGenerationSourceCancelContract();
+    else if(mode==='numeric'){const r=await executeNativeComparison(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else if(mode==='fixture'){const r=await executeFixture(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else{assert.equal(mode,'api');const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);}
   }catch(error){console.error(error.stack);process.exitCode=1;}

@@ -107,11 +107,12 @@ export function concretePlan(swRoot, inferenceRoot, stageRoot) {
       const scenario = path.join(stageRoot, `${c.id}.scenario.json`);
       const transcript = path.join(stageRoot, `${c.id}.api.json`);
       const apiCommand = ['node', path.join(swRoot, 'scripts/h3-finetune-terminal-api.mjs'), scenario, transcript];
+      if(check==='generation-source-prep-cancel')return {...c,blockedPrerequisite:'Await actual native typed cold-read progress, job-correlated SW trace and detached preparation/lease-release cancellation acknowledgment; no completed seal/load may be fabricated.',commands:[['node',path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'generation-source-prep-cancel',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot]]};
       if (c.group === 'numeric') {
         const mechanism=check==='tensor-mapping'?'convrot':check;
         const native=nativeCommands(inferenceRoot,c.backend,mechanism), authority=caseBook.numeric[mechanism];
         return {...c,...native,referenceRevision:authority.referenceRevision,
-          numericProof:{kind:'native-pinned-fixture',mechanism,package:c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',tests:authority.selectors??[authority.selector],...(check==='tensor-mapping'?{supportingCommands:[cargo(swRoot,c.backend,['sceneworks-core','minimax_h3_import',caseBook.numeric['tensor-mapping'].selector]),cargo(swRoot,c.backend,fixtureBindings.generalization['native-single'])]}:{})},
+          numericProof:{kind:'native-pinned-fixture',mechanism,package:c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',tests:authority.selectors??[authority.selector],...(check==='tensor-mapping'?{supportingCommands:[[...cargo(swRoot,c.backend,['sceneworks-core',null,'minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions']),'--exact']]}:{})},
           referenceCommand:referenceCommand(inferenceRoot,mechanism,path.join(stageRoot,`reference-${mechanism}`),path.join(stageRoot,c.id)),reference:authority,
           adapterCommand:['node',path.join(swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'numeric',path.join(stageRoot,'campaign-plan.json'),c.id,swRoot,inferenceRoot],
           referenceMeaning:'Native GPU assertions against the existing precomputed independent hash-bound CPU reference fixture; not upstream CUDA execution. No extra flat-vector export requirement.',
@@ -131,10 +132,26 @@ export function concretePlan(swRoot, inferenceRoot, stageRoot) {
   };
 }
 
-function validateExecution(e, c) {
+export function assertLicenseAuthority(e, {allowUnitFake=false}={}) {
+  const authority=e.licenseAuthority;
+  assert.ok(authority?.acknowledged===true && authority.approvedBy && authority.reference && Number.isFinite(Date.parse(authority.approvedAt)), 'explicit source and inherited-component license acknowledgment authority required');
+  assert.ok(authority.kind==='user-approved' || (allowUnitFake && authority.kind==='unit_fake'), 'synthetic consent is not real legal approval');
+  const source=e.family==='ltx'?e.ltxAdapter:e.model;
+  for(const [role,inputs] of [['source',[source]],['component',e.model.components??[]],['adapter',e.adapters??[]]])for(const input of inputs){hex(input?.sha256);if(role!=='source')assert.equal(input.licenseAcknowledged,true,'explicit inherited component/adapter acknowledgment required before any import');assert.ok(authority.subjects?.some(s=>s.role===role&&s.sha256===input.sha256),`missing explicit ${role} license authority for actual input`);}
+  assert.ok(e.model.components?.length,'inherited component authority is required even before canceled/interrupted import');
+  return authority;
+}
+function validateExecution(e, c, allowUnitFake=false) {
+  assertLicenseAuthority(e,{allowUnitFake});
   assert.ok(e.label && /^[a-zA-Z0-9_-]+$/.test(e.label));
-  assert.ok(e.model?.modelId?.startsWith('imported_'), 'explicit non-stock imported modelId required');
-  assert.ok(absoluteSourcePath(e.model.sourcePath), 'staged absolute platform-native source path required'); hex(e.model.sha256);
+  if(e.family==='ltx') {
+    assert.equal(c.id.split('.').slice(2).join('.'),'ltx-add-select-generate');
+    assert.ok(e.model?.modelId?.startsWith('ltx_') && e.model.modelId===e.ltxAdapter?.baseModel,'existing compatible LTX base selection required, not a full-checkpoint import');
+    assert.ok(e.ltxAdapter.id && absoluteSourcePath(e.ltxAdapter.sourcePath));hex(e.ltxAdapter.sha256);
+  } else {
+    assert.ok(e.model?.modelId?.startsWith('imported_'), 'explicit non-stock imported modelId required');
+    assert.ok(absoluteSourcePath(e.model.sourcePath), 'staged absolute platform-native source path required'); hex(e.model.sha256);
+  }
   if (e.model.sourceKind === 'directory' || e.model.sourceFormat === 'sharded-diffusers') {
     assert.equal(e.model.sourceKind, 'directory', 'sharded sources are directories, never a fictional aggregate-hashed file');
     assert.ok(e.model.files?.length > 0, 'directory source closure requires each actual file/hash');
@@ -240,20 +257,33 @@ export function buildScenario(c, p, executions) {
   if (check === 'managed-linked-equivalence') {
     assert.ok(executions.some(e => e.ownershipMode === 'linked') && executions.some(e => e.ownershipMode !== 'linked'), 'both managed and linked executions required');
     assert.equal(new Set(executions.map(e => e.model.sha256)).size, 1, 'equivalent ownership must use the same source bytes');
+    assert.equal(executions.length,2,'one managed/linked controlled pair required');assert.equal(new Set(executions.map(e=>e.model.modelId)).size,2,'ownership comparison must install two distinct model selections');
+    for(const key of ['maximumBaselineDelta','maximumVideoDelta','maximumAudioDelta'])assert.ok(Number.isFinite(p.equivalence?.[key])&&p.equivalence[key]>=0,`explicit ownership nondeterminism bound ${key} required`);
   }
-  if (check === 'cold-warm-staged') for (const label of ['cold', 'warm', 'staged']) assert.ok(executions.some(e => e.label === label), `missing ${label} execution; stage/cache state must also be observed, not inferred from the label`);
+  if (check === 'cold-warm-staged') {
+    for (const label of ['cold', 'warm', 'staged']) assert.ok(executions.some(e => e.label === label), `missing ${label} execution; stage/cache state must also be observed, not inferred from the label`);
+    const [cold,warm,staged]=['cold','warm','staged'].map(label=>executions.find(e=>e.label===label));
+    assert.ok(!cold.reuseInstalled&&warm.reuseInstalled&&staged.reuseInstalled,'warm/staged reuse the actual first installed source');assert.equal(new Set([cold,warm,staged].map(e=>e.model.modelId)).size,1);
+    assert.ok(staged.memoryCap && staged.memoryCap.kind===(c.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb') && Number.isFinite(staged.memoryCap.value) && staged.memoryCap.value>0,'staged run needs an explicit actual worker memory cap, not an invented advanced flag');
+  }
   const steps = clone(p.setupSteps ?? []), comparisons = [], lifecycleActions = [];
   for (const e of executions) {
-    validateExecution(e, c);
+    validateExecution(e, c, p.proof_kind==='unit_fake');
     const prefix = e.label;
-    const importBody = { modelId: e.model.modelId, name: `sc26691 ${prefix}`, sourcePath: e.model.sourcePath, expectedSha256: e.model.sha256, baseModel: e.model.baseModel, licenseAcknowledged: true };
+    if(e.family==='ltx') {
+      const a=e.ltxAdapter;
+      steps.push({id:`${prefix}_adapter_import`,method:'POST',path:'/api/v1/loras/import',body:{loraId:a.id,name:a.name??a.id,sourcePath:a.sourcePath,expectedSha256:a.sha256,family:'ltx-video',baseModel:a.baseModel,scope:'project',projectId:p.projectId,licenseAcknowledged:e.licenseAuthority.acknowledged},expectedStatus:201});
+      steps.push({id:`${prefix}_adapter_installed`,waitJob:cap(`${prefix}_adapter_import/id`),assert:[eq('/status','completed')]});
+      steps.push({id:`${prefix}_adapter_selected`,method:'GET',path:`/api/v1/loras?projectId=${encodeURIComponent(p.projectId)}`,expectedStatus:200,assert:[{pointer:'',contains:{id:a.id,baseModel:a.baseModel}}]});
+    }
+    const importBody = { modelId: e.model.modelId, name: `sc26691 ${prefix}`, sourcePath: e.model.sourcePath, expectedSha256: e.model.sha256, baseModel: e.model.baseModel, licenseAcknowledged: e.licenseAuthority.acknowledged };
     if(e.importSource){assert.equal(e.importSource.kind,'huggingFace');assert.notEqual(e.ownershipMode,'linked','choose the actual managed HF or approved linked source, not contradictory locators');assert.match(e.importSource.revision??'',/^[a-f0-9]{40}$/);importBody.source=clone(e.importSource);delete importBody.sourcePath;if(c.artifact){assert.equal(e.importSource.repo,SOURCE.repo);assert.equal(e.importSource.revision,SOURCE.revision);assert.deepEqual(e.importSource.files,[c.artifact]);}}
     if (e.model.sourceKind === 'directory') delete importBody.expectedSha256; // No invented directory digest; retain per-file closure in preparation plan.
     if (e.family !== 'ltx') importBody.minimaxH3Partition = e.model.partition;
     if (e.ownershipMode === 'linked') {
       assert.ok(e.linkedRootId && e.linkedRelativePath);
       delete importBody.sourcePath;
-      Object.assign(importBody, { ownershipMode: 'linked', linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath });
+      Object.assign(importBody, { linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath });
     }
     if (check === 'restart-replay' && e.replayJobId) {
       assert.ok(e.reuseInstalled, 'explicit phased replay requires an actual previously owned persisted job');
@@ -262,7 +292,7 @@ export function buildScenario(c, p, executions) {
       steps.push({ id: `${prefix}_replayed`, waitJob: cap(`${prefix}_replay/id`), assert: [eq('/status', 'completed'), eq('/payload/model', e.model.modelId)] });
       continue; // Actual process restart is an external precondition, never a fabricated HTTP call.
     }
-    if (!e.reuseInstalled) {
+    if (!e.reuseInstalled && e.family!=='ltx') {
       steps.push({ id: `${prefix}_import`, method: 'POST', path: '/api/v1/models/import', body: importBody, expectedStatus: 201, assert: [eq('/payload/modelId', e.model.modelId)] });
       if (['cancel', 'interruption-retry'].includes(check)) {
         if(check==='interruption-retry')lifecycleActions.push({kind:'interrupt-import',beforeStep:`${prefix}_cancel`,jobCapture:`${prefix}_import/id`});
@@ -277,7 +307,7 @@ export function buildScenario(c, p, executions) {
       steps.push({ id: `${prefix}_installed`, waitJob: cap(`${prefix}_import/id`), assert: [eq('/result/modelId', e.model.modelId)] });
     }
     const requestedCheck = c.group === 'capability' && !['turbo', 'lora', 'lokr', 'hybrid'].includes(check) ? check : e.conditioning ?? (e.mode === 'reference_to_video' ? 'audio-reference' : e.mode === 'first_last_frame' ? 'first-last-frame' : e.mode === 'image_to_video' ? 'image' : 'text');
-    const selectedAdapters = (e.adapters ?? []).map(a => ({ id: a.id, weight: a.weight ?? 1 }));
+    const selectedAdapters = (e.family==='ltx'?[e.ltxAdapter]:e.adapters ?? []).map(a => ({ id: a.id, weight: a.weight ?? 1 }));
     const variants = conditioning(requestedCheck, p.assets ?? {});
     if (['turbo', 'lora', 'lokr'].includes(check)) {
       // Hold checkpoint, seed, NFE, shifts and geometry fixed; remove ONLY adapters.
@@ -290,11 +320,12 @@ export function buildScenario(c, p, executions) {
       variants[0] = { ...variants[0], loras: selectedAdapters };
     }
     // Real repeated-baseline floor, then one mechanism intervention at a time.
-    const variantsToRun = c.group === 'capability' ? [variants[0], variants[0], ...variants.slice(1)] : [variants[0]];
+    const variantsToRun = check==='managed-linked-equivalence'?[variants[0],variants[0]]:c.group === 'capability' ? [variants[0], variants[0], ...variants.slice(1)] : [variants[0]];
     for (const [i, variant] of variantsToRun.entries()) {
       const id = `${prefix}_av${i}`, s = e.sampling;
+      if(check==='cold-warm-staged'&&e.label==='staged')lifecycleActions.push({kind:'restart',beforeStep:id,memoryCap:clone(e.memoryCap)});
       const body = {
-        projectId: p.projectId, model: e.reuseInstalled ? e.model.modelId : cap(`${prefix}_installed/result/modelId`), mode: e.mode,
+        projectId: p.projectId, model: e.reuseInstalled || e.family==='ltx' ? e.model.modelId : cap(`${prefix}_installed/result/modelId`), mode: e.mode,
         prompt: e.prompt ?? (['audio-reference','ordered-multimodal'].includes(requestedCheck) ? 'A person faces the camera and says, "We are glad to welcome you today and share a clear account of the work we have finished." Natural continuous speech, steady camera, synchronized voice audio.' : 'A red cube slides right across a white table, synchronized soft impacts.'), seed: p.seed,
         requestedGpu: p.requestedGpu, duration: s.duration, fps: s.fps, width: s.width, height: s.height,
         advanced: { ...(s.advanced ?? {}), ...(e.family === 'ltx' ? {} : { mlxQuantize: { bf16: 0, q4: 4, q8: 8 }[e.model.componentTier] }), steps: s.steps, ...(s.schedulerShift === undefined ? {} : { schedulerShift: s.schedulerShift }), ...(s.audioSchedulerShift === undefined ? {} : { audioSchedulerShift: s.audioSchedulerShift }) },
@@ -315,7 +346,8 @@ export function buildScenario(c, p, executions) {
     if (c.group === 'capability') comparisons.push({ label: prefix, baseline: `${prefix}_av0_done`, repeatedBaseline: `${prefix}_av1_done`, interventions: variantsToRun.slice(2).map((v, i) => ({ job: `${prefix}_av${i + 2}_done`, allowedChanges: [...new Set([...Object.keys(variants[0]),...Object.keys(v)])].filter(k=>JSON.stringify(variants[0][k])!==JSON.stringify(v[k])), stream: check === 'audio-reference' || JSON.stringify(v.referenceAudioAssetIds) !== JSON.stringify(variants[0].referenceAudioAssetIds) ? 'audio' : 'video' })), stream: check === 'audio-reference' ? 'audio' : 'video', thresholds: clone(p.sensitivity), command: ['node', 'scripts/h3-finetune-terminal.mjs', 'compare-control', 'BASELINE_AV_FROM_ACTUAL_JOB', 'REPEATED_AV_FROM_ACTUAL_JOB', 'INTERVENTION_AV_FROM_ACTUAL_JOB', check === 'audio-reference' ? 'audio' : 'video', String(p.sensitivity.minimumControlDelta), String(p.sensitivity.maximumBaselineDelta)], policy: 'Bind checkpoint/source closure + seed + complete sampling/config; decode both AV streams. Measure repeated-baseline RMSE B. Predeclare intervention threshold T and require intervention RMSE > max(T,3*B). If noise floor is unstable, acceptance is unresolved, not any-hash-difference success.' });
   }
   assert.equal(new Set(steps.map(s => s.id)).size, steps.length, 'execution labels must be unique');
-  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons, lifecycleActions };
+  const ownershipEquivalence=check==='managed-linked-equivalence'?{managed:executions.find(e=>e.ownershipMode!=='linked').label,linked:executions.find(e=>e.ownershipMode==='linked').label,thresholds:clone(p.equivalence)}:undefined;
+  return { baseUrl: p.baseUrl, caseId: c.id, timeoutSeconds: p.timeoutSeconds, steps, comparisons, lifecycleActions,...(check==='cold-warm-staged'?{cacheCoverage:{cold:'cold_av0_done',warm:'warm_av0_done',staged:'staged_av0_done'}}:{}),...(ownershipEquivalence?{ownershipEquivalence}:{}) };
 }
 // Deliberately not a run-case plan: no invented evidence.json or successful runtime metrics.
 export async function prepareCases(parameters, destination) {
@@ -331,7 +363,7 @@ export async function prepareCases(parameters, destination) {
   // Exclusive directory: no overwrite/recovery of another campaign candidate.
   await mkdir(destination);
   for (const c of requiredCases().filter(c => c.group === 'numeric')) await mkdir(path.join(destination, c.id));
-  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, importSource: e.importSource, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
+  const cases = plan.cases.map(c => ({ ...c, ...(parameters.bindings[c.id] ? { declaredSourceBindings: parameters.bindings[c.id].map(e => ({ label: e.label, model: e.model, family: e.family, licenseAuthority:e.licenseAuthority, ltxAdapter:e.ltxAdapter, historyBinding:e.historyBinding, importSource: e.importSource, mode: e.mode, sampling: e.sampling, adapters: e.adapters, ownershipMode: e.ownershipMode, linkedRootId: e.linkedRootId, linkedRelativePath: e.linkedRelativePath, reuseInstalled: e.reuseInstalled, replayJobId: e.replayJobId })) } : {}) }));
   await writeFile(path.join(destination, 'case-plan.json'), JSON.stringify({ ...plan, cases, responsibleTask: 'sc-26691', sceneworks: parameters.sceneworks, inference: parameters.inference }, null, 2) + '\n', { flag: 'wx' });
   for (const [id, scenario] of scenarios) await writeFile(path.join(destination, `${id}.scenario.json`), JSON.stringify(scenario, null, 2) + '\n', { flag: 'wx' });
   return { cases: plan.cases.length, scenarios: scenarios.length, status: 'prepared-not-executed', unresolvedInterfaces: plan.unresolvedInterfaces };
@@ -346,7 +378,8 @@ export async function finalizeCampaignPlan(parameters, preparedRoot) {
   for(const template of book.cases) {
     const c={...template,evidence:'evidence.json',timeoutSeconds:parameters.timeoutSeconds,inputs:clone(parameters.caseInputs?.[template.id]??[]),loadHostBudgetBytes:parameters.budgets?.[template.backend]?.hostBytes,loadDeviceBudgetBytes:parameters.budgets?.[template.backend]?.deviceBytes};
     const cfg={...(parameters.runtime??{}),...(parameters.backends?.[c.backend]?.runtime??{}),...(parameters.caseRuntime?.[c.id]??{})};
-    if(c.numericProof){
+    if(c.blockedPrerequisite){c.command=c.commands[0];}
+    else if(c.numericProof){
       const mechanism=c.numericProof.mechanism, fixture=path.join(parameters.inferenceRoot,caseBook.numeric[mechanism].fixture);
       c.inputs.push({path:fixture,sha256:await hashFile(fixture),role:'numeric-fixture'});
       assert.ok(c.inputs.some(i=>i.role==='reference'),'stage actual pinned external reference blobs for native arithmetic');
@@ -355,7 +388,8 @@ export async function finalizeCampaignPlan(parameters, preparedRoot) {
       c.scenario=cfg.scenario??c.scenario;
       c.inputs.push({path:c.scenario,sha256:await hashFile(c.scenario),role:'scenario'});
       for(const source of c.declaredSourceBindings??[]){
-        assert.ok(c.inputs.some(i=>i.role==='checkpoint'&&i.sha256===source.model.sha256),'stage each selected actual checkpoint closure');
+        assertLicenseAuthority(source,{allowUnitFake:parameters.proof_kind==='unit_fake'});
+        assert.ok(source.family==='ltx'?c.inputs.some(i=>i.role==='adapter'&&i.sha256===source.ltxAdapter.sha256):c.inputs.some(i=>i.role==='checkpoint'&&i.sha256===source.model.sha256),'stage each selected actual checkpoint/adapter closure');
         for(const component of [...(source.model.components??[]),...(source.adapters??[])])assert.ok(c.inputs.some(i=>i.sha256===component.sha256),'stage each actual bound component/adapter');
       }
       c.runtime={...cfg,scenario:c.scenario};c.command=['node',path.join(parameters.swRoot,'scripts/h3-finetune-terminal-runtime.mjs'),'api',filename,c.id,parameters.swRoot,parameters.inferenceRoot];
