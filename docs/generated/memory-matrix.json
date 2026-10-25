@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c432c6c64ebe0e024b0b95837591bf981990ea5197697ad884bc1000f6baf44e",
+    "sceneWorksRevision": "source-tree:7c9cb0dfa614405a13c0b6489c4edb2ddb17d7ad9e115c74b224e6232c98660a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "82ea553e725fc21e371624573929402576326cb1311134b713a503402e0d9529"
+        "sha256": "7af2ed830bc4ff461bf99df2f01ebf5acbe6641a2ea27b5547a618e24ba270da"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -13,11 +13,11 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "23f0b07513e9533219728f048d2de6262ddf03636b0347e87b52c2db2e4a0aad"
+        "sha256": "a9a4ceed4ebc36b22cbbb9d60e90b2a7b21fe3b528d9f28b344bd30091fb9abb"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "d8995c8b538220de69feb1aefdd0cbe7960ee6c1c9834eaae4ecb2176ad688f3"
+        "sha256": "ec8ba5ada63dfd30a3eac25e5360b9088779c2283b54c0b648f8dd1c018c3a53"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "443f2d2e6af710359920d947389b2eaaba78f8b3a8c77e7e4a5823b6149b1671"
+        "sha256": "0dfa05d5edffe2cfc5dcbcc1388c620617290f01d065977365d5fa396ee88487"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a18e3a741a1beb4f0b2eb03f4b814bd47e8682c3d3fb672eafaa73218998f873"
+        "sha256": "d244fa5df667ddbe4cb8fbf0990691e358f2917d049ff9a75408c372fbdda017"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -177,7 +177,7 @@
     "anchors": 259,
     "analyticOnlyCells": 104,
     "anchoredCells": 3988,
-    "staleAnchors": 258,
+    "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -9373,7 +9373,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 2
     },
@@ -229572,7 +229572,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -229616,7 +229616,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
