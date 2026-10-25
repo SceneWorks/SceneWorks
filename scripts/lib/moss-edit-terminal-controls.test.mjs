@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync} from 'node:fs';
-import {chromium} from 'playwright';
 import {verifyReplayForm,waitForReplayForm,modelPicker} from './moss-edit-terminal-controls.mjs';
+
+let chromium;
+try {({chromium}=await import('playwright'));} catch(error) {if(error.code!=='ERR_MODULE_NOT_FOUND')throw error;}
 
 const expected={model:'moss_image_sft',prompt:'Make the bottle deep red.',count:2,width:64,height:64,seed:173,referenceAssetIds:['asset_B'],advanced:{steps:2,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:2.5,max_sequence_length:128},mossImageEdit:{reference_max_edge:32,use_kv_cache:true},mossImageAdvanced:{output:'latents'}}};
 const input=(label,value)=>`<label>${label}<input value="${value}"></label>`;
@@ -14,7 +16,7 @@ ${Object.entries({'Prompt':expected.prompt,'Variations':2,'Width override':64,'H
 ${[['Native output','latents'],['Positive embeddings',''],['Positive attention mask',''],['Negative embeddings',''],['Negative attention mask',''],['Explicit initial noise','']].map(([name,value])=>picker(name,value)).join('')}
 <label>Native text prompt batch<input type="checkbox"></label><label>Per-prompt negative strings<input type="checkbox"></label><label>Upscale<input type="checkbox"></label>`;
 
-test('real browser waits for complete recipe hydration after Prompt is already restored, but never selects a wrong Model',{skip:!existsSync(chromium.executablePath())},async()=>{
+test('real browser waits for complete recipe hydration after Prompt is already restored, but never selects a wrong Model',{skip:!chromium||!existsSync(chromium.executablePath())?'Playwright Chromium is unavailable on this host':false},async()=>{
   const browser=await chromium.launch({headless:true,args:['--disable-gpu']});
   try {
     const page=await browser.newPage(),actions=[];await page.setContent(html);

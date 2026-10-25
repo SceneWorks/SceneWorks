@@ -7,6 +7,7 @@ import {canonical,digest,fileIdentity,json,requireThat,safePath,sha,reviewVerdic
 import {CASES_MANIFEST_SHA256} from '../ci/moss-upstream-quality.mjs';
 
 export const AMENDMENT_SHA256='596ad6038ae5e1ab211e646255b9a1f67be1cdd3a79ea07a741fce506d414fe9';
+export const FINAL_EXECUTION_TOOLING_SHA='7dfbb2205034529ff3abfe16772b2726e153c069';
 const SHA=/^[a-f0-9]{64}$/;
 const CELLS=['base-single','base-four','sft-single','sft-four'];
 const NOISE_SHA='92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82';
@@ -48,7 +49,8 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
   const capture=await json(await identity(root,captureEntry));
   validateExecutionToolingCapture(capture,historicalExecutionToolingSha,verificationSourceRoot);
   const finalEntry=comparison.finalExecutionToolingCapture;
-  requireThat(finalEntry?.file==='final-execution-tooling-capture.json'&&/^[1-9][0-9]*$/.test(String(finalEntry.runId))&&/^[1-9][0-9]*$/.test(String(finalEntry.artifactId))&&String(finalEntry.runId)!==String(captureEntry.runId)&&String(finalEntry.artifactId)!==String(captureEntry.artifactId)&&finalEntry.attempt===1&&/^[a-f0-9]{40}$/.test(executionToolingSha??'')&&executionToolingSha===verificationToolingSha&&executionToolingSha!==historicalExecutionToolingSha,'amended review requires distinct actual final execution-tooling capture');
+  requireThat(finalEntry?.file==='final-execution-tooling-capture.json'&&/^[1-9][0-9]*$/.test(String(finalEntry.runId))&&/^[1-9][0-9]*$/.test(String(finalEntry.artifactId))&&String(finalEntry.runId)!==String(captureEntry.runId)&&String(finalEntry.artifactId)!==String(captureEntry.artifactId)&&finalEntry.attempt===1&&executionToolingSha===FINAL_EXECUTION_TOOLING_SHA&&/^[a-f0-9]{40}$/.test(verificationToolingSha??'')&&verificationToolingSha!==historicalExecutionToolingSha,'amended review requires distinct actual final execution-tooling capture');
+  execFileSync('git',['-C',verificationSourceRoot,'merge-base','--is-ancestor',executionToolingSha,verificationToolingSha]);
   const finalCapture=await json(await identity(root,finalEntry));
   validateExecutionToolingCapture(finalCapture,executionToolingSha,verificationSourceRoot,4);
   requireThat(canonical(Object.keys(comparison.upstream??{}).sort())===canonical([...CELLS].sort())&&Array.isArray(comparison.rows)&&comparison.rows.length===8,'all four upstream cells and eight native comparisons required');
@@ -69,7 +71,7 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
     requireThat(result?.result?.width===(cell.endsWith('four')?512:768)&&result.result.height===(cell.endsWith('four')?768:512)&&result.result.seed===173&&result.result.actual_steps===30&&result.result.cfg===4&&result.result.inference_shift===5&&result.result.kv_cache===true&&result.result.dit_quantization==='none'&&result.result.text_quantization==='none'&&result.noiseAllocations===1,'upstream diagnostic settings differ from frozen quality case');
     requireThat(result.noiseSha256===NOISE_SHA&&entry.noiseSha256===NOISE_SHA&&auth&&typeof auth==='object','upstream noise/authentication evidence missing');
     if(cell==='base-single')requireThat(auth.payloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&result.wrapperSha256==='ffe0e18dbf021ca5f8f62cf7cacb54f4b0c2a40c4d6142c862bd4df9d42f248d'&&result.frozenFilesVerifiedAfterRun===24,'original Base/single frozen learned source changed');
-    else requireThat(auth.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&auth.priorPayloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&auth.toolingSha===entry.toolingSha&&entry.toolingSha===verificationToolingSha&&auth.nativeProductSha===lock.sources.sceneworks.head&&auth.nativeInferenceSha===lock.sources.inference.head&&auth.wrapperSha256===result.wrapperSha256&&result.caseId===cell&&result.variant===cell.split('-')[0]&&result.frozenFilesVerifiedAfterRun===24&&canonical(result.noiseShape)===canonical(cell.endsWith('four')?[1,128,48,32]:[1,128,32,48]),'three-case upstream producer/source/shape identity changed');
+    else requireThat(auth.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&auth.priorPayloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&auth.toolingSha===entry.toolingSha&&entry.toolingSha===FINAL_EXECUTION_TOOLING_SHA&&auth.nativeProductSha===lock.sources.sceneworks.head&&auth.nativeInferenceSha===lock.sources.inference.head&&auth.wrapperSha256===result.wrapperSha256&&result.caseId===cell&&result.variant===cell.split('-')[0]&&result.frozenFilesVerifiedAfterRun===24&&canonical(result.noiseShape)===canonical(cell.endsWith('four')?[1,128,48,32]:[1,128,32,48]),'three-case upstream producer/source/shape identity changed');
     const expectedRefs=cell.endsWith('four')?['B','L','P','G']:['B'];
     requireThat(canonical(entry.inputs?.map(item=>item.id))===canonical(expectedRefs)&&entry.inputs.every(item=>item.sha256===inputs[item.id]?.sha256),'upstream reference inputs differ from frozen ordered images');
     requireThat(result.result.references?.length===expectedRefs.length&&result.result.references.every((path,index)=>path.endsWith(`/${expectedRefs[index]}.png`))&&result.result.prompt===qualityRows.find(row=>row.variant===cell.split('-')[0]&&row.refs.length===expectedRefs.length).request.prompt&&result.result.negative_prompt==='','upstream prompt/reference order differs from frozen quality case');
@@ -79,11 +81,17 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
   requireThat(suite&&summaryEntry?.file==='upstream-suite-summary.json'&&String(summaryEntry.runId)===suite.runId&&String(summaryEntry.artifactId)===suite.artifactId&&summaryEntry.attempt===suite.attempt,'three-case suite summary missing actual artifact identity');
   const summary=await json(await identity(root,summaryEntry));
   requireThat(summary.toolingSha===suite.toolingSha&&summary.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&Array.isArray(summary.outputs)&&summary.outputs.length===3,'three-case suite result provenance changed');
-  for(const cell of CELLS.filter(name=>name!=='base-single')){
-    const output=summary.outputs.find(item=>item.caseId===cell),entry=comparison.upstream[cell];
-    requireThat(summary.outputs.filter(item=>item.caseId===cell).length===1&&output.imageSha256===entry.image.sha256&&output.diagnosticSha256===entry.diagnostic.sha256,'upstream image/diagnostic differs from actual three-case suite output');
-  }
+  validateSuiteOutputs(summary,comparison.upstream);
   return comparison;
+}
+
+export function validateSuiteOutputs(summary,upstream){
+  requireThat(Array.isArray(summary?.outputs)&&summary.outputs.length===3,'three-case suite output count changed');
+  for(const cell of CELLS.filter(name=>name!=='base-single')){
+    const output=summary.outputs.find(item=>item.caseId===cell),entry=upstream?.[cell];
+    requireThat(summary.outputs.filter(item=>item.caseId===cell).length===1&&output.imageSha256===entry?.image?.sha256&&output.diagnosticSha256===entry?.diagnostic?.sha256,'upstream image/diagnostic differs from actual three-case suite output');
+  }
+  return true;
 }
 
 export function compareQualityRow(row,nativeReview,nativeReviewSha256,outputs,comparison){
