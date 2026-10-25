@@ -16835,16 +16835,16 @@ mod minimax_h3_import_declaration_tests {
             "models": [
                 { "id": "minimax_h3", "type": "video", "family": "minimax-h3", "loraCompatibility": { "families": [] },
                   "downloads":[
-                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"q4","default":true,"files":["q4/transformer/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer/*"]},
-                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer_ref/*"]},
-                    {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"q4","coRequisite":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/shared","revision":"1111111111111111111111111111111111111111","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
                 { "id":"minimax_h3_ref", "type":"video", "family":"minimax-h3", "downloads":[
-                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","default":true,"files":["q4/transformer_ref/*"]},
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"q4","default":true,"files":["q4/transformer_ref/*"]},
                     {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"bf16","files":["bf16/transformer_ref/*"]},
-                    {"provider":"huggingface","repo":"fixture/tiers","variant":"q4","coRequisite":true,"files":["q4/transformer/*"]},
-                    {"provider":"huggingface","repo":"fixture/shared","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
+                    {"provider":"huggingface","repo":"fixture/tiers","revision":"1111111111111111111111111111111111111111","variant":"q4","coRequisite":true,"files":["q4/transformer/*"]},
+                    {"provider":"huggingface","repo":"fixture/shared","revision":"1111111111111111111111111111111111111111","coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]}
                   ] },
                 { "id": "sdxl", "type": "image", "family": "sdxl" }
             ]
@@ -16899,6 +16899,15 @@ mod minimax_h3_import_declaration_tests {
                 }])
             );
             assert!(rows.iter().all(super::is_co_requisite_download));
+            assert!(
+                rows.iter()
+                    .all(|row| { row["revision"] == "1111111111111111111111111111111111111111" }),
+                "E8/E9: every queued resident declaration must pin its source revision"
+            );
+            assert!(
+                entry.get("importPlan").is_none(),
+                "uninspected bytes are not ready"
+            );
             let imported_slot = if partition == "ref2va" {
                 "q4/transformer_ref/*"
             } else {
@@ -16909,6 +16918,42 @@ mod minimax_h3_import_declaration_tests {
                 .any(|row| super::string_array_field(row, "files")
                     .contains(&imported_slot.to_owned())));
         }
+        // Negative control for this shared catalog: absent revisions must still refuse BEFORE
+        // queuing either an import or any component download (E8/E9), never float to main.
+        let (_, before) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        let path = temp.path().join("config/manifests/builtin.models.jsonc");
+        let mut catalog: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for row in catalog["models"][0]["downloads"].as_array_mut().unwrap() {
+            if row["componentId"] == "tokenizer" {
+                row.as_object_mut().unwrap().remove("revision");
+            }
+        }
+        std::fs::write(path, catalog.to_string()).unwrap();
+        let router = create_app(test_settings(&temp)).unwrap();
+        let (status, error) = request(
+            router.clone(),
+            "POST",
+            "/api/v1/models/import",
+            json!({
+                "name":"Unpinned H3 residents", "repo":"owner/custom", "family":"minimax-h3",
+                "baseModel":"minimax_h3", "minimaxH3Partition":"fl2va", "licenseAcknowledged":true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .unwrap()
+                .contains("component revision is missing"),
+            "{error}"
+        );
+        let (_, after) = request(router, "GET", "/api/v1/jobs", Value::Null).await;
+        assert_eq!(
+            after, before,
+            "an unpinned declaration cannot enqueue imports or components"
+        );
     }
 
     #[tokio::test]
@@ -17233,16 +17278,48 @@ mod minimax_h3_import_declaration_tests {
         let library = temp.path().join("library");
         let source = library.join("custom");
         write_lifecycle_h3(&source);
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            temp.path().join("fixture-hub"),
+        );
         let store =
             sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
         let root = store.approve_root(&library).unwrap();
-        let compiled = store.compile_linked(&root.root_id, "custom").unwrap();
         let revision = "0123456789012345678901234567890123456789";
         let rows = json!([
             {"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"componentId":"audio_vae","files":["audio_vae/config.json", "audio_vae/weights.safetensors"]},
             {"provider":"huggingface","repo":"fixture/tiers","revision":revision,"variant":"q4","coRequisite":true,"componentId":"text_encoder","files":["q4/text_encoder/config.json", "q4/text_encoder/model.safetensors"]}
         ]);
-        let mut entry = json!({"id":"repair_h3","name":"Repair H3", "baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4", "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"custom"}, "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}, "downloads":rows}).as_object().unwrap().clone();
+        let mut entry = json!({"id":"repair_h3","name":"Repair H3", "family":"minimax-h3", "baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4", "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"custom"}, "downloads":rows}).as_object().unwrap().clone();
+        for row in rows.as_array().unwrap() {
+            let cache = super::huggingface_repo_cache_path(
+                &settings.data_dir,
+                row["repo"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert!(cache.starts_with(temp.path()));
+            for file in row["files"].as_array().unwrap() {
+                let path = cache
+                    .join("snapshots")
+                    .join(revision)
+                    .join(file.as_str().unwrap());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"fixture").unwrap();
+            }
+        }
+        // E8/E9: capture complete contents before compile, then remove only the repair target.
+        let context = sceneworks_worker::minimax_h3_import_fixture::captured_component_context(
+            &settings.data_dir,
+            &entry,
+        );
+        let compiled = store
+            .compile_linked_with_context(&root.root_id, "custom", context)
+            .unwrap();
+        entry.insert(
+            "importPlan".into(),
+            json!({"checkpointId":compiled.checkpoint_id,
+            "planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}),
+        );
         let assembly =
             sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
                 &compiled.plan,
@@ -17250,6 +17327,7 @@ mod minimax_h3_import_declaration_tests {
             )
             .unwrap();
         sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        assert_h3_component_authority_required(&settings.data_dir, &entry);
         let manifest = settings.config_dir.join("manifests/user.models.jsonc");
         std::fs::write(
             &manifest,
@@ -17260,27 +17338,11 @@ mod minimax_h3_import_declaration_tests {
         let builtin_path = settings.config_dir.join("manifests/builtin.models.jsonc");
         let mut builtin: Value =
             serde_json::from_str(&std::fs::read_to_string(&builtin_path).unwrap()).unwrap();
-        let base = &mut builtin["models"][0];
-        base["downloads"]
+        builtin["models"][0]["downloads"]
             .as_array_mut()
             .unwrap()
             .extend(rows.as_array().unwrap().iter().cloned());
         std::fs::write(builtin_path, builtin.to_string()).unwrap();
-        for row in rows.as_array().unwrap() {
-            let cache = super::huggingface_repo_cache_path(
-                &settings.data_dir,
-                row["repo"].as_str().unwrap(),
-            )
-            .unwrap();
-            for file in row["files"].as_array().unwrap() {
-                let path = cache
-                    .join("snapshots")
-                    .join(revision)
-                    .join(file.as_str().unwrap());
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::write(path, b"fixture").unwrap();
-            }
-        }
         // Start complete; remove ONLY audio VAE bytes. The import and text encoder remain sound.
         let audio = super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared")
             .unwrap()
@@ -17376,10 +17438,13 @@ mod minimax_h3_import_declaration_tests {
         let library = temp.path().join("library");
         let source = library.join("custom");
         write_lifecycle_h3(&source);
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            settings.data_dir.clone(),
+            temp.path().join("fixture-hub"),
+        );
         let store =
             sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
         let root = store.approve_root(&library).unwrap();
-        let compiled = store.compile_linked(&root.root_id, "custom").unwrap();
         let required = [
             "text_encoder/config.json",
             "text_encoder/model.safetensors",
@@ -17392,7 +17457,30 @@ mod minimax_h3_import_declaration_tests {
             "FL2VA/audio_vae/config.yaml",
         ];
         let revision = "0123456789012345678901234567890123456789";
-        let mut entry = json!({"id":"lifecycle_h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va", "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}, "downloads":[{"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"files":required}]}).as_object().unwrap().clone();
+        let mut entry = json!({"id":"lifecycle_h3","family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4", "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"custom"}, "downloads":[{"provider":"huggingface","repo":"fixture/shared","revision":revision,"coRequisite":true,"files":required}]}).as_object().unwrap().clone();
+        let cache =
+            super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared").unwrap();
+        assert!(cache.starts_with(temp.path()));
+        let snapshot = cache.join("snapshots").join(revision);
+        for file in required {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        // E7/E8/E9: fresh source and component tier/content are committed together, not rebound
+        // after publication. Later disappearance is missing content, not historical unknown authority.
+        let context = sceneworks_worker::minimax_h3_import_fixture::captured_component_context(
+            &settings.data_dir,
+            &entry,
+        );
+        let compiled = store
+            .compile_linked_with_context(&root.root_id, "custom", context)
+            .unwrap();
+        entry.insert(
+            "importPlan".into(),
+            json!({"checkpointId":compiled.checkpoint_id,
+            "planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}),
+        );
         let assembly =
             sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
                 &compiled.plan,
@@ -17400,19 +17488,13 @@ mod minimax_h3_import_declaration_tests {
             )
             .unwrap();
         sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        assert_h3_component_authority_required(&settings.data_dir, &entry);
         let mut model = Value::Object(entry);
-        model["importComponentTier"] = json!("q4");
+        std::fs::remove_file(snapshot.join(required[0])).unwrap();
         let missing = super::install_state_for(None, &model, &settings.data_dir);
         assert!(!missing.installed);
         assert!(missing.cache_incomplete);
-        let cache =
-            super::huggingface_repo_cache_path(&settings.data_dir, "fixture/shared").unwrap();
-        let snapshot = cache.join("snapshots").join(revision);
-        for file in required {
-            let path = snapshot.join(file);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"fixture").unwrap();
-        }
+        std::fs::write(snapshot.join(required[0]), b"fixture").unwrap();
         assert!(super::install_state_for(None, &model, &settings.data_dir).installed);
         let mut unbound = model.clone();
         unbound["importPlan"]
@@ -17675,98 +17757,34 @@ mod imported_checkpoint_product_surface_tests {
         entry
     }
 
-    /// Write the smallest checkpoint `compile_linked` accepts as an H3 DiT directory: a
-    /// published-geometry config plus one complete safetensors carrying exactly those shapes.
-    fn write_tiny_h3(dir: &std::path::Path) {
-        let mut config = sceneworks_core::minimax_h3_codec::H3Config::published().0;
-        for (key, value) in [
-            ("num_layers", 1),
-            ("num_refiner_layers", 1),
-            ("num_attention_heads", 2),
-            ("attention_head_dim", 6),
-            ("hidden_size", 8),
-            ("ffn_dim", 8),
-            ("in_channels", 2),
-            ("audio_in_channels", 2),
-            ("text_dim", 8),
-            ("freq_dim", 4),
-            ("time_embed_hidden_dim", 8),
-            ("time_embed_dim", 4),
-            ("rope_freq_dim", 1),
-        ] {
-            config[key] = json!(value);
-        }
-        let shapes = sceneworks_core::minimax_h3_codec::H3Config(config.clone())
-            .shapes()
-            .unwrap();
-        let mut header = serde_json::Map::new();
-        let mut offset = 0;
-        for (name, shape) in shapes {
-            let size = shape.iter().product::<usize>() * 2;
-            header.insert(
-                name,
-                json!({"dtype":"BF16","shape":shape,"data_offsets":[offset,offset+size]}),
-            );
-            offset += size;
-        }
-        let encoded = serde_json::to_vec(&header).unwrap();
-        let mut bytes = (encoded.len() as u64).to_le_bytes().to_vec();
-        bytes.extend(encoded);
-        bytes.resize(bytes.len() + offset, 0x31);
-        std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
-        std::fs::write(dir.join("diffusion_pytorch_model.safetensors"), bytes).unwrap();
-    }
-
-    /// A plan-backed entry whose linked source REALLY resolves under its own `data_dir` — the only
-    /// fixture a readiness verdict means anything against. The tempdir is held for the test's
-    /// lifetime so the source bytes stay present while the surface is projected.
+    /// E6/E8/E9: readiness is meaningful only for a committed source AND its captured residents.
+    /// Keep the real transactional fixture and its private cache guard alive during projection.
     struct CompiledImport {
         entry: JsonObject,
         data_dir: std::path::PathBuf,
+        _import: sceneworks_worker::minimax_h3_import_fixture::ManagedMiniMaxH3Import,
         _temp: tempfile::TempDir,
     }
 
     fn real_imported_h3_entry(partition: &str) -> CompiledImport {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path().join("data");
-        let library = temp.path().join("library");
-        write_tiny_h3(&library.join("tune"));
-        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data_dir);
-        let root = store.approve_root(&library).unwrap();
-        let compiled = store.compile_linked(&root.root_id, "tune").unwrap();
-        let mut entry = json!({
-            "id": "my_singularity_tune",
-            "name": "My Singularity tune",
-            "type": "video",
-            "family": "minimax-h3",
-            "catalogScope": "user",
-            "importSourceShape": "transformer_directory",
-            "baseModel": "minimax_h3",
-            "minimaxH3Partition": partition,
-            "importComponentTier": "q4",
-            "importPlan": {
-                "checkpointId": compiled.checkpoint_id,
-                "planId": compiled.plan.plan_id,
-                "semanticDigest": compiled.record.plan.semantic_digest
-            },
-            "capabilities": ["reference_to_video"],
-            "macSupport": {"supported": true},
-            "candleSupport": {"supported": true},
-        })
-        .as_object()
-        .expect("fixture is an object")
-        .clone();
-        let assembly =
-            sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
-                &compiled.plan,
-                &entry,
-            )
-            .unwrap();
-        sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        let imported =
+            sceneworks_worker::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+                &data_dir,
+                "my_singularity_tune",
+                "dense",
+                partition,
+            );
+        crate::tests::support::assert_h3_component_authority_required(&data_dir, &imported.entry);
+        let mut entry = imported.entry.clone();
+        entry.insert("catalogScope".into(), json!("user"));
+        entry.insert("macSupport".into(), json!({"supported":true}));
+        entry.insert("candleSupport".into(), json!({"supported":true}));
         CompiledImport {
             entry,
             data_dir,
+            _import: imported,
             _temp: temp,
         }
     }
@@ -17850,16 +17868,24 @@ mod imported_checkpoint_product_surface_tests {
         let CompiledImport {
             entry,
             data_dir,
+            _import,
             _temp,
         } = real_imported_h3_entry("fl2va");
+        let resident_count = entry["downloads"].as_array().unwrap().len();
         let entry = project_at(entry, &data_dir);
         let components = entry["componentReadiness"]["components"]
             .as_array()
             .expect("components");
         assert_eq!(
             components.len(),
-            1,
-            "only the imported DiT is bound: {components:?}"
+            1 + resident_count,
+            "the imported DiT AND every frozen resident are bound: {components:?}"
+        );
+        assert!(
+            components
+                .iter()
+                .all(|component| component["present"] == true),
+            "{components:?}"
         );
         assert_eq!(components[0]["componentId"], json!("transformer"));
         assert_eq!(
@@ -17874,22 +17900,17 @@ mod imported_checkpoint_product_surface_tests {
     #[test]
     fn a_missing_resident_component_blocks_readiness_and_names_the_download() {
         let CompiledImport {
-            mut entry,
+            entry,
             data_dir,
+            _import,
             _temp,
         } = real_imported_h3_entry("fl2va");
-        entry.insert(
-            "downloads".to_owned(),
-            json!([
-                {
-                    "componentId": "audio_vae",
-                    "repo": "MiniMaxAI/MiniMax-H3",
-                    "revision": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e",
-                    "subdir": "audio_vae",
-                    "files": ["audio_vae/*"]
-                }
-            ]),
-        );
+        // Remove actual committed bytes, never edit downloads after commitment to bless a new row.
+        let audio =
+            sceneworks_worker::minimax_h3_import_fixture::shared_component_snapshot(&data_dir)
+                .join("audio_vae/fixture.safetensors");
+        assert!(audio.starts_with(&data_dir));
+        std::fs::remove_file(&audio).unwrap();
         let entry = project_at(entry, &data_dir);
         assert_eq!(
             entry["componentReadiness"]["ready"],

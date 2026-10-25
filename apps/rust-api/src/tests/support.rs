@@ -67,6 +67,45 @@ pub(crate) fn persist_checkpoint_plan_fixture(
     .unwrap();
 }
 
+/// E6/E8/E9 negative controls for a REAL fresh H3 fixture. Run while its scoped cache guard lives.
+/// Neither missing authority nor an unavailable resident may become fresh load authority.
+/// Uses production validators/capture; never writes or repairs a fixture's committed plan.
+pub(crate) fn assert_h3_component_authority_required(
+    data_dir: &std::path::Path,
+    entry: &serde_json::Map<String, Value>,
+) {
+    use sceneworks_core::minimax_h3_import::verify_entry_assembly;
+    use sceneworks_core::model_artifacts::provenance::{
+        capture_h3_component_closure_with_check, MODEL_DECLARATION_KEY,
+    };
+    let checkpoint = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry).unwrap();
+    let plan = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data_dir)
+        .resolve(checkpoint)
+        .unwrap()
+        .plan;
+    verify_entry_assembly(entry, &plan).expect("fresh committed fixture has complete authority");
+    for empty in [false, true] {
+        let mut unknown = plan.clone();
+        let declaration = unknown.context.get_mut(MODEL_DECLARATION_KEY).unwrap();
+        if empty {
+            declaration["componentClosure"] = json!([]);
+        } else {
+            declaration
+                .as_object_mut()
+                .unwrap()
+                .remove("componentClosure");
+        }
+        let error = verify_entry_assembly(entry, &unknown).unwrap_err();
+        assert!(error.contains("component content is unknown"), "{error}");
+    }
+    let mut unavailable = entry.clone();
+    unavailable["downloads"][0]["repo"] = json!("fixture/sc26679-unavailable-components");
+    let error =
+        capture_h3_component_closure_with_check(data_dir, &unavailable, &|| Ok(())).unwrap_err();
+    assert!(error.contains("component unavailable"), "{error}");
+    verify_entry_assembly(entry, &plan).expect("negative controls never rebind the real fixture");
+}
+
 /// The single process-global lock every rust-api test that mutates HF-cache env serializes on.
 /// rust-api's `#[test]`s run as threads in ONE binary, so a `set_var`/`remove_var` in one is visible
 /// to all the others; mutual exclusion must therefore be crate-wide — a per-module lock serializes

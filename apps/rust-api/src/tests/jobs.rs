@@ -5326,43 +5326,43 @@ async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
 
 #[tokio::test]
 async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() {
-    use sceneworks_core::checkpoint_import::{
-        CheckpointCatalogRecordV1, CheckpointContainerV1, CheckpointInventoryV1, ImportLayerV1,
-        ImportPlanV1, SourceLocatorV1,
-    };
+    use sceneworks_worker::minimax_h3_import_fixture as fixture;
     let _env = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
-    let current_plan = ImportPlanV1::new(
-        format!("checkpoint-plan-{}", "c".repeat(64)),
-        "minimax-h3",
-        vec![ImportLayerV1 {
-            layer_id: "dit".into(),
-            role: "transformer".into(),
-            target_path: "model.safetensors".into(),
-            container: CheckpointContainerV1::Safetensors,
-            source: SourceLocatorV1::linked("root-test", "model.safetensors", "a".repeat(64))
-                .unwrap(),
-        }],
+    // E8/E9: use actual source bytes and capture the complete component closure BEFORE compile.
+    // Retain the staging fixture's private source-library guard, including during API admission.
+    let imported = fixture::stage_managed_minimax_h3_import(&settings.data_dir, "same-import-id");
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root = store
+        .approve_root(&settings.data_dir.join("models/incoming"))
+        .unwrap();
+    let context = fixture::captured_component_context(&settings.data_dir, &imported.entry);
+    let compiled = store
+        .compile_linked_with_context(&root.root_id, "same-import-id", context)
+        .unwrap();
+    let checkpoint_id = &compiled.checkpoint_id;
+    let current_plan = &compiled.plan;
+    let mut model = imported.entry.clone();
+    model.remove("paths");
+    model.insert(
+        "source".into(),
+        json!({"provider":"linked-library",
+        "rootId":root.root_id,"relativePath":"same-import-id"}),
+    );
+    model.insert(
+        "importPlan".into(),
+        json!({"checkpointId":checkpoint_id,
+        "planId":current_plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}),
+    );
+    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+        current_plan,
+        &model,
     )
     .unwrap();
-    let checkpoint_id = "linked/root-test/model.safetensors";
-    let record = CheckpointCatalogRecordV1::from_plan(checkpoint_id, &current_plan).unwrap();
-    let plans = settings.data_dir.join("checkpoints/plans");
-    std::fs::create_dir_all(&plans).unwrap();
-    std::fs::write(
-        plans.join(format!("{}.json", current_plan.plan_id)),
-        current_plan.canonical_json().unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        settings.data_dir.join("checkpoints/inventory.json"),
-        CheckpointInventoryV1::new(vec![record.clone()])
-            .unwrap()
-            .canonical_json()
-            .unwrap(),
-    )
-    .unwrap();
+    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut model, &assembly);
+    assert_h3_component_authority_required(&settings.data_dir, &model);
     let config = settings.config_dir.join("manifests");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
@@ -5373,12 +5373,7 @@ async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() 
     write_empty_sibling_manifests(&config);
     std::fs::write(
         config.join("user.models.jsonc"),
-        json!({"schemaVersion":1,"models":[{
-            "id":"same-import-id", "type":"video", "family":"minimax-h3", "baseModel":"minimax_h3",
-            "minimaxH3Partition":"fl2va", "importPlan":{"checkpointId":checkpoint_id,
-            "planId":current_plan.plan_id,"semanticDigest":record.plan.semantic_digest}
-        }]})
-        .to_string(),
+        json!({"schemaVersion":1,"models":[model]}).to_string(),
     )
     .unwrap();
     let (app, state) = create_app_with_state(settings).unwrap();
@@ -5395,7 +5390,7 @@ async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() 
     let actual =
         crate::imported_reference_from_provenance(entry.as_object().unwrap(), provenance.as_ref())
             .expect("canonical imported fixture has a validated replay identity");
-    assert_eq!(actual["checkpointId"], checkpoint_id);
+    assert_eq!(actual["checkpointId"], checkpoint_id.as_str());
     assert_eq!(actual["planId"], current_plan.plan_id);
     let mut expected = actual;
     expected["planId"] = json!(format!("checkpoint-plan-{}", "b".repeat(64)));

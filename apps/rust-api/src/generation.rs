@@ -3212,82 +3212,25 @@ mod plan_backed_video_enqueue_tests {
 #[cfg(test)]
 mod imported_minimax_h3_video_tests {
     use crate::tests::support::*;
-    use sceneworks_core::checkpoint_import::{
-        CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
-    };
-    use sceneworks_core::minimax_h3_import::{
-        stamp_imported_minimax_h3_entry, MiniMaxH3ImportAssembly,
+    use sceneworks_worker::minimax_h3_import_fixture::{
+        stage_managed_minimax_h3_import, ManagedMiniMaxH3Import,
     };
 
     const IMPORTED_ID: &str = "minimax_h3_custom";
 
-    /// The catalog entry `run_model_import_job` writes for a managed dense H3 DiT import.
-    fn imported_entry(temp_dir: &tempfile::TempDir, with_assembly: bool) -> Value {
-        let plan = ImportPlanV1::new(
-            format!("checkpoint-plan-{}", "4".repeat(64)),
-            "minimax-h3",
-            vec![
-                ImportLayerV1 {
-                    layer_id: "artifact:diffusion_pytorch_model.safetensors".to_owned(),
-                    role: "transformer".to_owned(),
-                    target_path: "diffusion_pytorch_model.safetensors".to_owned(),
-                    container: CheckpointContainerV1::Safetensors,
-                    source: SourceLocatorV1::linked(
-                        "root-0123456789abcdef",
-                        "h3/diffusion_pytorch_model.safetensors",
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                    )
-                    .expect("valid locator"),
-                },
-                ImportLayerV1 {
-                    layer_id: "artifact:config.json".to_owned(),
-                    role: "descriptor".to_owned(),
-                    target_path: "config.json".to_owned(),
-                    container: CheckpointContainerV1::JsonDescriptor,
-                    source: SourceLocatorV1::linked(
-                        "root-0123456789abcdef",
-                        "h3/config.json",
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                    )
-                    .expect("valid locator"),
-                },
-            ],
-        )
-        .expect("valid plan");
-        persist_checkpoint_plan_fixture(
-            &test_settings(temp_dir),
-            &format!("managed/{IMPORTED_ID}"),
-            &plan,
-        );
-        let mut entry = json!({
-            "id": IMPORTED_ID,
-            "name": "Singularity FL2VA (dense)",
-            "type": "image",
-            "baseModel": "minimax_h3",
-            "minimaxH3Partition": "fl2va",
-            "importPlan": {
-                "checkpointId": format!("managed/{IMPORTED_ID}"),
-                "planId": plan.plan_id,
-            },
-        })
-        .as_object()
-        .cloned()
-        .expect("object");
-        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry)
-            .expect("complete explicit assembly");
-        stamp_imported_minimax_h3_entry(&mut entry, &assembly);
-        sceneworks_core::lora_family::apply_model_manifest_defaults(
-            &mut entry,
-            "video",
-            Some("minimax-h3"),
-        );
+    /// E6/E8/E9: a fresh import captures real component contents BEFORE committing its plan.
+    /// Retain the fixture's scoped source-library guard for the entire API request lifetime.
+    fn imported_entry(temp_dir: &tempfile::TempDir, with_assembly: bool) -> ManagedMiniMaxH3Import {
+        let mut imported =
+            stage_managed_minimax_h3_import(&test_settings(temp_dir).data_dir, IMPORTED_ID);
+        assert_h3_component_authority_required(&test_settings(temp_dir).data_dir, &imported.entry);
         if !with_assembly {
-            entry["importPlan"]
+            imported.entry["importPlan"]
                 .as_object_mut()
                 .expect("importPlan object")
                 .remove("assembly");
         }
-        Value::Object(entry)
+        imported
     }
 
     fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
@@ -3375,7 +3318,8 @@ mod imported_minimax_h3_video_tests {
     #[tokio::test]
     async fn the_imported_h3_entry_is_a_selectable_video_model_on_both_lanes() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with(&temp_dir, imported_entry(&temp_dir, true));
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
         let row = catalog_row(&app).await;
 
         assert_eq!(row["type"], "video");
@@ -3401,17 +3345,27 @@ mod imported_minimax_h3_video_tests {
                 "{block}: the bound partition is the base one"
             );
         }
-        assert!(
-            row.get("loraCompatibility").is_none()
-                || row["loraCompatibility"]["supported"] == false,
-            "adapters are not advertised on imported H3 checkpoints: {row}"
+        // E5/S9: compatible imported H3 checkpoints retain their adapter surface.
+        assert_eq!(row["loraCompatibility"]["supported"], true, "{row}");
+        assert_eq!(
+            row["loraCompatibility"]["families"],
+            json!(["minimax-h3"]),
+            "{row}"
         );
+        assert!(!row["importPlan"]["assembly"]["componentClosure"]
+            .as_array()
+            .expect("fresh import component closure")
+            .is_empty());
 
         // Control: the identical row without its validated binding is an incomplete assembly, and
         // must not read as a usable model on either lane.
         let unbound_dir = tempfile::tempdir().expect("temp dir creates");
-        let unbound =
-            catalog_row(&app_with(&unbound_dir, imported_entry(&unbound_dir, false))).await;
+        let unbound_import = imported_entry(&unbound_dir, false);
+        let unbound = catalog_row(&app_with(
+            &unbound_dir,
+            Value::Object(unbound_import.entry.clone()),
+        ))
+        .await;
         assert_eq!(unbound["macSupport"]["supported"], false, "{unbound}");
         assert_eq!(unbound["candleSupport"]["supported"], false, "{unbound}");
     }
@@ -3419,7 +3373,8 @@ mod imported_minimax_h3_video_tests {
     #[tokio::test]
     async fn a_public_request_for_the_imported_h3_entry_enqueues_with_its_binding() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with(&temp_dir, imported_entry(&temp_dir, true));
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
         create_project(&app).await;
 
         let (status, job) = enqueue_t2v(&app).await;
@@ -3446,7 +3401,8 @@ mod imported_minimax_h3_video_tests {
     #[tokio::test]
     async fn the_imported_h3_entry_without_its_binding_is_refused_by_the_no_lane_gate() {
         let temp_dir = tempfile::tempdir().expect("temp dir creates");
-        let app = app_with(&temp_dir, imported_entry(&temp_dir, false));
+        let imported = imported_entry(&temp_dir, false);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
         create_project(&app).await;
 
         let (status, error) = enqueue_t2v(&app).await;
