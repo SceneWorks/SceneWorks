@@ -4375,6 +4375,10 @@ async fn run_training_execution(
 mod tests {
     use super::*;
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[test]
     fn moss_field_shapes_worker_and_submission_have_identical_refusals() {
         let targets = sceneworks_core::training::builtin_training_targets();
