@@ -2862,6 +2862,9 @@ pub(super) async fn generate_video_using(
         let engine_id = input.engine_id;
         let receipt_job_id = job.id.clone();
         let receipt_backend = backend.to_owned();
+        // The frozen component closure comparison resolves the persisted declaration against the
+        // data dir's source library; captured before `input` moves so it reaches the spawned task.
+        let preparation_data_dir = settings.data_dir.clone();
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
@@ -2894,10 +2897,19 @@ pub(super) async fn generate_video_using(
         let host_probe_runtime = tokio::runtime::Handle::current();
         tokio::spawn(async move {
             let mut spec = video_load_spec(&input);
-            let (spec, h3_receipt) = if input.imported_h3_identity.is_some() {
+            let (spec, h3_receipt) = if let Some(identity) = input.imported_h3_identity.clone() {
                 let authority = input.imported_h3_authority.clone().ok_or_else(|| {
                     WorkerError::InvalidPayload(
                         "imported H3 load is missing its resolved source authority".into(),
+                    )
+                })?;
+                // Finding 4's generation-time guarantee: the frozen component closure recorded at
+                // import must be compared against the components ACTUALLY acquired for this render.
+                // A closure that does not match the acquired seals refuses by component, revision
+                // and hash; a historical assembly with no captured closure refuses the same way.
+                let assembly = identity.get("assembly").cloned().ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "imported H3 load is missing its validated assembly binding".into(),
                     )
                 })?;
                 let preparation_cancel = cancel.clone();
@@ -2916,6 +2928,16 @@ pub(super) async fn generate_video_using(
                                 WorkerError::Canceled(message)
                             } else { WorkerError::InvalidPayload(message) }
                         })?;
+                    sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure(
+                        &preparation_data_dir,
+                        &assembly,
+                        receipt.files(),
+                    )
+                    .map_err(|message| {
+                        WorkerError::InvalidPayload(format!(
+                            "[checkpoint-plan:incompatible-component] {message}"
+                        ))
+                    })?;
                     Ok::<_, WorkerError>((spec, Some(receipt)))
                 })
                 .await
