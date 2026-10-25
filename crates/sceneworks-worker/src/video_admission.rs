@@ -1453,6 +1453,20 @@ impl PhasePeaks {
     }
 }
 
+/// Any typed task profile opts this source into selected-task accounting, including a valid
+/// selected zero. Only sources with NO typed profiles use the legacy route-wide scalar.
+fn native_quant_adapter_overlay_bytes(
+    native: &gen_core::h3_memory::NativeAllocationFacts,
+    rows: gen_core::h3_memory::NativeRows,
+    legacy_overlay: u64,
+) -> u64 {
+    if native.tasks.iter().any(|task| task.adapter.is_some()) {
+        native.adapter_resident_bytes(rows)
+    } else {
+        legacy_overlay
+    }
+}
+
 /// Strengthen the raw stage prediction with the provider's task-conditional DiT allocation
 /// envelope. Precompute and denoise are successive instants of the existing Denoise phase:
 /// compare them, never sum them. No host RSS/device sum and no second policy allowance here.
@@ -1499,12 +1513,7 @@ fn native_quant_phase_floor(
     // methods already price the TOTAL install high-water (install peak minus resident, plus the
     // scoped forward scratch), so it is never added on top here. The route-independent global
     // overlay remains only as the legacy None-profile fallback.
-    let selected_adapter_resident = native.adapter_resident_bytes(rows);
-    let steady_overlay = if selected_adapter_resident > 0 {
-        selected_adapter_resident
-    } else {
-        facts.overlay_bytes
-    };
+    let steady_overlay = native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes);
     // The source-owned window plan correlates root/refiner, current window, shared native
     // storage and retained tables. A full-component native floor would erase a valid rung 4.
     let native_denoise = native
@@ -1626,12 +1635,7 @@ fn video_floor_weights_bytes(
         // Same selected-task adapter rule as the phase floor: a declared profile's steady
         // residency replaces the route-independent global overlay; install high-water is priced
         // inside the native windowed peak, never added on top of it.
-        let selected_adapter_resident = native.adapter_resident_bytes(rows);
-        let steady_overlay = if selected_adapter_resident > 0 {
-            selected_adapter_resident
-        } else {
-            facts.overlay_bytes
-        };
+        let steady_overlay = native_quant_adapter_overlay_bytes(native, rows, facts.overlay_bytes);
         return Ok(conditioning
             .max(encode)
             .max(native.video_decode_resident_bytes)

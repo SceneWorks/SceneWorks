@@ -6013,9 +6013,69 @@ fn native_quant_selected_adapter_profile_prices_the_steady_overlay_once_on_both_
         .unwrap();
         assert_eq!(
             ignored.denoise_bytes,
-            dit + 5 * GIB,
-            "an unselected task's profile falls back to the legacy overlay for this request"
+            dit,
+            "typed profiles keep the selected task's zero; the unselected task never leaks through a global overlay"
         );
+    }
+}
+
+/// Typed profile presence and a positive selected byte count are different: an unselected task's
+/// adapter must never leak into a zero-adapter selected task through the legacy global overlay.
+#[test]
+fn native_quant_typed_profiles_keep_selected_zero_without_global_overlay() {
+    use gen_core::h3_adapter_memory::H3AdapterMemoryProfile;
+    for lane in [VideoLane::Mlx, VideoLane::Candle] {
+        for empty_selected_profile in [false, true] {
+            let mut baseline = native_quant_contract(lane, 2);
+            baseline.asset_facts.overlay_bytes = 0;
+            let mut unselected = baseline.clone();
+            unselected.asset_facts.overlay_bytes = 5 * GIB;
+            let native = unselected
+                .phase_facts
+                .as_mut()
+                .unwrap()
+                .native_quant
+                .as_mut()
+                .unwrap();
+            native.tasks[0].adapter = empty_selected_profile.then(H3AdapterMemoryProfile::default);
+            native.tasks[1].adapter = Some(H3AdapterMemoryProfile {
+                resident_bytes: 5 * GIB,
+                install_peak_bytes: 7 * GIB,
+                projections: vec![],
+            });
+            let request = native_quant_request(&[]);
+            let geometry = geometry(124, VideoGeometryRole::Requested);
+            let rows = native_rows_at(request, geometry, native);
+            assert_eq!(native.adapter_resident_bytes(rows), 0);
+            let selection = selection_for(MemoryStrategy::Resident);
+            let ordinary = PhasePeaks {
+                conditioning_bytes: 7,
+                denoise_bytes: 11,
+                decode_bytes: 13,
+            };
+            assert_eq!(
+                native_quant_phase_floor(&unselected, &selection, Some(request), geometry, ordinary).unwrap(),
+                native_quant_phase_floor(&baseline, &selection, Some(request), geometry, ordinary).unwrap(),
+                "selected None/zero profile must remain zero, not inherit an unselected adapter via the global overlay"
+            );
+            assert_eq!(
+                video_floor_weights_bytes(
+                    &native_quant_selector(&unselected, request, lane),
+                    geometry,
+                    selection,
+                    &[]
+                )
+                .unwrap(),
+                video_floor_weights_bytes(
+                    &native_quant_selector(&baseline, request, lane),
+                    geometry,
+                    selection,
+                    &[]
+                )
+                .unwrap(),
+                "the ordinary residency floor must use the same typed selected-task zero"
+            );
+        }
     }
 }
 
