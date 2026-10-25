@@ -8,10 +8,16 @@ use crate::{api_client::ApiClient, Settings, WorkerResult};
 use sceneworks_core::contracts::{JobSnapshot, JsonObject};
 use sceneworks_core::training::TrainingPlan;
 
+mod acceptance_progress;
+pub use acceptance_progress::{
+    acceptance_api_cancel_controller, acceptance_progress_snapshot, observe_acceptance_trainer,
+    request_acceptance_api_cancel, AcceptanceProgressLedger, AcceptanceProgressObservation,
+};
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub use candle_gen_moss_image::test_support::{generation_request, Fixture};
 pub use gen_core;
-pub use gen_core_testkit::moss_training_probe::TrainingProbe;
+pub use gen_core_testkit::moss_training_probe::{EvaluationManifest, TrainingProbe};
 #[cfg(target_os = "macos")]
 pub use mlx_gen_moss_image::test_support::{generation_request, Fixture};
 
@@ -46,6 +52,70 @@ pub fn prepare_selected_adapters(
     let request = sceneworks_core::image_request::ImageRequest::from_payload(payload);
     let (specs, pins) = crate::image_jobs::prepared_adapter_selection_for_test(&request, settings)?;
     Ok(PreparedAdapterSelection { specs, pins })
+}
+
+/// Register through the real startup-health/discovery/registry chain. No fake
+/// capability advertisement and no CPU fallback can count as GPU acceptance.
+/// Call only against the caller's isolated loopback API and settings.
+pub async fn register_real_acceptance_worker(
+    settings: &Settings,
+) -> WorkerResult<sceneworks_core::contracts::WorkerSnapshot> {
+    let url = reqwest::Url::parse(&settings.api_url)
+        .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
+    if settings.access_token.is_some()
+        || !settings.credentials.is_empty()
+        || url.scheme() != "http"
+        || !matches!(url.host_str(), Some("127.0.0.1" | "::1"))
+    {
+        return Err(crate::WorkerError::InvalidPayload(
+            "acceptance registration requires credential-free owned loopback settings".into(),
+        ));
+    }
+    let health = crate::cuda_startup_health(settings).await;
+    if !health.is_usable() {
+        return Err(crate::WorkerError::InvalidPayload(
+            "real GPU startup health refused acceptance registration".into(),
+        ));
+    }
+    let gpu = crate::gpu::discover_gpu(settings, &health).await;
+    if gpu.id == "cpu"
+        || gpu.name == format!("GPU {}", gpu.id)
+        || !gpu
+            .capabilities
+            .contains(&sceneworks_core::contracts::WorkerCapability::Gpu)
+        || !crate::worker_capabilities(&gpu)
+            .contains(&sceneworks_core::contracts::WorkerCapability::LoraTrainExecute)
+    {
+        return Err(crate::WorkerError::InvalidPayload(
+            "discovered device does not expose real GPU training execution".into(),
+        ));
+    }
+    crate::register_worker(&ApiClient::new(settings), settings, &gpu).await
+}
+
+/// Full production utility dispatcher, including source guard, import/image
+/// routing, terminal reconciliation and metrics. Unit return is NOT success:
+/// callers must read and validate the actual API terminal job snapshot.
+pub async fn run_acceptance_utility_job(settings: &Settings, job: JobSnapshot) {
+    let api = ApiClient::new(settings);
+    crate::run_utility_job(
+        &api,
+        settings,
+        api.http_client(),
+        job,
+        gen_core::CancelFlag::new(),
+    )
+    .await;
+}
+
+/// Header-only forecast through the same selected spec, component/adapter pins
+/// and native structural demand routines used by the production image handler.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub fn moss_generation_preload(
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<serde_json::Value> {
+    crate::image_jobs::moss_generation_preload_for_test(settings, job)
 }
 
 pub async fn run_training_execution_using(
@@ -102,4 +172,188 @@ pub async fn run_training_execution_observing_request(
         observe_request,
     )
     .await
+}
+
+/// Official-source, header-only acceptance construction. Call this inside the
+/// existing blocking loader closure: the returned Trainer is intentionally not Send.
+/// This never selects a Fixture, overrides a discovered budget, loads model
+/// tensors, or changes a device/stream. The native plan performs normal admission.
+pub fn real_moss_trainer_with_probe(
+    engine_id: &str,
+    spec: &gen_core::LoadSpec,
+    request: &gen_core::TrainingRequest,
+    probe: TrainingProbe,
+) -> gen_core::Result<(Box<dyn gen_core::Trainer>, serde_json::Value)> {
+    let variant = match engine_id {
+        "moss_image_base" => gen_core::moss_image::MossImageVariant::Base,
+        "moss_image_sft" => gen_core::moss_image::MossImageVariant::Sft,
+        _ => {
+            return Err(gen_core::Error::Unsupported(
+                "acceptance requires an exact MOSS Base/SFT provider".into(),
+            ))
+        }
+    };
+    let unsupported =
+        |error: &dyn std::fmt::Display| gen_core::Error::Unsupported(error.to_string());
+    #[cfg(target_os = "macos")]
+    {
+        if !cfg!(target_arch = "aarch64") {
+            return Err(gen_core::Error::Unsupported(
+                "MLX acceptance requires Apple Silicon".into(),
+            ));
+        }
+        let device = mlx_rs::Device::try_default().map_err(|error| unsupported(&error))?;
+        if !matches!(
+            device.get_type().map_err(|error| unsupported(&error))?,
+            mlx_rs::DeviceType::Gpu
+        ) {
+            return Err(gen_core::Error::Unsupported(
+                "MLX acceptance refuses a CPU default device".into(),
+            ));
+        }
+        let stream = mlx_rs::Stream::task_local_or_default()
+            .get_index()
+            .map_err(|error| unsupported(&error))?;
+        let gpu_stream = mlx_rs::Stream::gpu()
+            .get_index()
+            .map_err(|error| unsupported(&error))?;
+        if stream != gpu_stream {
+            return Err(gen_core::Error::Unsupported(
+                "MLX acceptance requires its original default GPU stream".into(),
+            ));
+        }
+        let total = gen_core::moss_image_training::recovery::host::total_bytes()
+            .map_err(|error| unsupported(&error))?;
+        let ceiling = gen_core::train::effective_memory_budget_with_fraction(
+            total,
+            Some(total),
+            request.config.memory_limit_bytes,
+            request.config.memory_limit_fraction,
+        )
+        .map_err(|error| unsupported(&error))?;
+        let frozen = gen_core::train::effective_memory_budget_with_fraction(
+            total,
+            Some(total),
+            None,
+            Some(0.60),
+        )
+        .map_err(|error| unsupported(&error))?;
+        if ceiling > frozen {
+            return Err(gen_core::Error::Unsupported(
+                "acceptance request exceeds the frozen global MLX fraction".into(),
+            ));
+        }
+        let mut trainer = mlx_gen_moss_image::training::MossImageTrainer::load(variant, spec)
+            .map_err(|error| unsupported(&error))?;
+        trainer.set_test_probe(Some(probe));
+        let plan = trainer
+            .test_memory_plan(request)
+            .map_err(|error| unsupported(&error))?;
+        let metadata = serde_json::json!({
+            "backend":"mlx", "deviceIdentity":format!("mlx-default-gpu/stream-{stream}"),
+            "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
+            "resolvedCapProvenance":"product gpuMemoryLimitFraction -> actual unified total via recovery::host::total_bytes -> gen_core::train::effective_memory_budget_with_fraction; native test_memory_plan separately intersects normal safety limits",
+            "headerDemandProvenance":"mlx_gen_moss_image::training::MossImageTrainer::test_memory_plan (probe attached before planning)",
+            "nativePlan":plan, "weightsLoaded":false,
+            "observationSchema":moss_acceptance_observation_schema()
+        });
+        Ok((Box::new(trainer), metadata))
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        let device = candle_gen::default_device().map_err(|error| unsupported(&error))?;
+        if !device.is_cuda() {
+            return Err(gen_core::Error::Unsupported(
+                "Candle acceptance refuses a CPU/non-CUDA allocator device".into(),
+            ));
+        }
+        let (total, identity) = {
+            let cuda = device
+                .as_cuda_device()
+                .map_err(|error| unsupported(&error))?;
+            let context = cuda.cuda_stream().context();
+            let (_, total) = context
+                .mem_get_info()
+                .map_err(|error| unsupported(&error))?;
+            let uuid = context.uuid().map_err(|error| unsupported(&error))?;
+            let mut identity = String::from("GPU-");
+            use std::fmt::Write as _;
+            for (index, byte) in uuid.bytes.map(|byte| byte as u8).iter().enumerate() {
+                if matches!(index, 4 | 6 | 8 | 10) {
+                    identity.push('-');
+                }
+                write!(identity, "{byte:02x}").map_err(|error| unsupported(&error))?;
+            }
+            (
+                u64::try_from(total).map_err(|error| unsupported(&error))?,
+                identity,
+            )
+        };
+        let ceiling = gen_core::train::effective_memory_budget_with_fraction(
+            total,
+            Some(total),
+            request.config.memory_limit_bytes,
+            request.config.memory_limit_fraction,
+        )
+        .map_err(|error| unsupported(&error))?;
+        let frozen = gen_core::train::effective_memory_budget_with_fraction(
+            total,
+            Some(total),
+            None,
+            Some(0.85),
+        )
+        .map_err(|error| unsupported(&error))?;
+        if ceiling > frozen {
+            return Err(gen_core::Error::Unsupported(
+                "acceptance request exceeds the frozen global CUDA fraction".into(),
+            ));
+        }
+        let mut trainer = candle_gen_moss_image::training::MossImageTrainer::load_on_device(
+            variant, spec, device,
+        )
+        .map_err(|error| unsupported(&error))?;
+        trainer.set_test_probe(Some(probe));
+        let plan = trainer
+            .test_memory_plan(request)
+            .map_err(|error| unsupported(&error))?;
+        let metadata = serde_json::json!({
+            "backend":"cuda", "deviceIdentity":identity,
+            "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
+            "resolvedCapProvenance":"actual allocator-selected CUDA context mem_get_info TOTAL -> product gen_core::train::effective_memory_budget_with_fraction; never host/free/max-across-devices; native test_memory_plan separately intersects normal safety limits",
+            "headerDemandProvenance":"candle_gen_moss_image::training::MossImageTrainer::test_memory_plan (probe attached before planning)",
+            "nativePlan":plan, "weightsLoaded":false,
+            "observationSchema":moss_acceptance_observation_schema()
+        });
+        Ok((Box::new(trainer), metadata))
+    }
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    {
+        let _ = (variant, spec, request, probe, unsupported);
+        Err(gen_core::Error::Unsupported(
+            "real MOSS acceptance requires the linked MLX or Candle/CUDA backend".into(),
+        ))
+    }
+}
+
+/// Type-schema inspection only, never a fabricated run or a measurement. A
+/// consumer must fail closed when required native diagnostic fields are absent.
+pub fn moss_acceptance_observation_schema() -> serde_json::Value {
+    // TYPE-SCHEMA ONLY: Some(empty pair) survives a round trip only when the
+    // linked receipt understands this optional diagnostic. Default serializes
+    // None by omission; checking Default alone misidentifies a capable engine.
+    // This value is never persisted or used as native execution evidence.
+    let mut fields =
+        serde_json::to_value(gen_core_testkit::moss_training_probe::RunReceipt::default())
+            .expect("native diagnostic receipt schema serializes");
+    fields["prepared_evaluation"] = serde_json::json!({"before":null,"after":null});
+    let schema: gen_core_testkit::moss_training_probe::RunReceipt =
+        serde_json::from_value(fields).expect("native diagnostic receipt type-schema round trip");
+    let fields = serde_json::to_value(schema).expect("native diagnostic type-schema serializes");
+    serde_json::json!({
+        "gradientObservations":fields.get("gradient_tensors").is_some(),
+        "fixedEvaluationPair":fields.get("evaluation_before").is_some() && fields.get("evaluation_after").is_some(),
+        "numericFactorDelta":fields.get("final_parameter_delta").is_some(),
+        "preparedTensorSnapshots":fields.get("prepared_evaluation").is_some_and(|pair| pair.is_object()),
+        "schemaOnlyNotRunEvidence":true
+    })
 }

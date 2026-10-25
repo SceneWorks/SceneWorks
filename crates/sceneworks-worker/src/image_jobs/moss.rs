@@ -159,22 +159,24 @@ fn moss_render(
     );
     Ok((images, facts))
 }
-#[allow(clippy::too_many_arguments)]
-async fn generate_moss_stream_using(
-    api: &ApiClient,
+struct MossPreparedPreload {
+    native: gen_core::GenerationRequest,
+    variant: gen_core::moss_image::MossImageVariant,
+    resolved: gen_core::moss_image::MossImageResolved,
+    spec: LoadSpec,
+    peak: u64,
+}
+
+// Shared source/spec preparation and the unchanged production header math.
+// This boundary creates neither a generator nor model tensors nor GPU work.
+fn prepare_moss_preload(
     settings: &Settings,
-    job: &JobSnapshot,
-    plan: &ImagePlan,
-    project_path: &Path,
-    asset_writes: &mut Vec<Value>,
-    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
-        + Send
-        + 'static,
-) -> WorkerResult<()> {
+    payload: &JsonObject,
+    request: &ImageRequest,
+) -> WorkerResult<MossPreparedPreload> {
     use gen_core::moss_image::{MossImageResolved, MossImageVariant};
-    let request = &plan.request;
-    let mut native =
-        sceneworks_core::moss_image::native_request(&job.payload, &request.model_manifest_entry)
+    let native =
+        sceneworks_core::moss_image::native_request(payload, &request.model_manifest_entry)
             .map_err(WorkerError::InvalidPayload)?
             .ok_or_else(|| WorkerError::InvalidPayload("missing MOSS model".into()))?;
     let variant = MossImageVariant::from_provider_id(&request.model).expect("validated MOSS id");
@@ -276,6 +278,70 @@ async fn generate_moss_stream_using(
     )
     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
     .peak_bytes;
+    Ok(MossPreparedPreload {
+        native,
+        variant,
+        resolved,
+        spec,
+        peak,
+    })
+}
+
+/// Read-only test-support inspection of the EXACT production-selected source
+/// pins, adapter stack and native header-demand routine. Never loads a model.
+#[cfg(feature = "test-support")]
+pub(crate) fn moss_generation_preload_for_test(
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<Value> {
+    let request = ImageRequest::from_payload(&job.payload);
+    let prepared = prepare_moss_preload(settings, &job.payload, &request)?;
+    let provenance = if cfg!(target_os = "macos") {
+        "production prepare_moss_preload -> mlx moss_memory::selected_asset_facts.base_bytes + overlay_bytes + request_workspace_bytes (exact selected request/adapter pins)"
+    } else {
+        "production prepare_moss_preload -> candle moss_memory::selected_preload_estimate.peak_bytes (exact selected request/adapter pins, includes owned-shard staging)"
+    };
+    let adapters = prepared.spec.adapters.iter().map(|adapter| {
+        let headers = gen_core::weightsmeta::safetensors_path_tensor_headers(&adapter.path)
+            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
+            .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
+        let pin=gen_core::PinnedWeightsFile::pin(&adapter.path).map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
+        let sha256=pin.content_sha256().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
+        pin.ensure_unchanged().map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
+        Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
+    }).collect::<WorkerResult<Vec<Value>>>()?;
+    Ok(json!({
+        "kind":"moss-production-generation-preload",
+        "requiredBytes":prepared.peak,"provenance":provenance,
+        "parent":prepared.variant,"selectedMode":prepared.resolved.acceleration,
+        "width":prepared.native.width,"height":prepared.native.height,
+        "steps":prepared.resolved.steps,"guidance":prepared.resolved.guidance,
+        "adapters":adapters,"weightsLoaded":false,"modelTensorsLoaded":false,
+        "deviceExecutionPerformed":false
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_moss_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
+    let request = &plan.request;
+    let MossPreparedPreload {
+        mut native,
+        variant,
+        resolved,
+        spec,
+        peak,
+    } = prepare_moss_preload(settings, &job.payload, request)?;
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
     let job_request = request.clone();
@@ -379,7 +445,7 @@ async fn generate_moss_stream_using(
     #[cfg(target_os = "macos")]
     let (backend, adapter) = (
         "mlx",
-        if variant == MossImageVariant::Base {
+        if variant == gen_core::moss_image::MossImageVariant::Base {
             "mlx_moss_image_base"
         } else {
             "mlx_moss_image_sft"
@@ -410,6 +476,144 @@ mod moss_consumer_tests {
     use super::*;
     use gen_core::moss_image::*;
     use std::cell::{Cell, RefCell};
+
+    // Request metadata only: no model fixture, source payload, device, tensor or
+    // native backend invocation. The tests below stop before backend header pricing.
+    fn preload_payload_for_pure_test(variant: MossImageVariant, mode: &str) -> JsonObject {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .unwrap()
+            .1;
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == variant.provider_id())
+            .unwrap();
+        json!({
+            "model":variant.provider_id(), "modelManifestEntry":entry,
+            "prompt":"source-only preload request", "width":256, "height":256,
+            "count":1, "advanced":if mode == "off" {
+                json!({"steps":8,"guidanceScale":1.0,"mossImage":{"acceleration":mode}})
+            } else {
+                // DMD is natively no-CFG; this test targets snapshot availability.
+                json!({"steps":8,"mossImage":{"acceleration":mode}})
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn prepared_preload_refuses_non_moss_before_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let request = ImageRequest::from_payload(&payload);
+        let error = prepare_moss_preload(&settings, &payload, &request)
+            .err()
+            .expect("non-MOSS must fail before snapshot/backend preparation");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message == "missing MOSS model"),
+            "{error}"
+        );
+        assert!(
+            !hub.exists(),
+            "request refusal must not create a model cache"
+        );
+    }
+
+    #[test]
+    fn prepared_preload_preserves_base_dmd_refusal_before_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        for mode in ["unmerged_bf16", "full_fp32"] {
+            let payload = preload_payload_for_pure_test(MossImageVariant::Base, mode);
+            let request = ImageRequest::from_payload(&payload);
+            let error = prepare_moss_preload(&settings, &payload, &request)
+                .err()
+                .expect("Base+DMD must fail before source/backend preparation");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("DMD requires the exact SFT parent")),
+                "{mode}: {error}"
+            );
+            assert!(
+                !error.to_string().contains("snapshot missing"),
+                "parent refusal must precede cache lookup: {error}"
+            );
+        }
+        assert!(
+            !hub.exists(),
+            "parent refusal must not create a model cache"
+        );
+    }
+
+    #[test]
+    fn prepared_preload_requires_exact_frozen_snapshot_for_each_admissible_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        for (variant, mode) in [
+            (MossImageVariant::Base, "off"),
+            (MossImageVariant::Sft, "off"),
+            (MossImageVariant::Sft, "unmerged_bf16"),
+            (MossImageVariant::Sft, "full_fp32"),
+        ] {
+            // An unrelated empty revision must not become a fallback. No model
+            // file is created, and native/backend demand functions remain unreachable.
+            let wrong = hub
+                .join(format!(
+                    "models--{}",
+                    variant.repository().replace('/', "--")
+                ))
+                .join("snapshots")
+                .join("0000000000000000000000000000000000000000");
+            std::fs::create_dir_all(&wrong).unwrap();
+            let payload = preload_payload_for_pure_test(variant, mode);
+            let request = ImageRequest::from_payload(&payload);
+            let error = prepare_moss_preload(&settings, &payload, &request)
+                .err()
+                .expect("absent frozen snapshot must refuse before backend demand pricing");
+            let expected = format!(
+                "{} frozen snapshot missing; install or repair this model in Models",
+                variant.provider_id()
+            );
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message) if message == &expected),
+                "{variant:?}/{mode}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&wrong).unwrap().count(),
+                0,
+                "no model payload may be staged by a pre-load refusal"
+            );
+        }
+    }
+
     #[test]
     fn full_prepared_consumer_config_reaches_native_shared_preparation_without_ordinary_dit() {
         let temp = tempfile::tempdir().unwrap();

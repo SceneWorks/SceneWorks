@@ -151,20 +151,29 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
   assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
-  assert.deepEqual(jobs, ["qwen-app-lifecycle", "iris-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
-  const runs = (profile, backend) => jobs.filter((job) => {
+  const mossJobs = jobs.filter((job) => job.startsWith("moss-"));
+  assert.ok(mossJobs.length > 0, "manual MOSS dispatcher stages must exist");
+  const runs = (profile, backend, runMoss = false) => jobs.filter((job) => {
     const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
     assert.ok(condition, `missing ${job} dispatch predicate`);
     // Evaluate only the tiny predicate grammar, never a workflow step or command.
     assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
-    return Function("inputs", `return (${condition})`)({ profile, backend });
+    return Function("inputs", `return (${condition})`)({ profile, backend, run_moss_training_acceptance: runMoss });
   });
   for (const backend of ["mlx", "candle"]) {
     assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
     assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
     assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
     assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
-    assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
+    const profiles = new Set(["qwen-image-2-1-app-lifecycle", "iris-mlx-real-weights", "catalog", "", "unknown",
+      ...[...workflow.matchAll(/inputs\.profile\s*==\s*'([^']*)'/g)].map((match) => match[1])]);
+    for (const profile of profiles) {
+      if (!["qwen-image-2-1-app-lifecycle", "iris-mlx-real-weights", "catalog", ""].includes(profile)) {
+        assert.deepEqual(runs(profile, backend), [], "every unrecognized profile must fail closed");
+      }
+      assert.deepEqual(runs(profile, backend, true), mossJobs,
+        "MOSS selection must exclude every app, Iris, catalog and publication job");
+    }
   }
 }
 test("registered dispatcher isolates app proof from both catalog lanes and their publication", () => {
@@ -172,6 +181,10 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
   const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
+  mutants.push(
+    workflow.replaceAll("!inputs.run_moss_training_acceptance && ", ""),
+    workflow + "\n  hidden-profile-publication:\n    if: ${{ inputs.profile == 'undeclared-profile' }}\n    runs-on: ubuntu-latest\n",
+  );
   for (const mutant of mutants) assert.throws(() => assertDispatcherIsolation(mutant));
 });
 

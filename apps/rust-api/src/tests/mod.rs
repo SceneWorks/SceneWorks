@@ -28,6 +28,16 @@ mod moss_image;
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+mod moss_training_acceptance;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_acceptance_contracts;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod moss_training_native;
 mod projects;
 mod prompt_batches;

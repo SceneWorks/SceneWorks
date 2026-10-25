@@ -1,0 +1,230 @@
+{
+  "$schema": "./campaign.schema.json",
+  "schemaVersion": 1,
+  "kind": "moss-image-training-acceptance-campaign",
+  "epicId": 26584,
+  "sourcePolicy": {
+    "executionStage": "terminal-final-merged-source",
+    "requireExactSceneWorksSha": true,
+    "requireExactPermanentInferencePin": true,
+    "allowDependencyOverrides": false,
+    "allowSourceBuildWeightDownloads": false,
+    "allowRuntimeWeightDownloads": false
+  },
+  "axes": {
+    "backends": ["mlx", "cuda"],
+    "parents": ["base", "sft"],
+    "methods": ["lora", "lokr"],
+    "caseIdFormat": "backend/parent/method",
+    "requiredCaseCount": 8,
+    "allowedPerCellDifferences": ["backend", "parent", "method", "ownedPaths", "jobIds", "deviceIdentity", "observedEvidence"]
+  },
+  "dataset": {
+    "id": "synthetic-moss-v1",
+    "kind": "deterministic-procedural-rgb-images",
+    "recipe": {
+      "repository": "https://github.com/SceneWorks/inference",
+      "revision": "e9612d817ee77907db7a5c6be42375dafa5f6805",
+      "path": "crates/media/mlx-gen/mlx-gen-moss-image/examples/adapter_acceptance.rs",
+      "sourceSha256": "32032a0200ed4d96518d29042e0e8a7604819a396eca0f0866fbcf131aac7941",
+      "sourceLines": [21, 58]
+    },
+    "width": 256,
+    "height": 256,
+    "items": [
+      {"image": "shape-0.png", "caption": "sksmoss red circle centered on a pale background", "mask": null},
+      {"image": "shape-1.png", "caption": "sksmoss blue square centered on a pale background", "mask": null},
+      {"image": "shape-2.png", "caption": "sksmoss green triangle centered on a pale background", "mask": null}
+    ],
+    "preparation": {
+      "materializeOnce": true,
+      "sealBeforeAnyWeightsLoad": true,
+      "recordEveryImageAndCaptionSha256": true,
+      "shareExactPreparedDatasetArtifactAcrossAllCells": true,
+      "uploadThroughProductionDatasetApi": true
+    }
+  },
+  "training": {
+    "config": {
+      "steps": 60,
+      "batchSize": 1,
+      "gradientAccumulation": 1,
+      "saveEvery": 20,
+      "resolution": 256,
+      "rank": 4,
+      "alpha": 6.0,
+      "learningRate": 0.001,
+      "seed": 1789,
+      "optimizer": "adamw",
+      "triggerWord": "sksmoss",
+      "advanced": {
+        "mixedPrecision": "bf16",
+        "gradientCheckpointing": false,
+        "cacheLatents": true,
+        "cacheTextEmbeddings": true,
+        "decomposeFactor": -1,
+        "loraTargetModules": [],
+        "timestepType": "moss_stage3_v1",
+        "timestepBias": "balanced",
+        "lossType": "mse",
+        "lrScheduler": "constant",
+        "weightDecay": 0.0,
+        "lrWarmupSteps": 0,
+        "sampleEvery": 0,
+        "modelOptions": {"vae_posterior": "posterior_mean_v1"}
+      }
+    },
+    "networkTypeFromMethodAxis": true,
+    "expectedOptimizerUpdates": 60,
+    "expectedCheckpointSteps": [20, 40, 60],
+    "fullModelFineTuning": false,
+    "textEncoderTraining": false
+  },
+  "recovery": {
+    "uninterruptedReferencePerCell": true,
+    "uninterruptedReferenceSteps": 60,
+    "cancelResumeSubrunsPerCell": 1,
+    "cancelAfterDurableCheckpoint": 20,
+    "cancelThroughProductionApi": true,
+    "resumeThroughProductionApi": true,
+    "resumeToOriginalSteps": 60,
+    "requireOriginalHorizonAndIdentity": true,
+    "requireCompleteOptimizerSchedulerRngCursorAndAccumulationState": true,
+    "compareActualExportedStateAndResults": true,
+    "weakenExistingAssertions": false,
+    "freshReentrySubrunsPerBackend": 1,
+    "freshReentryAnchor": {"parent": "base", "method": "lora"},
+    "freshReentryCancelAfterDurableCheckpoint": 20,
+    "freshReentryUsesNewRunAndIndependentCancelToken": true,
+    "freshReentryDeadlineChargedToAnchorCell": true
+  },
+  "resources": {
+    "capMechanism": "global-gpuMemoryLimitFraction-product-handoff",
+    "settingsScope": "owned-isolated-campaign-config-only",
+    "backends": {
+      "mlx": {"gpuMemoryLimitFraction": 0.60, "capacityBasis": "actual-detected-total-unified-memory"},
+      "cuda": {"gpuMemoryLimitFraction": 0.85, "capacityBasis": "actual-claimed-cuda-context-total-vram"}
+    },
+    "resolveAbsoluteCeilingBeforeWeightsLoad": true,
+    "preserveExistingProductRoundingAndSafetyIntersections": true,
+    "requireActualClaimedDeviceIdentity": true,
+    "requireRealHeaderDerivedAllPhaseDemand": true,
+    "refuseProjectedDemandAboveResolvedCeiling": true,
+    "allowMidCampaignCeilingIncrease": false,
+    "aggregateRssWatchdog": {
+      "scope": "owned-api-worker-and-all-descendants",
+      "ceilingSource": "same-resolved-absolute-product-ceiling",
+      "requirePositiveInitialMeasurement": true,
+      "requireContinuousPositiveMeasurements": true,
+      "missingMeasurement": "fail-case",
+      "onCeilingOrDeadline": "fail-and-propagate-owned-cancellation",
+      "requireOwnedChildReleaseBeforeContinuation": true,
+      "allowBroadProcessKilling": false,
+      "allowForcedMlxKillMidBuffer": false
+    },
+    "lowCapControl": {
+      "perCell": true,
+      "deriveStrictlyInfeasibleRequestFromRealHeaderDemand": true,
+      "useProductionCapPath": true,
+      "requirePreLoadRefusal": true,
+      "allowCeilingIncrease": false,
+      "mainCaseRefusalIsAcceptanceFailure": true
+    }
+  },
+  "limits": {
+    "caseWallSeconds": 3600,
+    "crossLoadWallSeconds": 3600,
+    "buildPreparationWallSeconds": 7200,
+    "caseDeadlineStartsAt": "recorded-case-start",
+    "crossLoadDeadlineStartsAt": "cross-load-job-start",
+    "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "preview-inspection", "ordinary-and-dmd-regression", "cleanup"],
+    "crossLoadDeadlineIncludes": ["cross-backend-load", "cross-load-generation", "cross-load-resource-guard", "cross-load-cleanup"],
+    "excludeOnlySeparateBuildPreparation": true,
+    "pauseDeadlineForQueueOrInspection": false
+  },
+  "evaluation": {
+    "image": "shape-0.png",
+    "caption": "sksmoss red circle centered on a pale background",
+    "triggerWord": "sksmoss",
+    "mask": null,
+    "width": 256,
+    "height": 256,
+    "noiseSeedHex": "0x48454c444f555401",
+    "sigma": 0.375,
+    "manifestAlgorithm": "native-EvaluationManifest::new",
+    "manifestHashBinding": "compute-before-weights-load-and-require-identical-across-all-cells-and-all-subruns",
+    "runtimeHashNote": "The evaluation manifest hash is computed at run time before weights load and bound into the evidence; it is not fabricated at configuration seal time.",
+    "withinNativeRun": {
+      "reuseSameActualPreparedTensorPackageBeforeAndAfter": true,
+      "allowReencodingBetweenMeasurements": false,
+      "allowNoiseRegenerationBetweenMeasurements": false,
+      "recordBeforeAndAfterTensorShapesDtypesLayoutsAndHashes": true,
+      "requireBeforeAndAfterTensorDescriptorsAndHashesEqual": true
+    },
+    "acrossNativeRuns": {
+      "requireIdenticalSourceBytesCaptionMaskDimensionsSeedSigmaAndManifestHash": true,
+      "requireIdenticalPreparedTensorValuesAcrossBackends": false,
+      "backendSpecificPreparedValuesAreNotDefects": true,
+      "requirePerBackendPreparedTensorEvidence": true
+    },
+    "learning": {
+      "requireBothLossesPresentAndFinite": true,
+      "criterion": "after < before",
+      "allowTrainingLossSubstitution": false,
+      "allowImageDifferenceSubstitution": false,
+      "allowHashChangeSubstitution": false,
+      "allowToleranceOrOracleChanges": false
+    }
+  },
+  "previews": {
+    "prompt": "sksmoss red circle centered on a pale background",
+    "seed": 1789,
+    "width": 256,
+    "height": 256,
+    "steps": 8,
+    "guidance": 1.0,
+    "count": 1,
+    "required": [
+      {"role": "before-untrained", "adapterStrength": 1.0, "adapterState": "run-start-untrained-export"},
+      {"role": "after-trained", "adapterStrength": 1.0, "adapterState": "final-trained-export"},
+      {"role": "disable-control", "adapterStrength": 0.0, "adapterState": "final-trained-export"}
+    ],
+    "ordinaryNoAdapterBaselineRequired": true,
+    "requireActualDecodedPngs": true,
+    "record": ["artifactSha256", "dimensions", "prompt", "seed", "adapterHash", "adapterStrength", "executionReceipt"],
+    "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteWithinCaseDeadline": true, "missingInspection": "acceptance-incomplete"}
+  },
+  "productAcceptance": {
+    "useProductionTrainingDatasetJobProgressCancelRetryAndLibraryApis": true,
+    "requireActualLibraryRegistration": true,
+    "requireFinalNotIntermediateAdapterSelection": true,
+    "requireSameBackendSaveReloadGenerate": true,
+    "requireCrossBackendLoadAndGenerate": true,
+    "requireExactParentAndMethod": true,
+    "allowCrossBaseSftCompatibilityClaim": false,
+    "ordinaryRegression": {"requireNoAdapterBaselineAndPostUnloadReplay": true, "requireDisableControlMatchesBaseline": true},
+    "dmdRegression": {"sftModes": ["unmerged_bf16", "full_fp32"], "requireActualDmdWeights": true, "requireSelectedAndExecutedModes": true, "requireCustomAdapterAndAcceleratorNotDropped": true, "baseDmdMustRefuse": true}
+  },
+  "evidence": {
+    "schema": "evidence.schema.json",
+    "requireFiniteNonzeroGradientObservations": true,
+    "requireActualFactorValuesAndPositiveNumericFactorDeltas": true,
+    "requireFrozenBackboneTextEncoderAndVaeObservations": true,
+    "requireWeightRepositoryRevisionAndConsumedFileHashes": true,
+    "retainRawObservationsBeforeAssertions": true,
+    "retainFailureAndCleanupEvidence": true,
+    "requireAllEightCellsAndBothBackendReentries": true,
+    "allowCpuFixtureEvidenceAsRealWeights": false,
+    "allowFabricatedOrCarriedEvidence": false,
+    "requireInspectionBeforeAccepted": true
+  },
+  "changeControl": {
+    "oneSealedManifestForAllEightCells": true,
+    "sealAlgorithm": "sha256-of-exact-utf8-file-bytes",
+    "allowPerCellConfigurationTweaks": false,
+    "horizonCadenceFractionOrDeadlineChange": "document-new-campaign-configuration-invalidate-and-rerun-all-eight-cells",
+    "otherManifestChanges": "new-seal-and-new-complete-eight-cell-campaign",
+    "allowTuningToPassLearningAssertion": false,
+    "allowToleranceOracleOrAssertionLoosening": false
+  }
+}
