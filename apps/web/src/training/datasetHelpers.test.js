@@ -9,11 +9,39 @@ import {
   datasetReferenceCap,
   datasetSaveValidation,
   editPairDatasetIssues,
+  preserveUneditedDatasetCaptions,
   referenceDraftsDiffer,
   referenceDraftsFromDataset,
   selectionAfterDuplicateRemoval,
   trainingTargetReferenceCap,
 } from "./datasetHelpers.js";
+
+describe("background caption results", () => {
+  const manual = (text) => ({ text, source: "manual", triggerWords: [] });
+  const generated = { text: "a portrait", source: "auto", triggerWords: ["person"], mode: "subjectOnly" };
+
+  it("preserves generated captions when a stale draft only edits dataset metadata", () => {
+    const baseline = { items: [{ id: "one", caption: manual("") }] };
+    const payload = { name: "Renamed", items: [{ id: "one", displayName: "photo.png", caption: manual("") }] };
+    expect(preserveUneditedDatasetCaptions(payload, baseline)).toEqual({
+      ...payload,
+      preserveCaptionItemIds: ["one"],
+    });
+    // A follow-up save in the same action must compare with the original render's baseline,
+    // not treat its still-empty draft as a clear of captions returned by the first save.
+    expect(preserveUneditedDatasetCaptions(payload, baseline).preserveCaptionItemIds).toEqual(["one"]);
+  });
+
+  it("keeps local caption edits, explicit clears, and newly added images", () => {
+    const baseline = { items: [{ id: "one", caption: manual("") }, { id: "two", caption: generated }] };
+    const payload = { items: [
+      { id: "one", caption: manual("my edit") },
+      { id: "two", caption: manual("") },
+      { caption: manual("new image") },
+    ] };
+    expect(preserveUneditedDatasetCaptions(payload, baseline)).toEqual({ ...payload, preserveCaptionItemIds: [] });
+  });
+});
 
 describe("caption mode round-trip (sc-24829)", () => {
   const selection = "dataset-item:ds1:item_1";

@@ -1,4 +1,5 @@
 import { terminalStatuses } from "./jobTypes.js";
+import { MAX_LISTED_JOBS } from "./constants.js";
 
 export function sortNewest(a, b) {
   return b.createdAt.localeCompare(a.createdAt);
@@ -15,12 +16,16 @@ export function sortWorkers(a, b) {
 // sc-8860 (F-058): cap on retained *terminal* jobs (completed/failed/canceled/
 // interrupted). Active/non-terminal jobs are NEVER dropped — only the count of
 // finished jobs the client hangs onto is bounded so a long session can't grow the
-// `jobs` array (and its per-SSE-tick copy) without limit. 200 keeps the Queue's
-// recent-history view and every studio's "remembered" run (buildLocalJobStack only
-// ever remembers the most-recent runs) fully intact while capping the tail; a busy
-// day rarely leaves more than a few dozen finished jobs on screen at once, so 200 is
-// generous headroom, not a functional ceiling.
-export const MAX_TERMINAL_JOBS = 200;
+// `jobs` array (and its per-SSE-tick copy) without limit.
+//
+// The retention cap is the server's page depth (MAX_LISTED_JOBS, mirrored from
+// crates/sceneworks-core/src/jobs_store.rs) because the Queue's initial load is one
+// `GET /api/v1/jobs` page: cap the client lower and it throws away rows the server just
+// sent, so the Queue silently shows less history than 1000 again. The bound still does
+// its job — a session that churns past that many finished jobs stops accumulating, and
+// every studio's "remembered" run (buildLocalJobStack only ever remembers the
+// most-recent runs) stays well inside it.
+export const MAX_TERMINAL_JOBS = MAX_LISTED_JOBS;
 
 export function jobFreshnessMs(job) {
   const timestamp = job?.updatedAt ?? job?.completedAt ?? job?.canceledAt ?? job?.startedAt ?? job?.createdAt;

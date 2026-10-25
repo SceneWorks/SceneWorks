@@ -98,8 +98,7 @@ Clippy warnings **fail** the build, so keep it clean.
 > which meant the gate contributors are told to run went green while CI's `parity` lane went
 > red. They run in under a second each; when one fails, regenerate with
 > `npm run generate:memory-matrix` or
-> `npm run generate:tier-integrity` and commit the result. The same check is also the first
-> thing the pre-push hook runs for a Rust-touching push.
+> `npm run generate:tier-integrity` and commit the result.
 
 **The "neither" build** — CI's `parity` lane runs the Rust clippy on **Linux with
 default features (no `backend-candle`)**. The worker's generation harness
@@ -113,10 +112,8 @@ npm run rust:check:neither
 
 On Linux/Windows that's a native clippy — the host already *is* the neither build. On
 macOS it runs the same clippy inside a Linux Docker container, because a native macOS
-clippy always compiles `base.rs` and can never see the trap. It's also wired into the
-optional pre-push hook on Linux/Windows hosts (on macOS, CI's parity lane owns it — the dev
-Mac does not run the container) (installed by `npm run hooks:install`; skip a run with
-`SKIP_NEITHER_CHECK=1` or `git push --no-verify`).
+clippy always compiles `base.rs` and can never see the trap. The neither and candle checks
+are manual local commands; pushes do not run a Rust preflight gate.
 
 > **The base.rs / candle cfg rule.** Any `sceneworks-worker` item — a `use`, struct, or
 > helper fn — used **only** by `base.rs` or other candle-only code MUST carry the same cfg
@@ -127,8 +124,8 @@ Mac does not run the container) (installed by `npm run hooks:install`; skip a ru
 > ```
 >
 > `npm run rust:check` on **macOS cannot catch a violation** (there `target_os` is always
-> `macos`, so `base.rs` always compiles) — use `npm run rust:check:neither`, the pre-push
-> hook, or the CI parity lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
+> `macos`, so `base.rs` always compiles) — use `npm run rust:check:neither` or the CI parity
+> lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
 > (`run_blocking_with_heartbeat`).
 
 **The "candle" build** — the `all(not(target_os = "macos"), feature = "backend-candle")`

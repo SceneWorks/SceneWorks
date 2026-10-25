@@ -786,7 +786,7 @@ fn future_versions_precede_duplicate_body_diagnostics() {
 
     assert_recompile_rescan_required!(
         SourceLocatorV1,
-        format!(r#"{{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}"#)
+        r#"{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}"#
     );
     assert_recompile_rescan_required!(
         ImportPlanV1,

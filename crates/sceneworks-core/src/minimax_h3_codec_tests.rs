@@ -1045,21 +1045,25 @@ fn pruned_entries(reduced: &str) -> Entries {
 fn stored_values(dtype: &str, bytes: &[u8]) -> Vec<f32> {
     match dtype {
         "F32" => bytes
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect(),
         "BF16" => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
-                let bits = (u16::from_le_bytes(chunk.try_into().unwrap()) as u32) << 16;
+                let bits = (u16::from_le_bytes(*chunk) as u32) << 16;
                 f32::from_bits(bits)
             })
             .collect(),
         "F16" => bytes
-            .chunks_exact(2)
-            .map(|chunk| {
-                half::f16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32()
-            })
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|chunk| half::f16::from_bits(u16::from_le_bytes(*chunk)).to_f32())
             .collect(),
         other => panic!("unexpected fixture dtype {other}"),
     }

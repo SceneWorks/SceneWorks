@@ -2653,7 +2653,8 @@ async fn the_labeled_evaluation_over_the_real_vqa_route_scores_exactly_as_the_sc
     // fake worker claimed, over frames imported as project assets.
     let asked = harness.script.lock().vqa_asked.len();
     assert!(asked > 0);
-    // `GET /api/v1/jobs` pages at 100, so count the jobs the fake worker CLAIMED instead.
+    // `GET /api/v1/jobs` returns one bounded page (MAX_LISTED_JOBS), so count the jobs the
+    // fake worker CLAIMED instead.
     let claimed_vqa = harness
         .script
         .lock()

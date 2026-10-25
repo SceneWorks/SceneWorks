@@ -179,6 +179,7 @@ import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
+  MAX_LISTED_JOBS,
   PROMPT_REFINE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
@@ -257,11 +258,18 @@ const REFERENCE_TUNING_PRESET_KEYS = [
 
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+// This is a CONFIRMATION threshold only: it never caps how many images a run may
+// resolve — an over-cap run just gets one "N images?" gate before it starts.
 const BATCH_RENDER_CAP = 100;
-// Keep high-cardinality batch state bounded without changing the eager behavior of
-// ordinary (at-or-under-cap) runs. The worker remains serial; this is client-side
-// backpressure for confirmed large runs only.
-const BATCH_ACTIVE_JOB_LIMIT = BATCH_RENDER_CAP;
+// How many of a confirmed run's jobs may be in flight at once — the submit window
+// `waitForBatchSlot` holds the fan-out behind. Distinct from BATCH_RENDER_CAP: when the
+// two were one constant, confirming a 250-image run queued 100 jobs and then held the
+// remaining 150 until the first 100 finished, because the window could only refill as
+// jobs settled. The window only bounds the client's in-flight id set (the worker stays
+// serial either way), so it is the queue depth the app can hold and show — a run at or
+// under it queues in full the moment it is confirmed, and a larger run feeds in windows
+// of that size.
+const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // A styled Cartesian batch can be enormous even though its queue state remains bounded.
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.

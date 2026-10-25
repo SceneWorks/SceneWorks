@@ -95,6 +95,9 @@ export function SimpleShell({
   settingsSharingFocusRequest,
   lockedToSimple,
   preferencesHydrated = true,
+  sidebarCollapsed = false,
+  onSidebarCollapsedChange,
+  workspaceSwitcher,
 }) {
   const {
     jobs = [],
@@ -110,8 +113,9 @@ export function SimpleShell({
   const [rootRef, width] = useContainerWidth();
   const breakpoint = breakpointFor(width);
   const phone = breakpoint === "phone";
+  const compactSidebar = sidebarCollapsed && !phone && !lockedToSimple;
 
-  const [screen, setScreen] = useState("image");
+  const [screen, setScreen] = useState(() => SCREEN_BY_ID.has(requestedScreen) ? requestedScreen : "image");
   const [drawer, setDrawer] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -301,13 +305,25 @@ export function SimpleShell({
   return (
     <SimpleUiContext.Provider value={ui}>
       <div
-        className="su-root"
+        className={compactSidebar ? "su-root su-sidebar-collapsed" : "su-root"}
         data-bp={breakpoint}
         ref={rootRef}
         style={{ "--su-content-max": contentMaxWidth(breakpoint) }}
       >
         {!phone || drawer ? (
           <nav aria-label="Primary" className="su-nav">
+            {!phone && !lockedToSimple && onSidebarCollapsedChange ? (
+              <button
+                aria-expanded={!sidebarCollapsed}
+                aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                className="icon-btn sidebar-toggle"
+                onClick={() => onSidebarCollapsedChange(!sidebarCollapsed)}
+                title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                type="button"
+              >
+                <Icon.Sidebar collapsed={sidebarCollapsed} />
+              </button>
+            ) : null}
             <div className="su-nav-scroll su-scroll">
               <div className="su-brand">
                 <Logo size={30} />
@@ -316,6 +332,7 @@ export function SimpleShell({
                   <div className="su-brand-sub">Simple</div>
                 </div>
               </div>
+              {workspaceSwitcher}
               {SIMPLE_SCREENS.map((group) => (
                 <React.Fragment key={group.group}>
                   <div className="su-nav-group-title">{group.group}</div>
@@ -328,6 +345,8 @@ export function SimpleShell({
                       const IconComponent = item.icon;
                       return (
                         <button
+                          aria-label={compactSidebar ? item.label : undefined}
+                          title={compactSidebar ? item.label : undefined}
                           aria-current={screen === item.id ? "page" : undefined}
                           className={screen === item.id ? "su-nav-item active" : "su-nav-item"}
                           key={item.id}
@@ -347,8 +366,22 @@ export function SimpleShell({
               ))}
             </div>
             <div className="su-nav-footer">
-              {appVersion}
-              <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
+              {compactSidebar ? (
+                <button
+                  aria-label="Switch to Advanced UI"
+                  className="icon-btn"
+                  onClick={() => onModeChange(ADVANCED_MODE)}
+                  title="Switch to Advanced UI"
+                  type="button"
+                >
+                  <Icon.Sliders />
+                </button>
+              ) : (
+                <>
+                  {appVersion}
+                  <SimpleModeSwitch locked={lockedToSimple} mode="simple" onChange={onModeChange} />
+                </>
+              )}
             </div>
           </nav>
         ) : null}

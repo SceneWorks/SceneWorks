@@ -1068,8 +1068,9 @@ impl Client<'_> {
 
     /// Every job the API holds for `project_id`, newest first.
     ///
-    /// `GET /api/v1/jobs` clamps `limit` at [`JOB_LOOKUP_LIMIT`] and takes no offset, so a FULL
-    /// page may be a truncated one — with `--project-id` reusing a busy project, the run's own jobs
+    /// `GET /api/v1/jobs` takes no offset and answers at most the `limit` it is asked for
+    /// ([`JOB_LOOKUP_LIMIT`] here), so a FULL page may be a truncated one — with `--project-id`
+    /// reusing a busy project, the run's own jobs
     /// can sit past the cut and a lookup that assumed one page would silently answer "no such job"
     /// and enqueue a duplicate render. A full page is therefore widened by asking for each status
     /// separately (the route's only other axis) and merging on job id; the common case still costs
