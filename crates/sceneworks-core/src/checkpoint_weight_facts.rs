@@ -108,6 +108,8 @@ pub const INT8_PER_ROW_CODEC_ID: &str = "int8-per-row-v1";
 /// Descriptor-validated rotated INT8 source/native format, not the generic dense decoder.
 /// The stable identity is owned by the existing backend-neutral native validation contract.
 pub const CONVROT_INT8_CODEC_ID: &str = gen_core::convrot_int8::CODEC_ID;
+/// Descriptor-validated packed codebook W4A8 source/native execution (possibly mixed with INT8).
+pub const W4A8_INT8_CODEC_ID: &str = gen_core::w4a8_int8::CODEC_ID;
 /// Dense F16.
 pub const DENSE_F16_CODEC_ID: &str = "dense-f16-v1";
 /// Dense F32.
@@ -134,6 +136,7 @@ pub const KNOWN_CODEC_IDS: &[&str] = &[
     INT8_PER_ROW_CODEC_ID,
     MXFP8_CODEC_ID,
     NVFP4_CODEC_ID,
+    W4A8_INT8_CODEC_ID,
 ];
 
 /// Whether `value` is a codec id this build recognizes.

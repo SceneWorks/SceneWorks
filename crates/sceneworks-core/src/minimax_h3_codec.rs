@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use gen_core::checkpoint_codec::{CheckpointCodecRegistry, WeightEncoding, DENSE_CODECS};
 use gen_core::convrot_int8::{ConvRotInt8, MAX_DESCRIPTOR_BYTES};
 use gen_core::pruned_adaln::{PrunedAdaLn, PruningIdentity, TABLE_KEY, TOPOLOGY_ID};
+use gen_core::w4a8_int8::W4A8Int8;
 use gen_core::weightsmeta::Dtype;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -570,6 +571,8 @@ pub struct H3SourceInventory {
     pub requires_normalization: bool,
     /// Descriptor-validated native symmetric INT8, never the affine MLX Q8 dialect.
     pub convrot_int8: bool,
+    /// Packed codebook W4A8, possibly mixed with ConvRot INT8 projections.
+    pub w4a8_int8: bool,
     /// Content identity of the reduced centered-curve AdaLN topology this source actually carries.
     /// Present only when the source stores the direct table instead of the timestep MLP.
     pub pruning: Option<H3PruningBinding>,
@@ -722,9 +725,9 @@ impl H3SourceInventory {
         )?;
         for outputs in quantized.values() {
             for (logical, shape, _) in outputs {
-                if !logical.ends_with(".weight") {
-                    expected.insert(logical.clone(), shape.clone());
-                }
+                // The packed projection's physical shape is [out, in/2]; the codec already
+                // checked its logical geometry against the architecture before scheduling it.
+                expected.insert(logical.clone(), shape.clone());
             }
         }
         for (source, ((_, path), header)) in weights.iter().zip(&headers).enumerate() {
@@ -744,8 +747,8 @@ impl H3SourceInventory {
                     "BF16" => (Some(WeightEncoding::DenseBf16),2u64),
                     "F16" => (Some(WeightEncoding::DenseF16),2u64),
                     "F32" => (Some(WeightEncoding::DenseF32),4u64),
-                    "I8" | "U8" if quantized.contains_key(key) => (None,1u64),
-                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8, not pruned/W4A8")),
+                    "I8" | "U8" | "F8_E4M3" if quantized.contains_key(key) => (None,1u64),
+                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8/W4A8 operands")),
                 };
                 if encoding.is_some_and(|encoding| codecs.for_encoding(encoding).is_none()) {
                     return Err(format!("unregistered H3 dense codec for {key:?}"));
@@ -886,11 +889,22 @@ impl H3SourceInventory {
             config,
             native,
             requires_normalization: requires_normalization || pruning.is_some(),
-            convrot_int8: tensors.keys().any(|key| key.ends_with(".comfy_quant")),
+            convrot_int8: tensors.keys().any(|key| key.ends_with(".weight_scale")),
+            w4a8_int8: tensors.keys().any(|key| key.ends_with(".weight_s_rel")),
             pruning,
             sources,
             tensors,
         })
+    }
+
+    pub fn source_encoding(&self) -> Option<&'static str> {
+        if self.w4a8_int8 {
+            Some("asym_w4a8_int8")
+        } else if self.convrot_int8 {
+            Some("convrot_int8")
+        } else {
+            None
+        }
     }
 
     pub fn derivative_request(&self) -> CheckpointDerivativeRequestV1 {
@@ -900,7 +914,9 @@ impl H3SourceInventory {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
             adapter_version: "1".into(),
-            codec_id: if self.convrot_int8 {
+            codec_id: if self.w4a8_int8 {
+                crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
+            } else if self.convrot_int8 {
                 crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
             } else {
                 "dense-f16-bf16-f32"
@@ -1200,6 +1216,21 @@ fn convrot_outputs(
             {
                 return Err(format!("H3 {key}: requires bounded U8 ConvRot descriptor"));
             }
+            reader
+                .seek(SeekFrom::Start(body + offset(entry)?))
+                .map_err(|e| e.to_string())?;
+            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
+            reader.read_exact(payload).map_err(|e| e.to_string())?;
+            let declaration: Value = serde_json::from_slice(payload)
+                .map_err(|e| format!("H3 {key}: invalid projection descriptor: {e}"))?;
+            match declaration.get("format").and_then(Value::as_str) {
+                Some("asym_w4a8_int8") => {
+                    w4a8_outputs(key, payload, physical, files, native, config, layout, expected, &mut outputs)?;
+                    continue;
+                }
+                Some("int8_tensorwise") => {}
+                other => return Err(format!("H3 {key}: unsupported projection format {other:?}; supported native formats are int8_tensorwise ConvRot and asym_w4a8_int8; export a supported checkpoint")),
+            }
             let weight_key = format!("{base}.weight");
             let scale_key = format!("{base}.weight_scale");
             let (_, weight) = physical
@@ -1215,11 +1246,6 @@ fn convrot_outputs(
             }
             let weight_shape = shape(weight)?;
             let scale_shape = shape(scale)?;
-            reader
-                .seek(SeekFrom::Start(body + offset(entry)?))
-                .map_err(|e| e.to_string())?;
-            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
-            reader.read_exact(payload).map_err(|e| e.to_string())?;
             let descriptor = ConvRotInt8::parse(payload, &weight_shape, &scale_shape)
                 .map_err(|e| format!("H3 {key}: {e}"))?;
             let mut foreign_reader;
@@ -1295,6 +1321,175 @@ fn convrot_outputs(
         }
     }
     Ok(outputs)
+}
+
+/// Validate the shared native W4A8 contract, then schedule only row copies. Logical rows are
+/// mapped first (QKV and SwiGLU); each companion applies that exact permutation at its own stored
+/// row width. No unpacked int8, float projection, or model-sized scratch is ever constructed.
+#[allow(clippy::too_many_arguments)]
+fn w4a8_outputs(
+    key: &str,
+    payload: &[u8],
+    physical: &H3Physical<'_>,
+    files: &[(&String, &PathBuf)],
+    native: bool,
+    config: &H3Config,
+    layout: H3QkvLayout,
+    expected: &BTreeMap<String, Vec<usize>>,
+    outputs: &mut BTreeMap<String, Vec<Output>>,
+) -> Result<(), String> {
+    let base = key
+        .strip_suffix(".comfy_quant")
+        .ok_or("invalid W4A8 descriptor key")?;
+    let operand =
+        |suffix: &str, dtype: &str| -> Result<(String, usize, Vec<usize>, &Value), String> {
+            let name = format!("{base}.{suffix}");
+            let (source, entry) = physical
+                .get(name.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing W4A8 {suffix}"))?;
+            if entry["dtype"].as_str() != Some(dtype) {
+                return Err(format!(
+                    "H3 {name}: W4A8 requires stored {dtype}, got {}",
+                    entry["dtype"]
+                ));
+            }
+            let shape = entry["shape"]
+                .as_array()
+                .and_then(|shape| {
+                    shape
+                        .iter()
+                        .map(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| format!("H3 {name}: invalid W4A8 shape"))?;
+            Ok((name, *source, shape, *entry))
+        };
+    let weight = operand("weight", "I8")?;
+    let relative = operand("weight_s_rel", "F8_E4M3")?;
+    let channel = operand("weight_s_channel", "F32")?;
+    let codebook = operand("weight_codebook", "F32")?;
+    let descriptor = W4A8Int8::parse(payload, &weight.2, &relative.2, &channel.2, &codebook.2)
+        .map_err(|e| format!("H3 {key}: {e}"))?;
+    // Shared value validators run on bounded chunks. Each chunk is a complete set of groups or
+    // channels; geometry has already been validated above against the original stored operands.
+    for (suffix, item, width) in [
+        ("weight_s_rel", &relative, 1usize),
+        ("weight_s_channel", &channel, 4),
+        ("codebook", &codebook, 4),
+    ] {
+        let mut file = File::open(files[item.1].1).map_err(|e| e.to_string())?;
+        let mut length = [0; 8];
+        file.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let start = item.3["data_offsets"][0]
+            .as_u64()
+            .ok_or("W4A8 operand lacks offset")?;
+        file.seek(SeekFrom::Start(8 + u64::from_le_bytes(length) + start))
+            .map_err(|e| e.to_string())?;
+        let mut remaining = item
+            .2
+            .iter()
+            .try_fold(width, |n, &d| n.checked_mul(d))
+            .ok_or("W4A8 operand byte count overflow")?;
+        let mut buffer = [0u8; 64 * 1024];
+        while remaining != 0 {
+            let count = remaining.min(buffer.len());
+            file.read_exact(&mut buffer[..count])
+                .map_err(|e| e.to_string())?;
+            let validated = if suffix == "weight_s_rel" {
+                // count is a multiple of 16: each rotation group carries sixteen fp8 scales.
+                W4A8Int8 {
+                    out_features: count / 16,
+                    in_features: 256,
+                    ..descriptor
+                }
+                .validate_s_rel(&buffer[..count])
+            } else {
+                let values: Vec<_> = buffer[..count]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                if suffix == "codebook" {
+                    descriptor.validate_codebook(&values)
+                } else {
+                    W4A8Int8 {
+                        out_features: values.len(),
+                        ..descriptor
+                    }
+                    .validate_s_channel(&values)
+                }
+            };
+            validated.map_err(|e| format!("H3 {}: {e}", item.0))?;
+            remaining -= count;
+        }
+    }
+    let logical_shape = vec![descriptor.out_features, descriptor.in_features];
+    let mapped = if native {
+        native_outputs(strip_prefix(&weight.0), config, layout, &logical_shape, 1)?
+    } else {
+        vec![(
+            strip_prefix(&weight.0).into(),
+            logical_shape.clone(),
+            vec![(0, (descriptor.out_features * descriptor.in_features) as u64)],
+        )]
+    };
+    let mut packed = Vec::new();
+    let mut relative_outputs = Vec::new();
+    let mut channel_outputs = Vec::new();
+    let mut codebook_outputs = Vec::new();
+    let mut descriptors = Vec::new();
+    for (logical, dimensions, ranges) in mapped {
+        let supported = (logical.starts_with("transformer_blocks.")
+            || logical.starts_with("token_refiner.refiner_blocks."))
+            && (logical.contains(".attn.to_") || logical.contains(".ff."));
+        if !supported || expected.get(&logical) != Some(&dimensions) {
+            return Err(format!("H3 {key}: W4A8 projection {logical:?} is not a native packed consumer with geometry {dimensions:?}"));
+        }
+        let logical_base = logical
+            .strip_suffix(".weight")
+            .ok_or("invalid W4A8 logical weight")?;
+        let rows = |row_width: u64| {
+            ranges
+                .iter()
+                .map(|&(start, len)| {
+                    (
+                        start / descriptor.in_features as u64 * row_width,
+                        len / descriptor.in_features as u64 * row_width,
+                    )
+                })
+                .collect()
+        };
+        relative_outputs.push((
+            format!("{logical_base}.weight_s_rel"),
+            vec![dimensions[0], descriptor.in_features / 16],
+            rows((descriptor.in_features / 16) as u64),
+        ));
+        channel_outputs.push((
+            format!("{logical_base}.weight_s_channel"),
+            vec![dimensions[0]],
+            rows(4),
+        ));
+        codebook_outputs.push((
+            format!("{logical_base}.weight_codebook"),
+            vec![16],
+            vec![(0, 64)],
+        ));
+        descriptors.push((
+            format!("{logical_base}.comfy_quant"),
+            vec![payload.len()],
+            vec![(0, payload.len() as u64)],
+        ));
+        packed.push((
+            logical,
+            vec![dimensions[0], descriptor.in_features / 2],
+            rows((descriptor.in_features / 2) as u64),
+        ));
+    }
+    outputs.insert(weight.0, packed);
+    outputs.insert(relative.0, relative_outputs);
+    outputs.insert(channel.0, channel_outputs);
+    outputs.insert(codebook.0, codebook_outputs);
+    outputs.insert(key.into(), descriptors);
+    Ok(())
 }
 
 fn native_outputs(

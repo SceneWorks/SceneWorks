@@ -322,7 +322,7 @@ test("diagnostic stops only at three accepted or three rejected across the five 
 test("workflow exposes one fixed Windows diagnostic with offline cleanup and diagnostic-only artifacts", async () => {
   const workflow = await readFile(new URL("../.github/workflows/server-candle-linux.yml", import.meta.url), "utf8");
   const job = workflow.slice(workflow.indexOf("  starvector-diagnostic-candle-1b:"));
-  assert.match(workflow, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
+  assert.match(workflow, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both\]/);
   assert.match(job, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(job, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
   assert.match(job, /shell: cmd/);

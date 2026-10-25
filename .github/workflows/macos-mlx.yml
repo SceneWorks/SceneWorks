@@ -426,25 +426,8 @@ jobs:
       # this skip cannot quietly become a hole.
       - name: Workspace tests (excluding the NAX guard, which needs M5)
         run: cargo test -- --skip nax_16bit_sdpa_is_correct
-      # NO `-p sceneworks-worker` HERE (sc-26684 CI repair). Package selection decides the
-      # workspace feature union, exactly as the `image` comment in Cargo.toml warns: the step
-      # above builds the six default members, so `-p sceneworks-worker` resolves a narrower
-      # feature set and cargo recompiles every inference dependency before the test binary can
-      # run. Same default-member selection as the step above, `--lib` narrows only the targets
-      # that run, not the resolved features, so this reuses the warm build.
-      - name: Run the synthetic MiniMax-H3 pruned Metal import forward
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          export HF_HOME="$(mktemp -d "$RUNNER_TEMP/sc-26684-pruned-XXXXXX")"
-          export HF_HUB_CACHE="$HF_HOME/hub"
-          export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
-          export HF_HUB_OFFLINE=1
-          export TRANSFORMERS_OFFLINE=1
-          mkdir -p "$HF_HUB_CACHE"
-          log="$HF_HOME/native-metal.txt"
-          cargo test --locked --lib minimax_h3_import_fixture::pruned_import_native_mlx_projection_smoke -- --exact --ignored --nocapture --test-threads=1 | tee "$log"
-          node -e "const text=require('node:fs').readFileSync(process.argv[1],'utf8'); if(!/test result: ok\\. 1 passed; 0 failed; 0 ignored;/.test(text)||!text.includes('minimax_h3_import_fixture::pruned_import_native_mlx_projection_smoke')) throw new Error('exact native pruned Metal fixture did not execute once');" "$log"
+      # Model-level H3 forwards, including synthetic weights, stay ignored here. Explicit
+      # pruned/W4A8 native proofs live in server-candle-linux.yml's selected manual-only jobs.
 
       # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
       # hosted half rather than the scarce M5/NAX pool. `always()` preserves a fresh native artifact
