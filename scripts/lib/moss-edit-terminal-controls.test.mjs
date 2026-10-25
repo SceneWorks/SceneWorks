@@ -50,3 +50,30 @@ test('cold catalog gate must settle into the real model picker before recipe com
     await assert.rejects(()=>waitForModelCatalog(page,actions,3000),/model catalog settled without an available Image Studio model/);
   } finally {await browser.close();}
 });
+
+test('catalog transition between locator reads accepts the mounted Image Studio form',{skip:!chromium||!existsSync(chromium.executablePath())?'Playwright Chromium is unavailable on this host':false},async()=>{
+  const browser=await chromium.launch({headless:true,args:['--disable-gpu']});
+  try {
+    const page=await browser.newPage(),actions=[];
+    await page.setContent('<section class="model-availability-gate"><div role="progressbar" aria-label="Initializing models">Loading</div></section>');
+    let switched=false;
+    const racingPage={
+      locator:(...args)=>page.locator(...args),
+      on:(...args)=>page.on(...args),off:(...args)=>page.off(...args),
+      waitForTimeout:(...args)=>page.waitForTimeout(...args),
+      getByRole:(role,options)=>{
+        const locator=page.getByRole(role,options);
+        if(role!=='progressbar')return locator;
+        return {isVisible:async()=>{
+          const visible=await locator.isVisible();
+          if(visible&&!switched){switched=true;await page.setContent(html);}
+          return visible;
+        }};
+      },
+    };
+    await waitForModelCatalog(racingPage,actions,1000);
+    assert.equal(switched,true);
+    assert.equal(await modelPicker(page).inputValue(),'moss_image_base');
+    assert.equal(actions.at(-1).action,'observe-model-catalog-ready');
+  } finally {await browser.close();}
+});

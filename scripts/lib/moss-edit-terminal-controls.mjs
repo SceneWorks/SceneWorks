@@ -18,9 +18,12 @@ export async function waitForModelCatalog(page,actions,timeoutMs=120000) {
   try {
     let terminalSince=null;
     while(Date.now()<deadline){
+      // React can replace the gate with the form between two Playwright reads.
+      // Observe the model first, then the gate; an overlapping transition is
+      // retried instead of treating a stale gate observation as a failure.
+      const modelVisible=await modelPicker(page).isVisible();
       const initializing=await page.getByRole('progressbar',{name:'Initializing models'}).isVisible();
-      if(await modelPicker(page).isVisible()){
-        requireThat(!initializing,'model catalog gate remained over the form');
+      if(modelVisible&&!initializing){
         actions.push({at:now(),action:'observe-model-catalog-ready',elapsedMs:Date.now()-started,modelResponses:responses});
         return;
       }
