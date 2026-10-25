@@ -129,12 +129,17 @@ impl PreparedH3Load {
         spec: &mut LoadSpec,
         authority: Option<H3SourceAuthority>,
     ) -> Result<Self, String> {
-        Self::prepare_authorized_with_check(spec, authority, &|| Ok(()))
+        Self::prepare_authorized_with_check(spec, authority, None, &|| Ok(()))
     }
 
+    /// `companion` names a frozen component directory the import committed but the direct DiT
+    /// path does not expose as its sibling (the Candle FL2VA direct-directory route). Its files
+    /// are pinned into the prepared receipt exactly like a staged sibling's, so the frozen
+    /// component closure verifies — no staging, no substitution, and no cross-volume links.
     pub fn prepare_authorized_with_check(
         spec: &mut LoadSpec,
         authority: Option<H3SourceAuthority>,
+        companion: Option<PathBuf>,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<Self, String> {
         check().map_err(|error| error.to_string())?;
@@ -163,6 +168,9 @@ impl PreparedH3Load {
             root.join("tokenizer"),
             root.join("FL2VA/audio_vae"),
         ];
+        if let Some(companion) = companion {
+            dirs.push(companion);
+        }
         // Include additional explicitly configured native components (for example Veda), but do
         // not walk the whole shared snapshot or any unrelated cache/model tree.
         dirs.extend(spec.components.values().filter_map(|source| match source {
@@ -329,4 +337,106 @@ fn members(dir: &Path) -> Result<Vec<PathBuf>, String> {
     }
     files.sort();
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Terminal review Issue 2: a direct-path import whose frozen companion is NOT the DiT
+    /// directory's sibling must still ACQUIRE that companion into the prepared receipt — the
+    /// frozen component closure verifies against `receipt.files()`, and a direct-directory load
+    /// has no sibling rule to rely on. The companion is pinned at its actually resolved location;
+    /// no staging, no copies, and nothing is installed on the provider spec that the engine did
+    /// not ask for.
+    #[test]
+    fn an_explicit_companion_is_acquired_into_the_prepared_receipt_for_direct_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let put = |dir: &Path, name: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, [name.as_bytes(), b"-fixture-bytes"].concat()).unwrap();
+            path
+        };
+        let root = temp.path().join("root");
+        let dit = put(&root.join("transformer"), "dit.safetensors");
+        put(&root.join("text_encoder"), "te.safetensors");
+        // The companion lives OUTSIDE the weights root — exactly the resolved library snapshot a
+        // Candle FL2VA import commits, which nothing about the direct DiT path exposes.
+        let companion_dir = temp.path().join("library/q4/transformer_ref");
+        let companion_file = put(&companion_dir, "companion.safetensors");
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
+        spec.components.insert(
+            "transformer".to_owned(),
+            WeightsSource::Dir(dit.parent().unwrap().to_path_buf()),
+        );
+
+        // Without the explicit companion, the sibling rule finds nothing outside the root: the
+        // receipt must not invent the frozen component.
+        let mut plain = spec.clone();
+        let without =
+            PreparedH3Load::prepare_authorized_with_check(&mut plain, None, None, &|| Ok(()))
+                .unwrap();
+        assert!(
+            without
+                .files()
+                .iter()
+                .all(|pin| pin.loader_path() != &companion_file),
+            "no sibling heuristic may invent a companion the caller did not acquire"
+        );
+
+        // With it, the companion's real files are pinned into the SAME receipt and the provider
+        // spec stays untouched (acquisition-only, exactly as the frozen closure expects).
+        let mut direct = spec.clone();
+        let with = PreparedH3Load::prepare_authorized_with_check(
+            &mut direct,
+            None,
+            Some(companion_dir.clone()),
+            &|| Ok(()),
+        )
+        .unwrap();
+        assert!(
+            with.files()
+                .iter()
+                .any(|pin| pin.loader_path() == &companion_file),
+            "the explicit companion is acquired into the prepared receipt"
+        );
+        assert!(
+            direct.prepared_file_pins().is_empty(),
+            "companion acquisition installs nothing on the provider spec"
+        );
+        with.validate(&direct).unwrap();
+
+        // And the companion seal is content-bound: mutating the byte under the same path yields
+        // a DIFFERENT acquired digest on re-preparation, so a frozen closure recorded against the
+        // original content can never verify against the mutated file.
+        let acquired_digest = with
+            .files()
+            .iter()
+            .find(|pin| pin.loader_path() == &companion_file)
+            .expect("the companion was acquired")
+            .content_sha256()
+            .to_vec();
+        std::fs::write(&companion_file, b"mutated-companion-bytes").unwrap();
+        let mut mutated = spec;
+        let reprepared = PreparedH3Load::prepare_authorized_with_check(
+            &mut mutated,
+            None,
+            Some(companion_dir),
+            &|| Ok(()),
+        )
+        .unwrap();
+        let mutated_digest = reprepared
+            .files()
+            .iter()
+            .find(|pin| pin.loader_path() == &companion_file)
+            .expect("the companion is re-acquired")
+            .content_sha256()
+            .to_vec();
+        assert_ne!(
+            acquired_digest, mutated_digest,
+            "the acquired companion seal follows the live file content"
+        );
+    }
 }

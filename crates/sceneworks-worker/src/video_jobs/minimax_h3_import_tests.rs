@@ -469,6 +469,12 @@ fn drive_candle_imported_minimax_h3(
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
+/// Also the terminal-review Issue-2 regression (hosted-only lane): this FL2VA import keeps its
+/// DIRECT DiT directory, whose sibling is not the library's frozen `q4/transformer_ref`
+/// companion. The explicit companion acquisition must pin that companion into the prepared
+/// receipt so the frozen component closure verifies BEFORE the stub loader runs — a render that
+/// reaches the provider here proves the closure passed; pre-fix it refused with "frozen H3
+/// component was not acquired" before any load.
 fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_identity() {
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),

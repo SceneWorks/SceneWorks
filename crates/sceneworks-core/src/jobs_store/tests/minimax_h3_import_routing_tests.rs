@@ -46,15 +46,15 @@ fn dense_dit_plan() -> ImportPlanV1 {
     .expect("valid plan")
 }
 
-/// The catalog entry the import job stamps for a dense H3 DiT.
-fn imported_entry() -> Map<String, Value> {
+/// The catalog entry the import job stamps for a dense H3 DiT of one declared partition.
+fn imported_entry_partition(partition: &str, base: &str) -> Map<String, Value> {
     let mut entry = object(json!({
         "id": IMPORTED_ID,
-        "importPlan": { "checkpointId": "managed/singularity_fl2va_dense" },
+        "importPlan": { "checkpointId": format!("managed/singularity_{partition}") },
     }));
     let assembly = MiniMaxH3ImportAssembly::from_declared_plan(
         &dense_dit_plan(),
-        serde_json::json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+        serde_json::json!({"baseModel":base,"minimaxH3Partition":partition})
             .as_object()
             .unwrap(),
     )
@@ -62,6 +62,11 @@ fn imported_entry() -> Map<String, Value> {
     stamp_imported_minimax_h3_entry(&mut entry, &assembly);
     crate::lora_family::apply_model_manifest_defaults(&mut entry, "video", Some("minimax-h3"));
     entry
+}
+
+/// The catalog entry the import job stamps for a dense H3 DiT.
+fn imported_entry() -> Map<String, Value> {
+    imported_entry_partition("fl2va", "minimax_h3")
 }
 
 fn payload(model: &str, mode: &str, extra: Value, entry: Map<String, Value>) -> Map<String, Value> {
@@ -81,6 +86,62 @@ fn claimed_on_both(payload: &Map<String, Value>) -> (bool, bool) {
         video_request_is_mlx_eligible(&JobType::VideoGenerate, payload),
         video_request_is_candle_eligible(&JobType::VideoGenerate, payload),
     )
+}
+
+/// Terminal review Issue 1: a reference-partition (Ref2VA) import serves its adapter surface
+/// THROUGH THE REFERENCE SHAPE. A text-only probe cannot be claimed by this partition, so an
+/// advertisement derived from a single mode would withdraw adapters the reference shape
+/// genuinely serves; the claim here proves both lanes carry it with real reference conditioning.
+#[test]
+fn a_ref2va_import_with_adapters_is_claimed_through_its_reference_shape() {
+    let entry = imported_entry_partition("ref2va", "minimax_h3_ref");
+    let turbo = json!({ "id": "minimax_h3_turbo_4step_v01" });
+
+    // The text-only shape is outside the reference partition's bound surface, adapter or not.
+    for loras in [json!({}), json!({ "loras": [turbo] })] {
+        let claim = payload(IMPORTED_ID, "text_to_video", loras, entry.clone());
+        assert_eq!(
+            claimed_on_both(&claim),
+            (false, false),
+            "text_to_video stays refused for a reference-only partition"
+        );
+    }
+
+    // reference_to_video WITH valid conditioning is the shape it serves — adapters included, on
+    // BOTH native lanes, and through the enqueue gate.
+    let claim = payload(
+        IMPORTED_ID,
+        "reference_to_video",
+        json!({ "referenceAssetIds": ["r1"], "loras": [turbo] }),
+        entry.clone(),
+    );
+    assert_eq!(
+        claimed_on_both(&claim),
+        (true, true),
+        "both lanes must claim the ref2va reference shape with its adapter stack"
+    );
+    assert!(video_request_is_claimable_by_any_lane(
+        &JobType::VideoGenerate,
+        &claim
+    ));
+    assert!(
+        crate::jobs_store::imported_video_adapter_surface_claimable(&entry, true, false)
+            && crate::jobs_store::imported_video_adapter_surface_claimable(&entry, false, true),
+        "the any-valid-shape advertisement must hold on each lane pair"
+    );
+
+    // Control: a partition with no claimable shape (the assembly lies) advertises nothing.
+    let mut unclaimable = imported_entry_partition("ref2va", "minimax_h3_ref");
+    unclaimable
+        .entry("importPlan".to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .unwrap()
+        .remove("assembly");
+    assert!(
+        !crate::jobs_store::imported_video_adapter_surface_claimable(&unclaimable, true, true),
+        "an entry that is no longer plan-backed advertises no adapter surface"
+    );
 }
 
 #[test]
