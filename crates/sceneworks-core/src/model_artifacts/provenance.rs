@@ -443,8 +443,51 @@ pub fn capture_h3_component_closure_with_check(
     Ok(json!(closure))
 }
 
-/// Compare already acquired component seals to the persisted assembly. No rehash and no fresh
-/// authority: a changed cache object, revision, or unconsumed commitment is a hard refusal.
+/// Metadata-only identity proof for aliases created by the existing component staging path.
+/// A matching filename/hash is not source/revision authority: aliases must name the SAME file.
+fn acquired_component_is_source(
+    pin: &gen_core::PinnedWeightsFile,
+    expected: &Path,
+    target: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<bool, String> {
+    if pin.loader_path() == expected || pin.canonical_target_path() == target {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let observed = pin.target_fingerprint();
+        Ok(metadata.is_file()
+            && metadata.dev() == observed.device
+            && metadata.ino() == observed.inode)
+    }
+    #[cfg(windows)]
+    {
+        // Same established volume/file-index proof used by the platform materialization guard.
+        // The pin itself remains the stronger replacement-sensitive acquired authority.
+        let expected = std::fs::File::open(expected).map_err(|error| error.to_string())?;
+        let acquired = std::fs::File::open(pin.loader_path()).map_err(|error| error.to_string())?;
+        let expected =
+            winapi_util::file::information(&expected).map_err(|error| error.to_string())?;
+        let acquired =
+            winapi_util::file::information(&acquired).map_err(|error| error.to_string())?;
+        let _ = metadata;
+        Ok(
+            expected.volume_serial_number() == acquired.volume_serial_number()
+                && expected.file_index() == acquired.file_index(),
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        Ok(false)
+    }
+}
+
+/// Compare already acquired component seals to the persisted assembly. No rehash, network or fresh
+/// authority. Exact revision source identity, size and SHA must all match. Supported symlink and
+/// hardlink staging aliases retain physical file identity; same-named copies do not authorize it.
 pub fn verify_prepared_h3_component_closure(
     data_dir: &Path,
     assembly: &Value,
@@ -456,20 +499,6 @@ pub fn verify_prepared_h3_component_closure(
     let resolver = crate::model_artifacts::ModelArtifactResolver::new(
         crate::hf_home::model_source_library(data_dir),
     );
-    fn logical_path(relative: &str) -> &str {
-        relative
-            .strip_prefix("q4/")
-            .or_else(|| relative.strip_prefix("q8/"))
-            .or_else(|| relative.strip_prefix("bf16/"))
-            .unwrap_or(relative)
-    }
-    let logical_files: Vec<_> = closure
-        .iter()
-        .filter_map(|row| row.get("files").and_then(Value::as_array))
-        .flatten()
-        .filter_map(|file| file.get("relativePath").and_then(Value::as_str))
-        .map(logical_path)
-        .collect();
     let mut committed_paths = std::collections::BTreeSet::new();
     let mut snapshot_roots = std::collections::BTreeSet::new();
     let mut acquired_component_dirs = std::collections::BTreeSet::new();
@@ -485,70 +514,73 @@ pub fn verify_prepared_h3_component_closure(
             .get("revision")
             .and_then(Value::as_str)
             .ok_or("missing component revision")?;
+        let component = row
+            .get("componentId")
+            .and_then(Value::as_str)
+            .or_else(|| row.get("subdir").and_then(Value::as_str))
+            .unwrap_or(repo);
+        let refuse = |reason: String| {
+            format!("H3 component {component} ({repo}@{revision}): {reason}; explicitly repair/reimport or rescan")
+        };
         if row.get("revision").and_then(Value::as_str) != Some(revision) {
-            return Err("component revision commitment is inconsistent".into());
+            return Err(refuse("revision commitment mismatch".into()));
         }
         let (_, snapshot) = resolver
             .discover_source_snapshot(repo, Some(revision))
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| refuse(error.to_string()))?;
         snapshot_roots.insert(snapshot.clone());
         for expected in member
             .get("files")
             .and_then(Value::as_array)
-            .filter(|v| !v.is_empty())
-            .ok_or("empty frozen component closure")?
+            .filter(|rows| !rows.is_empty())
+            .ok_or_else(|| refuse("empty frozen file closure".into()))?
         {
             let relative = expected
                 .get("relativePath")
                 .and_then(Value::as_str)
-                .ok_or("missing component path")?;
+                .ok_or_else(|| refuse("missing file path".into()))?;
             crate::checkpoint_plan_store::portable_relative_path_parts(relative)?;
             let path = snapshot.join(relative);
+            let target = std::fs::canonicalize(&path)
+                .map_err(|error| refuse(format!("source {relative} unavailable: {error}")))?;
+            let metadata = std::fs::metadata(&path)
+                .map_err(|error| refuse(format!("source {relative} unavailable: {error}")))?;
             committed_paths.insert(path.clone());
-            // Source-library snapshots and supported operator roots can be aliases of the same
-            // semantic component. Match its logical relative path, never ownership/root metadata.
-            let logical = logical_path(relative);
-            let candidates: Vec<_> = files
-                .iter()
-                .filter(|pin| {
-                    let matches = pin.loader_path() == path
-                        || pin.loader_path().ends_with(relative)
-                        || pin.loader_path().ends_with(logical)
-                        || pin.canonical_target_path().ends_with(relative);
-                    // The FL2VA source audio descriptor is distinct from audio_vae/config.json.
-                    // Choose the most-specific logical binding, never every matching suffix.
-                    matches
-                        && !logical_files.iter().any(|other| {
-                            other.len() > logical.len()
-                                && (pin.loader_path().ends_with(other)
-                                    || pin.canonical_target_path().ends_with(other))
-                        })
-                })
-                .collect();
-            if candidates.is_empty() {
-                return Err(format!(
-                    "frozen H3 component was not acquired: {}",
-                    path.display()
-                ));
-            }
-            for pin in candidates {
+            let mut acquired = false;
+            for pin in files {
+                if !acquired_component_is_source(pin, &path, &target, &metadata).map_err(refuse)? {
+                    continue;
+                }
+                pin.verify_unchanged().map_err(|error| {
+                    refuse(format!("acquired seal changed for {relative}: {error}"))
+                })?;
                 let digest = format!(
                     "sha256:{}",
                     pin.content_sha256()
                         .iter()
-                        .map(|b| format!("{b:02x}"))
+                        .map(|byte| format!("{byte:02x}"))
                         .collect::<String>()
                 );
                 if expected.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
-                    return Err(format!(
-                        "H3 component content drift: {}; explicitly repair/reimport or rescan",
-                        pin.loader_path().display()
-                    ));
+                    return Err(format!("H3 component content drift: {component} ({repo}@{revision}) {relative}; expected {}, acquired {digest}; explicitly repair/reimport or rescan",expected["sha256"]));
                 }
+                if expected.get("sizeBytes").and_then(Value::as_u64)
+                    != Some(pin.target_fingerprint().size)
+                {
+                    return Err(refuse(format!(
+                        "size mismatch for {relative}: expected {}, acquired {} bytes",
+                        expected["sizeBytes"],
+                        pin.target_fingerprint().size
+                    )));
+                }
+                acquired = true;
                 committed_paths.insert(pin.loader_path().to_owned());
                 if let Some(parent) = pin.loader_path().parent() {
                     acquired_component_dirs.insert(parent.to_owned());
                 }
+            }
+            if !acquired {
+                return Err(format!("frozen H3 component was not acquired: {component} ({repo}@{revision}) {relative}; source/revision mismatch; explicitly repair/reimport or rescan"));
             }
         }
     }
@@ -564,6 +596,12 @@ pub fn verify_prepared_h3_component_closure(
                 pin.loader_path().display()
             ));
         }
+        pin.verify_unchanged().map_err(|error| {
+            format!(
+                "acquired H3 component seal changed for {}: {error}",
+                pin.loader_path().display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -1001,6 +1039,75 @@ mod tests {
         )
         .unwrap_err()
         .contains("uncommitted"));
+    }
+
+    #[test]
+    fn acquired_components_require_the_frozen_revision_size_and_live_source_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let hub = temporary.path().join("hub");
+        let _guard = crate::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        assert_eq!(crate::hf_home::model_source_library(&data).root(), hub);
+        let (_, mut entry) = frozen_h3_plan();
+        entry["downloads"][0]["componentId"] = json!("tokenizer");
+        let snapshot = hub
+            .join("models--fixture--components/snapshots")
+            .join("1".repeat(40));
+        let source = snapshot.join("tokenizer/tokenizer.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"{}").unwrap();
+        let closure = capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap();
+        let assembly = json!({"componentClosure":closure});
+        let pin = gen_core::PinnedWeightsFile::pin(&source).unwrap();
+        verify_prepared_h3_component_closure(&data, &assembly, std::slice::from_ref(&pin)).unwrap();
+        let mut wrong_size = assembly.clone();
+        wrong_size["componentClosure"][0]["files"][0]["sizeBytes"] = json!(3);
+        let error =
+            verify_prepared_h3_component_closure(&data, &wrong_size, std::slice::from_ref(&pin))
+                .unwrap_err();
+        assert!(
+            error.contains("tokenizer") && error.contains("size mismatch"),
+            "{error}"
+        );
+        let mut wrong_revision = assembly.clone();
+        wrong_revision["componentClosure"][0]["revision"] = json!("2".repeat(40));
+        assert!(verify_prepared_h3_component_closure(
+            &data,
+            &wrong_revision,
+            std::slice::from_ref(&pin)
+        )
+        .unwrap_err()
+        .contains("revision commitment mismatch"));
+        let copy = hub
+            .join("models--fixture--components/snapshots")
+            .join("2".repeat(40))
+            .join("tokenizer/tokenizer.json");
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(&source, &copy).unwrap();
+        let other_revision_pin = gen_core::PinnedWeightsFile::pin(copy).unwrap();
+        assert_eq!(
+            other_revision_pin.content_sha256(),
+            pin.content_sha256(),
+            "identical bytes do not authorize a different source/revision"
+        );
+        assert!(
+            verify_prepared_h3_component_closure(&data, &assembly, &[other_revision_pin])
+                .unwrap_err()
+                .contains("source/revision mismatch")
+        );
+        let alias = temporary.path().join("staged/tokenizer/tokenizer.json");
+        std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        let alias_pin = gen_core::PinnedWeightsFile::pin(alias).unwrap();
+        verify_prepared_h3_component_closure(&data, &assembly, &[alias_pin]).unwrap();
+        let stale = gen_core::PinnedWeightsFile::pin(&source).unwrap();
+        std::fs::write(&source, b"[]").unwrap();
+        assert!(
+            verify_prepared_h3_component_closure(&data, &assembly, &[stale])
+                .unwrap_err()
+                .contains("acquired seal changed"),
+            "an old acquired digest cannot authorize an in-place replacement"
+        );
     }
 
     #[cfg(feature = "test-support")]
