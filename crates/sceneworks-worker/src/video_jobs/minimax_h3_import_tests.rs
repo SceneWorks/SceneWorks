@@ -547,7 +547,51 @@ fn an_imported_h3_dit_reaches_the_candle_provider_as_its_transformer_with_its_id
         canonical(transformer),
         canonical(&rehost.join("q4").join("transformer"))
     );
-    assert!(matches!(&spec.weights, WeightsSource::Dir(root) if *root == upstream));
+    let bound_root = crate::minimax_h3_import_fixture::shared_component_snapshot(data.path());
+    assert!(matches!(&spec.weights, WeightsSource::Dir(root) if root == &bound_root));
+    assert_ne!(
+        canonical(&bound_root),
+        canonical(&upstream),
+        "operator staging is not the committed component source"
+    );
+    let closure = &imported.entry["importPlan"]["assembly"]["componentClosure"];
+    assert_eq!(raw["importPlan"]["assembly"]["componentClosure"], *closure);
+    let shared = closure
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|member| member["download"]["repo"] == "MiniMaxAI/MiniMax-H3")
+        .collect::<Vec<_>>();
+    assert!(!shared.is_empty());
+    for member in shared {
+        assert_eq!(member["revision"], SHARED_REVISION);
+        for file in member["files"].as_array().unwrap() {
+            let path = bound_root.join(file["relativePath"].as_str().unwrap());
+            let pin = spec
+                .prepared_file_pins()
+                .iter()
+                .map(|(_, pin)| pin)
+                .find(|pin| pin.loader_path() == path.as_path())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the actual provider load must retain its frozen resident {}",
+                        path.display()
+                    )
+                });
+            let digest = format!(
+                "sha256:{}",
+                pin.content_sha256()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            assert_eq!(file["sha256"], digest);
+            assert_eq!(
+                file["sizeBytes"].as_u64(),
+                Some(pin.target_fingerprint().size)
+            );
+        }
+    }
     assert_eq!(spec.quantize, None);
     assert_eq!(raw["model"], json!("singularity_fl2va_dense"));
     assert_eq!(

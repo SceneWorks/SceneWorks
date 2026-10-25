@@ -329,6 +329,20 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "minimax-h3-shared",
         CacheRole::Scratch,
     ),
+    // The same existing assembly aliases, authenticated at the shared core staging boundary.
+    (
+        "core",
+        "model_artifacts/provenance.rs",
+        "minimax-h3-assemblies",
+        CacheRole::Scratch,
+    ),
+    // Runtime aliases to the frozen shared-component snapshots; never a new weight destination.
+    (
+        "core",
+        "model_artifacts/provenance.rs",
+        "minimax-h3-shared",
+        CacheRole::Scratch,
+    ),
     // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
     (
         "worker",
@@ -2757,6 +2771,38 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
         "an unregistered destination in the SAME fixture file must still fail the guard"
     );
     assert!(rejected[0].contains("fixture-hub-new-unregistered"));
+    for subdir in ["minimax-h3-shared", "minimax-h3-assemblies"] {
+        assert_eq!(
+            allowed.get(&(
+                "core".into(),
+                "model_artifacts/provenance.rs".into(),
+                subdir.into()
+            )),
+            Some(&CacheRole::Scratch)
+        );
+    }
+    let discovered = cache_destinations(
+        "let p = data_dir.join(\"cache/minimax-h3-shared-new-unregistered\");",
+        &BTreeMap::new(),
+    );
+    assert!(discovered.contains("minimax-h3-shared-new-unregistered"));
+    let found = discovered
+        .into_iter()
+        .map(|subdir| {
+            (
+                "core".into(),
+                "model_artifacts/provenance.rs".into(),
+                subdir,
+            )
+        })
+        .collect();
+    let rejected = unregistered_cache_destinations(&found, &allowed);
+    assert_eq!(
+        rejected.len(),
+        1,
+        "literal known assembly roots do not authorize a new core destination"
+    );
+    assert!(rejected[0].contains("minimax-h3-shared-new-unregistered"));
 }
 
 /// **AC9, the surface the other two gates stand on.** [`DOWNLOAD_PRIMITIVES`] must name the whole
