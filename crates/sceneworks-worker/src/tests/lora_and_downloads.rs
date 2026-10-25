@@ -3386,7 +3386,8 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                         .join(config_row["files"][0].as_str().unwrap());
                     assert!(config_cache.starts_with(&fixture.settings.data_dir));
                     std::fs::create_dir_all(config_cache.parent().unwrap()).unwrap();
-                    let config_bytes = std::fs::read(native.install_dir.join("config.json")).unwrap();
+                    // Native fixture metadata embeds this exact config; its install has no sidecar.
+                    let config_bytes = serde_json::to_vec(&crate::minimax_h3_import_fixture::h3_fixture_config()).unwrap();
                     std::fs::write(&config_cache, &config_bytes).unwrap();
                     job.payload["manifestEntry"]["downloads"].as_array_mut().unwrap().push(config_row.clone());
                     job.payload.insert("uploadedSourcePath".into(), json!(true));
