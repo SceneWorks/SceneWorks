@@ -403,8 +403,18 @@ mod tests {
             "the explicit companion is acquired into the prepared receipt"
         );
         assert!(
-            direct.prepared_file_pins().is_empty(),
+            direct
+                .prepared_file_pins()
+                .iter()
+                .all(|(_, pin)| pin.loader_path() != &companion_file),
             "companion acquisition installs nothing on the provider spec"
+        );
+        // The check above would pass vacuously against an empty pin set, so the spec's OWN
+        // configured files must still be pinned: preparation installs the spec closure and
+        // nothing beyond it.
+        assert!(
+            !direct.prepared_file_pins().is_empty(),
+            "the spec's own configured files are still pinned"
         );
         with.validate(&direct).unwrap();
 
