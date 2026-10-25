@@ -2,6 +2,37 @@ name: H3 fine-tune explicit terminal case
 
 # No pull_request/push/schedule trigger: real models never belong to ordinary CI.
 on:
+  # Called locally from the already registered server-candle-linux workflow at
+  # the SAME caller ref. This file need not exist/register on default main first.
+  workflow_call:
+    inputs:
+      stationary_pair_authorized:
+        required: true
+        type: boolean
+      sceneworks_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      backend:
+        required: true
+        type: string
+      expected_runner:
+        required: true
+        type: string
+      plan_path:
+        required: true
+        type: string
+      output_path:
+        required: true
+        type: string
+      case_id:
+        required: true
+        type: string
+    secrets:
+      SCENEWORKS_INFERENCE_READ_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       stationary_pair_authorized:
@@ -46,7 +77,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   terminal:
-    if: inputs.stationary_pair_authorized
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.stationary_pair_authorized == true && (inputs.backend == 'mlx' || inputs.backend == 'cuda') }}
     runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-chroma"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
     timeout-minutes: 150
     steps:
@@ -79,6 +110,8 @@ jobs:
             import assert from "node:assert/strict";
             import {readFile} from "node:fs/promises";
             const e=process.env,p=JSON.parse(await readFile(e.PLAN,"utf8"));
+            assert.equal(e.GITHUB_SHA,e.SW_SHA,"caller workflow commit must equal the exact requested SceneWorks source");
+            assert.match(e.SW_SHA,/^[a-f0-9]{40}$/); assert.match(e.INF_SHA,/^[a-f0-9]{40}$/);
             assert.equal(e.RUNNER_NAME,e.EXPECTED_RUNNER);
             assert.equal(p.output,e.OUTPUT);
             assert.equal(p.sceneworks,e.SW_SHA); assert.equal(p.inference,e.INF_SHA);

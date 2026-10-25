@@ -6,10 +6,41 @@ This is executable **campaign preparation**, not accepted real-weight evidence. 
 
 - `node scripts/h3-finetune-terminal.mjs list` prints the complete required inventory: the eight frozen artifact/backend executions, plus backend-local numerical, conditioning, generalization, and lifecycle mechanisms. No filename or precision substitution is allowed. Capability mechanisms may use different *compatible* artifacts, not falsely exercise an unsupported operation on every file.
 - Stage a version-1 JSON plan **outside both clean repositories**. `check-plan PLAN` validates its complete inventory without running anything.
-- Only after the coordinator confirms the final stationary paired revisions, inference-main merge, and permanent consumer pin: manually dispatch `.github/workflows/h3-finetune-terminal.yml` at the exact SceneWorks ref, supplying the exact pair, one listed case, staged plan, external output, and exact runner name. Authorization defaults to false. MLX uses the existing `rw-chroma` route and requires `nax-macos-2`; CUDA uses the existing Windows `cuda,real-weights` route. Do not use another physical device to work around an actual task restriction.
+- Only after the coordinator confirms the final stationary paired revisions, inference-main merge, and permanent consumer pin: use the **already registered** `.github/workflows/server-candle-linux.yml` entrypoint (workflow ID `297197519`), selecting exactly `h3-terminal-mlx` or `h3-terminal-cuda`. Its same-ref local `workflow_call` reuses `.github/workflows/h3-finetune-terminal.yml`; that new file need not be registered on default main first. Supply the exact pair, one listed case, staged plan/output and exact runner through the explicit H3 JSON request described below. Authorization defaults to false. MLX uses the existing `rw-chroma` route and requires `nax-macos-2`; CUDA uses the existing Windows `cuda,real-weights` route. Do not use another physical device to work around an actual task restriction.
 - The job checks out both exact sources, validates the permanent pin and inference-main ancestry, streams input hashes before and after execution, captures actual subprocess results, and rechecks clean source identities. Artifact cases retrieve only the frozen HF revision's metadata (`blobs=true`) during the authorized job and compare the actual checkpoint digest with its published LFS SHA-256, retaining `source-catalog.json`; internally consistent stock-weight receipts cannot impersonate a frozen artifact. It does not provision weights, choose substitute checkpoints, claim a GPU reservation, or acquire global tokens/locks.
 - `run-case PLAN CASE SW_ROOT INFERENCE_ROOT` is Actions-only. Each command is an argv array (no shell interpolation); `H3_CASE_DIR`, `H3_CASE_ID`, `H3_INFERENCE_ROOT`, and `H3_TIMEOUT_SECONDS` are provided. Commands must use task-owned API/worker instances and disposable application state, never a user's running app/shared mutable cache. Native builds/fixtures also run only in explicit Actions.
 - `verify PLAN` rehashes every source input and retained evidence file, redecodes AV and redoes comparisons; missing cases are failures. This command records delivery evidence, **not** an automatic merge, Shortcut transition, or statement that a reviewer validated the linked CI/tracker snapshots.
+
+## Registered dispatch route (preparation only)
+
+Read-only registration checks found **Server Candle (Linux/NVIDIA)** active as ID `297197519`, path `.github/workflows/server-candle-linux.yml`, with default-main blob `7a16e9cf1579186199056aedf4892220f5776b26`. The new H3 file was absent on main (Contents API 404) and absent from registered workflows. Do **not** merge an incomplete feature to main to activate it, dispatch a deliberately registration-only H3/Veda stub, or assume the new file itself can dispatch from a feature ref.
+
+The existing entrypoint retains its ten standing dispatch keys and all old StarVector/default selections. For **only** `h3-terminal-mlx` / `h3-terminal-cuda`, `campaign_run_id` contains this JSON object (values below are coordinator parameters, not invented future SHAs):
+
+```json
+{
+  "stationary_pair_authorized": true,
+  "sceneworks_sha": "FINAL_REVIEWED_SCENEWORKS_SHA",
+  "inference_sha": "FINAL_MERGED_PERMANENT_INFERENCE_SHA",
+  "expected_runner": "EXACT_AUTHORIZED_RUNNER_NAME",
+  "plan_path": "ABSOLUTE_ALREADY_STAGED_PLAN",
+  "output_path": "ABSOLUTE_PLAN_OUTPUT",
+  "case_id": "mlx.artifact.0"
+}
+```
+
+Backend is derived solely from the positive selector, not from ambiguous JSON/default StarVector fields. Authorization must be actual JSON boolean `true`; strings/numbers do not opt in. The root H3 group is unique per run/attempt and differs from the reusable job's group; standard ref-keyed and StarVector non-canceling groups remain unchanged. The sole optional inference-read token is mapped from the standing token names; no secret values were inspected.
+
+After publication and explicit campaign authorization **only**, the actual registered call shape is:
+
+```sh
+gh workflow run server-candle-linux.yml --repo SceneWorks/SceneWorks \
+  --ref "$PUBLISHED_SOURCE_REF" \
+  -f starvector_terminal_operation=h3-terminal-mlx \
+  -f campaign_run_id="$(cat "$H3_REQUEST_JSON")"
+```
+
+Use `h3-terminal-cuda` and a CUDA case/runner for CUDA. `PUBLISHED_SOURCE_REF` is the branch/tag containing this router and local callee. GitHub resolves the local reusable file at that **same caller commit**. The callee's preflight requires `GITHUB_SHA == sceneworks_sha == plan.sceneworks`, the exact inference input, plan/output/case/backend and runner match; the existing runtime then checks clean paired sources, permanent pin and inference-main ancestry. Its native job additionally requires the original event to be `workflow_dispatch`, explicit authorization and a recognized backend, so ordinary PR/push/schedule callers cannot execute it. There is no default-main activation prerequisite. **No dispatch was performed during this preparation.**
 
 ## Plan contract
 

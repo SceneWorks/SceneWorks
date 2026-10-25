@@ -16,7 +16,7 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
   const component=path.join(root,'synthetic-component');await writeFile(component,'unit_fake component');const componentHash=await hashFile(component);
   const scenarioPath=path.join(root,'scenario.json');
   const c={...requiredCases().find(c=>c.id===`${backend}.${group}.${check}`),timeoutSeconds:30,evidence:'evidence.json',inputs:[{path:input,sha256:digest,role:'checkpoint'},{path:component,sha256:componentHash,role:'component'}],loadHostBudgetBytes:100000,loadDeviceBudgetBytes:100000,minimumControlDelta:0.01,controlStream:'video',runtime:{port:43210,gpuId:'unit_fake_gpu',deviceId:'unit_fake_device',scenario:scenarioPath,sampleIntervalMs:1}};
-  const p={sceneworks:sw,inference:inf,source:SOURCE,output:root,responsibleTask:'sc-26691'};
+  const p={proof_kind:'unit_fake',sceneworks:sw,inference:inf,source:SOURCE,output:root,responsibleTask:'sc-26691'};
   const execution={label:'test',mode:'image_to_video',model:{modelId:'imported_unit_fake',sourcePath:input,sha256:digest,baseModel:'minimax_h3',partition:'fl2va',topology:'full',componentTier:'q4',supportedModes:['image_to_video'],components:[{sha256:componentHash,source:'unit_fake',revision:inf,licenseAcknowledged:true}]},sampling:{contractSource:'unit_fake recipe',steps:50,width:576,height:320,fps:24,duration:5.1667}};
   const parameters={baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake_project',requestedGpu:'unit_fake_gpu',timeoutSeconds:30,seed:42,assets:{imageA:'unit_fake_red',imageB:'unit_fake_blue'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.005}};
   const scenario=(group==='capability'||(group==='lifecycle'&&check==='cancel'))?buildScenario(c,parameters,[execution]):{baseUrl:parameters.baseUrl,caseId:c.id,timeoutSeconds:30,steps:[{id:'import',method:'POST',path:'/api/v1/models/import',body:{modelId:'imported_unit_fake',sourcePath:input},expectedStatus:201,assert:[{pointer:'/payload/modelId',equals:'imported_unit_fake'}]},{id:'installed',waitJob:{$capture:'import/id'},assert:[{pointer:'/result/modelId',equals:'imported_unit_fake'}]}]};
@@ -60,7 +60,7 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
 }
 test('real service/native entry is refused locally before spawn or transport',async t=>{
   const f=await fixture(t);assert.throws(()=>authorized(f.p,f.c));
-  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir).initialize(),/Actions-only|equal/);
+  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir).initialize(),/unit_fake|Actions-only|equal/);
 });
 test('task input ownership is checked before opening an out-of-root path',async t=>{
   const f=await fixture(t);await verifyInputs(f.c,[f.root]);

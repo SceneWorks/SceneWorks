@@ -27,7 +27,7 @@ on:
         required: true
         default: standard
         type: choice
-        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b]
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-terminal-mlx, h3-terminal-cuda]
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
@@ -65,7 +65,7 @@ on:
         default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       campaign_run_id:
-        description: Unique terminal campaign identity.
+        description: StarVector campaign identity, or explicit H3 request JSON for h3-terminal-mlx/cuda only (keeps the ten standing dispatch keys).
         required: false
         type: string
 
@@ -74,10 +74,10 @@ permissions:
   actions: read
 
 concurrency:
-  # Every terminal phase shares one non-canceling bridge queue. An unrelated
-  # ordinary Linux compile must not cancel a source/provision/readiness/campaign
-  # caller, and a later terminal phase must wait for its predecessor to finish.
-  group: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge' }}
+  # StarVector phases retain their existing non-canceling bridge queue and ordinary
+  # builds retain their ref-keyed queue. Explicit H3 runs have a distinct per-run root
+  # group, different from the reusable callee, without changing device queues.
+  group: ${{ (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge') }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
@@ -164,6 +164,24 @@ jobs:
           name: sceneworks-api-candle-linux
           path: target/release/sceneworks-rust-api
           if-no-files-found: error
+
+  # Already registered on main; local reusable calls resolve at THIS caller commit,
+  # so no incomplete feature->main activation merge is needed. Unknown/ordinary
+  # selections cannot reach H3, and authorization must be JSON boolean true.
+  h3-terminal:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') }}
+    uses: ./.github/workflows/h3-finetune-terminal.yml
+    with:
+      stationary_pair_authorized: ${{ toJSON(fromJSON(inputs.campaign_run_id).stationary_pair_authorized) == 'true' }}
+      sceneworks_sha: ${{ fromJSON(inputs.campaign_run_id).sceneworks_sha }}
+      inference_sha: ${{ fromJSON(inputs.campaign_run_id).inference_sha }}
+      backend: ${{ inputs.starvector_terminal_operation == 'h3-terminal-mlx' && 'mlx' || 'cuda' }}
+      expected_runner: ${{ fromJSON(inputs.campaign_run_id).expected_runner }}
+      plan_path: ${{ fromJSON(inputs.campaign_run_id).plan_path }}
+      output_path: ${{ fromJSON(inputs.campaign_run_id).output_path }}
+      case_id: ${{ fromJSON(inputs.campaign_run_id).case_id }}
+    secrets:
+      SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || secrets.INFERENCE_READ_TOKEN }}
 
   # GitHub exposes workflow_dispatch only for files that already exist on the
   # default branch. This standing manual workflow is therefore the narrow

@@ -2,6 +2,7 @@
   "version": 1,
   "kind": "preparation-not-campaign-evidence",
   "inspectionBaseline": "b11766f52ca41288e850178185c68094ee08f749",
+  "dispatch":{"registeredEntrypoint":".github/workflows/server-candle-linux.yml","workflowId":297197519,"observedState":"active","observedDefaultMainBlob":"7a16e9cf1579186199056aedf4892220f5776b26","newCalleeDefaultMainObservation":"404; not a dispatch activation prerequisite","selectorInput":"starvector_terminal_operation","selectors":{"mlx":"h3-terminal-mlx","cuda":"h3-terminal-cuda"},"requestJsonInput":"campaign_run_id","localSameRefCallee":".github/workflows/h3-finetune-terminal.yml","sourceIdentity":"caller github.sha must equal requested sceneworks_sha and staged plan source; final campaign pair remains coordinator parameters","executed":false},
   "source": {"repo":"WarmBloodAban/Minimax-h3_Singularity","revision":"a56850c870825d6a8ae501a595c4dbbbc77bbc7e"},
   "catalogUrl": "https://huggingface.co/api/models/WarmBloodAban/Minimax-h3_Singularity/revision/a56850c870825d6a8ae501a595c4dbbbc77bbc7e?blobs=true",
   "artifacts": [

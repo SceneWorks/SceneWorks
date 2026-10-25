@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
+import { runInNewContext } from 'node:vm';
 import path from 'node:path';
 import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer } from './h3-finetune-terminal-api.mjs';
@@ -154,6 +155,60 @@ test('manual workflow is execution-only and uses existing runner/token infrastru
   assert.match(workflow, /rw-chroma/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /SCENEWORKS_INFERENCE_READ_TOKEN/); assert.match(workflow, /stationary_pair_authorized/);
   assert.doesNotMatch(workflow, /registration_only|pkill|flock|gpu.token/i);
+});
+const workflowJob = (text, name) => {
+  const start=text.indexOf(`\n  ${name}:\n`); assert.ok(start>=0,`missing ${name} job`);
+  const next=text.slice(start+1).search(/\n  [a-z][\w-]*:\n/); return text.slice(start,next<0?undefined:start+1+next);
+};
+const workflowExpression = (expression, inputs, github={event_name:'workflow_dispatch',run_id:'unit_fake_101',run_attempt:'1',ref:'refs/heads/unit_fake'}) => runInNewContext(expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/g,''),{
+  inputs,github,fromJSON:JSON.parse,toJSON:JSON.stringify,format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,n)=>String(values[Number(n)])),
+},{timeout:100});
+test('registered Candle entrypoint positively routes only explicit H3 selections to the same-ref reusable job',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');
+  const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
+  const job=workflowJob(router,'h3-terminal'),selected=/^    if: (.+)$/m.exec(job)[1],authorization=/^      stationary_pair_authorized: (.+)$/m.exec(job)[1];
+  assert.match(job,/uses: \.\/.github\/workflows\/h3-finetune-terminal\.yml/);assert.doesNotMatch(job,/uses:.*@main|registration_only|activation/);assert.match(callee,/workflow_call:/);
+  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
+  for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){
+    const inputs={starvector_terminal_operation:operation,campaign_run_id:JSON.stringify({stationary_pair_authorized:true})};assert.equal(workflowExpression(selected,inputs),true);assert.equal(workflowExpression(authorization,inputs),true);
+    const backend=/^      backend: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(backend,inputs),operation.endsWith('-mlx')?'mlx':'cuda');
+    for(const value of [false,null,1,'true','false'])assert.equal(workflowExpression(authorization,{...inputs,campaign_run_id:JSON.stringify({stationary_pair_authorized:value})}),false);
+  }
+  const native=workflowJob(callee,'terminal'),nativeIf=/^    if: (.+)$/m.exec(native)[1];
+  for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(nativeIf,{stationary_pair_authorized:true,backend:'mlx'},{event_name:event}),false);
+  assert.equal(workflowExpression(nativeIf,{stationary_pair_authorized:false,backend:'mlx'}),false);assert.equal(workflowExpression(nativeIf,{stationary_pair_authorized:true,backend:'unknown'}),false);
+  for(const backend of ['mlx','cuda'])assert.equal(workflowExpression(nativeIf,{stationary_pair_authorized:true,backend}),true);
+});
+test('H3 bridge preserves all standing dispatch keys, old flow selection and isolated concurrency groups',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');
+  const header=router.slice(router.indexOf('  workflow_dispatch:'),router.indexOf('\npermissions:'));
+  const keys=[...header.matchAll(/^      ([a-z][\w_]+):$/gm)].map(m=>m[1]).sort();
+  assert.deepEqual(keys,['starvector_terminal_operation','inference_revision','inference_preflight_run_id','inference_preflight_artifact','mac_app_data_source','mac_hf_home_source','windows_app_data_source','windows_hf_home_source','permanent_pin','campaign_run_id'].sort());
+  const rootGroup=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1],build=/^    if: (.+)$/m.exec(workflowJob(router,'build-candle'))[1];
+  for(const operation of ['standard','']){assert.equal(workflowExpression(build,{starvector_terminal_operation:operation}),true);assert.equal(workflowExpression(cancel,{starvector_terminal_operation:operation}),true);assert.match(workflowExpression(rootGroup,{starvector_terminal_operation:operation}),/^server-candle-linux-/);}
+  for(const operation of ['source','provision','readiness','campaign','diagnostic-candle-1b']){assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation}),'starvector-terminal-bridge');assert.equal(workflowExpression(cancel,{starvector_terminal_operation:operation}),false);assert.equal(workflowExpression(build,{starvector_terminal_operation:operation}),false);}
+  for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(build,inputs),false);assert.notEqual(workflowExpression(rootGroup,inputs),workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102',run_attempt:'1'}));assert.match(workflowExpression(rootGroup,inputs),/^h3-terminal-bridge-/);}
+  for(const [name,file] of [['source-closure','starvector-terminal-source.yml'],['provision','starvector-terminal-provision.yml'],['readiness','starvector-terminal-readiness.yml'],['campaign','starvector-terminal.yml']])assert.ok(workflowJob(router,`starvector-${name}`).includes(`uses: ./.github/workflows/${file}`));
+});
+test('H3 caller forwards only explicit request fields and the standing read token without duplicate execution logic',async()=>{
+  const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),job=workflowJob(router,'h3-terminal');
+  for(const field of ['sceneworks_sha','inference_sha','expected_runner','plan_path','output_path','case_id'])assert.ok(job.includes(field+': ${{ fromJSON(inputs.campaign_run_id).'+field+' }}'));
+  assert.doesNotMatch(job,/runs-on:|run-case|cargo |permanent_pin|inference_revision|secrets: inherit/);
+  assert.match(job,/SCENEWORKS_INFERENCE_READ_TOKEN: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| secrets\.INFERENCE_READ_TOKEN \}\}/);
+  const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');assert.match(callee,/SCENEWORKS_INFERENCE_READ_TOKEN:\n        required: false/);assert.match(callee,/group: h3-finetune-terminal-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+});
+test('actual reusable preflight rejects source-ref drift before product execution without a main activation prerequisite',async t=>{
+  const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),code=/node --input-type=module -e '\n([\s\S]*?)\n          '/.exec(workflow)?.[1];assert.ok(code);
+  assert.doesNotMatch(code,/workflow.*register|default.*branch|gh workflow|activation/);
+  const dir=await mkdtemp(path.join(os.tmpdir(),'h3-dispatch-unit-fake-'));t.after(()=>rm(dir,{recursive:true,force:true}));const file=path.join(dir,'plan.json');await writeFile(file,JSON.stringify({sceneworks:sw,inference:inf,output:dir,cases:[{id:'mlx.artifact.0',backend:'mlx'}]}));
+  const env={...process.env,PLAN:file,OUTPUT:dir,CASE_ID:'mlx.artifact.0',BACKEND:'mlx',EXPECTED_RUNNER:'unit_fake_runner',RUNNER_NAME:'unit_fake_runner',SW_SHA:sw,INF_SHA:inf,GITHUB_SHA:sw};
+  const good=spawnSync(process.execPath,['--input-type=module','-e',code],{env,encoding:'utf8'});assert.equal(good.status,0,good.stderr);
+  const bad=spawnSync(process.execPath,['--input-type=module','-e',code],{env:{...env,GITHUB_SHA:inf},encoding:'utf8'});assert.equal(bad.status,1);assert.match(bad.stderr,/caller workflow commit/);
+});
+test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
+  const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
+  for(const name of ['h3-finetune-terminal.test.mjs','h3-finetune-terminal-cases.test.mjs','h3-finetune-terminal-runtime.test.mjs'])assert.ok(p.scripts.check.includes(`scripts/${name}`));
+  assert.doesNotMatch(p.scripts.check,/h3-finetune-terminal(?:-runtime)?\.mjs\s+(?:run-case|api|numeric)|gh workflow run/);
 });
 test('delivery records reject old CI, wrong main pin and unresolved limitations', async t => {
   const { p } = await fixture(t);
