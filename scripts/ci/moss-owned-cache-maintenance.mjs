@@ -172,7 +172,8 @@ export async function maintain(env, io) {
     const cacheInventory = validateTree(await io.inspect(from), from);
     const dest = validateTree(await io.inspect(target), target);
     const freeBeforeCopy = await io.volume();
-    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (item.run !== original.run || item.metadata?.completeProjection));
+    // Completeness is a property of the projection, never of which target cache was selected.
+    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (item.run === '40163530825' && item.metadata?.completeProjection === true)));
     const projectionReserveBytes = Math.max(0, ...completeProjections.map(item => item.inventory.bytes));
     const rebuildReserveBytes = 4 * 1024 ** 3;
     const requiredFreeBytes = cacheInventory.bytes + projectionReserveBytes + rebuildReserveBytes;

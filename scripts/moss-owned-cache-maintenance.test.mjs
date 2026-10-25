@@ -161,3 +161,20 @@ test('fixed R10 cache copy requires original artifact binary SHA and proved comp
   const low=fixture({r10Cache:true,freeBytes:1});await maintain(env,low.io);assert.equal(low.mutations.some(item=>item[0]==='copy'),false);assert.equal(low.roots.has(low.from),true);
   const copied=fixture({r10Cache:true});copied.io.hash=async file=>file.startsWith(copied.to)?'0'.repeat(64):OWNED_RUNS[3].cacheBinarySha256;await assert.rejects(()=>maintain(env,copied.io),/copied cache binary differs/);
 });
+
+test('mixed cache selection never promotes an incomplete R10 or unproved R6 projection',async()=>{
+  for(const scenario of ['r6-fallback-r10-incomplete','r6-fallback-r10-target-unsafe','r10-selected-r6-unproved','r10-selected-r6-only']) {
+    const r10Selected=scenario.startsWith('r10-selected'),f=fixture({r10Cache:r10Selected});
+    for(const binding of OWNED_RUNS.slice(0,2))f.roots.delete(path.join(binding.root,'hf'));
+    if(!r10Selected)f.roots.delete(path.join(OWNED_RUNS[2].root,'hf'));
+    if(scenario==='r10-selected-r6-only')f.roots.delete(path.join(OWNED_RUNS[3].root,'hf'));
+    else {const observe=f.io.metadata;f.io.metadata=async runtime=>{const proof=await observe(runtime);proof.entries.pop();return proof;};}
+    if(scenario==='r6-fallback-r10-target-unsafe'){const inspect=f.io.inspect;f.io.inspect=async root=>root===path.join(OWNED_RUNS[3].root,'target')?{...tree(root),reparsePoints:1}:inspect(root);}
+    const receipt=await maintain(env,f.io);assert.match(receipt.cache.state,/insufficient-proved/,scenario);assert.equal(receipt.cache.projectionReserveBytes,0,scenario);assert.equal(f.mutations.some(item=>item[0]==='copy'),false,scenario);assert.equal(f.roots.has(f.from),true,scenario);
+  }
+  // The explicit historical R4 policy can still provide the reserve for either selected target.
+  for(const r10Cache of [false,true]) {
+    const f=fixture({r10Cache});f.roots.delete(path.join(OWNED_RUNS[1].root,'hf'));f.roots.delete(path.join(OWNED_RUNS[2].root,'hf'));f.roots.delete(path.join(OWNED_RUNS[3].root,'hf'));
+    const receipt=await maintain(env,f.io);assert.equal(receipt.cache.projectionReserveBytes,100);assert.ok(f.mutations.some(item=>item[0]==='copy'));
+  }
+});
