@@ -983,11 +983,12 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
 fn imported_companion_config_mismatches_are_refused_not_defaulted() {
     let tiers = minimax_h3_tier_root("mm_mismatch_", &["q4"], &["transformer", "transformer_ref"]);
     let base = minimax_h3_base_root("mm_mismatch_base_");
-    let encoder = tiers.path().join("q4/text_encoder");
-    let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
-        &minimax_h3_data_dir(tiers.path()),
-        "mismatch_test",
-    );
+    let data = minimax_h3_data_dir(tiers.path());
+    let imported =
+        crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(&data, "mismatch_test");
+    let bound_base = crate::minimax_h3_import_fixture::shared_component_snapshot(&data);
+    let encoder =
+        crate::minimax_h3_import_fixture::tier_component_snapshot(&data).join("q4/text_encoder");
     for (file, pointer, value) in [
         (
             encoder.join("config.json"),
@@ -995,27 +996,29 @@ fn imported_companion_config_mismatches_are_refused_not_defaulted() {
             json!(4096),
         ),
         (
-            base.path().join("vae/config.json"),
+            bound_base.join("vae/config.json"),
             "/temporal_downsample_factors",
             json!([1, 1, 1, 1, 1, 1]),
         ),
         (
-            base.path().join("audio_vae/config.json"),
+            bound_base.join("audio_vae/config.json"),
             "/sampling_rate",
             json!(16000),
         ),
         (
-            base.path().join("tokenizer/tokenizer.json"),
+            bound_base.join("tokenizer/tokenizer.json"),
             "/added_tokens/0/id",
             json!(42),
         ),
         (
-            base.path().join("tokenizer/tokenizer_config.json"),
+            bound_base.join("tokenizer/tokenizer_config.json"),
             "/additional_special_tokens/0",
             json!("</d>"),
         ),
     ] {
-        crate::minimax_h3_import_fixture::write_shared_configs(base.path(), &encoder);
+        // Restore exactly the committed fixture bytes, then mutate the ACTUAL bound source.
+        // Never recapture the declaration here: that would authorize the mismatch under test.
+        crate::minimax_h3_import_fixture::restage_component_snapshots(&data);
         let mut config: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         *config.pointer_mut(pointer).unwrap() = value;
         std::fs::write(&file, config.to_string()).unwrap();
@@ -1073,7 +1076,13 @@ fn native_and_sharded_managed_and_linked_sources_preserve_explicit_partition_ope
                         sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&data);
                     let root = plans.approve_root(library.path()).unwrap();
                     let compiled = plans
-                        .compile_linked(&root.root_id, "arbitrary-checkpoint")
+                        .compile_linked_with_context(
+                            &root.root_id,
+                            "arbitrary-checkpoint",
+                            crate::minimax_h3_import_fixture::captured_component_context(
+                                &data, &entry,
+                            ),
+                        )
                         .unwrap();
                     entry.remove("paths");
                     entry.insert("importPlan".into(),json!({"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}));
@@ -1370,8 +1379,12 @@ fn provider_stages_the_persisted_weight_only_config_and_source_owned_config_wins
         if !source_owned {
             std::fs::remove_file(&config_path).unwrap();
         }
-        let context = [("transformerConfig".into(), sceneworks_core::minimax_h3_import::config_binding(fallback.clone(),
-            json!({"kind":"selected-base","baseModel":"minimax_h3","repo":"fixture/config","revision":"1111111111111111111111111111111111111111","path":"bf16/transformer/config.json","componentTier":"bf16"})))].into();
+        let mut context = crate::minimax_h3_import_fixture::captured_component_context(
+            data.path(),
+            &imported.entry,
+        );
+        context.insert("transformerConfig".into(),sceneworks_core::minimax_h3_import::config_binding(fallback.clone(),
+            json!({"kind":"selected-base","baseModel":"minimax_h3","repo":"fixture/config","revision":"1111111111111111111111111111111111111111","path":"bf16/transformer/config.json","componentTier":"bf16"})));
         let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data.path());
         let compiled = store
             .compile_managed_with_context(
@@ -1461,6 +1474,12 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
     ]);
     for (tier, main_complete) in [("bf16", false), ("bf16", true), ("q4", false), ("q4", true)] {
         let data = tempfile::tempdir().unwrap();
+        // The pre-staged pinned and distracting-main snapshots must use the SAME guarded root
+        // that the import captures, not a root shadowed later by fixture registration.
+        let _component_cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data.path().to_owned(),
+            data.path().join("cache/source-library"),
+        );
         let snapshot = |repo: &str, revision: &str| {
             let cache = huggingface_repo_cache_path(data.path(), repo).unwrap();
             let dir = cache.join("snapshots").join(revision);
@@ -1492,10 +1511,14 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
         write_companion(&tier_a.join(format!("{tier}/transformer_ref")));
         std::fs::write(base_b.join("partial.txt"), b"mutable main is partial").unwrap();
         std::fs::write(tier_b.join("partial.txt"), b"mutable main is partial").unwrap();
-        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
-            data.path(),
-            "bound_h3",
-        );
+        let imported =
+            crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source_with_tier(
+                data.path(),
+                "bound_h3",
+                "dense",
+                "fl2va",
+                tier,
+            );
         let mut entry = imported.entry.clone();
         entry.insert("importComponentTier".into(), json!(tier));
         entry.insert(
