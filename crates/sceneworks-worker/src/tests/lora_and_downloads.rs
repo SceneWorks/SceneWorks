@@ -2609,7 +2609,14 @@ async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
         entry["capabilities"],
         json!(["text_to_video", "image_to_video", "first_last_frame"])
     );
-    assert!(entry.get("loraCompatibility").is_none());
+    // The stamped entry advertises exactly the H3 family the native imported route serves
+    // (terminal finding 1): a withdrawn advertisement (missing/empty families) or a family no
+    // imported-H3 lane can claim must fail here, not pass silently.
+    assert_eq!(
+        entry["loraCompatibility"]["families"],
+        json!(["minimax-h3"]),
+        "the imported H3 entry advertises its servable LoRA family: {entry:?}"
+    );
 
     // The binding is the persisted plan's own, re-derived through the store.
     let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(

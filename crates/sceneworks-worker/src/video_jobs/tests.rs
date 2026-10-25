@@ -1425,8 +1425,13 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
     let spec_preparation = funnel
         .find("let mut spec = video_load_spec(&input);")
         .expect("the native LoadSpec must be derived from VideoGenInput");
+    // The current preparation mechanism is the cooperative checked variant: it prepares the
+    // SAME native spec from the retained request state (identity + authority), under the
+    // worker's cancel-aware checkpoint, and hands (spec, prepared context) to the cache. Each
+    // literal below is load-bearing — dropping the retention input or the checkpoint closes this
+    // contract red rather than greening a widened grep.
     let sealed_preparation = funnel
-        .find("PreparedH3Load::prepare_authorized(")
+        .find("PreparedH3Load::prepare_authorized_with_check(")
         .expect("imported source authority must prepare the same native load spec");
     assert!(
         spec_preparation < sealed_preparation
@@ -1434,6 +1439,13 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
             && funnel.contains("(spec, prepared_h3_context),"),
         "the prepared source identity and native spec must reach the original request-aware \
          callback together, not an alternate cache route or an identity-free LoadSpec"
+    );
+    assert!(
+        funnel.contains("h3_preparation_checkpoint(")
+            && funnel.contains("input.imported_h3_authority.clone()")
+            && funnel.contains("verify_prepared_h3_component_closure("),
+        "the checked preparation must carry the retained request state: the cancellation \
+         checkpoint, the imported source authority, and the frozen component-closure comparison"
     );
     assert_eq!(
         funnel.matches("(spec, prepared_h3_context),").count(),
