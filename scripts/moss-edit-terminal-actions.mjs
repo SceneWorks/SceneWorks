@@ -600,10 +600,10 @@ export async function finalize(config) {
   config.guardRequests=await json(resolve(root,'resolved-guards.json'));
   const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');
   if(config.toolingRoot) {
-    const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
+    const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
     const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
     const retry=await latestRetry(root);
-    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
+    launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(root,'continuation-original-inventory.json'))).sha256,tooling,executionToolingSha:retry?.toolingSha??H18_RETRY_TOOLING_SHA,verificationToolingSha:config.toolingSha,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1}:{})};
   }
   await save(launchPath,launch);
   for(const entry of await filesUnder(config.reviewRoot)) {

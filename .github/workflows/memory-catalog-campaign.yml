@@ -88,7 +88,7 @@ on:
         type: string
         default: "{}"
       moss_reference:
-        description: "One fixed frozen-upstream Base/single reference: closed JSON phase upload|execute|upload-probe|execute-probe and exact artifact_run_id/artifact_id (null for uploads)."
+        description: "Closed frozen-upstream reference envelope: Base/single/probe or approved three-case quality suite; exact artifact IDs (null for uploads)."
         required: false
         type: string
         default: "{}"
@@ -309,7 +309,7 @@ jobs:
         id: reference
         run: node scripts/ci/moss-upstream-reference.mjs validate
       - name: Upload immutable small reference payload (no model weights or venv)
-        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe'
+        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe' || steps.reference.outputs.phase == 'upload-cases'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-payload-${{ github.run_id }}-${{ github.run_attempt }}
@@ -317,7 +317,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Download exact immutable reference payload
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.reference.outputs.artifact_id }}
@@ -335,16 +335,23 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
       - name: Run one reviewed fixed MPS reference after payload, runtime and model authentication
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases'
         run: node scripts/ci/moss-upstream-reference.mjs execute
       - name: Retain only reference outputs and authentication, separate from native evidence
-        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe')
+        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-result-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.reference.outputs.root }}/upstream-base-single.png
             ${{ steps.reference.outputs.root }}/upstream-base-single.diagnostic.json
+            ${{ steps.reference.outputs.root }}/upstream-base-four.png
+            ${{ steps.reference.outputs.root }}/upstream-base-four.diagnostic.json
+            ${{ steps.reference.outputs.root }}/upstream-sft-single.png
+            ${{ steps.reference.outputs.root }}/upstream-sft-single.diagnostic.json
+            ${{ steps.reference.outputs.root }}/upstream-sft-four.png
+            ${{ steps.reference.outputs.root }}/upstream-sft-four.diagnostic.json
+            ${{ steps.reference.outputs.root }}/suite-summary.json
             ${{ steps.reference.outputs.root }}/authentication.json
             ${{ steps.reference.outputs.root }}/execution.log
             ${{ steps.reference.outputs.root }}/probe-authentication.json

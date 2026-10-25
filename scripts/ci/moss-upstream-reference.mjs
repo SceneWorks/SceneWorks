@@ -52,6 +52,8 @@ async function execute(root,payload){
   await new Promise((done,fail)=>{const child=spawn(runtime.launcher,['-B',resolve(payload,'reference_diagnostic.py'),'--snapshot-view',view,'--device','mps','--output',output,'--execute-reviewed'],{cwd:payload,env:{...process.env,PYTHONPATH:'',PYTHONDONTWRITEBYTECODE:'1',PYTHONPYCACHEPREFIX:resolve(root,'pycache'),HF_HOME:resolve(root,'hf'),HF_MODULES_CACHE:resolve(root,'modules'),TORCH_HOME:resolve(root,'torch'),XDG_CACHE_HOME:resolve(root,'cache'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',PYTORCH_ENABLE_MPS_FALLBACK:'0',CUDA_VISIBLE_DEVICES:'',OMP_NUM_THREADS:'1'},stdio:['ignore','pipe','pipe']});child.stdout.pipe(log,{end:false});child.stderr.pipe(log,{end:false});child.on('error',fail);child.on('close',code=>{log.end();code===0?done():fail(Error(`fixed reference exited ${code}`));});});
 }
 async function main(){
+  const requested=JSON.parse(process.env.MOSS_REFERENCE??'{}');
+  if(['upload-cases','execute-cases'].includes(requested.phase))return (await import('./moss-upstream-quality.mjs')).main();
   check(process.env.GITHUB_ACTIONS==='true'&&process.env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','registered Mac Actions route only');
   const value=envelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);
   const root=resolve(BASE,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);check(/^[1-9][0-9]+$/.test(process.env.GITHUB_RUN_ID)&&/^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT),'actual Actions identity required');

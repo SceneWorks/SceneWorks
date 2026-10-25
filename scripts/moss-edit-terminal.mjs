@@ -8,6 +8,7 @@ import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fil
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
 import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import {loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
 const encode = value => encodeURIComponent(value);
@@ -78,6 +79,10 @@ async function load(configPath) {
     const tooling = config.repair.tooling;
     requireThat(tooling?.sourceRoot && /^[a-f0-9]{40}$/.test(tooling.head ?? '') && canonical(treeIdentity(tooling.sourceRoot)) === canonical(tooling.source) && tooling.head === tooling.source.head, 'continuation tooling checkout changed');
     requireThat(resolve(tooling.files?.harness) === fileURLToPath(import.meta.url) && resolve(tooling.files?.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)) && resolve(tooling.files?.browserDriver) === fileURLToPath(new URL('./moss-edit-terminal-browser.mjs',import.meta.url)) && resolve(tooling.files?.browserControls) === fileURLToPath(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url)), 'continuation did not execute its declared tooling');
+    if(config.repair.verificationToolingSha){
+      requireThat(config.repair.verificationToolingSha===tooling.head&&/^[a-f0-9]{40}$/.test(config.repair.executionToolingSha??'')&&config.repair.executionToolingSha!==tooling.head&&resolve(tooling.files?.qualityAmendment)===fileURLToPath(new URL('./lib/moss-edit-quality-amendment.mjs',import.meta.url)),'separate H21 execution and H22 verification tooling identities required');
+      execFileSync('git',['-C',tooling.sourceRoot,'merge-base','--is-ancestor',config.repair.executionToolingSha,tooling.head]);
+    }
     for (const [name, path] of Object.entries(tooling.files)) requireThat(canonical(await fileIdentity(path)) === canonical(tooling.identities[name]), `continuation tooling ${name} changed`);
     requireThat(resolve(config.files.harness) === resolve(config.sources.sceneworks,'scripts/moss-edit-terminal.mjs') && resolve(config.files.harnessLibrary) === resolve(config.sources.sceneworks,'scripts/lib/moss-edit-terminal.mjs'), 'continuation displaced frozen production protocol files');
   } else requireThat(resolve(config.files.harness) === fileURLToPath(import.meta.url) && resolve(config.files.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)), 'local binding must identify the protocol source actually executing');
@@ -633,7 +638,7 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
         }
         previous=current;
       }
-      requireThat(previous.toolingSha===repair.tooling.head&&!(await readdir(state.root)).some(name=>/^continuation-retry-[0-9]+\.json$/.test(name)&&Number(name.slice('continuation-retry-'.length,-'.json'.length))>(repair.retryOrdinal??1)),'final tooling or chained retry count changed');
+      requireThat(previous.toolingSha===(repair.executionToolingSha??repair.tooling.head)&&!(await readdir(state.root)).some(name=>/^continuation-retry-[0-9]+\.json$/.test(name)&&Number(name.slice('continuation-retry-'.length,-'.json'.length))>(repair.retryOrdinal??1)),'final execution tooling or chained retry count changed');
     }
     requireThat(adjudication.version===VERSION&&adjudication.name==='r16-checker-recovery'&&adjudication.rowId==='advanced-mlx-sft'&&adjudication.candidateId===state.lock.candidateId&&adjudication.sourceSha===state.lock.sources.sceneworks.head&&adjudication.inferenceSha===state.lock.sources.inference.head&&adjudication.toolingSha===(repair.previousToolingSha??repair.tooling.head)&&adjudication.inventorySha256===repair.inventorySha256&&adjudication.lockSha256===digest(state.lock),'checker adjudication substituted candidate/source/tooling');
     const id='advanced-mlx-sft',dir=resolve(state.root,'rows',id),attempt=resolve(state.root,'attempts/mlx'),failure=await json(resolve(dir,'failure.json')),attemptFailure=await json(resolve(attempt,`${id}.failure.json`)),start=await json(resolve(attempt,`${id}.start.json`)),receipt=await json(resolve(dir,'receipt.json')),job=await json(resolve(dir,'terminal-job.json')),readback=await json(resolve(dir,'recovery-job-readback.json')),proof=await json(resolve(attempt,`${id}.reconciliation.json`)),resolution=await json(resolve(attempt,`${id}.resolution.json`));
@@ -649,6 +654,8 @@ export function acceptedRecoveryFailure(acceptedRecovery,backend,name) {
 async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
   const requireEvidence = async (name, check) => { try { await check(); } catch (error) { findings.push({ item: name, state: ['ENOENT','MOSS_AWAITING_RESOLUTION'].includes(error.code) ? 'AWAITING' : 'FAIL', reason: error.code === 'ENOENT' ? 'required evidence missing' : error.message }); } };
+  let qualityComparison=null;
+  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{executionToolingSha:state.config.repair?.executionToolingSha,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
   let acceptedRecovery=false;
   if(state.config.repair)await requireEvidence('r16-original-checker-recovery',async()=>{acceptedRecovery=await validateRecoveryAdjudication(state);});
   for (const backend of ['mlx','cuda']) await requireEvidence(`dispatch-${backend}`,async () => {
@@ -706,7 +713,11 @@ async function verify(configPath, retained = false) {
     requireThat(raw.length===samples.samples.length&&raw.every((item,index)=>item.device.uuid===receipt.device.uuid&&item.raw&&canonical({at:item.at,phase:item.phase,usedBytes:item.usedBytes})===canonical(samples.samples[index])),'raw whole-device observations differ from reported samples');
     const memory = memorySummary(samples, job.id);
     requireThat(Date.parse(samples.samples[0].at) <= Date.parse(job.startedAt) && Date.parse(samples.samples.at(-1).at) >= Date.parse(job.completedAt ?? job.canceledAt) && samples.samples.some(s => s.phase === 'active' && Date.parse(s.at) >= Date.parse(job.startedAt) && Date.parse(s.at) <= Date.parse(job.completedAt ?? job.canceledAt)), 'whole-device samples did not bracket actual worker execution');
-    if (row.anchors) requireThat(reviewVerdict(row, await json(resolve(path, 'quality-review.json')), receipt.outputs) === 'PASS', 'required visual anchor failed');
+    if (row.anchors) {
+      const reviewPath=resolve(path,'quality-review.json'),review=await json(reviewPath);
+      const verdict=qualityComparison?compareQualityRow(row,review,(await fileIdentity(reviewPath)).sha256,receipt.outputs,qualityComparison):reviewVerdict(row,review,receipt.outputs);
+      requireThat(verdict==='PASS','required visual quality comparison failed');
+    }
     if (row.anchors) {
       const pairs = await json(resolve(path, 'visual-pairs.json'));
       requireThat(pairs.lockSha256 === digest(state.lock) && pairs.rowId === row.id && pairs.inputPairs?.length === row.refs.length && pairs.detailCrops?.length >= 3, 'retain full original/output pairs plus at least three detail crops');
