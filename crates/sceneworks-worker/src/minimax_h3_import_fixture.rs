@@ -132,6 +132,19 @@ pub fn stage_managed_minimax_h3_import_source(
     layout: &str,
     partition: &str,
 ) -> ManagedMiniMaxH3Import {
+    stage_managed_minimax_h3_import_source_with_tier(data_dir, model_id, layout, partition, "q4")
+}
+
+/// Select resident precision BEFORE the fixture's immutable plan is compiled, just as the import
+/// API does. Editing an entry's tier after commitment is deliberately not a legitimate import.
+pub fn stage_managed_minimax_h3_import_source_with_tier(
+    data_dir: &Path,
+    model_id: &str,
+    layout: &str,
+    partition: &str,
+    component_tier: &str,
+) -> ManagedMiniMaxH3Import {
+    assert!(matches!(component_tier, "q4" | "q8" | "bf16"));
     let cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new_if_unregistered(
         data_dir.to_owned(),
         data_dir.join("cache/fixture-hub"),
@@ -368,20 +381,8 @@ pub fn stage_managed_minimax_h3_import_source(
             .expect("stages");
     }
     let declaration = json!({"family":"minimax-h3","baseModel":if partition == "ref2va" {"minimax_h3_ref"} else {"minimax_h3"},
-        "minimaxH3Partition":partition,"importComponentTier":"q4","downloads":component_downloads("q4",partition)});
-    let mut context = sceneworks_core::model_artifacts::provenance::import_declaration_context(
-        declaration.as_object().unwrap(),
-    )
-    .unwrap();
-    context
-        .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
-        .unwrap()["componentClosure"] =
-        sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
-            data_dir,
-            declaration.as_object().unwrap(),
-            &|| Ok(()),
-        )
-        .unwrap();
+        "minimaxH3Partition":partition,"importComponentTier":component_tier,"downloads":component_downloads(component_tier,partition)});
+    let context = captured_component_context(data_dir, declaration.as_object().unwrap());
     let install = ingest
         .finalize_with_context(
             if matches!(
@@ -406,8 +407,8 @@ pub fn stage_managed_minimax_h3_import_source(
         "family": "minimax-h3",
         "baseModel": if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" },
         "minimaxH3Partition": partition,
-        "importComponentTier": "q4",
-        "downloads": component_downloads("q4", partition),
+        "importComponentTier": component_tier,
+        "downloads": component_downloads(component_tier, partition),
         "importPlan": {
             "checkpointId": install.checkpoint_id,
             "planId": install.compiled.plan.plan_id,
@@ -442,6 +443,36 @@ pub fn stage_managed_minimax_h3_import_source(
 pub const SHARED_REVISION: &str = "1111111111111111111111111111111111111111";
 pub const TIER_REVISION: &str = "2222222222222222222222222222222222222222";
 
+/// The same source-content capture fresh managed/linked imports perform. Use only at explicit
+/// fixture construction/recompilation, never in a render helper (which would bless drift).
+pub fn captured_component_context(
+    data_dir: &Path,
+    entry: &Map<String, Value>,
+) -> std::collections::BTreeMap<String, Value> {
+    use sceneworks_core::model_artifacts::provenance::{
+        capture_h3_component_closure_with_check, import_declaration_context, MODEL_DECLARATION_KEY,
+    };
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    assert!(
+        library.root().starts_with(data_dir.parent().unwrap()),
+        "component capture fixtures require a private per-data cache guard"
+    );
+    // Project the actual typed import declaration, not later catalog-derived codec annotations.
+    // Source quantization is independently derived and bound by the checkpoint inspector.
+    let declaration = json!({"family":entry.get("family"),"baseModel":entry.get("baseModel"),
+        "minimaxH3Partition":entry.get("minimaxH3Partition"),"importComponentTier":entry.get("importComponentTier"),
+        "downloads":entry.get("downloads")});
+    let declaration = declaration.as_object().unwrap();
+    let mut context =
+        import_declaration_context(declaration).expect("fixture declaration is valid");
+    context
+        .get_mut(MODEL_DECLARATION_KEY)
+        .expect("fixture declaration context")["componentClosure"] =
+        capture_h3_component_closure_with_check(data_dir, declaration, &|| Ok(()))
+            .expect("complete real fixture component closure");
+    context
+}
+
 /// The ACTUAL snapshot roots an import binds its shared components against: the private
 /// source-library copies [`stage_component_snapshots`] materialized inside the data dir, not the
 /// operator tier/base scratch trees a test happened to stage first. Mutating or asserting against
@@ -467,6 +498,12 @@ fn component_snapshot(data_dir: &Path, repo: &str, revision: &str) -> PathBuf {
 /// mutates or removes a bound component restores the exact bytes the import's frozen closure was
 /// captured against before its next case, so later cases never inherit earlier mutations.
 pub fn restage_component_snapshots(data_dir: &Path) {
+    assert!(
+        sceneworks_core::hf_home::model_source_library(data_dir)
+            .root()
+            .starts_with(data_dir.parent().unwrap()),
+        "fixture reset must never address a real/shared HF cache"
+    );
     for repo in ["MiniMaxAI/MiniMax-H3", "SceneWorks/minimax-h3-mlx"] {
         let root = sceneworks_core::hf_home::model_source_library(data_dir)
             .repository_root(repo)
