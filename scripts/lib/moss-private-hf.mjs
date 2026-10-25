@@ -40,6 +40,31 @@ export async function sealPrivateHf(config) {
   const receipt={...identity(config),root:config.root,hfHome:config.hfHome,runtime:await fileIdentity(resolve(config.root,'runtime.json')),files:await privateHfIntegrity(config)};
   await writeFile(resolve(config.root,'hf-owner.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
+// The corrected CUDA binary uses the same frozen 43 installed packages. Move
+// the last stopped private owner into the new build namespace on this volume;
+// never fall back to a second projection of the shared model store.
+export async function adoptStoppedCudaBuildPrivateHf(config,artifactRoot,old,continuity,artifactIdentity) {
+  owned(config,'build');
+  requireThat(config.backend==='cuda'&&old?.runId>0&&old?.attempt>0&&old?.artifactId>0&&old?.originalRunId>0&&old?.originalAttempt>0&&old.runId!==old.originalRunId&&continuity?.oldSourceSha===old.sourceSha&&continuity?.oldInferenceSha===old.inferenceSha&&continuity?.sourceSha===config.sourceSha&&continuity?.inferenceSha===config.inferenceSha,'cross-candidate CUDA package owner or reviewed source pair missing');
+  const prior=await json(resolve(artifactRoot,'runtime.json')),transfer=await json(resolve(artifactRoot,'hf-transfer.json')),preparation=await json(resolve(artifactRoot,'cuda-package-preparation.json'));
+  const fromRoot=prior.root,from=prior.hfHome;
+  requireThat(basename(fromRoot)===`moss-execute-${old.runId}-${old.attempt}-cuda`&&from===resolve(fromRoot,'hf')&&prior.backend==='cuda'&&prior.candidateId===old.candidateId&&prior.sourceSha===old.sourceSha&&prior.inferenceSha===old.inferenceSha,'stopped CUDA artifact names another execution owner');
+  owned(prior,'execute');
+  requireThat(transfer.operation==='same-volume-stopped-CUDA-HF-adoption'&&transfer.to===from&&transfer.priorRunId>0&&transfer.priorAttempt>0&&transfer.priorArtifactId>0&&transfer.originalRunId===old.originalRunId&&transfer.originalAttempt===old.originalAttempt&&transfer.candidateId===old.candidateId&&transfer.sourceSha===old.sourceSha&&transfer.inferenceSha===old.inferenceSha&&canonical(transfer.before)===canonical(transfer.after),'stopped CUDA owner lacks its authenticated original transfer');
+  const parentPath=resolve(artifactRoot,'stopped-cuda-hf-transfer.json'),parent=await json(parentPath);
+  requireThat(canonical(await fileIdentity(parentPath))===canonical(transfer.priorTransfer)&&parent.to===transfer.from&&parent.originalRunId===old.originalRunId&&parent.originalAttempt===old.originalAttempt&&canonical(parent.after)===canonical(transfer.before)&&canonical(parent.before)===canonical(parent.after)&&canonical(parent.origin??{originalBuildHf:parent.from,originalOwner:parent.originalOwner,initialTransfer:transfer.priorTransfer})===canonical(transfer.origin),'stopped CUDA transfer chain changed');
+  requireThat(preparation.mode==='stopped-execution-HF'&&preparation.candidateId===old.candidateId&&preparation.sourceSha===old.sourceSha&&preparation.inferenceSha===old.inferenceSha&&preparation.stoppedArtifact?.runId===transfer.priorRunId&&preparation.stoppedArtifact?.attempt===transfer.priorAttempt&&preparation.stoppedArtifact?.artifactId===transfer.priorArtifactId&&canonical(preparation.transfer)===canonical(await fileIdentity(resolve(artifactRoot,'hf-transfer.json'))),'stopped CUDA package preparation changed');
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])requireThat(canonical(await fileIdentity(resolve(artifactRoot,name)))===canonical(await fileIdentity(resolve(fromRoot,name))),`stopped CUDA ${name} differs from archived bytes`);
+  requireThat(canonical(prior.packageFiles.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256})))&&canonical(transfer.after.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256})))&&config.packageFiles.length===43,'corrected CUDA package identities changed');
+  await confined(config.root);requireThat(await absent(config.hfHome),'new build private HF destination already exists');
+  requireThat((await lstat(from)).dev===(await lstat(config.root)).dev,'stopped CUDA private HF is not on the new build volume');
+  const before=await privateHfIntegrity({...prior,hfHome:from});
+  requireThat(canonical(before)===canonical(transfer.after),'stopped CUDA private package bytes changed');
+  await rename(from,config.hfHome);
+  const after=await privateHfIntegrity(config);requireThat(canonical(after)===canonical(before),'cross-candidate package ownership transfer changed bytes');
+  const receipt={operation:'same-volume-stopped-CUDA-to-corrected-build',old:{...old,artifactIdentity},current:identity(config),sourceContinuity:continuity,from,to:config.hfHome,priorRuntime:await fileIdentity(resolve(artifactRoot,'runtime.json')),priorTransfer:await fileIdentity(resolve(artifactRoot,'hf-transfer.json')),priorPreparation:await fileIdentity(resolve(artifactRoot,'cuda-package-preparation.json')),parentTransfer:await fileIdentity(parentPath),before,after};
+  await writeFile(resolve(config.root,'cuda-rebase-hf-transfer.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
+}
 export async function transferPrivateHf(config,installedInventory,inventoryIdentity) {
   const match=owned(config,'execute'),from=installedInventory.hfHome,fromRoot=dirname(from);
   requireThat(basename(fromRoot)===`moss-build-${match[1]}-${match[2]}-${config.backend}`&&basename(from)==='hf','installed HF source must name this exact run/backend private build');
@@ -179,7 +204,7 @@ export function mossArtifactRoute(key,path,rawBase,platform=process.platform) {
 export async function normalizeMossEnvironment(env) {
   const workspace=await realpath(env.GITHUB_WORKSPACE),base=resolve(workspace,'..','moss-sc-26752'),rawBase=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752'),result={};
   await mkdir(base,{recursive:true});await confined(base,{descendants:false});
-  for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_BUNDLE','MOSS_PRIOR_MLX','MOSS_SUPPLEMENT'])if(env[key]) {
+  for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_OLD_BUILDS','MOSS_BUNDLE','MOSS_PRIOR_MLX','MOSS_SUPPLEMENT','MOSS_STOPPED_CUDA'])if(env[key]) {
     const {external}=mossArtifactRoute(key,env[key],rawBase);
     if(external) {
       const mount=resolve(MAC_MOSS_BASE,'..');await confined(mount,{descendants:false});

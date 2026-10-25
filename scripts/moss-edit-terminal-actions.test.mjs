@@ -11,9 +11,10 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
-import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
+import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
+import { validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
 globalThis.fetch=async()=>{throw Error('LIVE_NETWORK_FORBIDDEN');};
@@ -452,6 +453,18 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.equal(repaired(cudaOnly).mlx_artifact_id,'654');
   for(const change of [{mlx_artifact_id:''},{mlx_run_id:'789'},{mlx_run_attempt:'0'},{mlx_tooling_sha:tooling},{cuda_hf_run_id:''},{cuda_hf_run_id:'789'},{cuda_hf_run_attempt:'0'},{cuda_hf_artifact_id:''},{retry_run_id:'999'},{original_inventory_path:continuation.original_inventory_path}])assert.throws(()=>repaired({...cudaOnly,...change}),/completed MLX and stopped CUDA HF artifacts/);
   assert.throws(()=>repaired({...continuation,mlx_run_id:'987'}),/no review\/native override/);
+  const paired={...execute,phase:'cuda-rebase',execution_run_id:'789',execution_run_attempt:'1',mlx_run_id:'987',mlx_run_attempt:'1',mlx_artifact_id:'654',mlx_tooling_sha:'d'.repeat(40),mlx_candidate_id:'old-candidate',mlx_source_sha:'e'.repeat(40),mlx_inference_sha:'f'.repeat(40),cuda_hf_run_id:'246',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'135'};
+  assert.equal(validate(paired).cuda_hf_artifact_id,'135');
+  assert.throws(()=>validate({...paired,mlx_candidate_id:paired.candidate_id}),/independent Mac/);
+  assert.throws(()=>validate({...paired,cuda_hf_artifact_id:''}),/stopped HF/);
+  assert.throws(()=>validate({...paired,mlx_source_sha:identity.sourceSha}),/source pair/);
+  const aggregate={...paired,phase:'verify-rebase',native_run_id:'123',native_run_attempt:'1',review_artifact_id:'111',review_run_id:'222'};
+  assert.equal(validate(aggregate).native_run_id,'123');
+  const old={candidateId:'old-candidate',sourceSha:'e'.repeat(40),inferenceSha:'f'.repeat(40),lockSha256:'1'.repeat(64),verifiedRows:25,verifiedGuards:29},current={candidateId:'new-candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40)};
+  const record={name:'sc-26757-corrected-cuda-candidate/v1',old,current,continuity:{oldSourceSha:old.sourceSha,oldInferenceSha:old.inferenceSha,sourceSha:current.sourceSha,inferenceSha:current.inferenceSha}};
+  assert.equal(validateCudaRebaseRecord(record,old,current),record);
+  assert.throws(()=>validateCudaRebaseRecord({...record,current:{...current,candidateId:old.candidateId}},old,{...current,candidateId:old.candidateId}),/identity changed/);
+  for(const mutation of [{review_artifact_id:''},{native_run_id:''},{mlx_run_id:'789'},{cuda_hf_run_id:'789'},{retry_inventory_path:'foreign'}])assert.throws(()=>validate({...aggregate,...mutation}));
   assert.equal(repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha,native_run_id:'789',native_run_attempt:'1'}).native_run_id,'789');
   assert.throws(()=>repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha}),/original native run/);
   for(const value of [null,[],{}, {...execute,extra:'unexpected'},{...execute,bundle_run_id:123},{...execute,bundle_artifact_id:'../other'},{...execute,candidate_id:'../other'},{...execute,bundle_manifest_sha256:'wrong'},{...execute,phase:'build'},{...execute,execution_run_id:'789'},{...verify,execution_run_id:''},{...verify,review_artifact_id:''},{...verify,execution_run_attempt:'0'}])assert.throws(()=>validate(value));
@@ -466,15 +479,16 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   for(const backend of ['mlx','candle'])assert.ok(dispatcher.includes(`(inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == '${backend}'`));
   for(const profile of ['qwen-image-2-1-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights'])assert.ok(dispatcher.includes(`inputs.profile == '${profile}'`));
   assert.match(workflow,/workflow_call:/);assert.match(workflow,/SCENEWORKS_INFERENCE_READ_TOKEN:\s+required: false/);
-  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,6);
+  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,7);
   const cudaContinuation=workflow.match(/^  continue-cuda:\n([\s\S]*?)(?=^  verify-retained:)/m)?.[1];
   assert.ok(cudaContinuation);assert.doesNotMatch(cudaContinuation,/shell:\s*bash/);
   assert.match(cudaContinuation,/name: Validate bundle and configure private execution\/build roots\s+shell: powershell/);
   assert.match(cudaContinuation,/\$env:MOSS_REHYDRATE_ROOT/);assert.match(cudaContinuation,/\$LASTEXITCODE -ne 0/);
+  assert.match(cudaContinuation,/if \('\$\{\{ inputs\.phase \}\}' -ne 'cuda-rebase'\) \{\s+node tooling\/scripts\/moss-edit-terminal-actions\.mjs configure "\$env:MOSS_BUNDLE\/campaign\.json" "\$env:MOSS_SOURCE" "\$env:MOSS_INFERENCE" "\$env:MOSS_REHYDRATE_ROOT"/);
   assert.match(cudaContinuation,/if: inputs\.phase == 'continue-cuda'[\s\S]*?artifact-ids: \$\{\{ inputs\.mlx_artifact_id \}\}/);
   assert.match(cudaContinuation,/artifact-ids: \$\{\{ inputs\.cuda_hf_artifact_id \}\}[\s\S]*?prior-cuda[\s\S]*?Adopt authenticated stopped CUDA private packages/);
   assert.match(workflow,/supplement-mlx-handoff:[\s\S]*?stage-completed-mlx-handoff[\s\S]*?include-hidden-files: true/);
-  assert.match(cudaContinuation,/needs: \[continue-mlx, supplement-mlx-handoff\][\s\S]*?needs\.supplement-mlx-handoff\.result == 'success'/);
+  assert.match(cudaContinuation,/needs: \[continue-mlx, supplement-mlx-handoff, build-native\][\s\S]*?needs\.supplement-mlx-handoff\.result == 'success'/);
   assert.match(cudaContinuation,/name: moss-mlx-hidden-handoff-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow,/test "\$RUNNER_NAME" = nax-macos/);assert.match(workflow,/run-id: \$\{\{ inputs.review_run_id \|\| inputs.bundle_run_id \}\}/);
 });
@@ -709,6 +723,30 @@ test('stopped CUDA HF survives legacy and top-level authenticated ownership hops
   for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json', 'stopped-cuda-hf-transfer.json'])await writeFile(resolve(thirdArtifact,name),await readFile(resolve(nextRoot,name)));
   const continued=await adoptStoppedExecutionPrivateHf(third,thirdArtifact,inventory,123,1,987,1,852);
   assert.deepEqual(continued.origin,receipt.origin);assert.equal(continued.priorRunId,987);await assert.rejects(()=>lstat(next.hfHome),{code:'ENOENT'});
+});
+test('corrected CUDA build adopts only an authenticated stopped 43-file owner without copying',async t=>{
+  const {base,build,run,installed}=await privateHfFixture(t,'cuda'),parent=resolve(base,'moss-sc-26752'),priorRoot=resolve(parent,'moss-execute-456-1-cuda'),stoppedRoot=resolve(parent,'moss-execute-789-1-cuda'),newBuildRoot=resolve(parent,'moss-build-999-1-cuda'),artifactRoot=resolve(base,'stopped-artifact');
+  for(const path of [priorRoot,stoppedRoot,newBuildRoot,artifactRoot])await mkdir(path);
+  const prior={...run,root:priorRoot,hfHome:resolve(priorRoot,'hf')},stopped={...run,root:stoppedRoot,hfHome:resolve(stoppedRoot,'hf')},originalPackages={byteLength:12,sha256:sha('old native package receipt')};
+  await save(resolve(priorRoot,'runtime.json'),prior);
+  await adoptOriginalPrivateHf(prior,installed,originalPackages,123,1);
+  await save(resolve(priorRoot,'cuda-package-preparation.json'),{mode:'original-sealed-HF',originalRunId:123,originalAttempt:1,candidateId:prior.candidateId,sourceSha:prior.sourceSha,inferenceSha:prior.inferenceSha,originalNativePackages:originalPackages,transfer:await fileIdentity(resolve(priorRoot,'hf-transfer.json'))});
+  const firstArtifact=resolve(base,'first-artifact');await mkdir(firstArtifact);for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await writeFile(resolve(firstArtifact,name),await readFile(resolve(priorRoot,name)));
+  await save(resolve(stoppedRoot,'runtime.json'),stopped);
+  const transfer=await adoptStoppedExecutionPrivateHf(stopped,firstArtifact,originalPackages,123,1,456,1,654);
+  await save(resolve(stoppedRoot,'cuda-package-preparation.json'),{mode:'stopped-execution-HF',originalRunId:123,originalAttempt:1,candidateId:stopped.candidateId,sourceSha:stopped.sourceSha,inferenceSha:stopped.inferenceSha,originalNativePackages:originalPackages,transfer:await fileIdentity(resolve(stoppedRoot,'hf-transfer.json')),stoppedArtifact:{runId:456,attempt:1,artifactId:654}});
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await writeFile(resolve(artifactRoot,name),await readFile(resolve(stoppedRoot,name)));
+  await writeFile(resolve(artifactRoot,'stopped-cuda-hf-transfer.json'),await readFile(resolve(firstArtifact,'hf-transfer.json')));
+  const current={...build,root:newBuildRoot,hfHome:resolve(newBuildRoot,'hf'),candidateId:'corrected',sourceSha:'c'.repeat(40),inferenceSha:'d'.repeat(40)},old={candidateId:stopped.candidateId,sourceSha:stopped.sourceSha,inferenceSha:stopped.inferenceSha,runId:789,attempt:1,artifactId:753,originalRunId:123,originalAttempt:1},continuity={oldSourceSha:old.sourceSha,oldInferenceSha:old.inferenceSha,sourceSha:current.sourceSha,inferenceSha:current.inferenceSha,auditSha256:sha('reviewed continuity')};
+  const model=resolve(stopped.hfHome,stopped.packageFiles[0].file),before=await lstat(model);
+  await assert.rejects(()=>adoptStoppedCudaBuildPrivateHf({...current,packageFiles:current.packageFiles.map((item,index)=>index?item:{...item,sha256:sha('changed')})},artifactRoot,old,continuity,{artifactId:753}),/package identities changed/);
+  assert.equal((await lstat(model)).ino,before.ino);
+  const receipt=await adoptStoppedCudaBuildPrivateHf(current,artifactRoot,old,continuity,{artifactId:753});
+  assert.equal(receipt.operation,'same-volume-stopped-CUDA-to-corrected-build');assert.equal(receipt.before.length,43);assert.deepEqual(receipt.before,receipt.after);
+  assert.equal((await lstat(resolve(current.hfHome,current.packageFiles[0].file))).ino,before.ino);
+  await assert.rejects(()=>lstat(stopped.hfHome),{code:'ENOENT'});
+  await save(resolve(newBuildRoot,'runtime.json'),current);const owner=await sealPrivateHf(current);assert.equal(owner.candidateId,'corrected');assert.equal(owner.files.length,43);
+  assert.deepEqual(transfer.after,receipt.before);
 });
 test('all 43 installed packages transfer by rename, retaining original receipts and exclusive adapter ownership',async t=>{
   const {build,run,installed}=await privateHfFixture(t),original=await readFile(resolve(build.root,'hf-owner.json')),before=await lstat(resolve(build.hfHome,installed.files[0].file));

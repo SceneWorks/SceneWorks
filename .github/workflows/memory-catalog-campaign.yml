@@ -422,6 +422,9 @@ jobs:
       mlx_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_run_attempt }}
       mlx_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_artifact_id }}
       mlx_tooling_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_tooling_sha }}
+      mlx_candidate_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_candidate_id }}
+      mlx_source_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_source_sha }}
+      mlx_inference_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).mlx_inference_sha }}
       cuda_hf_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).cuda_hf_run_id }}
       cuda_hf_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).cuda_hf_run_attempt }}
       cuda_hf_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).cuda_hf_artifact_id }}

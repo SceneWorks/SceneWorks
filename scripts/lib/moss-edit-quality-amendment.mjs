@@ -38,12 +38,12 @@ export function validateExecutionToolingCapture(capture,executionToolingSha,veri
   return true;
 }
 
-export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,finalExecutionOrdinal,verificationToolingSha,verificationSourceRoot}={}){
+export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,finalExecutionOrdinal,verificationToolingSha,verificationSourceRoot,cudaLockSha256}={}){
   const file=resolve(root,'quality-upstream-comparison.json');
   const comparison=await json(file).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
   if(!comparison)return null;
   requireThat(sha(await readFile(resolve(root,'quality-acceptance-amendment.md')))===AMENDMENT_SHA256,'approved quality amendment bytes changed');
-  requireThat(comparison.version==='sc-26757-upstream-comparison/v1'&&comparison.amendmentSha256===AMENDMENT_SHA256&&comparison.lockSha256===digest(lock),'quality comparison not bound to approved policy and frozen lock');
+  requireThat(comparison.version===(cudaLockSha256?'sc-26757-upstream-comparison-dual/v1':'sc-26757-upstream-comparison/v1')&&comparison.amendmentSha256===AMENDMENT_SHA256&&comparison.lockSha256===digest(lock)&&(!cudaLockSha256||comparison.cudaLockSha256===cudaLockSha256),'quality comparison not bound to approved policy and both frozen locks');
   const captureEntry=comparison.executionToolingCapture;
   requireThat(captureEntry?.file==='execution-tooling-capture.json'&&String(captureEntry.runId)==='40214209083'&&String(captureEntry.artifactId)==='12607298574'&&captureEntry.attempt===1&&historicalExecutionToolingSha==='2cd0363d59cb3eb0989bbb708000b6ffc907932a'&&verificationSourceRoot,'amended review requires actual H21 execution-tooling capture');
   const capture=await json(await identity(root,captureEntry));

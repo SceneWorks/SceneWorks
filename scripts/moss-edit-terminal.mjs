@@ -10,10 +10,16 @@ import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBin
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
 import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, postRowsGuardFrontier, postDmdGuardFrontier, correctedDmdRequest, lexicalParserRefusal, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import {loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
+import {cudaSourceContinuity} from './lib/moss-edit-cuda-rebase.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
 const encode = value => encodeURIComponent(value);
 const jobPath = id => `/api/v1/jobs/${encode(id)}`;
+async function correctedCudaPackageReuse(config,continuity) {
+  const path=resolve(dirname(config.files.toolchain),'private-hf-reuse.json'),receipt=await json(path),toolchain=await json(config.files.toolchain),old=config.stoppedCuda;
+  requireThat(toolchain.reusedPrivateHf&&canonical(await fileIdentity(path))===canonical(toolchain.reusedPrivateHf)&&receipt.operation==='same-volume-stopped-CUDA-to-corrected-build'&&receipt.old?.candidateId===old?.candidateId&&receipt.old?.sourceSha===old?.sourceSha&&receipt.old?.inferenceSha===old?.inferenceSha&&receipt.old?.runId===old?.runId&&receipt.old?.attempt===old?.attempt&&receipt.old?.artifactId===old?.artifactId&&receipt.old?.originalRunId===old?.originalRunId&&receipt.old?.originalAttempt===old?.originalAttempt&&receipt.old?.artifactIdentity?.sha256===old?.inventory?.sha256&&receipt.current?.candidateId===config.candidateId&&receipt.current?.sourceSha===continuity.sourceSha&&receipt.current?.inferenceSha===continuity.inferenceSha&&canonical(receipt.sourceContinuity)===canonical(continuity)&&Array.isArray(receipt.before)&&receipt.before.length===43&&canonical(receipt.before)===canonical(receipt.after),'source-paired CUDA build reused packages without authenticated stopped-owner continuity');
+  return {receipt:await fileIdentity(path),oldArtifact:receipt.old.artifactIdentity,packageCount:receipt.before.length};
+}
 const assetPath = (project, asset) => `/api/v1/projects/${encode(project)}/assets/${encode(asset)}`;
 const mediaPath = (project, path) => `/api/v1/projects/${encode(project)}/files/${path.split('/').map(encode).join('/')}`;
 function noReceipts(value) {
@@ -99,6 +105,9 @@ export function validateLexicalNonfinite(rawJson) {
 }
 export async function freeze(configPath) {
   const { config, root, plan } = await load(configPath);
+  const cudaRebase=config.cudaRebase?.name==='sc-26757-corrected-cuda-candidate/v1';
+  requireThat(!config.cudaRebase||cudaRebase&&config.localBackend==='cuda'&&config.cudaRebase.old?.lockSha256&&config.cudaRebase.old?.handoffSha256,'CUDA-only freeze requires the separately authenticated completed Mac producer');
+  if(cudaRebase)requireThat(canonical(config.cudaRebase.continuity)===canonical(cudaSourceContinuity({sceneworksRoot:config.sources.sceneworks,inferenceRoot:config.sources.inference,oldSourceSha:config.cudaRebase.old.sourceSha,oldInferenceSha:config.cudaRebase.old.inferenceSha,sourceSha:config.cudaRebase.current.sourceSha,inferenceSha:config.cudaRebase.current.inferenceSha,auditPath:config.cudaRebase.auditPath,auditSha256:config.cudaRebase.continuity.auditSha256})),'CUDA-only freeze lost its exact source continuity');
   requireThat(typeof config.candidateId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(config.candidateId),'actual stable campaign candidate ID required');
   validatePlan(plan, await json(resolve(root, 'inputs.original.json')));
   requireThat(config.approvedBy && [config.approvalEvidenceSha256, config.phase18ReviewSha256, config.inferencePreMergeReviewSha256].every(v => /^[a-f0-9]{64}$/.test(v ?? '')), 'coordinator approval, integrated requirements review and inference pre-merge source review identities required');
@@ -123,10 +132,11 @@ export async function freeze(configPath) {
   for (const name of ['harness', 'harnessLibrary', 'apiBinary', 'workerBinary', 'webPackage', 'packages', 'toolchain', 'numericalCarryForward']) requireThat(config.files[name], `missing ${name}`);
   requireThat(resolve(config.files.harness) === fileURLToPath(import.meta.url) && resolve(config.files.harnessLibrary) === fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url)), 'freeze the source actually executing this protocol');
   for (const [name, path] of Object.entries(config.files)) files[name] = await fileIdentity(path);
-  for (const backend of ['mlx','cuda']) artifacts[backend] = validateArtifactInventory(await json(config.artifactInventories[backend]),backend,sources);
+  for (const backend of (cudaRebase?['cuda']:['mlx','cuda'])) artifacts[backend] = validateArtifactInventory(await json(config.artifactInventories[backend]),backend,sources);
   requireThat(plan.cacheComparisonPolicy.implementationSha256 === files.harnessLibrary.sha256,'cache metric must freeze the actual source-owned implementation');
   const sharedFiles = Object.fromEntries(Object.entries(files).filter(([name]) => !BACKEND_FILES.includes(name)));
-  const lock = { version: VERSION, candidateId:config.candidateId, createdAt: new Date().toISOString(), planSha256: digest(plan), guardRequestsSha256: digest(config.guardRequests), inputIdentitiesSha256: digest(await json(resolve(root, 'input-identities.json'))), sources, files:sharedFiles, artifacts, approvals: { by: config.approvedBy, evidence: config.approvalEvidenceSha256, phase18Review: config.phase18ReviewSha256, inferencePreMergeReview: config.inferencePreMergeReviewSha256 }, counts: { renders: plan.renderExecutions, guards: plan.requiredGuardCases.length*2, guardCasesPerBackend:plan.requiredGuardCases.length } };
+  const reuse=cudaRebase?await correctedCudaPackageReuse(config,config.cudaRebase.continuity):null;
+  const lock = { version: VERSION, candidateId:config.candidateId, createdAt: new Date().toISOString(), planSha256: digest(plan), guardRequestsSha256: digest(config.guardRequests), inputIdentitiesSha256: digest(await json(resolve(root, 'input-identities.json'))), sources, files:sharedFiles, artifacts, ...(cudaRebase?{scope:'corrected-cuda-only',macProducer:config.cudaRebase.old,sourceContinuity:config.cudaRebase.continuity,packageReuse:reuse}:{}) ,approvals: { by: config.approvedBy, evidence: config.approvalEvidenceSha256, phase18Review: config.phase18ReviewSha256, inferencePreMergeReview: config.inferencePreMergeReviewSha256 }, counts: { renders: cudaRebase?25:plan.renderExecutions, guards: plan.requiredGuardCases.length*(cudaRebase?1:2), guardCasesPerBackend:plan.requiredGuardCases.length } };
   await verifyFrozenSources(config, lock);
   executionBinding(config,lock,files); // Validate the actual local endpoint before writing the immutable lock.
   await save(resolve(root, 'protocol.lock.json'), lock);
@@ -150,6 +160,7 @@ export async function frozen(configPath, { retained = false } = {}) {
   for (const input of Object.values(await json(resolve(state.root,'input-identities.json')))) requireThat((await fileIdentity(safePath(state.root,input.file))).sha256 === input.sha256,'frozen original input bytes changed');
   validatePlan(state.plan, await json(resolve(state.root, 'inputs.original.json')));
   await verifyFrozenSources(state.config, lock);
+  if(lock.scope==='corrected-cuda-only')requireThat(canonical(state.config.cudaRebase?.continuity)===canonical(lock.sourceContinuity)&&canonical(cudaSourceContinuity({sceneworksRoot:state.config.sources.sceneworks,inferenceRoot:state.config.sources.inference,oldSourceSha:lock.macProducer.sourceSha,oldInferenceSha:lock.macProducer.inferenceSha,sourceSha:lock.sources.sceneworks.head,inferenceSha:lock.sources.inference.head,auditPath:state.config.cudaRebase.auditPath,auditSha256:lock.sourceContinuity.auditSha256}))===canonical(lock.sourceContinuity)&&canonical(await correctedCudaPackageReuse(state.config,lock.sourceContinuity))===canonical(lock.packageReuse),'retained corrected CUDA source/package continuity changed');
   if(state.config.files.fixtureBindings)for(const fixture of Object.values(await json(state.config.files.fixtureBindings)))if(fixture?.asset) {
     requireThat((await fileIdentity(safePath(state.root,fixture.uploadedFile))).sha256===fixture.uploadedSha256&&(await fileIdentity(safePath(state.root,fixture.actualFile))).sha256===fixture.actualSha256,'retained actual guard fixture upload/readback bytes changed');
   }
@@ -704,12 +715,35 @@ export function acceptedRecoveryFailure(acceptedRecovery,backend,name,postRowsGu
 }
 async function verify(configPath, retained = false) {
   const state = await frozen(configPath,{retained}), findings = [], summaries = [];
+  const historicalOnly=state.config.historicalEvidenceOnly===true;
+  requireThat(!historicalOnly||state.config.repair?.name==='r16-checker-recovery'&&state.lock.sources.sceneworks.head==='42a8aff9852d01e0506df8afc466c0024b6eed8c'&&state.lock.sources.inference.head==='857f7a1996e3678a0773c3509ac0087522c19ce6','historical evidence-only verification is restricted to the original completed Mac producer');
+  const candidateBackends=historicalOnly?['mlx']:state.lock.scope==='corrected-cuda-only'?['cuda']:['mlx','cuda'];
+  let historicalResult=null;
   const requireEvidence = async (name, check) => { try { await check(); } catch (error) { findings.push({ item: name, state: ['ENOENT','MOSS_AWAITING_RESOLUTION'].includes(error.code) ? 'AWAITING' : 'FAIL', reason: error.code === 'ENOENT' ? 'required evidence missing' : error.message }); } };
   let qualityComparison=null;
-  await requireEvidence('quality-policy',async()=>{qualityComparison=await loadQualityAmendment(state.root,state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:state.config.repair?.historicalExecutionToolingSha,executionToolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:state.config.repair?.retryOrdinal,verificationToolingSha:state.config.repair?.verificationToolingSha,verificationSourceRoot:state.config.repair?.tooling?.sourceRoot});});
+  if(!historicalOnly)await requireEvidence('quality-policy',async()=>{
+    const dual=state.lock.scope==='corrected-cuda-only',mac=dual?await json(resolve(state.root,'../prior/evidence/protocol.lock.json')):null;
+    if(dual)requireThat(digest(mac)===state.lock.macProducer.lockSha256&&canonical(mac.sources)===canonical(state.lock.macProducer.sources),'aggregate changed completed Mac lock or source pair');
+    qualityComparison=await loadQualityAmendment(state.root,mac??state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:dual?'2cd0363d59cb3eb0989bbb708000b6ffc907932a':state.config.repair?.historicalExecutionToolingSha,executionToolingSha:dual?state.lock.macProducer.toolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:dual?8:state.config.repair?.retryOrdinal,verificationToolingSha:dual?state.lock.sources.sceneworks.head:state.config.repair?.verificationToolingSha,verificationSourceRoot:dual?state.config.sources.sceneworks:state.config.repair?.tooling?.sourceRoot,...(dual?{cudaLockSha256:digest(state.lock)}:{})});
+    requireThat(!dual||qualityComparison,'dual-source candidate needs actual eight-row approved upstream comparison');
+  });
+  if(state.lock.scope==='corrected-cuda-only')await requireEvidence('completed-mac-producer',async()=>{
+    const historical=await verify(state.config.cudaRebase.historicalLaunchPath,true);
+    requireThat(historical.verdict==='PASS'&&historical.lockSha256===state.lock.macProducer.lockSha256&&historical.verifiedRows===25&&historical.verifiedGuards===29,'completed Mac rows/refusals did not pass full historical source-bound verification');
+    historicalResult=historical;
+    const prior=resolve(state.root,'../prior'),old=state.lock.macProducer;
+    const {validateCompletedMlxArtifact,validateCompletedMlxHandoffSupplement}=await import('./lib/moss-edit-terminal-actions.mjs');
+    const authenticated=await validateCompletedMlxArtifact(prior,{candidateId:old.candidateId,sourceSha:old.sourceSha,inferenceSha:old.inferenceSha,originalRunId:old.originalRunId,originalAttempt:old.originalAttempt,toolingSha:old.toolingSha,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId});
+    requireThat(canonical(old)===canonical({...authenticated,sources:(await json(resolve(prior,'handoff/handoff.json'))).sources}),'retained completed Mac producer changed');
+    await validateCompletedMlxHandoffSupplement(prior,{...authenticated,cudaToolingSha:state.lock.sources.sceneworks.head});
+    for(const row of state.plan.rows.filter(row=>row.backend==='mlx'&&row.anchors)){
+      const path=resolve(prior,'evidence/rows',row.id),reviewPath=resolve(state.root,'rows',row.id,'quality-review.json'),review=await json(reviewPath),receipt=await json(resolve(path,'receipt.json'));
+      requireThat(compareQualityRow(row,review,(await fileIdentity(reviewPath)).sha256,receipt.outputs,qualityComparison)==='PASS','retained completed Mac image/review failed dual-source quality comparison');
+    }
+  });
   let acceptedRecovery=false;
   if(state.config.repair)await requireEvidence('r16-original-checker-recovery',async()=>{acceptedRecovery=await validateRecoveryAdjudication(state);});
-  for (const backend of ['mlx','cuda']) await requireEvidence(`dispatch-${backend}`,async () => {
+  for (const backend of candidateBackends) await requireEvidence(`dispatch-${backend}`,async () => {
     const binding = validateBinding(await json(resolve(state.root,'bindings',`${backend}.json`)),state.lock,backend);
     const attempts = await readdir(resolve(state.root,'attempts',backend)).catch(error => {if(error.code === 'ENOENT')return[];throw error;});
     for (const name of attempts.filter(name=>name.endsWith('.start.json'))) {
@@ -719,7 +753,7 @@ async function verify(configPath, retained = false) {
     requireThat(!attempts.some(name => name.endsWith('.failure.json') && !acceptedRecoveryFailure(acceptedRecovery,backend,name,Boolean(state.config.repair?.postRowsGuard),Boolean(state.config.repair?.postGuardDmd))),'recorded failed submission attempt remains failed even after safe reconciliation');
     await assertDispatchClear(state.root,backend);
   });
-  for (const row of state.plan.rows) await requireEvidence(row.id, async () => {
+  for (const row of state.plan.rows.filter(row=>candidateBackends.includes(row.backend))) await requireEvidence(row.id, async () => {
     const path = resolve(state.root, 'rows', row.id);
     const failure = await json(resolve(path,'failure.json')).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
     requireThat(!failure || (acceptedRecovery&&row.id==='advanced-mlx-sft'), 'recorded execution attempt failed or requires authoritative reconciliation; cannot accept this candidate');
@@ -765,9 +799,9 @@ async function verify(configPath, retained = false) {
     const memory = memorySummary(samples, job.id);
     requireThat(Date.parse(samples.samples[0].at) <= Date.parse(job.startedAt) && Date.parse(samples.samples.at(-1).at) >= Date.parse(job.completedAt ?? job.canceledAt) && samples.samples.some(s => s.phase === 'active' && Date.parse(s.at) >= Date.parse(job.startedAt) && Date.parse(s.at) <= Date.parse(job.completedAt ?? job.canceledAt)), 'whole-device samples did not bracket actual worker execution');
     if (row.anchors) {
-      const reviewPath=resolve(path,'quality-review.json'),review=await json(reviewPath);
+      const reviewPath=historicalOnly?resolve(state.config.historicalQualityReviewRoot,'rows',row.id,'quality-review.json'):resolve(path,'quality-review.json'),review=await json(reviewPath);
       const verdict=qualityComparison?compareQualityRow(row,review,(await fileIdentity(reviewPath)).sha256,receipt.outputs,qualityComparison):reviewVerdict(row,review,receipt.outputs);
-      requireThat(verdict==='PASS','required visual quality comparison failed');
+      requireThat(historicalOnly?['PASS','FAIL'].includes(verdict):verdict==='PASS','required visual quality comparison failed');
     }
     if (row.anchors) {
       const pairs = await json(resolve(path, 'visual-pairs.json'));
@@ -779,7 +813,7 @@ async function verify(configPath, retained = false) {
     if (row.compareTo) { const comparison = await json(resolve(path, 'cache-comparison.json')), actual = await measuredCacheComparison(state,row); requireThat(canonical(comparison) === canonical(actual) && comparison.value <= state.plan.cacheComparisonPolicy.tolerance,'cached/uncached actual metric provenance/value mismatch or failed tolerance'); }
     summaries.push({ rowId: row.id, jobId: job.id, backend: row.backend, verdict: 'PASS', outputs: receipt.outputs.map(o => o.sha256), memory });
   });
-  for (const backend of ['mlx', 'cuda']) for (const name of state.plan.requiredGuardCases) await requireEvidence(`${backend}/${name}`, async () => {
+  for (const backend of candidateBackends) for (const name of state.plan.requiredGuardCases) await requireEvidence(`${backend}/${name}`, async () => {
     const lexicalRecovery=acceptedRecovery&&backend==='mlx'&&name==='training-shift-nonfinite'&&Boolean(state.config.repair?.postRowsGuard),dmdRecovery=acceptedRecovery&&backend==='mlx'&&name==='edit-dmd'&&Boolean(state.config.repair?.postGuardDmd),path = resolve(state.root, 'guards', `${backend}-${name}${lexicalRecovery?`-retry-${state.config.repair.postRowsGuardOrdinal??state.config.repair.retryOrdinal}`:dmdRecovery?`-retry-${state.config.repair.retryOrdinal}`:''}`), receipt = await json(resolve(path, 'receipt.json')), proof = await json(resolve(path, 'no-provider-load.json'));
     const binding = validateBinding(await json(resolve(state.root,'bindings',`${backend}.json`)),state.lock,backend);
     requireThat(receipt.bindingSha256 === digest(binding),'refusal belongs to another backend execution binding');
@@ -819,20 +853,27 @@ async function verify(configPath, retained = false) {
     },proof);
     requireThat(canonical(actual)===canonical(proof.observation),'refusal boundary observation was changed or fabricated');
   });
-  for (const name of state.plan.requiredExternal) await requireEvidence(name, async () => {
+  // Aggregate reviews cover both producers under the new paired review lock.
+  // The immutable Mac execution artifact predates those external reviews; its
+  // historical pass still rechecks every row, guard, output and raw sample.
+  for (const name of historicalOnly?[]:state.plan.requiredExternal) await requireEvidence(name, async () => {
     const evidence = await json(resolve(state.root, 'external', `${name}.json`));
     requireThat(evidence.version === VERSION && evidence.lockSha256 === digest(state.lock) && evidence.verdict === 'PASS' && evidence.observer && evidence.observations?.length && evidence.files?.length && evidence.rowIds?.length && evidence.rowIds.every(id => state.plan.rows.some(r => r.id === id)), 'required external evidence absent/unbound/failed');
     for (const entry of evidence.files) requireThat((await fileIdentity(safePath(state.root, entry.file))).sha256 === entry.sha256, 'external evidence changed');
-    if(name==='package-install-select-ui')for(const backend of ['mlx','cuda']) {
+    if(name==='package-install-select-ui')for(const backend of candidateBackends) {
       const toolchainPath=resolve(state.root,'external',`toolchain-${backend}.json`),toolchain=await json(toolchainPath);
       requireThat(canonical(await fileIdentity(toolchainPath))===canonical(state.lock.artifacts[backend].files.toolchain)&&toolchain.installation?.files?.length,'actual source-bound native installer capture required');
       for(const item of toolchain.installation.files)requireThat((await fileIdentity(safePath(resolve(state.root,'external',`raw-install-${backend}`),item.file))).sha256===item.sha256,'source-bound real installer capture bytes changed');
     }
   });
   const verdict = findings.some(f => f.state === 'FAIL') ? 'FAIL' : findings.length ? 'AWAITING' : 'PASS';
+  const dual=state.lock.scope==='corrected-cuda-only',producerLocks=dual?{mlx:{candidateId:state.lock.macProducer.candidateId,lockSha256:state.lock.macProducer.lockSha256,sources:state.lock.macProducer.sources},cuda:{candidateId:state.lock.candidateId,lockSha256:digest(state.lock),sources:state.lock.sources}}:undefined;
+  const rows=dual?[...(historicalResult?.rows??[]).map(row=>({...row,producer:producerLocks.mlx})),...summaries.map(row=>({...row,producer:producerLocks.cuda}))]:summaries;
+  const result={version:VERSION,scope:historicalOnly?'historical-mlx-evidence-only':state.lock.scope??'paired',lockSha256:digest(state.lock),...(producerLocks?{producerLocks}:{}),verdict,counts:historicalOnly?{renders:25,guards:29}:dual?{renders:50,guards:58}:state.lock.counts,verifiedRows:historicalOnly?summaries.length:dual&&verdict==='PASS'?rows.length:summaries.length,verifiedGuards:historicalOnly?29:dual&&verdict==='PASS'?58:undefined,findings,rows};
   // stdout is portable: raw product objects, local source paths and media tickets are excluded.
-  console.log(JSON.stringify({ version: VERSION, lockSha256: digest(state.lock), verdict, counts: state.lock.counts, verifiedRows: summaries.length, findings, rows: summaries }, null, 2));
+  console.log(JSON.stringify(result,null,2));
   if (verdict !== 'PASS') process.exitCode = 2;
+  return result;
 }
 export async function main(argv = process.argv.slice(2)) {
   const [command, ...args] = argv;

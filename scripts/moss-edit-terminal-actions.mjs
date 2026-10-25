@@ -12,8 +12,9 @@ import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
 import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
+import { cudaSourceContinuity, validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
 
-import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
+import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -94,7 +95,7 @@ export async function createBundle(campaignPath,inputManifest,out) {
     if(item.source_receipt){await copy(resolve(dirname(resolve(inputManifest)),item.source_receipt),`inputs/${item.id}.source-receipt.json`,item.receipt_sha256);item.source_receipt=`inputs/${item.id}.source-receipt.json`;}
   }
   const copied=new Map();
-  for(const item of [campaign.numericalCarryForward,...(campaign.guardFixtures??[]).flatMap(fixture=>[fixture,fixture.corruptWith].filter(Boolean))]) {
+  for(const item of [campaign.numericalCarryForward,campaign.historicalNumericalCarryForward,campaign.sourceContinuityAudit,campaign.stoppedCuda?.inventory,...(campaign.guardFixtures??[]).flatMap(fixture=>[fixture,fixture.corruptWith].filter(Boolean))].filter(Boolean)) {
     requireThat(item?.file&&/^[a-f0-9]{64}$/.test(item.sha256??''),'bundle requires declared numerical/fixture bytes and SHA256');
     if(copied.has(item.file)){requireThat(copied.get(item.file)===item.sha256,'conflicting fixture SHA256');continue;}
     await copy(safePath(base,item.file),item.file,item.sha256);copied.set(item.file,item.sha256);
@@ -115,9 +116,10 @@ export async function validateUpload(root,kind,expectedSha,sourceSha,inferenceSh
   const inventory=await json(file);requireThat(inventory.sourceSha===sourceSha&&inventory.inferenceSha===inferenceSha&&inventory.candidateId===candidateId,'review upload source/candidate differs');
   requireThat(canonical(inventory.files)===canonical((await filesUnder(root)).filter(item=>item.file!=='review-inventory.json')),'review upload files/bytes differ from inventory');return inventory;
 }
-export async function arrangeBuilds(root) {
+export async function arrangeBuilds(root,onlyBackend=null) {
+  requireThat(onlyBackend===null||['cuda','mlx'].includes(onlyBackend),'single-backend native artifact route is invalid');
   const entries=await readdir(root,{withFileTypes:true});
-  for(const backend of ['mlx','cuda']) {
+  for(const backend of (onlyBackend?[onlyBackend]:['mlx','cuda'])) {
     const names=entries.filter(item=>item.isDirectory()&&new RegExp(`^moss-native-${backend}-[0-9]+-[0-9]+$`).test(item.name));
     requireThat(names.length===1,`require exactly one immutable ${backend} build artifact, never merge attempts`);
     const from=resolve(root,names[0].name);requireThat((await json(resolve(from,'inventory.json'))).backend===backend,'downloaded native artifact routing mismatch');
@@ -146,6 +148,7 @@ export async function verifyBuild(config) {
   const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,config.backend,'inventory.json')),config.backend,sources);
   for(const name of BACKEND_FILES)requireThat(canonical(await fileIdentity(paths[name]))===canonical(inventory.files[name]),`native ${name} changed before process startup`);
   const toolchain=await json(paths.toolchain);requireThat(canonical(toolchain.browser)===canonical(await browserIdentity(config)),'actual headless browser differs from the source-bound native build inventory');
+  if(toolchain.reusedPrivateHf)requireThat(config.backend==='cuda'&&canonical(await fileIdentity(resolve(dirname(paths.toolchain),'private-hf-reuse.json')))===canonical(toolchain.reusedPrivateHf),'source-paired private HF build ownership proof changed');
   const packages=await json(paths.packages);for(const item of packages.files)requireThat(canonical(await fileIdentity(safePath(config.hfHome,item.file)))===canonical({byteLength:item.byteLength,sha256:item.sha256}),'executing owned HF projection differs from frozen native package bytes');
   if(process.platform!=='win32')await chmod(paths.apiBinary,0o700);
   // The binary inventory must be verified before a single native child executes.
@@ -271,9 +274,20 @@ export async function buildBackend(config) {
   const binary=resolve(out,config.backend==='cuda'?'sceneworks-rust-api.exe':'sceneworks-rust-api');
   await cp(resolve(env.CARGO_TARGET_DIR,'release',config.backend==='cuda'?'sceneworks-rust-api.exe':'sceneworks-rust-api'),binary,{errorOnExist:true,force:false});
   await save(resolve(out,'web.json'),{files:await filesUnder(resolve(config.sourceRoot,'apps/web/dist'))});
-  await isolatePackages(config,{omitAdapter:config.installAdapter===true});
+  if(config.reusedPrivateHf) {
+    const {artifactRoot,old,continuity,artifactIdentity}=config.reusedPrivateHf;
+    await adoptStoppedCudaBuildPrivateHf(config,artifactRoot,old,continuity,artifactIdentity);
+    const receipt=await json(resolve(config.root,'cuda-rebase-hf-transfer.json'));
+    requireThat(config.backend==='cuda'&&receipt.to===config.hfHome&&canonical(receipt.after.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256}))),'corrected CUDA build lost authenticated installed package ownership');
+  } else await isolatePackages(config,{omitAdapter:config.installAdapter===true});
   let installation=null;
-  if(config.installAdapter===true) {
+  if(config.reusedPrivateHf) {
+    const from=resolve(config.reusedPrivateHf.artifactRoot,'evidence/external/raw-install-cuda'),to=resolve(out,'installation');
+    await cp(from,to,{recursive:true,errorOnExist:true,force:false});
+    installation={mode:'authenticated-stopped-CUDA-install',oldArtifact:config.reusedPrivateHf.artifactIdentity,capture:await fileIdentity(resolve(from,'capture.json')),transfer:await fileIdentity(resolve(config.root,'cuda-rebase-hf-transfer.json')),files:await filesUnder(to)};
+    requireThat(installation.files.length>0&&canonical(installation.files)===canonical(await filesUnder(from)),'stopped source-bound installer evidence changed during new build');
+  }
+  if(config.installAdapter===true&&!config.reusedPrivateHf) {
     requireThat(config.editAdapterFiles?.length&&config.editAdapterFiles.every(file=>config.packageFiles.some(item=>item.file===file)),'actual isolated adapter-install projection required');
     config.apiBinary=binary;const token=randomBytes(32).toString('hex'),stack=await startStack(config,token);
     try {
@@ -283,22 +297,38 @@ export async function buildBackend(config) {
       installation={capture:await fileIdentity(capture),files:await filesUnder(resolve(out,'installation'))};
     }finally{await stack.stop();}
   }
-  await materializePrivateAdapter(config);
+  if(!config.reusedPrivateHf)await materializePrivateAdapter(config);
   const packages=[];
-  for(const item of config.packageFiles) {
-    const path=contained(config.hfHome,resolve(config.hfHome,item.file)),identity=await fileIdentity(path);
-    requireThat(identity.sha256===item.sha256,'native package bytes differ from frozen model/package identities');packages.push({...item,...identity});
+  const reused=config.reusedPrivateHf?(await json(resolve(config.root,'cuda-rebase-hf-transfer.json'))).after:null;
+  for(const [index,item] of config.packageFiles.entries()) {
+    const identity=reused?reused[index]:await fileIdentity(contained(config.hfHome,resolve(config.hfHome,item.file)));
+    requireThat(identity.file===undefined||identity.file===item.file,'reused private package order changed');
+    requireThat(identity.sha256===item.sha256,'native package bytes differ from frozen model/package identities');packages.push({...item,byteLength:identity.byteLength,sha256:identity.sha256});
   }
   await save(resolve(out,'packages.json'),{hfHome:config.hfHome,files:packages});
   await sealPrivateHf(config);
+  if(config.reusedPrivateHf)await cp(resolve(config.root,'cuda-rebase-hf-transfer.json'),resolve(out,'private-hf-reuse.json'),{errorOnExist:true,force:false});
   const toolchain={node:(await execFile(process.execPath,['--version'])).stdout,rust:(await execFile('rustc',['-Vv'])).stdout,
     observationProducerSha256:(await fileIdentity(resolve(config.sourceRoot,'crates/sceneworks-worker/src/moss_terminal_observation.rs'))).sha256,
-    installation,browser:await browserIdentity(config),features,sources,buildCommand:['cargo','build','--release','--locked','-p','sceneworks-rust-api','--features',features]};
+    installation,...(config.reusedPrivateHf?{reusedPrivateHf:await fileIdentity(resolve(out,'private-hf-reuse.json'))}:{}),browser:await browserIdentity(config),features,sources,buildCommand:['cargo','build','--release','--locked','-p','sceneworks-rust-api','--features',features]};
   await save(resolve(out,'toolchain.json'),toolchain);
   const paths={apiBinary:binary,workerBinary:binary,webPackage:resolve(out,'web.json'),packages:resolve(out,'packages.json'),toolchain:resolve(out,'toolchain.json')},files={};
   for(const name of BACKEND_FILES)files[name]=await fileIdentity(paths[name]);
   await save(resolve(out,'inventory.json'),{backend:config.backend,sources,files});
   await save(resolve(out,'build.json'),{version:VERSION,backend:config.backend,sources,files,paths,device:await nativeDevice(config.backend)});
+}
+export async function buildCudaRebase(config,artifactRoot,runId,attempt,artifactId) {
+  const old=config.stoppedCuda;
+  requireThat(config.backend==='cuda'&&old?.candidateId&&old?.sourceSha&&old?.inferenceSha&&old?.runId===runId&&old?.attempt===attempt&&old?.artifactId===artifactId&&old?.originalRunId>0&&old?.originalAttempt>0&&old.inventory?.file&&/^[a-f0-9]{64}$/.test(old.inventory.sha256??''),'corrected CUDA build requires exact stopped owner and archived artifact inventory');
+  const manifestPath=safePath(config.bundleRoot,old.inventory.file);
+  requireThat((await fileIdentity(manifestPath)).sha256===old.inventory.sha256,'stopped CUDA artifact inventory changed');
+  const manifest=await json(manifestPath);
+  requireThat(manifest.version===1&&manifest.actualRunId===old.runId&&manifest.attempt===old.attempt&&manifest.artifactId===old.artifactId&&manifest.appendOnlyTails?.length===0&&new Set(manifest.files.map(item=>item.file)).size===manifest.files.length,'stopped CUDA artifact ID or exact file inventory changed');
+  const actual=await filesUnder(artifactRoot),byFile=items=>items.slice().sort((a,b)=>a.file.localeCompare(b.file));
+  requireThat(canonical(byFile(actual))===canonical(byFile(manifest.files)),'stopped CUDA artifact files/bytes changed');
+  const continuity=cudaSourceContinuity({sceneworksRoot:config.sourceRoot,inferenceRoot:config.inferenceRoot,oldSourceSha:old.sourceSha,oldInferenceSha:old.inferenceSha,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,auditPath:safePath(config.bundleRoot,config.sourceContinuityAudit.file),auditSha256:config.sourceContinuityAudit.sha256});
+  config.reusedPrivateHf={artifactRoot,old,continuity,artifactIdentity:{sha256:old.inventory.sha256,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId}};
+  return buildBackend(config);
 }
 export async function rehydrateCudaPackages(config) {
   requireThat(config.backend==='cuda'&&config.root===resolve(config.sourceRoot,'../..','moss-sc-26752',basename(config.root))&&/^moss-build-[0-9]+-[0-9]+-cuda$/.test(basename(config.root)),'CUDA rehydration requires a fresh exact owned build root');
@@ -359,6 +389,40 @@ export async function completedMlxHandoff(config,originalRunId,originalAttempt,r
   await save(resolve(config.root,'completed-mlx-artifact.json'),{...record,cudaToolingSha,supplementSha256:(await fileIdentity(resolve(config.root,'prior/supplement.json'))).sha256});
   return record;
 }
+export async function completedCudaRebaseHandoff(config,old,toolingRoot,toolingSha) {
+  requireThat(config.backend==='cuda'&&treeIdentity(toolingRoot).head===toolingSha&&toolingSha===config.sourceSha,'corrected CUDA controller must be the new stationary product source');
+  requireThat(config.sourceContinuityAudit?.file&&/^[a-f0-9]{64}$/.test(config.sourceContinuityAudit.sha256??''),'new paired bundle lacks the reviewed Mac source closure audit');
+  const auditPath=safePath(config.bundleRoot,config.sourceContinuityAudit.file),auditSha256=config.sourceContinuityAudit.sha256;
+  const continuity=cudaSourceContinuity({sceneworksRoot:config.sourceRoot,inferenceRoot:config.inferenceRoot,oldSourceSha:old.sourceSha,oldInferenceSha:old.inferenceSha,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,auditPath,auditSha256});
+  const mac=await validateCompletedMlxArtifact(resolve(config.root,'prior'),{candidateId:old.candidateId,sourceSha:old.sourceSha,inferenceSha:old.inferenceSha,originalRunId:old.originalRunId,originalAttempt:old.originalAttempt,toolingSha:old.toolingSha,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId});
+  await validateCompletedMlxHandoffSupplement(resolve(config.root,'prior'),{...mac,cudaToolingSha:toolingSha});
+  const handoff=await json(resolve(config.handoffRoot,'handoff.json'));
+  const record={name:'sc-26757-corrected-cuda-candidate/v1',old:{...mac,sources:handoff.sources},current:{candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,toolingSha},continuity};
+  validateCudaRebaseRecord(record,mac,config);
+  await save(resolve(config.root,'cuda-rebase.json'),record);
+  return record;
+}
+export async function historicalMlxLaunchForCudaRebase(config,macRoot,oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot,toolingRoot) {
+  const record=await json(resolve(config.root,'cuda-rebase.json')),old=record.old;
+  requireThat(treeIdentity(toolingRoot).head===config.sourceSha&&treeIdentity(oldSourceRoot).head===old.sourceSha&&treeIdentity(oldInferenceRoot).head===old.inferenceSha,'historical verification source checkouts changed');
+  const authenticated=await validateCompletedMlxArtifact(macRoot,{candidateId:old.candidateId,sourceSha:old.sourceSha,inferenceSha:old.inferenceSha,originalRunId:old.originalRunId,originalAttempt:old.originalAttempt,toolingSha:old.toolingSha,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId});
+  requireThat(canonical(old)===canonical({...authenticated,sources:(await json(resolve(macRoot,'handoff/handoff.json'))).sources}),'historical Mac artifact changed before full verification');
+  await validateCompletedMlxHandoffSupplement(macRoot,{...authenticated,cudaToolingSha:config.sourceSha});
+  const launch=await json(resolve(macRoot,'continuation-retry-8-launch.json')),evidence=resolve(macRoot,'evidence');
+  requireThat(launch.candidateId===old.candidateId&&launch.localBackend==='mlx'&&launch.repair?.retryOrdinal===8&&launch.repair.postGuardDmd&&launch.repair.postRowsGuard,'historical Mac launch is not the completed H27 producer');
+  launch.historicalEvidenceOnly=true;launch.plan=resolve(evidence,'cases.json');launch.evidenceRoot=evidence;
+  launch.historicalQualityReviewRoot=resolve(config.root,'evidence');
+  launch.sources={sceneworks:oldSourceRoot,inference:oldInferenceRoot};
+  const names={harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',observationValidator:'lib/moss-edit-terminal-observation.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'};
+  for(const [name,path] of Object.entries(names))launch.files[name]=resolve(oldSourceRoot,'scripts',path);
+  for(const name of ['apiBinary','workerBinary','webPackage','packages','toolchain'])launch.files[name]=resolve(oldMlxBuildRoot,basename(launch.files[name]));
+  launch.files.fixtureBindings=resolve(evidence,'guard-fixtures/bindings.json');launch.files.hostTensorBound=resolve(evidence,'host-tensor-bound.json');
+  requireThat(config.historicalNumericalCarryForward?.sha256==='bcd3309fab103cb93063adf565aafe6858695e5845e27000fb7c6c1ed26718cf','historical numerical source proof missing from new sealed bundle');
+  launch.files.numericalCarryForward=safePath(config.bundleRoot,config.historicalNumericalCarryForward.file);
+  const currentNames={harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs'},files=Object.fromEntries(Object.entries(currentNames).map(([name,path])=>[name,resolve(toolingRoot,'scripts',path)]));
+  launch.repair={...launch.repair,originalRoot:macRoot,tooling:{sourceRoot:toolingRoot,head:config.sourceSha,source:treeIdentity(toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))},historicalExecutionToolingSha:'2cd0363d59cb3eb0989bbb708000b6ffc907932a',executionToolingSha:old.toolingSha,verificationToolingSha:config.sourceSha};
+  const path=resolve(config.root,'historical-mlx-launch.json');await save(path,launch);return path;
+}
 async function harness(config,args,label) {
   const prefix=config.continuation?.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:config.toolingRoot||config.continuation?'continuation-':'';
   await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
@@ -369,14 +433,14 @@ export function compareCrossBackendHistoryJob(origin,actual) {
   const comparison=compareTypedMossEditHistory(origin.result,actual.result,{kind:'result',steps:origin.payload?.advanced?.steps});
   return {jobIdentityEqual,payloadEqual,resultEqual:comparison.rawEqual,sigmaF32Equivalent:comparison.sigmaF32Equivalent,sigmaDifferingIndices:comparison.sigmaDifferingIndices,normalizedResultEqual:comparison.normalizedEqual,typedResultEqual:comparison.typedEqual};
 }
-export async function authenticateCrossBackendHistory(api,evidenceRoot) {
+export async function authenticateCrossBackendHistory(api,evidenceRoot,readbackRoot=evidenceRoot) {
   const comparisons=[];
   for(const rowId of ['quality-mlx-base-four','quality-mlx-sft-single']) {
     const path=resolve(evidenceRoot,'rows',rowId,'terminal-job.json'),origin=await json(path);
     const actual=await api.request(`/api/v1/jobs/${encodeURIComponent(origin.id)}`);
     comparisons.push({rowId,originFile:await fileIdentity(path),actual,...compareCrossBackendHistoryJob(origin,actual)});
   }
-  await save(resolve(evidenceRoot,'external/cross-backend-history-readback.json'),{version:VERSION,name:'cross-backend-history-before-first-cuda-dispatch',comparisons});
+  await save(resolve(readbackRoot,'external/cross-backend-history-readback.json'),{version:VERSION,name:'cross-backend-history-before-first-cuda-dispatch',comparisons});
   requireThat(comparisons.every(item=>item.jobIdentityEqual&&item.payloadEqual&&item.typedResultEqual),'cross-backend history handoff changed original authored job/result identities');
   return comparisons;
 }
@@ -494,6 +558,14 @@ export async function executeBackend(config) {
   const continuing=Boolean(config.continuation);
   const repairTooling=Boolean(config.toolingRoot||continuing);
   const original=continuing?await validateContinuation(config):null;
+  const cudaRebase=config.cudaRebase?validateCudaRebaseRecord(config.cudaRebase,config.cudaRebase.old,config):null;
+  if(cudaRebase){
+    requireThat(config.backend==='cuda'&&!continuing&&!config.completedMlx&&!config.toolingRoot&&canonical(cudaRebase)===canonical(await json(resolve(config.root,'cuda-rebase.json'))),'corrected CUDA requires its separately authenticated source-paired Mac handoff');
+    requireThat(canonical(cudaRebase.continuity)===canonical(cudaSourceContinuity({sceneworksRoot:config.sourceRoot,inferenceRoot:config.inferenceRoot,oldSourceSha:cudaRebase.old.sourceSha,oldInferenceSha:cudaRebase.old.inferenceSha,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,auditPath:safePath(config.bundleRoot,config.sourceContinuityAudit.file),auditSha256:config.sourceContinuityAudit.sha256})),'corrected CUDA source difference changed before execution');
+    const old=cudaRebase.old,authenticated=await validateCompletedMlxArtifact(resolve(config.root,'prior'),{candidateId:old.candidateId,sourceSha:old.sourceSha,inferenceSha:old.inferenceSha,originalRunId:old.originalRunId,originalAttempt:old.originalAttempt,toolingSha:old.toolingSha,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId});
+    requireThat(canonical(old)===canonical({...authenticated,sources:(await json(resolve(config.handoffRoot,'handoff.json'))).sources}),'completed Mac producer changed after corrected CUDA handoff authentication');
+    await validateCompletedMlxHandoffSupplement(resolve(config.root,'prior'),{...authenticated,cudaToolingSha:config.sourceSha});
+  }
   if(config.completedMlx) {
     const record=await json(resolve(config.root,'completed-mlx-artifact.json')),prior=resolve(config.root,'prior');
     requireThat(config.backend==='cuda'&&canonical(record)===canonical(config.completedMlx)&&record.candidateId===config.candidateId&&record.sourceSha===config.sourceSha&&record.inferenceSha===config.inferenceSha&&record.cudaToolingSha===config.toolingSha&&record.toolingSha===(await json(resolve(prior,'evidence/continuation-retry-8.json'))).toolingSha&&record.completionSha256===(await fileIdentity(resolve(prior,'execution-continuation-retry-8.json'))).sha256&&record.retrySha256===(await fileIdentity(resolve(prior,'evidence/continuation-retry-8.json'))).sha256&&record.handoffSha256===(await fileIdentity(resolve(prior,'handoff/handoff.json'))).sha256&&record.supplementSha256===(await fileIdentity(resolve(prior,'supplement.json'))).sha256,'CUDA-only launch lost its authenticated completed Mac artifact');
@@ -535,8 +607,9 @@ export async function executeBackend(config) {
   }
   const token=randomBytes(32).toString('hex');process.env.MOSS_EDIT_ACTIONS_TOKEN=token;
   if(config.backend==='cuda') {
-    const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;await importState(config,config.handoffRoot);
-    await importCompletedMlxEvidence(config);
+    const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;
+    await importState(config,config.handoffRoot,cudaRebase?{authenticatedMac:cudaRebase.old}:{});
+    if(!cudaRebase)await importCompletedMlxEvidence(config);
     if(config.completedMlx) {
       await save(resolve(config.root,'evidence/external/completed-mlx-artifact-for-cuda.json'),config.completedMlx);
       await cp(resolve(config.root,'prior/supplement.json'),resolve(config.root,'evidence/external/completed-mlx-handoff-supplement.json'),{errorOnExist:true,force:false});
@@ -557,13 +630,28 @@ export async function executeBackend(config) {
       plan.cacheComparisonPolicy={metric:'rgb8-mae/v1',tolerance:config.cacheTolerance,implementationSha256:(await fileIdentity(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal.mjs'))).sha256};
       validatePlan(plan,original);await writeFile(planPath,`${JSON.stringify(plan,null,2)}\n`,{mode:0o600});
       await prepareHostGuard(config);config.guardRequests=await prepareGuardFixtures(config,stack.api);
+    } else if(cudaRebase) {
+      const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);requireThat(project.id===config.projectId,'corrected CUDA did not reopen the authenticated Mac project');
+      const originalInputs=await json(safePath(config.bundleRoot,config.inputManifest));
+      for(const item of originalInputs.assets)item.path=safePath(config.bundleRoot,item.path);
+      const originalPath=resolve(config.root,'original-inputs.json');await save(originalPath,originalInputs);await prepare(originalPath,resolve(config.root,'evidence'));
+      const planPath=resolve(config.root,'evidence/cases.json'),plan=await json(planPath);
+      plan.cacheComparisonPolicy={metric:'rgb8-mae/v1',tolerance:config.cacheTolerance,implementationSha256:(await fileIdentity(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal.mjs'))).sha256};
+      validatePlan(plan,originalInputs);await writeFile(planPath,`${JSON.stringify(plan,null,2)}\n`,{mode:0o600});
+      const priorPlan=await json(resolve(config.priorEvidenceRoot,'cases.json'));
+      requireThat(canonical(plan.rows)===canonical(priorPlan.rows)&&canonical(plan.requiredGuardCases)===canonical(priorPlan.requiredGuardCases)&&canonical(await json(resolve(config.root,'evidence/input-identities.json')))===canonical(await json(resolve(config.priorEvidenceRoot,'input-identities.json'))),'corrected CUDA changed frozen row, refusal or original input semantics');
+      await prepareHostGuard(config);config.guardRequests=await prepareGuardFixtures(config,stack.api);
+      for(const row of plan.rows.filter(row=>row.backend==='mlx'))await cp(resolve(config.priorEvidenceRoot,'rows',row.id),resolve(config.root,'evidence/rows',row.id),{recursive:true,errorOnExist:true,force:false});
+      await authenticateCrossBackendHistory(stack.api,config.priorEvidenceRoot,resolve(config.root,'evidence'));
+      await save(resolve(config.root,'evidence/external/completed-mlx-artifact-for-cuda.json'),cudaRebase.old);
+      await relocateImportedCudaModelLibrary(stack.api,{...config,completedMlx:cudaRebase.old});
     } else {
       config.guardRequests=await json(resolve(config.root,'evidence','resolved-guards.json'));
       const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);requireThat(project.id===config.projectId,'target API did not reopen the original transferred project identity');
       await authenticateCrossBackendHistory(stack.api,resolve(config.root,'evidence'));
       if(config.completedMlx)await relocateImportedCudaModelLibrary(stack.api,config);
     }
-    if(config.backend==='mlx'&&!continuing)for(const backend of ['mlx','cuda']) {
+    if((config.backend==='mlx'||cudaRebase)&&!continuing)for(const backend of (cudaRebase?['cuda']:['mlx','cuda'])) {
       const toolchain=await json(resolve(config.buildRoot,backend,'toolchain.json'));requireThat(toolchain.installation?.files?.length,'actual installer capture missing from native artifact');
       for(const item of toolchain.installation.files)requireThat((await fileIdentity(safePath(resolve(config.buildRoot,backend,'installation'),item.file))).sha256===item.sha256,'native installer evidence bytes changed');
       await cp(resolve(config.buildRoot,backend,'installation'),resolve(config.root,'evidence/external',`raw-install-${backend}`),{recursive:true,errorOnExist:true,force:false});
@@ -575,9 +663,10 @@ export async function executeBackend(config) {
     const launch=continuing?{...original.launch,guardRequests:config.guardRequests,repair:{name:'r16-checker-recovery',originalRoot:config.root,inventorySha256:original.manifestIdentity.sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal,...(await guardRepairFields(resolve(config.root,'evidence'),retry))}:{})}}:await launcher(config,config.projectId);
     if(repairTooling&&!continuing)launch.repair={name:'r16-checker-recovery',inventorySha256:(await fileIdentity(resolve(config.root,'evidence/continuation-original-inventory.json'))).sha256,tooling,...(retry?{previousToolingSha:H18_RETRY_TOOLING_SHA,checkpointInventorySha256:H18_RETRY_INVENTORY_SHA256,retryOrdinal:retry.ordinal??1,executionToolingSha:retry.toolingSha,...(await guardRepairFields(resolve(config.root,'evidence'),retry))}:{})};
     if(config.completedMlx)launch.repair.completedMlx=config.completedMlx;
+    if(cudaRebase){launch.cudaRebase={...cudaRebase,auditPath:safePath(config.bundleRoot,config.sourceContinuityAudit.file)};launch.stoppedCuda=config.stoppedCuda;}
     const launchPath=resolve(config.root,continuing?(config.continuation.retry?`continuation-${retrySuffix}-launch.json`:'continuation-launch.json'):'launch.json');await save(launchPath,launch);
     if(config.backend==='cuda'&&repairTooling)await cp(launchPath,resolve(config.root,'evidence/external/cuda-execution-tooling-capture.json'),{errorOnExist:true,force:false});
-    if(!continuing) {if(config.backend==='mlx')await freeze(launchPath);else await bind(launchPath);}
+    if(!continuing) {if(config.backend==='mlx'||cudaRebase)await freeze(launchPath);else await bind(launchPath);}
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
       gpuId:state.binding.endpoint.workerGpuId,
       binarySha256:state.lock.artifacts[config.backend].files.workerBinary.sha256,producerSha256:toolchain.observationProducerSha256};
@@ -690,10 +779,21 @@ export async function finalize(config) {
   // Root-owned actual reviews/observations arrive as immutable evidence files,
   // not synthetic PASS receipts generated by this controller.
   requireThat(config.reviewRoot,'actual external/visual review artifact root required');
+  if(config.cudaRebaseReview) {
+    const priorCuda=resolve(config.root,'prior-cuda'),record=await json(resolve(priorCuda,'cuda-rebase.json'));
+    requireThat(record.name==='sc-26757-corrected-cuda-candidate/v1'&&record.current.candidateId===config.candidateId&&record.current.sourceSha===config.sourceSha&&record.current.inferenceSha===config.inferenceSha,'retained corrected CUDA execution changed source pair');
+    config.cudaRebase={...record,auditPath:safePath(config.bundleRoot,config.sourceContinuityAudit.file)};
+    config.priorEvidenceRoot=resolve(priorCuda,'evidence');
+    await cp(resolve(priorCuda,'cuda-rebase.json'),resolve(config.root,'cuda-rebase.json'),{errorOnExist:true,force:false});
+  }
   await cp(config.priorEvidenceRoot,resolve(config.root,'evidence'),{recursive:true,errorOnExist:true,force:false});
   const root=resolve(config.root,'evidence'),binding=await json(resolve(root,'bindings',`${config.backend}.json`));
   config.guardRequests=await json(resolve(root,'resolved-guards.json'));
   const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');
+  if(config.cudaRebaseReview) {
+    const {oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot}=config.cudaRebaseReview;
+    launch.cudaRebase={...config.cudaRebase,historicalLaunchPath:await historicalMlxLaunchForCudaRebase(config,resolve(config.root,'prior'),oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot,config.sourceRoot)};launch.stoppedCuda=config.stoppedCuda;
+  }
   if(config.toolingRoot) {
     const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs'}).map(([name,path])=>[name,resolve(config.toolingRoot,'scripts',path)]));
     const tooling={sourceRoot:config.toolingRoot,head:config.toolingSha,source:treeIdentity(config.toolingRoot),files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
@@ -718,7 +818,7 @@ export async function main(args=process.argv.slice(2)) {
   if(phase==='bundle'&&rest.length===3){const result=await createBundle(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
   if(phase==='inventory-review'&&rest.length===4){const result=await inventoryReview(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
   if(phase==='validate-upload'&&rest.length===6)return validateUpload(...rest);
-  if(phase==='arrange-builds'&&rest.length===1)return arrangeBuilds(rest[0]);
+  if(phase==='arrange-builds'&&(rest.length===1||rest.length===2))return arrangeBuilds(rest[0],rest[1]??null);
   if(phase==='validate-bundle'&&rest.length===5)return validateBundle(...rest);
   if(phase==='configure-env'&&rest.length===0) {
     const env=process.env;await validateBundle(env.MOSS_BUNDLE,env.MOSS_BUNDLE_SHA,env.MOSS_SOURCE_SHA,env.MOSS_INFERENCE_SHA,env.MOSS_CANDIDATE);
@@ -743,6 +843,11 @@ export async function main(args=process.argv.slice(2)) {
     const toolingRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..');
     return completedMlxHandoff(await json(runtime),Number(originalRunId),Number(originalAttempt),Number(runId),Number(attempt),Number(artifactId),mlxToolingSha,cudaToolingSha,toolingRoot);
   }
+  if(phase==='completed-cuda-rebase-handoff'&&rest.length===10) {
+    const [runtime,candidateId,sourceSha,inferenceSha,originalRunId,originalAttempt,runId,attempt,artifactId,toolingSha]=rest,config=await json(runtime);
+    const old={candidateId,sourceSha,inferenceSha,originalRunId:Number(originalRunId),originalAttempt:Number(originalAttempt),runId:Number(runId),attempt:Number(attempt),artifactId:Number(artifactId),toolingSha};
+    return completedCudaRebaseHandoff(config,old,config.sourceRoot,config.sourceSha);
+  }
   if(phase==='stage-completed-mlx-handoff'&&rest.length===13) {
     const [prior,stopped,stage,candidateId,sourceSha,inferenceSha,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha]=rest;
     const toolingRoot=resolve(dirname(fileURLToPath(import.meta.url)),'..');
@@ -761,6 +866,18 @@ export async function main(args=process.argv.slice(2)) {
     requireThat(resolve(recordPath)===resolve(config.root,'completed-mlx-artifact.json')&&record.cudaToolingSha===toolingSha&&treeIdentity(toolingRoot).head===toolingSha&&toolingSha!==config.sourceSha,'CUDA-only continuation must use its authenticated completed-Mac handoff and clean new tooling');
     config.toolingRoot=resolve(toolingRoot);config.toolingSha=toolingSha;config.preparedCudaPackages=true;config.completedMlx=record;
     return executeBackend(config);
+  }
+  if(phase==='execute-cuda-rebase'&&rest.length===2) {
+    const [runtime,recordPath]=rest,config=await json(runtime),record=await json(recordPath);
+    requireThat(resolve(recordPath)===resolve(config.root,'cuda-rebase.json'),'corrected CUDA must use its owned authenticated handoff record');
+    config.cudaRebase=record;
+    return executeBackend(config);
+  }
+  if(phase==='build-cuda-rebase'&&rest.length===5)return buildCudaRebase(await json(rest[0]),resolve(rest[1]),Number(rest[2]),Number(rest[3]),Number(rest[4]));
+  if(phase==='finalize-cuda-rebase'&&rest.length===4) {
+    const [runtime,oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot]=rest,config=await json(runtime);
+    config.cudaRebaseReview={oldSourceRoot:resolve(oldSourceRoot),oldInferenceRoot:resolve(oldInferenceRoot),oldMlxBuildRoot:resolve(oldMlxBuildRoot)};
+    return finalize(config);
   }
   if(phase==='finalize-repair'&&rest.length===3) {
     const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime);
