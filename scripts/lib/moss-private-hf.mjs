@@ -8,9 +8,12 @@ import { inspectTree, powershell, hfEntries, entryIdentity } from '../ci/moss-ow
 const refuseFile=(message,path,info)=>requireThat(false,`${message}: ${JSON.stringify({path,...entryIdentity(info)})}`);
 const absent=async path=>{try{await lstat(path);return false;}catch(error){if(error.code==='ENOENT')return true;throw error;}};
 const identity=config=>({candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,backend:config.backend,packagesSha256:digest(config.packageFiles)});
+export const MAC_MOSS_BASE='/Volumes/Models/sceneworks-terminal-sc-26752';
+export function allowedPrivateParent(parent,sourceRoot,platform=process.platform) {return parent===resolve(sourceRoot,'../..','moss-sc-26752')||(platform==='darwin'&&parent===MAC_MOSS_BASE);}
+export function cargoTarget(config) {return resolve(config.sourceRoot,'../..','moss-sc-26752',basename(config.root),'target');}
 function owned(config,phase) {
   const match=new RegExp(`^moss-${phase}-([0-9]+)-([0-9]+)-(mlx|cuda)$`).exec(basename(config.root));
-  requireThat(match&&match[3]===config.backend&&dirname(config.root)===resolve(config.sourceRoot,'../..','moss-sc-26752')&&config.hfHome===resolve(config.root,'hf')&&config.hfHome!==config.packageSource,'exact current private HF ownership required');
+  requireThat(match&&match[3]===config.backend&&allowedPrivateParent(dirname(config.root),config.sourceRoot)&&config.hfHome===resolve(config.root,'hf')&&config.hfHome!==config.packageSource,'exact current private HF ownership required');
   return match;
 }
 async function confined(path,{descendants=true}={}) {
@@ -112,12 +115,22 @@ export async function materializePrivateAdapter(config) {
   await privateHfIntegrity(config);
   await writeFile(resolve(config.root,'adapter-materialization.json'),JSON.stringify({candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,operations},null,2)+'\n',{flag:'wx',mode:0o600});return operations;
 }
+export function mossArtifactRoute(key,path,rawBase,platform=process.platform) {
+  const external=key!=='MOSS_BUNDLE'&&platform==='darwin'&&dirname(resolve(path))===MAC_MOSS_BASE;
+  requireThat((dirname(resolve(path))===rawBase||external)&&/^moss-(?:build|builds|execute|review|bundle)-[0-9]+-[0-9]+(?:-(?:build|execute|review|mlx|cuda))*$/.test(basename(path)),'MOSS artifact path escaped durable namespace');
+  return {external,leaf:basename(path)};
+}
 export async function normalizeMossEnvironment(env) {
   const workspace=await realpath(env.GITHUB_WORKSPACE),base=resolve(workspace,'..','moss-sc-26752'),rawBase=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752'),result={};
   await mkdir(base,{recursive:true});await confined(base,{descendants:false});
   for(const key of ['MOSS_ROOT','MOSS_BUILDS','MOSS_BUNDLE'])if(env[key]) {
-    requireThat(dirname(resolve(env[key]))===rawBase&&/^moss-(?:build|builds|execute|review|bundle)-[0-9]+-[0-9]+(?:-(?:build|execute|review|mlx|cuda))*$/.test(basename(env[key])),'MOSS artifact path escaped durable namespace');
-    result[key]=resolve(base,basename(env[key]));
+    const {external}=mossArtifactRoute(key,env[key],rawBase);
+    if(external) {
+      const mount=resolve(MAC_MOSS_BASE,'..');await confined(mount,{descendants:false});
+      requireThat((await lstat(mount)).isDirectory()&&(await lstat(mount)).dev!==(await lstat(dirname(mount))).dev,'MOSS external storage must be a mounted separate volume');
+      await mkdir(MAC_MOSS_BASE,{recursive:true,mode:0o700});await confined(MAC_MOSS_BASE,{descendants:false});
+    }
+    result[key]=resolve(external?MAC_MOSS_BASE:base,basename(env[key]));
   }
   result.MOSS_SOURCE=resolve(workspace,'source');result.MOSS_INFERENCE=resolve(workspace,'inference');
   if(env.MOSS_UPLOAD_PATH)result.MOSS_UPLOAD_PATH=await realpath(env.MOSS_UPLOAD_PATH);

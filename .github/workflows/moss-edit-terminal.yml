@@ -190,8 +190,8 @@ jobs:
     timeout-minutes: 180
     env:
       MOSS_BACKEND: ${{ matrix.backend }}
-      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
-      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
+      MOSS_BUILDS: ${{ matrix.backend == 'mlx' && '/Volumes/Models/sceneworks-terminal-sc-26752' || format('{0}/../moss-sc-26752', github.workspace) }}/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-build-${{ matrix.backend }}
+      MOSS_ROOT: ${{ matrix.backend == 'mlx' && '/Volumes/Models/sceneworks-terminal-sc-26752' || format('{0}/../moss-sc-26752', github.workspace) }}/moss-build-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.backend }}
       CUDA_COMPUTE_CAP: '120'
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe
@@ -289,8 +289,8 @@ jobs:
     timeout-minutes: 720
     env:
       MOSS_BACKEND: mlx
-      MOSS_BUILDS: ${{ github.workspace }}/../moss-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-mlx
-      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-mlx
+      MOSS_BUILDS: /Volumes/Models/sceneworks-terminal-sc-26752/moss-builds-${{ github.run_id }}-${{ github.run_attempt }}-execute-mlx
+      MOSS_ROOT: /Volumes/Models/sceneworks-terminal-sc-26752/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-mlx
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

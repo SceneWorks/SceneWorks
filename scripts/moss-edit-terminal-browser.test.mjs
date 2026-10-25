@@ -187,3 +187,11 @@ test('both browser entrypoints use the fresh parent/leaf helper before importing
   const root=await mkdtemp(resolve(tmpdir(),'moss-capture-bootstrap-'));t.after(()=>rm(root,{recursive:true,force:true}));const captureRoot=resolve(root,'fresh/install/capture');
   await assert.rejects(()=>capturePackageInstallUi({apiUrl:'http://127.0.0.1:17957/',projectId:'inert-owned-project',captureRoot,playwrightModule:resolve(root,'runtime-must-not-load.mjs'),token:'inert-token',model:'moss_image_base',utilityWorkerId:'inert-utility'}),{code:'ERR_MODULE_NOT_FOUND'});assert.equal((await lstat(captureRoot)).isDirectory(),true);
 });
+
+test('production control extraction remains frozen and latent guards use the same tested labelled Engine control',async()=>{
+  const driver=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8'),controller=await readFile(new URL('./moss-edit-terminal-actions.mjs',import.meta.url),'utf8'),controls=await readFile(new URL('./lib/moss-edit-terminal-controls.mjs',import.meta.url),'utf8');
+  assert.match(driver,/import \{[^\n]*configure, verifyReplayForm \} from '\.\/lib\/moss-edit-terminal-controls.mjs'/);
+  assert.match(controller,/browserControls:'lib\/moss-edit-terminal-controls.mjs'/);
+  assert.match(driver,/await select\(labelledSelect\(page,'Engine'\), engine/);
+  assert.doesNotMatch(controls,/\bfetch\s*\(|\.request\.|\.route\s*\(|node:|process\./);
+});

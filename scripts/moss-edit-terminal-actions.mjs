@@ -12,7 +12,7 @@ import { command, sourceIdentity, filesUnder, contained, nativeDevice, sampler, 
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
-import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, exportMossEnvironment } from './lib/moss-private-hf.mjs';
+import { sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, exportMossEnvironment, cargoTarget } from './lib/moss-private-hf.mjs';
 
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -238,7 +238,7 @@ export async function buildBackend(config) {
   const sources=await sourceIdentity(config),out=resolve(config.buildRoot,config.backend);await mkdir(out,{recursive:true,mode:0o700});
   validatePackagePlan(config,JSON.parse(stripJsoncComments(await readFile(resolve(config.sourceRoot,'config/manifests/builtin.models.jsonc'),'utf8'))));
   await provisionBrowser(config);
-  const env={...process.env,CARGO_TARGET_DIR:resolve(config.root,'target'),VITE_API_BASE_URL:'',CARGO_PROFILE_RELEASE_STRIP:'none'};
+  const env={...process.env,CARGO_TARGET_DIR:cargoTarget(config),VITE_API_BASE_URL:'',CARGO_PROFILE_RELEASE_STRIP:'none'};
   const logRoot=resolve(out,'logs');
   await npmCommand(['--prefix','apps/web','ci'],{cwd:config.sourceRoot,env,log:resolve(logRoot,'web-ci.log')});
   await npmCommand(['--prefix','apps/web','run','build'],{cwd:config.sourceRoot,env,log:resolve(logRoot,'web-build.log')});
@@ -286,7 +286,7 @@ function buildPaths(config) {
 }
 async function launcher(config,projectId) {
   const root=resolve(config.root,'evidence'),paths=buildPaths(config),files={...paths};
-  for(const [name,path] of Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',observationValidator:'lib/moss-edit-terminal-observation.mjs',browserDriver:'moss-edit-terminal-browser.mjs'}))files[name]=resolve(config.sourceRoot,'scripts',path);
+  for(const [name,path] of Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',observationValidator:'lib/moss-edit-terminal-observation.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs'}))files[name]=resolve(config.sourceRoot,'scripts',path);
   files.numericalCarryForward=safePath(config.bundleRoot,config.numericalCarryForward.file);
   files.fixtureBindings=resolve(root,'guard-fixtures/bindings.json');
   files.hostTensorBound=resolve(root,'host-tensor-bound.json');

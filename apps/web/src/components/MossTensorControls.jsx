@@ -41,11 +41,11 @@ export function MossTensorControls({ assets = [], value = mossAdvancedDefaults()
     {picker("positive.values", "Positive embeddings", "float32", 3)}
     {picker("positive.mask", "Positive attention mask", "uint8", 2, !value.positive?.values)}
     {onPromptBatchChange ? <><label><input type="checkbox" checked={promptBatch.length > 0} disabled={Boolean(value.positive)} onChange={(event) => onPromptBatchChange(event.target.checked ? [""] : [])} />Native text prompt batch</label>
-      {promptBatch.length ? <label>One positive prompt per conditioning row<textarea disabled={Boolean(value.positive)} value={promptBatch.join("\n")} onChange={(event) => onPromptBatchChange(event.target.value.split("\n"))} /></label> : null}</> : null}
+      {promptBatch.length ? <label>One positive prompt per conditioning row<textarea aria-label="One positive prompt per conditioning row" disabled={Boolean(value.positive)} value={promptBatch.join("\n")} onChange={(event) => onPromptBatchChange(event.target.value.split("\n"))} /></label> : null}</> : null}
     {picker("negative.values", "Negative embeddings", "float32", 3, Boolean(value.negativePrompts))}
     {picker("negative.mask", "Negative attention mask", "uint8", 2, !value.negative?.values)}
     <label><input type="checkbox" checked={Boolean(value.negativePrompts)} disabled={Boolean(value.negative)} onChange={(event) => { const next = { ...value }; if (event.target.checked) next.negativePrompts = [""]; else delete next.negativePrompts; onChange(next); }} />Per-prompt negative strings</label>
-    {value.negativePrompts ? <label>One negative string per conditioning row<textarea value={value.negativePrompts.join("\n")} onChange={(event) => onChange({ ...value, negativePrompts: event.target.value.split("\n") })} /></label> : null}
+    {value.negativePrompts ? <label>One negative string per conditioning row<textarea aria-label="One negative string per conditioning row" value={value.negativePrompts.join("\n")} onChange={(event) => onChange({ ...value, negativePrompts: event.target.value.split("\n") })} /></label> : null}
     {picker("noise", "Explicit initial noise", "float32", 4)}
     {value.positive ? <p>Positive tensors replace both prompt fields. Clear text prompts before generating.</p> : null}
     {value.noise ? <p>Caller-supplied noise determines initialization. The execution seed is null; replay retains this exact noise artifact.</p> : null}

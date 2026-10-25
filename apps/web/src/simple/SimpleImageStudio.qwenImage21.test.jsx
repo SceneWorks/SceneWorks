@@ -15,6 +15,8 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
+import { configure } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 
@@ -319,4 +321,11 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     const request = context.createImageJob.mock.calls[0][0];
     expect(request.advanced.transparentBackground).toBe(true);
   });
+  it("production terminal configures actual Simple controls and submits ordered repeated references",async()=>{
+    const model={...manifestModels.find(entry=>entry.id==='moss_image_sft'),capabilities:['text_to_image','edit_image'],installState:'installed',conditionalPurposes:{moss_image_edit:{installState:'installed'}}},assets=[{id:'wide',type:'image',displayName:'Wide'},{id:'tall',type:'image',displayName:'Tall'}];
+    const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));await click([...container.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent==='Edit'));
+    const expected={model:model.id,prompt:'make second blue',negativePrompt:'',referenceAssetIds:['wide','tall','wide','tall'],width:512,height:512,count:1,seed:173,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
+    await configure(terminalBrowserDom(container),expected,'simple',[]);await click(container.querySelector('.su-generate'));const body=context.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(expected.referenceAssetIds);expect(body).toMatchObject({prompt:expected.prompt,width:512,height:512,seed:173});expect(body.advanced).toMatchObject(expected.advanced);
+  });
+
 });

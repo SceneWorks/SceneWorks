@@ -36,7 +36,7 @@ export function MossImageEditControls({ model, token, jobs = [], options, onChan
     <label><input type="checkbox" checked={options.use_kv_cache} onChange={(event) => onChange({ ...options, use_kv_cache: event.target.checked })} />Cache reference K/V</label>
     {generation ? <>
       {[["width", "Output width", 16, 4096, 16], ["height", "Output height", 16, 4096, 16], ["steps", "Steps", 1, undefined, 1], ["guidanceScale", "Guidance", 0, undefined, "any"], ["schedulerShift", "Schedule shift", 0, undefined, "any"], ["training_shift", "Training shift", 0, undefined, "any"], ["max_sequence_length", "Context limit", 1, 4096, 1]].map(([key, label, min, max, step]) => <label key={key}>{label}<input type="number" value={generation[key] ?? (key === "training_shift" ? 1 : "")} min={min} max={max} step={step} onChange={(event) => onGenerationChange({ ...generation, [key]: Number(event.target.value) })} /></label>)}
-      <label>Negative prompt<textarea value={generation.negativePrompt} onChange={(event) => onGenerationChange({ ...generation, negativePrompt: event.target.value })} /></label>
+      <label>Negative prompt<textarea aria-label="Negative prompt" value={generation.negativePrompt} onChange={(event) => onGenerationChange({ ...generation, negativePrompt: event.target.value })} /></label>
     </> : null}
     {onAdvancedChange ? <MossTensorControls value={advanced} onChange={onAdvancedChange} assets={assets} importAsset={importAsset} promptBatch={promptBatch} onPromptBatchChange={onPromptBatchChange} /> : null}
     <p>References retain their aspect ratios and are resized without crop, aligned to 16 pixels. Their order and repeated slots are preserved.</p>

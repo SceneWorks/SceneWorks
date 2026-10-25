@@ -9,7 +9,7 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
-import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment } from './lib/moss-private-hf.mjs';
+import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -377,7 +377,7 @@ test('HF release refuses altered bytes, wrong ownership and escaped/shared clean
 });
 test('durable MOSS storage lives outside checkout cleanup and release follows owned worker shutdown',async()=>{
   const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
-  for(const line of workflow.split('\n').filter(line=>/^\s+MOSS_(ROOT|BUILDS|BUNDLE):/.test(line)))assert.match(line,/github.workspace.*\/\.\.\/moss-sc-26752\/moss-/);
+  for(const line of workflow.split('\n').filter(line=>/^\s+MOSS_(ROOT|BUILDS|BUNDLE):/.test(line)))assert.match(line,/github.workspace.*\/\.\.\/moss-sc-26752\/moss-|format\('\{0\}\/\.\.\/moss-sc-26752', github.workspace\)|\/Volumes\/Models\/sceneworks-terminal-sc-26752\/moss-/);
   assert.match(controller,/await transferPrivateHf\(config/);assert.doesNotMatch(controller,/isolatePackages\(config,\{installedInventory/);
   assert.ok(controller.indexOf('await stack.stop();stopped=true;')<controller.indexOf('await releasePrivateHf(config)'));assert.ok(controller.indexOf("await exportState(config,resolve(config.root,'handoff'))")<controller.indexOf('await releasePrivateHf(config)'));
 });
@@ -469,4 +469,15 @@ test('hardlink normalization refuses external or third aliases, wrong hashes and
 test('exclusive-file refusals identify the exact leaf, type and unrounded link identity',async t=>{
   const {base,build}=await privateHfFixture(t),path=resolve(build.hfHome,build.packageFiles[0].file);await link(path,resolve(base,'external-alias'));const info=await lstat(path,{bigint:true});
   await assert.rejects(()=>privateHfIntegrity(build),error=>{assert.match(error.message,/private HF requires exclusive regular files/);const metadata=JSON.parse(error.message.slice(error.message.indexOf('{')));assert.equal(metadata.path,path);assert.equal(metadata.type,'file');assert.equal(metadata.dev,String(info.dev));assert.equal(metadata.ino,String(info.ino));assert.equal(metadata.nlink,'2');return true;});
+});
+
+test('exact Mac external HF/artifact storage preserves internal Cargo identity and refuses other roots/platforms',()=>{
+  const sourceRoot='/runner/_work/SceneWorks/SceneWorks/source',base=resolve(sourceRoot,'../..','moss-sc-26752'),leaf='moss-build-123-1-mlx';
+  for(const root of [resolve(base,leaf),resolve(MAC_MOSS_BASE,leaf)])assert.equal(cargoTarget({root,sourceRoot}),resolve(base,leaf,'target'));
+  assert.equal(allowedPrivateParent(MAC_MOSS_BASE,sourceRoot,'darwin'),true);
+  for(const platform of ['linux','win32'])assert.equal(allowedPrivateParent(MAC_MOSS_BASE,sourceRoot,platform),false);
+  for(const parent of ['/Volumes/Models/other','/Volumes/Models/sceneworks-terminal-sc-26752/escape','/Volumes/Other/sceneworks-terminal-sc-26752'])assert.equal(allowedPrivateParent(parent,sourceRoot,'darwin'),false);
+  for(const key of ['MOSS_ROOT','MOSS_BUILDS'])assert.equal(mossArtifactRoute(key,resolve(MAC_MOSS_BASE,leaf),base,'darwin').external,true);
+  for(const [key,path,platform]of [['MOSS_BUNDLE',resolve(MAC_MOSS_BASE,leaf),'darwin'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,leaf),'linux'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,'../escape',leaf),'darwin'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,'not-owned'),'darwin']])assert.throws(()=>mossArtifactRoute(key,path,base,platform),/escaped/);
+  assert.equal(mossArtifactRoute('MOSS_BUNDLE',resolve(base,'moss-bundle-123-1'),base,'darwin').external,false);
 });

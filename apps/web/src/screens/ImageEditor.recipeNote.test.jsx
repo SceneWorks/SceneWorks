@@ -12,6 +12,13 @@ vi.mock("react-konva", async () => {
   return { Stage: passthrough("stage"), Layer: passthrough("layer"), Image: () => null, Rect: () => null };
 });
 
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import JSON5 from 'json5';
+import { configure } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
+import { click } from '../testUtils/dom.js';
 import { ImageEditor } from "./ImageEditor.jsx";
 import { AppContext } from "../context/AppContext.js";
 
@@ -196,4 +203,15 @@ describe("the Image Editor's recipe pill asks the one reader (sc-15954)", () => 
     expect(pill().getAttribute("data-tone")).toBe("unknown");
     expect(pill().getAttribute("title")).toMatch(/not that it has none/);
   });
+  it("production terminal configures every actual MOSS Editor generation control",async()=>{
+    inspect.mockResolvedValue(body({workflow:null}));
+    const models=JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)),'../../../../config/manifests/builtin.models.jsonc'),'utf8')).models;
+    const model={...models.find(item=>item.id==='moss_image_sft'),installState:'installed',usable:true,capabilities:['text_to_image','edit_image'],conditionalPurposes:{moss_image_edit:{installState:'installed'}}},ctx=baseContext({imageModels:[model],models:[model],createImageJob:vi.fn(async()=>({id:'editor-job'}))});
+    await render(ctx);const edit=[...container.querySelectorAll('button')].find(node=>node.matches('.ie-acc-head')&&node.textContent.trim()==='AI Edit');expect(edit).toBeTruthy();await click(edit);
+    const expected={model:model.id,prompt:'editor instruction',negativePrompt:'editor negative',width:512,height:768,seed:173,count:1,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
+    await configure(terminalBrowserDom(container),expected,'editor',[]);
+    expect(container.querySelector('.ie-insp-body textarea.ie-textarea').value).toBe(expected.prompt);
+    expect([...container.querySelectorAll('button')].some(node=>node.textContent.includes('Generate'))).toBe(true);
+  });
+
 });
