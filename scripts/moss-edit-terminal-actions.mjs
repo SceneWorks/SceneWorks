@@ -13,7 +13,7 @@ import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18C
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 
-import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
+import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
 const execFile=promisify(callback);
 const optional=async path=>json(path).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -321,15 +321,20 @@ export async function rehydrateCudaPackages(config) {
   await sealPrivateHf(config);
   await save(resolve(config.root,'rehydration.json'),{version:VERSION,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,candidateId:config.candidateId,originalNativeInventory:inventory,installation:await filesUnder(resolve(config.root,'installation')),packages:await fileIdentity(resolve(config.root,'packages.json'))});
 }
-export async function prepareContinuationCudaPackages(config,rehydrateConfig,originalRunId,originalAttempt) {
+export async function prepareContinuationCudaPackages(config,rehydrateConfig,originalRunId,originalAttempt,stopped=null) {
   requireThat(config.backend==='cuda'&&rehydrateConfig.backend==='cuda'&&config.candidateId===rehydrateConfig.candidateId&&config.sourceSha===rehydrateConfig.sourceSha&&config.inferenceSha===rehydrateConfig.inferenceSha&&config.buildRoot===rehydrateConfig.buildRoot,'CUDA package preparation differs from the exact reviewed candidate/artifact');
   const inventory=validateArtifactInventory(await json(resolve(config.buildRoot,'cuda','inventory.json')),'cuda',await sourceIdentity(config));
   const installedPath=resolve(config.buildRoot,'cuda','packages.json');requireThat(canonical(await fileIdentity(installedPath))===canonical(inventory.files.packages),'original native CUDA installed-package inventory changed');
   const installed=await json(installedPath),from=installed.hfHome;
   let mode;
-  try {await lstat(from);mode='original-sealed-HF';}
+  if(stopped)mode='stopped-execution-HF';
+  else try {await lstat(from);mode='original-sealed-HF';}
   catch(error){if(error.code!=='ENOENT')throw error;mode='rehydrated-exact-packages';}
-  if(mode==='original-sealed-HF')await adoptOriginalPrivateHf(config,installed,inventory.files.packages,originalRunId,originalAttempt);
+  if(mode==='stopped-execution-HF') {
+    await adoptStoppedExecutionPrivateHf(config,stopped.artifactRoot,inventory.files.packages,originalRunId,originalAttempt,stopped.runId,stopped.attempt,stopped.artifactId);
+    await mkdir(resolve(config.root,'evidence/external'),{recursive:true});
+    for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await cp(resolve(stopped.artifactRoot,name),resolve(config.root,'evidence/external',`stopped-cuda-${name}`),{errorOnExist:true,force:false});
+  } else if(mode==='original-sealed-HF')await adoptOriginalPrivateHf(config,installed,inventory.files.packages,originalRunId,originalAttempt);
   else {
     await rehydrateCudaPackages(rehydrateConfig);
     await transferPrivateHf(config,await json(resolve(rehydrateConfig.root,'packages.json')),inventory.files.packages);
@@ -337,7 +342,7 @@ export async function prepareContinuationCudaPackages(config,rehydrateConfig,ori
     await cp(resolve(rehydrateConfig.root,'rehydration.json'),resolve(config.root,'rehydration/rehydration.json'),{errorOnExist:true,force:false});
     await cp(resolve(rehydrateConfig.root,'installation'),resolve(config.root,'rehydration/installation'),{recursive:true,errorOnExist:true,force:false});
   }
-  await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode,originalRunId,originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json'))});
+  await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode,originalRunId,originalAttempt,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json')),...(stopped?{stoppedArtifact:{runId:stopped.runId,attempt:stopped.attempt,artifactId:stopped.artifactId}}:{})});
 }
 export async function completedMlxHandoff(config,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha,toolingRoot) {
   requireThat(config.backend==='cuda'&&treeIdentity(toolingRoot).head===cudaToolingSha&&cudaToolingSha!==mlxToolingSha,'completed Mac/CUDA tooling identities must be separate clean commits');
@@ -698,9 +703,10 @@ export async function main(args=process.argv.slice(2)) {
     return executeBackend(config);
   }
   if(phase==='rehydrate-cuda'&&rest.length===1)return rehydrateCudaPackages(await json(rest[0]));
-  if(phase==='prepare-cuda-packages'&&rest.length===4) {
-    const [runtime,rehydrateRuntime,originalRunId,originalAttempt]=rest;
-    return prepareContinuationCudaPackages(await json(runtime),await json(rehydrateRuntime),Number(originalRunId),Number(originalAttempt));
+  if(phase==='prepare-cuda-packages'&&(rest.length===4||rest.length===8)) {
+    const [runtime,rehydrateRuntime,originalRunId,originalAttempt,priorRunId,priorAttempt,priorArtifactId,priorArtifactRoot]=rest;
+    const stopped=rest.length===8?{runId:Number(priorRunId),attempt:Number(priorAttempt),artifactId:Number(priorArtifactId),artifactRoot:priorArtifactRoot}:null;
+    return prepareContinuationCudaPackages(await json(runtime),await json(rehydrateRuntime),Number(originalRunId),Number(originalAttempt),stopped);
   }
   if(phase==='completed-mlx-handoff'&&rest.length===8) {
     const [runtime,originalRunId,originalAttempt,runId,attempt,artifactId,mlxToolingSha,cudaToolingSha]=rest;

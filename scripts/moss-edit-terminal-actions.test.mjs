@@ -11,7 +11,7 @@ import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, crea
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory } from './moss-edit-terminal-actions.mjs';
-import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
+import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 
@@ -413,9 +413,9 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.throws(()=>validateDispatchEnvelope(JSON.stringify({...retry,tooling_sha:'82c534d50b72c1a5984514b90548002da212d735'}),'82c534d50b72c1a5984514b90548002da212d735',identity.inferenceSha,'82c534d50b72c1a5984514b90548002da212d735'),/distinct tooling/);
   assert.throws(()=>repaired({...execute,retry_inventory_path:retry.retry_inventory_path,retry_inventory_sha256:retry.retry_inventory_sha256}),/cannot consume/);
   assert.throws(()=>repaired({...continuation,review_artifact_id:'999'}),/no review/);
-  const cudaOnly={...execute,phase:'continue-cuda',tooling_sha:tooling,product_sha:identity.sourceSha,execution_run_id:'789',execution_run_attempt:'1',mlx_run_id:'987',mlx_run_attempt:'1',mlx_artifact_id:'654',mlx_tooling_sha:'d'.repeat(40)};
+  const cudaOnly={...execute,phase:'continue-cuda',tooling_sha:tooling,product_sha:identity.sourceSha,execution_run_id:'789',execution_run_attempt:'1',mlx_run_id:'987',mlx_run_attempt:'1',mlx_artifact_id:'654',mlx_tooling_sha:'d'.repeat(40),cuda_hf_run_id:'246',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'135'};
   assert.equal(repaired(cudaOnly).mlx_artifact_id,'654');
-  for(const change of [{mlx_artifact_id:''},{mlx_run_id:'789'},{mlx_run_attempt:'0'},{mlx_tooling_sha:tooling},{retry_run_id:'999'},{original_inventory_path:continuation.original_inventory_path}])assert.throws(()=>repaired({...cudaOnly,...change}),/completed MLX artifact\/producer/);
+  for(const change of [{mlx_artifact_id:''},{mlx_run_id:'789'},{mlx_run_attempt:'0'},{mlx_tooling_sha:tooling},{cuda_hf_run_id:''},{cuda_hf_run_id:'789'},{cuda_hf_run_attempt:'0'},{cuda_hf_artifact_id:''},{retry_run_id:'999'},{original_inventory_path:continuation.original_inventory_path}])assert.throws(()=>repaired({...cudaOnly,...change}),/completed MLX and stopped CUDA HF artifacts/);
   assert.throws(()=>repaired({...continuation,mlx_run_id:'987'}),/no review\/native override/);
   assert.equal(repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha,native_run_id:'789',native_run_attempt:'1'}).native_run_id,'789');
   assert.throws(()=>repaired({...verify,tooling_sha:tooling,product_sha:identity.sourceSha}),/original native run/);
@@ -437,6 +437,7 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.match(cudaContinuation,/name: Validate bundle and configure private execution\/build roots\s+shell: powershell/);
   assert.match(cudaContinuation,/\$env:MOSS_REHYDRATE_ROOT/);assert.match(cudaContinuation,/\$LASTEXITCODE -ne 0/);
   assert.match(cudaContinuation,/if: inputs\.phase == 'continue-cuda'[\s\S]*?artifact-ids: \$\{\{ inputs\.mlx_artifact_id \}\}/);
+  assert.match(cudaContinuation,/artifact-ids: \$\{\{ inputs\.cuda_hf_artifact_id \}\}[\s\S]*?prior-cuda[\s\S]*?Adopt authenticated stopped CUDA private packages/);
   assert.match(workflow,/supplement-mlx-handoff:[\s\S]*?stage-completed-mlx-handoff[\s\S]*?include-hidden-files: true/);
   assert.match(cudaContinuation,/needs: \[continue-mlx, supplement-mlx-handoff\][\s\S]*?needs\.supplement-mlx-handoff\.result == 'success'/);
   assert.match(cudaContinuation,/name: moss-mlx-hidden-handoff-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
@@ -617,6 +618,33 @@ test('original stopped CUDA HF is adopted into a new run only from its sealed ex
   assert.equal(receipt.operation,'same-volume-original-stopped-CUDA-HF-adoption');assert.equal(receipt.from,build.hfHome);assert.equal(receipt.to,current.hfHome);
   assert.deepEqual(receipt.before,receipt.after);await assert.rejects(()=>lstat(build.hfHome),{code:'ENOENT'});
   await assert.rejects(()=>adoptOriginalPrivateHf(current,installed,{},123,1),/already exists/);
+});
+test('stopped CUDA execution HF follows two authenticated same-volume ownership hops without rehydration',async t=>{
+  const {base,build,run,installed}=await privateHfFixture(t,'cuda'),parent=resolve(base,'moss-sc-26752'),priorRoot=resolve(parent,'moss-execute-456-1-cuda'),currentRoot=resolve(parent,'moss-execute-789-1-cuda'),artifactRoot=resolve(base,'downloaded-artifact');
+  await Promise.all([mkdir(priorRoot),mkdir(currentRoot),mkdir(artifactRoot)]);
+  const prior={...run,root:priorRoot,hfHome:resolve(priorRoot,'hf')},current={...run,root:currentRoot,hfHome:resolve(currentRoot,'hf')},inventory={byteLength:12,sha256:sha('native package inventory')};
+  await save(resolve(priorRoot,'runtime.json'),prior);
+  await save(resolve(currentRoot,'runtime.json'),current);
+  await adoptOriginalPrivateHf(prior,installed,inventory,123,1);
+  await save(resolve(priorRoot,'cuda-package-preparation.json'),{mode:'original-sealed-HF',originalRunId:123,originalAttempt:1,candidateId:prior.candidateId,sourceSha:prior.sourceSha,inferenceSha:prior.inferenceSha,originalNativePackages:inventory,transfer:await fileIdentity(resolve(priorRoot,'hf-transfer.json'))});
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await writeFile(resolve(artifactRoot,name),await readFile(resolve(priorRoot,name)));
+  await assert.rejects(()=>adoptStoppedExecutionPrivateHf({...current,candidateId:'other'},artifactRoot,inventory,123,1,456,1,654),/another private execution|original sealed package transfer/);
+  await assert.rejects(()=>adoptStoppedExecutionPrivateHf(current,artifactRoot,{sha256:'0'.repeat(64)},123,1,456,1,654),/original sealed package transfer/);
+  assert.ok((await lstat(prior.hfHome)).isDirectory());
+  const receipt=await adoptStoppedExecutionPrivateHf(current,artifactRoot,inventory,123,1,456,1,654);
+  assert.equal(receipt.operation,'same-volume-stopped-CUDA-HF-adoption');assert.equal(receipt.priorArtifactId,654);assert.deepEqual(receipt.before,receipt.after);
+  await assert.rejects(()=>lstat(prior.hfHome),{code:'ENOENT'});assert.equal((await privateHfIntegrity(current)).length,43);
+  const archive=resolve(currentRoot,'evidence/external/stopped-cuda-hf-transfer.json');await mkdir(resolve(currentRoot,'evidence/external'),{recursive:true});await writeFile(archive,await readFile(resolve(artifactRoot,'hf-transfer.json')));
+  await save(resolve(currentRoot,'cuda-package-preparation.json'),{mode:'stopped-execution-HF',originalRunId:123,originalAttempt:1,candidateId:current.candidateId,sourceSha:current.sourceSha,inferenceSha:current.inferenceSha,originalNativePackages:inventory,transfer:await fileIdentity(resolve(currentRoot,'hf-transfer.json')),stoppedArtifact:{runId:456,attempt:1,artifactId:654}});
+  const secondArtifact=resolve(base,'second-downloaded-artifact'),nextRoot=resolve(parent,'moss-execute-987-1-cuda');await mkdir(secondArtifact);await mkdir(nextRoot);const next={...current,root:nextRoot,hfHome:resolve(nextRoot,'hf')};
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])await writeFile(resolve(secondArtifact,name),await readFile(resolve(currentRoot,name)));
+  await mkdir(resolve(secondArtifact,'evidence/external'),{recursive:true});await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),await readFile(archive));
+  await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),'changed predecessor');
+  await assert.rejects(()=>adoptStoppedExecutionPrivateHf(next,secondArtifact,inventory,123,1,789,1,753),/Unexpected token|predecessor transfer/);
+  assert.ok((await lstat(current.hfHome)).isDirectory());
+  await writeFile(resolve(secondArtifact,'evidence/external/stopped-cuda-hf-transfer.json'),await readFile(archive));
+  const chained=await adoptStoppedExecutionPrivateHf(next,secondArtifact,inventory,123,1,789,1,753);
+  assert.equal(chained.priorRunId,789);assert.deepEqual(chained.origin,receipt.origin);assert.deepEqual(chained.before,chained.after);await assert.rejects(()=>lstat(current.hfHome),{code:'ENOENT'});
 });
 test('all 43 installed packages transfer by rename, retaining original receipts and exclusive adapter ownership',async t=>{
   const {build,run,installed}=await privateHfFixture(t),original=await readFile(resolve(build.root,'hf-owner.json')),before=await lstat(resolve(build.hfHome,installed.files[0].file));

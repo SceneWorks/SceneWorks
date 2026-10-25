@@ -76,6 +76,39 @@ export async function adoptOriginalPrivateHf(config,installedInventory,inventory
   const receipt={...identity(config),operation:'same-volume-original-stopped-CUDA-HF-adoption',from,to:config.hfHome,originalRunId,originalAttempt,originalPackages:inventoryIdentity,originalOwner:await fileIdentity(resolve(fromRoot,'hf-owner.json')),before,after};
   await writeFile(resolve(config.root,'hf-transfer.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
+export async function adoptStoppedExecutionPrivateHf(config,artifactRoot,inventoryIdentity,originalRunId,originalAttempt,runId,attempt,artifactId) {
+  owned(config,'execute');
+  requireThat(config.backend==='cuda'&&[originalRunId,originalAttempt,runId,attempt,artifactId].every(value=>Number.isSafeInteger(value)&&value>0)&&runId!==originalRunId,'stopped CUDA adoption requires distinct exact run and artifact identities');
+  const prior=await json(resolve(artifactRoot,'runtime.json'));
+  const fromRoot=prior.root,from=prior.hfHome;
+  requireThat(basename(fromRoot)===`moss-execute-${runId}-${attempt}-cuda`&&from===resolve(fromRoot,'hf')&&prior.backend==='cuda'&&prior.candidateId===config.candidateId&&prior.sourceSha===config.sourceSha&&prior.inferenceSha===config.inferenceSha,'prior CUDA artifact names another private execution');
+  owned(prior,'execute');
+  const recorded=await json(resolve(artifactRoot,'hf-transfer.json')),prepared=await json(resolve(artifactRoot,'cuda-package-preparation.json'));
+  const initial=recorded.operation==='same-volume-original-stopped-CUDA-HF-adoption',chained=recorded.operation==='same-volume-stopped-CUDA-HF-adoption';
+  requireThat((initial||chained)&&recorded.to===from&&recorded.originalRunId===originalRunId&&recorded.originalAttempt===originalAttempt&&canonical(recorded.before)===canonical(recorded.after)&&canonical(recorded.after.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256})))&&canonical(recorded.originalPackages)===canonical(inventoryIdentity)&&canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,recorded[key]])))===canonical(identity(config)),'prior CUDA artifact does not prove original sealed package transfer');
+  let origin;
+  if(initial) {
+    requireThat(recorded.from===resolve(dirname(recorded.from),'hf')&&basename(dirname(recorded.from))===`moss-build-${originalRunId}-${originalAttempt}-cuda`,'prior CUDA original build owner path changed');
+    origin={originalBuildHf:recorded.from,originalOwner:recorded.originalOwner,initialTransfer:await fileIdentity(resolve(artifactRoot,'hf-transfer.json'))};
+  } else {
+    requireThat([recorded.priorRunId,recorded.priorAttempt,recorded.priorArtifactId].every(value=>Number.isSafeInteger(value)&&value>0)&&recorded.from===resolve(dirname(recorded.from),'hf')&&basename(dirname(recorded.from))===`moss-execute-${recorded.priorRunId}-${recorded.priorAttempt}-cuda`,'prior CUDA execution owner path changed');
+    const parentPath=resolve(artifactRoot,'evidence/external/stopped-cuda-hf-transfer.json'),parent=await json(parentPath);
+    requireThat(canonical(recorded.priorTransfer)===canonical(await fileIdentity(parentPath))&&['same-volume-original-stopped-CUDA-HF-adoption','same-volume-stopped-CUDA-HF-adoption'].includes(parent.operation)&&parent.to===recorded.from&&parent.originalRunId===originalRunId&&parent.originalAttempt===originalAttempt&&canonical(parent.originalPackages)===canonical(inventoryIdentity)&&canonical(parent.before)===canonical(parent.after)&&canonical(parent.after)===canonical(recorded.before)&&canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,parent[key]])))===canonical(identity(config)),'stopped CUDA predecessor transfer is missing or changed');
+    const parentOrigin=parent.origin??{originalBuildHf:parent.from,originalOwner:parent.originalOwner,initialTransfer:recorded.priorTransfer};
+    requireThat(canonical(recorded.origin)===canonical(parentOrigin),'stopped CUDA origin chain changed');origin=recorded.origin;
+  }
+  requireThat(origin.originalBuildHf===resolve(dirname(origin.originalBuildHf),'hf')&&basename(dirname(origin.originalBuildHf))===`moss-build-${originalRunId}-${originalAttempt}-cuda`&&canonical(origin.originalOwner)===canonical(await fileIdentity(resolve(dirname(origin.originalBuildHf),'hf-owner.json'))),'original sealed owner receipt changed after CUDA transfer');
+  requireThat(prepared.mode===(initial?'original-sealed-HF':'stopped-execution-HF')&&prepared.originalRunId===originalRunId&&prepared.originalAttempt===originalAttempt&&prepared.candidateId===config.candidateId&&prepared.sourceSha===config.sourceSha&&prepared.inferenceSha===config.inferenceSha&&canonical(prepared.originalNativePackages)===canonical(inventoryIdentity)&&canonical(prepared.transfer)===canonical(await fileIdentity(resolve(artifactRoot,'hf-transfer.json')))&&(!chained||prepared.stoppedArtifact?.runId===recorded.priorRunId&&prepared.stoppedArtifact?.attempt===recorded.priorAttempt&&prepared.stoppedArtifact?.artifactId===recorded.priorArtifactId),'prior CUDA package preparation differs from its sealed transfer');
+  for(const name of ['runtime.json','hf-transfer.json','cuda-package-preparation.json'])requireThat(canonical(await fileIdentity(resolve(artifactRoot,name)))===canonical(await fileIdentity(resolve(fromRoot,name))),`stopped CUDA ${name} differs from downloaded artifact`);
+  await confined(config.root);requireThat(await absent(config.hfHome),'new private CUDA destination already exists');
+  requireThat((await lstat(from)).dev===(await lstat(config.root)).dev,'stopped CUDA private HF is not on the execution volume');
+  const before=await privateHfIntegrity({...config,hfHome:from});requireThat(canonical(before)===canonical(recorded.after),'stopped CUDA package bytes changed');
+  requireThat(await absent(config.hfHome),'new private CUDA destination appeared before transfer');
+  await rename(from,config.hfHome);
+  const after=await privateHfIntegrity(config);requireThat(canonical(after)===canonical(before),'stopped CUDA ownership transfer changed package bytes');
+  const receipt={...identity(config),operation:'same-volume-stopped-CUDA-HF-adoption',from,to:config.hfHome,originalRunId,originalAttempt,priorRunId:runId,priorAttempt:attempt,priorArtifactId:artifactId,priorTransfer:await fileIdentity(resolve(artifactRoot,'hf-transfer.json')),priorRuntime:await fileIdentity(resolve(artifactRoot,'runtime.json')),origin,originalPackages:inventoryIdentity,before,after};
+  await writeFile(resolve(config.root,'hf-transfer.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
+}
 export async function releasePrivateHf(config) {
   owned(config,'execute');const receipt=await json(resolve(config.root,'hf-transfer.json'));
   requireThat(receipt.to===config.hfHome&&canonical(identity(config))===canonical(Object.fromEntries(Object.keys(identity(config)).map(key=>[key,receipt[key]]))),'private HF cleanup ownership mismatch');

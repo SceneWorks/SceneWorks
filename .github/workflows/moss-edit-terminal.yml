@@ -151,6 +151,15 @@ on:
       mlx_tooling_sha:
         required: false
         type: string
+      cuda_hf_run_id:
+        required: false
+        type: string
+      cuda_hf_run_attempt:
+        required: false
+        type: string
+      cuda_hf_artifact_id:
+        required: false
+        type: string
       upload_path:
         required: false
         type: string
@@ -683,8 +692,20 @@ jobs:
       - name: Authenticate completed MLX handoff before CUDA package adoption
         if: inputs.phase == 'continue-cuda'
         run: node tooling/scripts/moss-edit-terminal-actions.mjs completed-mlx-handoff "${{ env.MOSS_ROOT }}/runtime.json" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "${{ inputs.mlx_run_id }}" "${{ inputs.mlx_run_attempt }}" "${{ inputs.mlx_artifact_id }}" "${{ inputs.mlx_tooling_sha }}" "${{ inputs.tooling_sha }}"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.phase == 'continue-cuda'
+        with:
+          artifact-ids: ${{ inputs.cuda_hf_artifact_id }}
+          run-id: ${{ inputs.cuda_hf_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ env.MOSS_ROOT }}/prior-cuda
       - name: Adopt original sealed CUDA packages, rehydrate only if absent
+        if: inputs.phase == 'continue'
         run: node tooling/scripts/moss-edit-terminal-actions.mjs prepare-cuda-packages "${{ env.MOSS_ROOT }}/runtime.json" "${{ env.MOSS_REHYDRATE_ROOT }}/runtime.json" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}"
+      - name: Adopt authenticated stopped CUDA private packages
+        if: inputs.phase == 'continue-cuda'
+        run: node tooling/scripts/moss-edit-terminal-actions.mjs prepare-cuda-packages "${{ env.MOSS_ROOT }}/runtime.json" "${{ env.MOSS_REHYDRATE_ROOT }}/runtime.json" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "${{ inputs.cuda_hf_run_id }}" "${{ inputs.cuda_hf_run_attempt }}" "${{ inputs.cuda_hf_artifact_id }}" "${{ env.MOSS_ROOT }}/prior-cuda"
       - name: Provision exact execution browser
         run: node tooling/scripts/moss-edit-terminal-actions.mjs provision-browser "${{ env.MOSS_ROOT }}/runtime.json"
       - name: Run untouched CUDA rows and refusals against original H17 native binary
