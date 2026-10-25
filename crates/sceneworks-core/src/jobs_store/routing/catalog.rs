@@ -1522,6 +1522,40 @@ pub fn imported_video_lane_claims_with_lora(lane: &str, probe: &Map<String, Valu
     }
 }
 
+/// Whether ANY valid supported shape of this plan-backed imported H3 entry is claimable WITH a
+/// compatible adapter on the given lane pair. Every UI mode is probed through the SAME
+/// mode-conditioning machinery the support projection uses — a reference-partition (Ref2VA)
+/// import is advertised through the reference shape it actually serves, a hybrid through its
+/// base shape — so a text-only probe can never withdraw an adapter surface the entry genuinely
+/// claims on some other shape.
+pub fn imported_video_adapter_surface_claimable(
+    entry: &Map<String, Value>,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> bool {
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    VIDEO_UI_MODES.iter().any(|mode| {
+        let mut payload = video_mode_probe_payload(id, mode);
+        payload.insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(entry.clone()),
+        );
+        payload.insert(
+            "loras".to_owned(),
+            Value::Array(vec![json!({ "id": "minimax_h3_turbo_4step_v01" })]),
+        );
+        (mlx_lane_available
+            && super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, &payload))
+            || (candle_lane_available
+                && super::candle::video_request_is_candle_eligible(
+                    &JobType::VideoGenerate,
+                    &payload,
+                ))
+    })
+}
+
 /// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
 /// lanes, because both providers load a staged DiT directory through the same `transformer`
 /// component seam.

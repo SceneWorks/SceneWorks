@@ -9571,30 +9571,21 @@ fn imported_lora_advertisement_verdict(
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) -> Option<bool> {
-    // An imported plan-backed H3 video entry serves the family's adapter surface on exactly the
-    // lanes its claim predicate can serve; the same per-lane probe that decides video eligibility
-    // decides adapter advertisement, so the catalog can never offer an adapter no lane will claim.
+    // An imported plan-backed H3 video entry serves the family's adapter surface when ANY valid
+    // supported shape is claimable with a compatible adapter: every UI mode is probed with its
+    // real conditioning through the same predicates the support projection uses, so a
+    // reference-partition (Ref2VA) import is advertised through its reference shape rather than
+    // withdrawn by a probe no shape of it can answer.
     if object.get("type").and_then(Value::as_str) == Some("video")
         && sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(object)
     {
-        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
-        let mut probe = serde_json::Map::new();
-        probe.insert("model".to_owned(), Value::String(id.to_owned()));
-        probe.insert("mode".to_owned(), Value::String("text_to_video".to_owned()));
-        probe.insert(
-            "modelManifestEntry".to_owned(),
-            Value::Object(object.clone()),
+        return Some(
+            sceneworks_core::jobs_store::imported_video_adapter_surface_claimable(
+                object,
+                mlx_lane_available,
+                candle_lane_available,
+            ),
         );
-        probe.insert(
-            "loras".to_owned(),
-            Value::Array(vec![json!({ "id": "minimax_h3_turbo_4step_v01" })]),
-        );
-        let lane_serves = |lane: &str| {
-            sceneworks_core::jobs_store::imported_video_lane_claims_with_lora(lane, &probe)
-        };
-        let mlx_serves = mlx_lane_available && lane_serves("mlx");
-        let candle_serves = candle_lane_available && lane_serves("candle");
-        return Some(mlx_serves || candle_serves);
     }
     if object.get("type").and_then(Value::as_str) != Some("image") {
         return None;
@@ -16096,6 +16087,72 @@ mod imported_lora_advertisement_tests {
             .and_then(Value::as_array)
             .is_some_and(|families| families.is_empty())
             && object["loraCompatibility"]["supported"] == json!(false)
+    }
+
+    /// A plan-backed imported MiniMax-H3 entry of ANY supported partition advertises the family's
+    /// adapter surface on its lanes. A Ref2VA import serves references, not text-only shapes: a
+    /// text_to_video-only probe cannot be claimed by it, so deriving the advertisement from that
+    /// single shape withdrew the adapter surface the CONTRACTED reference Singularity models
+    /// genuinely serve. The advertisement now asks whether ANY valid supported shape is claimable,
+    /// through the same mode-conditioning probes the support projection uses.
+    #[test]
+    fn imported_ref2va_h3_advertises_adapters_through_its_reference_shape() {
+        let h3 = |partition: &str, base: &str| {
+            json!({
+                "id": format!("singularity_{partition}"),
+                "type": "video",
+                "family": sceneworks_core::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY,
+                "catalogScope": "user",
+                "importSourceShape":
+                    sceneworks_core::minimax_h3_import::MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+                "baseModel": base,
+                "minimaxH3Partition": partition,
+                "importPlan": {
+                    "checkpointId": format!("managed/singularity_{partition}"),
+                    "assembly": {
+                        "schemaVersion":
+                            sceneworks_core::minimax_h3_import::MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION,
+                        "partition": partition,
+                    },
+                },
+            })
+            .as_object()
+            .expect("entry object")
+            .clone()
+        };
+        assert!(
+            sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(&h3(
+                "ref2va",
+                "minimax_h3_ref"
+            )),
+            "the fixture must be the imported plan-backed shape the projection keys on"
+        );
+        for (partition, base) in [
+            ("ref2va", "minimax_h3_ref"),
+            ("fl2va", "minimax_h3"),
+            ("hybrid", "minimax_h3"),
+        ] {
+            for (mlx, candle) in [(true, false), (false, true)] {
+                let mut entry = h3(partition, base);
+                apply_imported_lora_advertisement_for_lanes(&mut entry, mlx, candle);
+                assert_eq!(
+                    entry["loraCompatibility"]["families"],
+                    json!(["minimax-h3"]),
+                    "{partition}: the servable H3 adapter family must be advertised \
+                     (mlx={mlx}, candle={candle}): {entry:?}"
+                );
+                assert_eq!(
+                    entry["loraCompatibility"]["supported"],
+                    json!(true),
+                    "{partition}: Studio must not hide adapters the lane can claim"
+                );
+                assert!(
+                    !withdrawn(&entry),
+                    "{partition}: the empty/unsupported withdrawal is the exact regression \
+                     (mlx={mlx}, candle={candle})"
+                );
+            }
+        }
     }
 
     /// Both native imported Krea 2 single-file loaders take adapters (sc-18480), so neither platform

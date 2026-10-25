@@ -1646,6 +1646,10 @@ pub(super) struct CandleMiniMaxH3Load {
     pub(super) root: PathBuf,
     pub(super) dit_dir: Option<PathBuf>,
     pub(super) text_encoder_dir: Option<PathBuf>,
+    /// The EXPLICIT frozen companion directory an import acquired but the direct DiT path does
+    /// not expose as a sibling. Prepared-file acquisition pins it so the frozen component
+    /// closure verifies; the engine itself is untouched (fl2va tasks never read it).
+    pub(super) companion_dir: Option<PathBuf>,
     pub(super) quant: Option<Quant>,
     pub(super) tier: &'static str,
 }
@@ -1688,6 +1692,7 @@ pub(super) fn resolve_candle_minimax_h3_load(
         root,
         dit_dir,
         text_encoder_dir,
+        companion_dir: None,
         quant,
         tier,
     })
@@ -1848,6 +1853,9 @@ pub(super) async fn generate_candle_minimax_h3_using(
         quant: load.quant,
         dit_component_dir: load.dit_dir,
         text_encoder_component_dir: load.text_encoder_dir,
+        // The explicit frozen companion for direct-path imports; prepared-file acquisition pins
+        // it so the frozen component closure verifies before provider execution.
+        imported_h3_companion_dir: load.companion_dir,
         adapters,
         conditioning,
         prompt: request.prompt.clone(),
@@ -2988,18 +2996,27 @@ pub(super) fn resolve_candle_imported_minimax_h3_load(
     let bound = resolve_imported_h3_components(settings, request, dit)?;
     // Base imports keep their direct path (including linked sources on another Windows volume).
     // Semantic identity is carried by the supplemental prepared cache context, not by hardlinks.
-    let dit_dir = if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va
-    {
-        dit.transformer_dir.clone()
-    } else {
-        stage_imported_minimax_h3_assembly(settings, dit, &bound.companion)?
-            .join(MINIMAX_H3_DIT_COMPONENT)
-    };
+    // The frozen companion the import committed is still ACQUIRED explicitly: the direct DiT
+    // directory's sibling is not the library's q4/transformer_ref, so prepared-file acquisition
+    // receives the companion path itself or the frozen component closure would refuse the
+    // render before any provider execution.
+    let (dit_dir, companion_dir) =
+        if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va {
+            (dit.transformer_dir.clone(), Some(bound.companion.clone()))
+        } else {
+            (
+                stage_imported_minimax_h3_assembly(settings, dit, &bound.companion)?
+                    .join(MINIMAX_H3_DIT_COMPONENT),
+                // The staged assembly already exposes the companion as the DiT's sibling.
+                None,
+            )
+        };
     Ok((
         CandleMiniMaxH3Load {
             root: bound.root,
             dit_dir: Some(dit_dir),
             text_encoder_dir: Some(bound.encoder),
+            companion_dir,
             quant: None,
             tier: IMPORTED_MINIMAX_H3_TIER,
         },

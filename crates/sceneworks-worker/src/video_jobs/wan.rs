@@ -1473,6 +1473,12 @@ pub(super) struct VideoGenInput {
     /// closure before deriving the warm key. This is not an executed-tensor attestation.
     pub(super) imported_h3_identity: Option<Value>,
     pub(super) imported_h3_authority: Option<sceneworks_core::minimax_h3_load::H3SourceAuthority>,
+    /// The EXPLICIT frozen companion directory for imported H3 loads whose DiT keeps its direct
+    /// path (Candle FL2VA): prepared-file acquisition pins it so the frozen component closure
+    /// verifies, without staging, substitution, or cross-volume links. `None` on every route
+    /// whose staged assembly already exposes the companion as the DiT's sibling.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    pub(super) imported_h3_companion_dir: Option<PathBuf>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1493,6 +1499,8 @@ impl Default for VideoGenInput {
             memory_context: None,
             imported_h3_identity: None,
             imported_h3_authority: None,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            imported_h3_companion_dir: None,
             engine_id: "",
             veda: None,
             veda_predictor: None,
@@ -2913,6 +2921,12 @@ pub(super) async fn generate_video_using(
                     )
                 })?;
                 let preparation_cancel = cancel.clone();
+                // The explicit frozen companion for direct-path imports: its files must be
+                // ACQUIRED alongside the DiT or the frozen component closure refuses the render.
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let companion = input.imported_h3_companion_dir.clone();
+                #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+                let companion = None;
                 let preparation_span = tracing::info_span!("h3_import_preparation",
                     jobId = %receipt_job_id, phase = "component-file-acquisition");
                 tokio::task::spawn_blocking(move || {
@@ -2921,6 +2935,7 @@ pub(super) async fn generate_video_using(
                         sceneworks_core::minimax_h3_load::PreparedH3Load::prepare_authorized_with_check(
                             &mut spec,
                             Some(authority),
+                            companion,
                             &|| super::minimax_h3::h3_preparation_checkpoint(&preparation_cancel),
                         )
                         .map_err(|message| {
