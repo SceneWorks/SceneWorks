@@ -6,6 +6,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
+import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
@@ -61,6 +63,198 @@ test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async
     "retain the ordinary workspace unit/math checks");
   assert.match(hosted, /cargo clippy/,
     "retain ordinary compilation/lint coverage");
+});
+
+test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  assert.match(server, /^on:\n  workflow_dispatch:/m);
+  assert.doesNotMatch(server, /^  (push|pull_request|merge_group|schedule):/m);
+  for (const file of ["macos-mlx.yml", "windows-candle.yml"]) {
+    const ordinary = await source(`.github/workflows/${file}`);
+    assert.doesNotMatch(ordinary, /(?:pruned|w4a8)_import_native_(?:mlx|cuda)_projection_smoke/);
+  }
+  assert.match(await source(".github/workflows/macos-mlx.yml"), /run: cargo test -- --skip nax_16bit_sdpa_is_correct/);
+  for (const backend of ["mlx", "cuda"]) {
+    const job = workflowJob(server, `h3-import-${backend}`);
+    const expression = workflowExpression(job);
+    for (const event of ["push", "pull_request", "merge_group", "workflow_dispatch"]) {
+      for (const operation of [undefined, "standard", "source", "h3-import-mlx", "h3-import-cuda", "h3-import-both"]) {
+        assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+          event === "workflow_dispatch" && [`h3-import-${backend}`, "h3-import-both"].includes(operation));
+      }
+    }
+    assert.match(job, /cancel-in-progress: false/);
+    assert.match(job, /if: \$\{\{ always\(\) \}\}/);
+    assert.match(job, /if-no-files-found: error/);
+    assert.match(job, new RegExp(`node scripts/ci/h3-import-native-proof\\.mjs ${backend}`));
+  }
+  assert.match(workflowJob(server, "h3-import-mlx"), /runs-on: \[self-hosted, macOS, ARM64, rw-llm\]/);
+  assert.match(workflowJob(server, "h3-import-mlx"), /test "\$RUNNER_NAME" = nax-macos-2/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /group: windows-candle-gpu-real-weights/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "0"/);
+  const fixture = await source("crates/sceneworks-worker/src/minimax_h3_import_fixture.rs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const bare = name.split("::").at(-1);
+      assert.match(fixture, new RegExp(`#\\[ignore[^\\n]*\\]\\nfn ${bare}\\(`), `${bare} remains ignored in ordinary cargo test`);
+    }
+  }
+});
+
+test("H3 native proof evidence refuses zero tests, ignored tests, wrong selection and failed commands", async () => {
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const good = `running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out;`;
+      verifyProofResult(good, name, 0);
+      for (const bad of [good.replace("1 passed", "0 passed"), good.replace("0 ignored", "1 ignored"), good.replace("0 failed", "1 failed"), good.replace("running 1 test", "running 0 tests"), good.replace(name, "unrelated_test")]) {
+        assert.throws(() => verifyProofResult(bad, name, 0));
+      }
+      assert.throws(() => verifyProofResult(good, name, 1));
+    }
+    requireManualSelection("workflow_dispatch", backend, backend);
+    requireManualSelection("workflow_dispatch", "both", backend);
+    for (const event of ["push", "pull_request", "merge_group", undefined]) assert.throws(() => requireManualSelection(event, backend, backend));
+    for (const selection of [undefined, "standard", "", backend === "mlx" ? "cuda" : "mlx"]) assert.throws(() => requireManualSelection("workflow_dispatch", selection, backend));
+  }
+  assert.throws(() => proofSelection("cpu"));
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  for (const token of ["sourceSha", "inferenceSha", "fixtureSha256", "configuration", "durationMs", "receipt.json", "--exact", "--ignored", "--test-threads=1", "--no-run", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HUGGINGFACE_HUB_CACHE", "SCENEWORKS_DATA_DIR", "tree_guard.py", '"8", "180"']) assert.ok(runner.includes(token), token);
+});
+
+test("H3 CUDA proof preserves PCI ordering and records the actual selected physical GPU", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  assert.match(job, /^      CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  const env = { CUDA_DEVICE_ORDER: "PCI_BUS_ID", CUDA_VISIBLE_DEVICES: "0" };
+  const csv = "0, GPU-high, 00000000:41:00.0, card-high, 580.1\n1, GPU-low, 00000000:01:00.0, card-low, 580.1\n";
+  const evidence = cudaDeviceEvidence(env, csv);
+  assert.equal(evidence.cudaDeviceOrder, "PCI_BUS_ID");
+  assert.deepEqual(evidence.selectedPhysicalDevice, { nvmlIndex: 1, uuid: "GPU-low", pciBusId: "00000000:01:00.0", name: "card-low", driverVersion: "580.1" });
+  for (const order of [undefined, "", "FASTEST_FIRST"]) assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_DEVICE_ORDER: order }, csv));
+  assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_VISIBLE_DEVICES: "1" }, csv));
+  for (const malformed of ["", "0, GPU-unknown, nope, card, 580", "0, missing-uuid, 0000:01:00.0, card, 580"]) assert.throws(() => cudaDeviceEvidence(env, malformed));
+  assert.match(await source("scripts/ci/h3-import-native-proof.mjs"), /receipt\.cuda = cudaDeviceEvidence\(process\.env, inventory\)/);
+});
+
+test("H3 dispatch queues are unique per run and leave old StarVector and ordinary keys unchanged", async () => {
+  const workflow = await source(".github/workflows/server-candle-linux.yml");
+  const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
+  const expression = workflowExpression(root, "group");
+  const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
+  assert.ok(expression.includes(original), "old group-key expression remains byte-identical");
+  assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
+  const evaluate = (event, operation, id) => Function("github", "inputs", "format", `return (${expression});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id }, { starvector_terminal_operation: operation },
+    (template, value) => template.replace("{0}", value));
+  for (const operation of ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", undefined]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), ["standard", ""].includes(operation) ? "server-candle-linux-refs/heads/feature" : "starvector-terminal-bridge");
+  }
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), "h3-import-native-10");
+    assert.equal(evaluate("workflow_dispatch", operation, 11), "h3-import-native-11");
+  }
+});
+
+test("H3 Candle proof clears an installed wrapper immediately after Rust runner preparation", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  const clear = workflowStep(job, "Disable sccache for the heavy Candle proof build");
+  assert.match(clear, /\$env:RUSTC_WRAPPER = ''/);
+  assert.match(clear, /'RUSTC_WRAPPER=' \| Out-File -FilePath \$env:GITHUB_ENV/);
+  assert.match(job, /uses: \.\/\.github\/actions\/prepare-rust-runner\n      - name: Disable sccache/);
+  assert.ok(job.indexOf(clear) < job.indexOf("Fetch source dependencies only"));
+});
+
+test("H3 Metal proof rechecks and records available memory immediately before every case", async () => {
+  const GiB = 2 ** 30;
+  requireMetalHeadroom({ totalBytes: 128 * GiB, freePercent: 50 });
+  requireMetalHeadroom({ totalBytes: 100 * GiB, freePercent: 18 });
+  for (const observation of [{ totalBytes: 100 * GiB, freePercent: 17 }, { totalBytes: 128 * GiB, freePercent: NaN }, { totalBytes: NaN, freePercent: 100 }]) assert.throws(() => requireMetalHeadroom(observation));
+  const receipt = {};
+  const saved = [];
+  const save = () => saved.push(structuredClone(receipt));
+  observeMetalCase("first", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 50 }));
+  assert.throws(() => observeMetalCase("second", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 10 })));
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1].memoryObservations[1].name, "second");
+  assert.equal(saved[1].memoryObservations[1].freePercent, 10);
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  const cases = runner.slice(runner.indexOf("for (const name of proofSelection(backend))"));
+  assert.match(cases, /if \(backend === "mlx"\) observeMetalCase\(name, receipt, save\);\n      const result/);
+});
+
+async function waitForBuildLog(file, marker) {
+  const until = Date.now() + 3000;
+  while (Date.now() < until) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    if (text.includes(marker)) return text;
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.fail(`live compiler log never contained ${marker}`);
+}
+
+function buildEvidence(evidence) {
+  const receipt = { status: "running", cases: [] };
+  const save = () => writeFileSync(path.join(evidence, "receipt.json"), JSON.stringify(receipt));
+  return { evidence, receipt, save, env: process.env };
+}
+
+test("H3 build evidence exists before compiler completion and streams both output files live", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-live-"));
+  const options = buildEvidence(evidence);
+  const pending = streamProofBuild(process.execPath, ["-e", 'console.log("live-out"); console.error("live-err"); setTimeout(() => process.exit(0), 700);'], options);
+  try {
+    const initial = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(initial.build.state, "running");
+    assert.ok(initial.build.startedAt);
+    assert.equal(initial.build.completedAt, undefined);
+    await waitForBuildLog(path.join(evidence, "build.jsonl"), "live-out");
+    await waitForBuildLog(path.join(evidence, "build.log"), "live-err");
+    assert.equal(options.receipt.build.state, "running", "diagnostics must exist while the compiler is still running");
+    assert.match(await pending, /live-out/);
+    assert.equal(options.receipt.build.state, "passed");
+    assert.ok(options.receipt.build.durationMs >= 0);
+  } finally {
+    await pending.catch(() => {});
+    await rm(evidence, { recursive: true, force: true });
+  }
+});
+
+test("H3 failed compiler preserves diagnostics and a failed build receipt", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-fail-"));
+  const options = buildEvidence(evidence);
+  try {
+    await assert.rejects(streamProofBuild(process.execPath, ["-e", 'console.log("partial-json"); console.error("compiler failed"); process.exit(7);'], options), /proof build failed/);
+    assert.match(await readFile(path.join(evidence, "build.log"), "utf8"), /compiler failed/);
+    const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(saved.build.state, "failed");
+    assert.equal(saved.build.status, 7);
+    assert.ok(saved.build.completedAt);
+    assert.notEqual(saved.status, "passed");
+  } finally { await rm(evidence, { recursive: true, force: true }); }
+});
+
+test("H3 bounded build timeout and interruption retain partial logs without reporting success", async () => {
+  for (const interrupt of [false, true]) {
+    const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-stop-"));
+    const options = { ...buildEvidence(evidence), timeoutMs: interrupt ? 5000 : 250, graceMs: 50 };
+    const listeners = process.listenerCount("SIGTERM");
+    const pending = streamProofBuild(process.execPath, ["-e", 'console.log("partial-before-stop"); setTimeout(() => process.exit(0), 2000);'], options);
+    const rejected = assert.rejects(pending, /proof build failed/);
+    try {
+      if (interrupt) {
+        await waitForBuildLog(path.join(evidence, "build.jsonl"), "partial-before-stop");
+        process.emit("SIGTERM"); // only the fake compiler is terminated, never this test process
+      }
+      await rejected;
+      const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+      assert.equal(saved.build.state, "interrupted");
+      assert.equal(saved.build.termination, interrupt ? "SIGTERM" : "timeout");
+      assert.ok(saved.build.terminationRequestedAt);
+      assert.match(await readFile(path.join(evidence, "build.jsonl"), "utf8"), /partial-before-stop/);
+      assert.notEqual(saved.status, "passed");
+      assert.equal(process.listenerCount("SIGTERM"), listeners);
+    } finally { await rejected; await rm(evidence, { recursive: true, force: true }); }
+  }
 });
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {

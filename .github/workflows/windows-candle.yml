@@ -880,29 +880,8 @@ jobs:
           type "%SCENEWORKS_H3_SMOKE_LOG%"
           if not "%smoke_exit%"=="0" exit /b %smoke_exit%
           powershell -NoProfile -Command "$text=[IO.File]::ReadAllText($env:SCENEWORKS_H3_SMOKE_LOG); if ($text -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;' -or $text -notmatch 'minimax_h3_import_fixture::convrot_import_native_cuda_projection_smoke') { throw 'exact native CUDA fixture did not execute once' }"
-      - name: Run the synthetic MiniMax-H3 pruned CUDA import forward
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke }}
-        timeout-minutes: 3
-        shell: cmd
-        run: |
-          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          set "HF_HOME="
-          for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "HF_HOME=%RUNNER_TEMP%\sc-26684-pruned-%%G"
-          if not defined HF_HOME exit /b 1
-          if exist "%HF_HOME%" exit /b 1
-          set "HF_HUB_CACHE=%HF_HOME%\hub"
-          set "HUGGINGFACE_HUB_CACHE=%HF_HOME%\hub"
-          set "HF_HUB_OFFLINE=1"
-          set "TRANSFORMERS_OFFLINE=1"
-          mkdir "%HF_HUB_CACHE%"
-          if errorlevel 1 exit /b 1
-          set "SCENEWORKS_H3_SMOKE_LOG=%HF_HOME%\native-cuda.txt"
-          cargo test --locked -p sceneworks-worker --features backend-candle --lib minimax_h3_import_fixture::pruned_import_native_cuda_projection_smoke -- --exact --ignored --nocapture --test-threads=1 > "%SCENEWORKS_H3_SMOKE_LOG%" 2>&1
-          set "smoke_exit=%ERRORLEVEL%"
-          type "%SCENEWORKS_H3_SMOKE_LOG%"
-          if not "%smoke_exit%"=="0" exit /b %smoke_exit%
-          powershell -NoProfile -Command "$text=[IO.File]::ReadAllText($env:SCENEWORKS_H3_SMOKE_LOG); if ($text -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;' -or $text -notmatch 'minimax_h3_import_fixture::pruned_import_native_cuda_projection_smoke') { throw 'exact native pruned CUDA fixture did not execute once' }"
+      # Model-level pruned/W4A8 H3 forwards require positive selection in the registered
+      # server-candle-linux.yml manual proof route, not this default dispatch/PR lane.
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
       # compile) and typechecks the full graph, so a candle sidecar build break is

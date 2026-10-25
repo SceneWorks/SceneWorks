@@ -2,6 +2,9 @@ use super::*;
 use crate::checkpoint_derivative::{CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore};
 use crate::checkpoint_plan_store::CheckpointPlanStore;
 
+#[path = "minimax_h3_w4a8_tests.rs"]
+mod w4a8;
+
 fn config() -> H3Config {
     let mut config = H3Config::published();
     for (key, value) in [

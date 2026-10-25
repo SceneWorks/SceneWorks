@@ -267,7 +267,11 @@ impl MiniMaxH3ImportAssembly {
         transformer_layer_ids.sort();
         let source_encoding = match plan.context.get("sourceEncoding") {
             None => None,
-            Some(Value::String(value)) if value == "convrot_int8" => Some(value.clone()),
+            Some(Value::String(value))
+                if matches!(value.as_str(), "convrot_int8" | "asym_w4a8_int8") =>
+            {
+                Some(value.clone())
+            }
             Some(_) => return Err("unknown MiniMax-H3 source encoding in plan context".into()),
         };
         let pruning = plan
@@ -432,6 +436,9 @@ pub fn verify_imported_pruning(
     assembly: &MiniMaxH3ImportAssembly,
     inventory: &crate::minimax_h3_codec::H3SourceInventory,
 ) -> Result<(), String> {
+    if assembly.source_encoding.as_deref() != inventory.source_encoding() {
+        return Err("MiniMax-H3 source encoding no longer matches its import plan; rescan or re-import the checkpoint".into());
+    }
     if assembly.pruning != inventory.pruning {
         return Err("MiniMax-H3 source pruning identity/topology no longer matches its import plan; rescan or re-import the checkpoint".into());
     }

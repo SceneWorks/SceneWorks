@@ -52,16 +52,20 @@ impl H3SourceAuthority {
         self
     }
 
-    /// Receipt identity comes only from the derivative lease retained by this authority. Clones
-    /// keep the same lease alive; source-only loads have no derivative receipt to claim.
+    /// Receipt identity from the derivative lease already retained by this authority. Returning
+    /// an owned key does not move or release either lease; blocking preparation/native loading
+    /// keeps both alive through the existing Arc clones, including after async cancellation.
     pub fn derivative_cache_key(&self) -> Option<String> {
-        let derivative = self._leases.as_ref()?._derivative.as_ref()?;
-        Some(
-            derivative
-                .artifact()
-                .cache_key()
-                .expect("leased artifact identity is validated"),
-        )
+        self._leases
+            .as_ref()?
+            ._derivative
+            .as_ref()
+            .map(|derivative| {
+                derivative
+                    .artifact()
+                    .cache_key()
+                    .expect("leased artifact identity is validated")
+            })
     }
 
     pub fn validate(&self) -> Result<(), String> {
