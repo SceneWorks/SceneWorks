@@ -405,15 +405,17 @@ function editorCase() {
   const expected={...structuredClone(row.request),projectId:'target-project',referenceAssetIds:['uploaded-original-B']};
   const uploadBytes=png([10,20,30,255],6),original=pngRgbIdentity(png([10,20,30]));
   const origin={jobId:'actual-mlx-origin',outputs:[{assetId:'actual-origin-output'}]};
-  const originJob={id:origin.jobId,projectId:'origin-project',status:'completed',payload:{projectId:'origin-project',prompt:'original request'},result:{assets:[{id:'actual-origin-output'}]}};
-  const originAsset={id:'actual-origin-output',projectId:'origin-project',lineage:{jobId:origin.jobId},recipe:{prompt:'original request',seed:173}};
+  const sigmas=Array.from({length:31},(_,index)=>Math.fround(1-index/30));sigmas[1]=0.9929999709129333;
+  const recipe={prompt:'original request',seed:173,rawAdapterSettings:{steps:30,mossImageEditExecutionReport:{base:{sampling:{kind:'euler',sigmas}}}}};
+  const originJob={id:origin.jobId,projectId:'origin-project',status:'completed',payload:{projectId:'origin-project',prompt:'original request',advanced:{steps:30}},result:{assets:[{id:'actual-origin-output',recipe:structuredClone(recipe)}]}};
+  const originAsset={id:'actual-origin-output',projectId:'origin-project',lineage:{jobId:origin.jobId},recipe};
   const at=n=>new Date(Date.now()-10000+n*1000).toISOString();
   const asset={id:'actual-ui-scratch',projectId:'target-project',type:'image',createdAt:at(1),file:{path:'assets/scratch.png'}};
   const lockSha256=sha('inert-candidate'),bindingSha256=sha('inert-binding');
   const capture={version:VERSION,rowId:row.id,lockSha256,bindingSha256,observer:'INERT_FIXTURE_NOT_RUNTIME',capturedAt:at(4),
     sourceUpload:{inputId:'B',file:'observed-upload.png',sha256:sha(uploadBytes),observedAt:at(1),byteObserver:'authenticated-product-asset-readback',network:{method:'POST',path:'/api/v1/projects/target-project/assets',request:{observer:'playwright-request-metadata-and-product-response',fileSha256:null,postDataState:'file-bytes-unavailable-in-observer',contentType:'multipart/form-data'},response:{id:asset.id}}},
     network:{method:'POST',path:'/api/v1/image/jobs',observedAt:at(2),request:{...structuredClone(expected),referenceAssetIds:[asset.id]},response:{id:'actual-editor-job'}},
-    history:{originJobId:origin.jobId,originAssetId:originAsset.id,originSampleIndex:0,hydrationObserved:true,selectedRecipe:originAsset.recipe}};
+    history:{originJobId:origin.jobId,originAssetId:originAsset.id,originSampleIndex:0,hydrationObserved:true,selectedRecipe:structuredClone(originAsset.recipe)}};
   return {row,expected,capture,intent:{startedAt:at(0),lockSha256,bindingSha256},original,uploadBytes,servedBytes:uploadBytes,asset,origin,originJob,originAsset,historyJob:structuredClone(originJob),historyAsset:structuredClone(originAsset)};
 }
 test('v4 Editor source binding admits only the observed opaque original raster and intact real history semantics', () => {
@@ -430,6 +432,23 @@ test('v4 Editor source binding admits only the observed opaque original raster a
     f=>f.historyJob.payload.prompt='rewritten-history',f=>f.historyJob.result.assets[0].id='rewritten-output',f=>f.historyAsset.recipe.seed++,f=>f.historyAsset.lineage.jobId='wrong-origin',f=>f.capture.history.selectedRecipe={seed:175}];
   for(const mutate of mutations){const f=editorCase();mutate(f);assert.throws(()=>validateEditorSource(f));}
   assert.throws(()=>assertRequestBinding(fixture.expected,fixture.capture.network.request)); // No ordinary/UI-wide ID alias.
+});
+test('Editor source binding records raw cross-host recipe drift but accepts only exact FP32 sigma bits',()=>{
+  const f=editorCase(),s=value=>value.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas;
+  s(f.historyJob.result.assets[0].recipe)[1]=0.9929999709129332;
+  s(f.historyAsset.recipe)[1]=0.9929999709129332;
+  s(f.capture.history.selectedRecipe)[1]=0.9929999709129332;
+  const proof=validateEditorSource(f);
+  for(const comparison of Object.values(proof.historyComparison)) {
+    assert.equal(comparison.rawEqual,false);assert.equal(comparison.typedEqual,true);assert.deepEqual(comparison.sigmaDifferingIndices,[1]);
+  }
+  const mutated=change=>{const copy=structuredClone(f);change(copy);assert.throws(()=>validateEditorSource(copy));};
+  const bytes=new DataView(new ArrayBuffer(4));bytes.setFloat32(0,0.9929999709129332,false);bytes.setUint32(0,bytes.getUint32(0,false)+1,false);
+  for(const get of [x=>x.historyJob.result.assets[0].recipe,x=>x.historyAsset.recipe,x=>x.capture.history.selectedRecipe])mutated(x=>{s(get(x))[1]=bytes.getFloat32(0,false);});
+  mutated(x=>{s(x.historyAsset.recipe).pop();});
+  mutated(x=>{s(x.capture.history.selectedRecipe)[0]=-0;});
+  mutated(x=>{x.historyJob.result.assets[0].id='changed-output';});
+  mutated(x=>{x.historyAsset.recipe.seed=174;});
 });
 test('v4 Editor adoption retains authenticated product read-back and final validation rejects changed evidence', async () => {
   const f=editorCase(),root=await temporary('editor-binding'),dest=resolve(root,'rows',f.row.id);await mkdir(dest,{recursive:true});

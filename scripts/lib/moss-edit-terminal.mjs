@@ -11,6 +11,25 @@ const SHA = /^[a-f0-9]{64}$/;
 export const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 export const canonical = value => JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b))) : v);
 export const digest = value => sha(canonical(value));
+// The pinned native Euler report declares sigmas as Vec<f32>; all other JSON leaves remain exact.
+export function compareTypedMossEditHistory(origin,actual,{kind,steps}) {
+  requireThat(['result','recipe'].includes(kind),'typed MOSS history comparison needs an explicit source-shaped value');
+  const rawEqual=canonical(origin)===canonical(actual);
+  const recipe=value=>kind==='result'?value?.assets?.[0]?.recipe:value;
+  const sampling=value=>recipe(value)?.rawAdapterSettings?.mossImageEditExecutionReport?.base?.sampling;
+  const expected=sampling(origin)?.sigmas,observed=sampling(actual)?.sigmas;
+  const shape=Number.isInteger(steps)&&(kind!=='result'||(origin?.assets?.length===1&&actual?.assets?.length===1))&&(kind!=='recipe'||(recipe(origin)?.rawAdapterSettings?.steps===steps&&recipe(actual)?.rawAdapterSettings?.steps===steps))&&sampling(origin)?.kind==='euler'&&sampling(actual)?.kind==='euler'&&Array.isArray(expected)&&Array.isArray(observed)&&expected.length===31&&expected.length===steps+1&&observed.length===expected.length;
+  const bits=value=>{const bytes=new DataView(new ArrayBuffer(4));bytes.setFloat32(0,value,false);return bytes.getUint32(0,false);};
+  const sigmaF32Equivalent=Boolean(shape&&expected.every((value,index)=>Number.isFinite(value)&&Number.isFinite(observed[index])&&Number.isFinite(Math.fround(value))&&Number.isFinite(Math.fround(observed[index]))&&bits(value)===bits(observed[index])));
+  const sigmaDifferingIndices=sigmaF32Equivalent?expected.flatMap((value,index)=>Object.is(value,observed[index])?[]:[index]):[];
+  let normalizedEqual=false;
+  if(sigmaF32Equivalent) {
+    const normalized=structuredClone(actual);
+    sampling(normalized).sigmas=[...expected];
+    normalizedEqual=canonical(normalized)===canonical(origin);
+  }
+  return {rawEqual,sigmaF32Equivalent,sigmaDifferingIndices,normalizedEqual,typedEqual:sigmaF32Equivalent&&normalizedEqual};
+}
 export function requireThat(ok, message) { if (!ok) throw new Error(message); }
 export const json = async path => JSON.parse(await readFile(path, 'utf8'));
 export async function save(path, data) {
@@ -337,10 +356,15 @@ export function validateEditorSource({ row, expected, capture, intent, original,
   const bound = structuredClone(expected); bound.referenceAssetIds = [asset.id];
   assertRequestBinding(bound, actual);
   requireThat(history?.originJobId === origin.jobId && history.originAssetId === origin.outputs[0].assetId && history.originSampleIndex === 0 && history.hydrationObserved === true, 'Editor must hydrate the actual allocated MLX history job/asset/sample');
-  requireThat(originJob.id === origin.jobId && historyJob.id === origin.jobId && historyJob.status === 'completed' && historyJob.projectId === originJob.projectId && canonical(historyJob.payload) === canonical(originJob.payload) && canonical(historyJob.result) === canonical(originJob.result), 'authenticated Editor history read-back differs from the actual original job');
-  requireThat(originAsset.id === history.originAssetId && historyAsset.id === originAsset.id && historyAsset.projectId === originAsset.projectId && canonical(historyAsset.recipe) === canonical(originAsset.recipe) && historyAsset.lineage?.jobId === origin.jobId, 'authenticated original history asset/recipe identity changed');
-  requireThat(canonical(history.selectedRecipe) === canonical(originAsset.recipe), 'Editor hydration did not retain the actual origin recipe');
-  return { inputId:'B', assetId:asset.id, uploadSha256:upload.sha256, ...identity, originJobId:origin.jobId, originAssetId:originAsset.id, actualRequestSha256:digest(actual), semanticRequestSha256:digest(expected) };
+  const historyComparison={
+    jobResult:compareTypedMossEditHistory(originJob.result,historyJob.result,{kind:'result',steps:originJob.payload?.advanced?.steps}),
+    assetRecipe:compareTypedMossEditHistory(originAsset.recipe,historyAsset.recipe,{kind:'recipe',steps:originAsset.recipe?.rawAdapterSettings?.steps}),
+    selectedRecipe:compareTypedMossEditHistory(originAsset.recipe,history.selectedRecipe,{kind:'recipe',steps:originAsset.recipe?.rawAdapterSettings?.steps})
+  };
+  requireThat(originJob.id === origin.jobId && historyJob.id === origin.jobId && historyJob.status === 'completed' && historyJob.projectId === originJob.projectId && canonical(historyJob.payload) === canonical(originJob.payload) && historyComparison.jobResult.typedEqual, 'authenticated Editor history read-back differs from the actual original job');
+  requireThat(originAsset.id === history.originAssetId && historyAsset.id === originAsset.id && historyAsset.projectId === originAsset.projectId && historyComparison.assetRecipe.typedEqual && historyAsset.lineage?.jobId === origin.jobId, 'authenticated original history asset/recipe identity changed');
+  requireThat(historyComparison.selectedRecipe.typedEqual, 'Editor hydration did not retain the actual origin recipe');
+  return { inputId:'B', assetId:asset.id, uploadSha256:upload.sha256, ...identity, originJobId:origin.jobId, originAssetId:originAsset.id, actualRequestSha256:digest(actual), semanticRequestSha256:digest(expected), historyComparison };
 }
 export function checkJob(row, request, job, workerGpuId = row.backend === 'cuda' ? '1' : 'mlx') {
   requireThat(job.id && job.projectId === request.projectId, 'job/project identity mismatch');

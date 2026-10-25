@@ -7,7 +7,7 @@ import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt } from './lib/moss-edit-terminal.mjs';
+import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt, compareTypedMossEditHistory } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
 import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
@@ -364,26 +364,10 @@ async function harness(config,args,label) {
   await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
 }
 export function compareCrossBackendHistoryJob(origin,actual) {
-  const f32Bits=value=>{
-    const bytes=new DataView(new ArrayBuffer(4));
-    bytes.setFloat32(0,value,false);
-    return bytes.getUint32(0,false);
-  };
   const jobIdentityEqual=actual.id===origin.id&&actual.projectId===origin.projectId&&actual.type===origin.type&&actual.status===origin.status;
-  const payloadEqual=canonical(actual.payload)===canonical(origin.payload),strictResultEqual=canonical(actual.result)===canonical(origin.result);
-  const left=origin.result?.assets?.[0]?.recipe?.rawAdapterSettings?.mossImageEditExecutionReport?.base?.sampling;
-  const right=actual.result?.assets?.[0]?.recipe?.rawAdapterSettings?.mossImageEditExecutionReport?.base?.sampling;
-  const expected=left?.sigmas,observed=right?.sigmas;
-  const shape=origin.result?.assets?.length===1&&actual.result?.assets?.length===1&&left?.kind==='euler'&&right?.kind==='euler'&&Array.isArray(expected)&&Array.isArray(observed)&&Number.isInteger(origin.payload?.advanced?.steps)&&expected.length===31&&expected.length===origin.payload.advanced.steps+1&&observed.length===expected.length;
-  const sigmaF32Equivalent=Boolean(shape&&expected.every((value,index)=>Number.isFinite(value)&&Number.isFinite(observed[index])&&Number.isFinite(Math.fround(value))&&Number.isFinite(Math.fround(observed[index]))&&f32Bits(value)===f32Bits(observed[index])));
-  const sigmaDifferingIndices=sigmaF32Equivalent?expected.flatMap((value,index)=>Object.is(value,observed[index])?[]:[index]):[];
-  let normalizedResultEqual=false;
-  if(sigmaF32Equivalent) {
-    const normalized=structuredClone(actual.result);
-    normalized.assets[0].recipe.rawAdapterSettings.mossImageEditExecutionReport.base.sampling.sigmas=[...expected];
-    normalizedResultEqual=canonical(normalized)===canonical(origin.result);
-  }
-  return {jobIdentityEqual,payloadEqual,resultEqual:strictResultEqual,sigmaF32Equivalent,sigmaDifferingIndices,normalizedResultEqual,typedResultEqual:sigmaF32Equivalent&&normalizedResultEqual};
+  const payloadEqual=canonical(actual.payload)===canonical(origin.payload);
+  const comparison=compareTypedMossEditHistory(origin.result,actual.result,{kind:'result',steps:origin.payload?.advanced?.steps});
+  return {jobIdentityEqual,payloadEqual,resultEqual:comparison.rawEqual,sigmaF32Equivalent:comparison.sigmaF32Equivalent,sigmaDifferingIndices:comparison.sigmaDifferingIndices,normalizedResultEqual:comparison.normalizedEqual,typedResultEqual:comparison.typedEqual};
 }
 export async function authenticateCrossBackendHistory(api,evidenceRoot) {
   const comparisons=[];
