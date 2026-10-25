@@ -92,6 +92,46 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        id: speech_python
+        with:
+          python-version: "3.12"
+      - name: Prepare private CPU-only conditioning and source-variant tools
+        if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          SPEECH_BASE_PYTHON: ${{ steps.speech_python.outputs.python-path }}
+          EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {execFileSync} from "node:child_process";
+          import {appendFile,mkdir,writeFile,lstat} from "node:fs/promises";
+          import {createHash} from "node:crypto";
+          import path from "node:path";
+          import {assertCliEnvironment,parseStageRequest} from "./scripts/h3-finetune-terminal-stage.mjs";
+          const env=process.env;assertCliEnvironment({env,platform:process.platform,backend:env.H3_STAGE_BACKEND});assert.equal(env.RUNNER_NAME,env.EXPECTED_RUNNER);
+          const request=parseStageRequest(env.H3_STAGE_REQUEST||"{}"),venv=path.join(env.RUNNER_TEMP,`h3-cpu-python-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          try{await lstat(venv);assert.fail("private CPU venv must be new");}catch(error){if(error.code!=="ENOENT")throw error;}
+          execFileSync(env.SPEECH_BASE_PYTHON,["-I","-B","-m","venv",venv],{stdio:"inherit",timeout:120000});
+          const python=path.join(venv,process.platform==="win32"?"Scripts/python.exe":"bin/python");
+          const torchArgs=["-I","-B","-m","pip","install","--isolated","--no-cache-dir","torch==2.9.1"];
+          if(process.platform==="win32")torchArgs.push("--index-url","https://download.pytorch.org/whl/cpu");
+          const bridgeNeeded=Boolean(env.H3_NATIVE_EVIDENCE_SHA);
+          if(bridgeNeeded)execFileSync(python,torchArgs,{stdio:"inherit",timeout:900000});
+          const packages=[];if(request.assetSets.includes("speech"))packages.push("pyarrow==19.0.1");if(request.prepare_float_variants===true)packages.push("numpy==2.2.6");
+          if(packages.length)execFileSync(python,["-I","-B","-m","pip","install","--isolated","--no-cache-dir",...packages],{stdio:"inherit",timeout:600000});
+          const versions=bridgeNeeded?JSON.parse(execFileSync(python,["-I","-B","-c","import json,sys,torch; assert sys.version_info[:2]==(3,12); assert str(torch.__version__).split('+')[0]=='2.9.1'; print(json.dumps({'python':sys.version.split()[0],'torch':str(torch.__version__)}))"],{encoding:"utf8",timeout:30000})):JSON.parse(execFileSync(python,["-I","-B","-c","import json,sys; assert sys.version_info[:2]==(3,12); print(json.dumps({'python':sys.version.split()[0],'torch':None}))"],{encoding:"utf8",timeout:30000}));
+          const help=bridgeNeeded?execFileSync(python,["-I","-B",path.join(env.GITHUB_WORKSPACE,"inference-evidence","scripts/h3_actual_checkpoint_oracle.py"),"--help"],{encoding:"utf8",timeout:30000}):"No artifact bridge requested for this legacy case.";
+          const freeze=execFileSync(python,["-I","-B","-m","pip","freeze","--all"],{encoding:"utf8",timeout:30000});
+          const evidence=path.join(env.RUNNER_TEMP,`h3-terminal-stage-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await mkdir(evidence,{recursive:true});
+          await writeFile(path.join(evidence,"cpu-tools-freeze.txt"),freeze);await writeFile(path.join(evidence,"cpu-bridge-help.txt"),help);
+          await writeFile(path.join(evidence,"cpu-tools.json"),JSON.stringify({kind:"h3-cpu-oracle-tools",status:"import-and-help-preflight-passed",numericProof:false,pythonExecutable:python,...versions,sourceSha:env.GITHUB_SHA,nativeEvidenceSha:env.H3_NATIVE_EVIDENCE_SHA,freezeSha256:createHash("sha256").update(freeze).digest("hex"),device:"cpu",meaning:"Actual import/version/help only; selected-artifact arithmetic remains unproven until the native/CPU comparison passes."},null,2)+"\n");
+          await appendFile(env.GITHUB_ENV,`H3_SPEECH_PYTHON=${python}\n${bridgeNeeded?"H3_PROBE_PYTHON="+python+"\n":""}`);
+          NODE
       - name: Ensure selected assets and conditioning in this terminal route
         id: stage
         shell: bash
@@ -186,29 +226,6 @@ jobs:
           await writeFile(path.join(evidence, "stage-binding.json"), JSON.stringify(binding, null, 2) + "\n");
           await appendFile(env.GITHUB_OUTPUT, `status=${binding.status}\nroot=${binding.root ?? ""}\nbound_inputs=${binding.boundInputs}\nblocked_by_allowed_roots=${binding.blockedByAllowedRoots}\n`);
           console.log(JSON.stringify({ stageRequested, status: binding.status, root: binding.root, boundInputs: binding.boundInputs, blockedByAllowedRoots: binding.blockedByAllowedRoots }));
-          NODE
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
-        id: speech_python
-        with:
-          python-version: "3.12"
-      - name: Prepare private CPU-only conditioning and source-variant tools
-        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
-        shell: bash
-        env:
-          SPEECH_BASE_PYTHON: ${{ steps.speech_python.outputs.python-path }}
-        run: |
-          set -euo pipefail
-          node --input-type=module <<'NODE'
-          import {execFileSync} from "node:child_process";
-          import {appendFile} from "node:fs/promises";
-          import path from "node:path";
-          const env=process.env,venv=path.join(env.RUNNER_TEMP,`h3-speech-python-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
-          execFileSync(env.SPEECH_BASE_PYTHON,["-I","-m","venv",venv],{stdio:"inherit"});
-          const python=path.join(venv,process.platform==="win32"?"Scripts/python.exe":"bin/python");
-          const packages=[];if(env.H3_STAGE_PREPARE_SPEECH==="true")packages.push("pyarrow==19.0.1");if(env.H3_STAGE_PREPARE_FLOATS==="true")packages.push("numpy==2.2.6");
-          execFileSync(python,["-I","-m","pip","install","--isolated","--no-cache-dir",...packages],{stdio:"inherit"});
-          await appendFile(env.GITHUB_ENV,"H3_SPEECH_PYTHON="+python+"\n");
           NODE
       - name: Derive explicit dense source variants from the actually staged raw snapshot
         if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_FLOATS == 'true' }}

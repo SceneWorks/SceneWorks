@@ -465,7 +465,7 @@ export async function bindStagedCampaignPlan(plan,{receiptPath,root,backend,iden
       const oldRoot=positive.model.sourcePath.slice(0,-positive.linkedRelativePath.length).replace(/[\\/]$/,'');assert.ok(oldRoot);replacements.set(oldRoot,root);replacements.set(positive.linkedRelativePath,path.relative(root,identityControls.renamed.path));
       const identityInput=c.inputs.find(i=>i.role==='identity-control-fixture');assert.ok(identityInput);replacements.set(identityInput.path,path.join(root,'fixtures','identity-controls.json'));
     }
-    const rewrite=value=>typeof value==='string'?(replacements.get(value)??value):Array.isArray(value)?value.map(rewrite):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,rewrite(v)])):value;
+    const rewrite=(value,key='')=>typeof value==='string'?(/(?:^path$|Path$|_path$)/.test(key)||['scenario','receipt','input','referenceDir'].includes(key)?replacements.get(value)??value:value):Array.isArray(value)?value.map(v=>rewrite(v,key)):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,rewrite(v,k)])):value;
     const declaredAuthority=JSON.stringify(c.declaredSourceBindings?.map(e=>e.licenseAuthority));
     const scenarioInput=c.inputs.find(i=>i.role==='scenario');
     if(scenarioInput){assert.equal(await hashFile(scenarioInput.path),scenarioInput.sha256,'unbound scenario changed');const scenario=rewrite(JSON.parse(await readFile(scenarioInput.path,'utf8'))),target=path.join(out,`${c.id}.scenario.json`);await writeFile(target,JSON.stringify(scenario,null,2)+'\n',{flag:'wx'});replacements.set(scenarioInput.path,target);scenarioInput.sha256=await hashFile(target);}

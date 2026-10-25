@@ -250,6 +250,13 @@ test('source UI proof is explicit hosted Chromium only, independent of model pin
   const rootGroup=/^  group: (.+)$/m.exec(router)[1],cancel=/^  cancel-in-progress: (.+)$/m.exec(router)[1],inputs={starvector_terminal_operation:'h3-ui-proof'};
   assert.equal(workflowExpression(rootGroup,inputs),'h3-ui-hosted-unit_fake_101-1');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-ui-hosted-unit_fake_102-1');assert.equal(workflowExpression(rootGroup,inputs,{run_attempt:'2'}),'h3-ui-hosted-unit_fake_101-2');assert.equal(workflowExpression(cancel,inputs),false);
 });
+test('CPU bridge provisions its pinned private interpreter before model assets and records the observed closure',async()=>{
+  const source=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),start=source.indexOf('      - name: Prepare private CPU-only conditioning and source-variant tools'),assets=source.indexOf('      - name: Ensure selected assets and conditioning in this terminal route');
+  assert.ok(start>0&&start<assets,'import/help failure must precede massive model downloads');const setup=source.slice(start,assets);
+  for(const token of ['torch==2.9.1','https://download.pytorch.org/whl/cpu','H3_PROBE_PYTHON','cpu-tools-freeze.txt','cpu-tools.json','cpu-bridge-help.txt','--help','sys.version_info[:2]==(3,12)','"-I","-B"'])assert.ok(setup.includes(token),token);
+  assert.ok(source.includes('python-version: "3.12"'));assert.doesNotMatch(setup,/--no-deps|PYTHONPATH|einops|diffusers/);assert.ok(setup.includes('numericProof:false'));
+  const adapter=await readFile(new URL('./h3-finetune-terminal-artifact-probe.mjs',import.meta.url),'utf8');assert.ok(adapter.includes("process.env.H3_PROBE_PYTHON"));assert.ok(adapter.includes("const producerCommand=[python,'-I','-B'"));
+});
 test('asset staging is folded into the terminal delivery and runs the reduced 25/backend inventory',async()=>{
   const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8'),callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
   const choices=/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/.exec(router)[1].split(',').map(v=>v.trim());
@@ -367,11 +374,11 @@ test('inline source binding rewrites the actual scenario and input hash together
   const {p,c,dir}=await fixture(t);p.proof_kind='unit_fake';
   const {mkdir}=await import('node:fs/promises'),{bindStagedCampaignPlan}=await import('./h3-finetune-terminal-cases.mjs');
   const root=path.join(dir,'sc26691-private','101-1');await mkdir(root,{recursive:true});const source=c.inputs[0],target=path.join(root,'model.bin');await writeFile(target,await readFile(source.path));
-  const scenarioPath=path.join(dir,'original-scenario.json'),scenario={caseId:c.id,steps:[{body:{sourcePath:source.path,licenseAcknowledged:false}}]};await writeFile(scenarioPath,JSON.stringify(scenario));
+  const scenarioPath=path.join(dir,'original-scenario.json'),scenario={caseId:c.id,steps:[{body:{sourcePath:source.path,prompt:source.path,licenseAcknowledged:false}}]};await writeFile(scenarioPath,JSON.stringify(scenario));
   c.runtime={scenario:scenarioPath,port:43210,gpuId:'unit_fake'};c.inputs.push({path:scenarioPath,sha256:await hashFile(scenarioPath),role:'scenario'});c.declaredSourceBindings=[{licenseAuthority:{kind:'unit_fake',acknowledged:false,reference:'NOT real approval'}}];
   const receiptPath=path.join(root,'h3-stage-receipt.json');await writeFile(receiptPath,JSON.stringify({proof_kind:'unit_fake',status:'completed',files:[{status:'completed',finalPath:target,expectedBytes:11,actualBytes:11,expectedSha256:source.sha256,observedSha256:source.sha256}]}));
   const result=await bindStagedCampaignPlan(p,{receiptPath,root,backend:'mlx',allowUnitFake:true}),bound=result.plan.cases.find(v=>v.id===c.id),actual=JSON.parse(await readFile(bound.runtime.scenario,'utf8'));
-  assert.equal(actual.steps[0].body.sourcePath,target);assert.equal(actual.steps[0].body.licenseAcknowledged,false);assert.deepEqual(bound.declaredSourceBindings,c.declaredSourceBindings);
+  assert.equal(actual.steps[0].body.sourcePath,target);assert.equal(actual.steps[0].body.prompt,source.path,'a prompt equal to a filesystem path remains literal creative text');assert.equal(actual.steps[0].body.licenseAcknowledged,false);assert.deepEqual(bound.declaredSourceBindings,c.declaredSourceBindings);
   assert.equal(bound.inputs.find(v=>v.role==='scenario').sha256,await hashFile(bound.runtime.scenario));assert.deepEqual(JSON.parse(await readFile(scenarioPath,'utf8')),scenario);assert.equal(result.plan.proof_kind,'unit_fake');
 });
 test('three individual source mutations are killed by executed assertions, not syntax errors', async t => {
