@@ -119,18 +119,41 @@ export const MODELS = [
   IMAGE_MODEL,
 ];
 
-const imageAsset = (id, displayName) => ({
-  id,
-  projectId: "project-1",
-  type: "image",
-  displayName,
-  status: { favorite: false, rating: 0, rejected: false, trashed: false },
-  file: { path: `assets/images/${id}.png`, mimeType: "image/png" },
-});
+// Canonical project-store asset shape (crates/sceneworks-core/src/contracts.rs::Asset,
+// camelCase): schemaVersion, id, projectId, generationSetId, type, displayName, createdAt,
+// file{path,mimeType,...}, status{favorite,rating,rejected,trashed}, recipe, lineage.
+// App.jsx sorts assets with sortNewest (b.createdAt.localeCompare), so a fixture asset
+// without createdAt crashes the whole shell behind an ErrorBoundary.
+function fixtureAsset(id, { type, displayName, mimeType, createdAt = "2026-10-20T00:00:00Z", generationSet = null, generationSetId = null }) {
+  return {
+    schemaVersion: 1,
+    id,
+    projectId: "project-1",
+    generationSetId,
+    type,
+    displayName,
+    createdAt,
+    file: { path: `assets/${type}/${id}.${type === "video" ? "mp4" : "png"}`, mimeType: type === "video" ? "video/mp4" : "image/png" },
+    status: { favorite: false, rating: 0, rejected: false, trashed: false },
+    recipe: {
+      mode: type === "video" ? "image_to_video" : "text_to_image",
+      model: type === "video" ? "imported_hybrid" : "flux2_dev",
+      adapter: type === "video" ? "procedural_video" : "flux_diffusers",
+      prompt: displayName,
+      negativePrompt: "",
+      seed: 0,
+      loras: [],
+      normalizedSettings: {},
+      rawAdapterSettings: {},
+    },
+    lineage: { parents: [], sourceAssetId: null, sourceTimestamp: null, jobId: null },
+    ...(generationSet ? { generationSet } : {}),
+  };
+}
 
-export const STALE_REFERENCE_ASSET = imageAsset("stale", "stale reference");
-export const LAST_FRAME_ASSET = imageAsset("last", "last frame");
-export const OTHER_IMAGE_ASSET = imageAsset("other", "other image");
+export const STALE_REFERENCE_ASSET = fixtureAsset("stale", { type: "image", displayName: "stale reference", mimeType: "image/png" });
+export const LAST_FRAME_ASSET = fixtureAsset("last", { type: "image", displayName: "last frame", mimeType: "image/png" });
+export const OTHER_IMAGE_ASSET = fixtureAsset("other", { type: "image", displayName: "other image", mimeType: "image/png" });
 
 export const IMPORTED_MODEL_REF = {
   modelId: "imported_hybrid",
@@ -141,51 +164,49 @@ export const IMPORTED_MODEL_REF = {
   family: "minimax-h3",
 };
 
-export const VIDEO_REPLAY_ASSET = {
-  id: "asset-video-replay",
-  projectId: "project-1",
-  generationSetId: "genset-video-replay",
-  type: "video",
-  displayName: "cyclist",
-  status: { favorite: false, rating: 0, rejected: false, trashed: false },
-  file: { path: "assets/videos/cyclist.mp4", mimeType: "video/mp4" },
-  generationSet: {
-    recipe: {
-      mode: "image_to_video",
-      model: "imported_hybrid",
-      prompt: "A cyclist rides",
-      importedModelRef: IMPORTED_MODEL_REF,
-      normalizedSettings: {
-        sourceAssetId: null,
-        lastFrameAssetId: "last",
-        width: 768,
-        height: 768,
-        duration: 5.1667,
-      },
-      rawAdapterSettings: {},
-    },
+const VIDEO_REPLAY_RECIPE = {
+  mode: "image_to_video",
+  model: "imported_hybrid",
+  adapter: "procedural_video",
+  prompt: "A cyclist rides",
+  negativePrompt: "",
+  seed: 0,
+  loras: [],
+  normalizedSettings: {
+    sourceAssetId: null,
+    lastFrameAssetId: "last",
+    width: 768,
+    height: 768,
+    duration: 5.1667,
   },
+  rawAdapterSettings: {},
+  importedModelRef: IMPORTED_MODEL_REF,
+};
+
+export const VIDEO_REPLAY_ASSET = {
+  ...fixtureAsset("asset-video-replay", { type: "video", displayName: "cyclist" }),
+  generationSetId: "genset-video-replay",
+  generationSet: { id: "genset-video-replay", recipe: VIDEO_REPLAY_RECIPE },
+  recipe: VIDEO_REPLAY_RECIPE,
+};
+
+const IMAGE_EMPTY_REFS_RECIPE = {
+  mode: "edit_image",
+  model: "flux2_dev",
+  adapter: "flux_diffusers",
+  prompt: "a lighthouse in heavy fog",
+  negativePrompt: "",
+  seed: 0,
+  loras: [],
+  normalizedSettings: { referenceAssetIds: [], width: 1024, height: 1024, count: 1 },
+  rawAdapterSettings: { referenceAssetIds: ["stale"] },
 };
 
 export const IMAGE_EMPTY_REFS_ASSET = {
-  id: "asset-image-empty-refs",
-  projectId: "project-1",
+  ...fixtureAsset("asset-image-empty-refs", { type: "image", displayName: "empty refs replay" }),
   generationSetId: "genset-image-empty-refs",
-  type: "image",
-  displayName: "empty refs replay",
-  status: { favorite: false, rating: 0, rejected: false, trashed: false },
-  file: { path: "assets/images/asset-image-empty-refs.png", mimeType: "image/png" },
-  generationSet: {
-    recipe: {
-      mode: "edit_image",
-      model: "flux2_dev",
-      prompt: "a lighthouse in heavy fog",
-      negativePrompt: "",
-      loras: [],
-      normalizedSettings: { referenceAssetIds: [], width: 1024, height: 1024, count: 1 },
-      rawAdapterSettings: { referenceAssetIds: ["stale"] },
-    },
-  },
+  generationSet: { id: "genset-image-empty-refs", recipe: IMAGE_EMPTY_REFS_RECIPE },
+  recipe: IMAGE_EMPTY_REFS_RECIPE,
 };
 
 export const ASSETS = [
@@ -270,35 +291,57 @@ export function verifyMiddleware() {
         theme: "light",
       });
     }
-    if (path === "/api/v1/projects") return json(200, [{ id: "project-1", name: "Noir" }]);
+    if (path === "/api/v1/projects") {
+      return json(200, [{
+        schemaVersion: 1,
+        appVersion: "0.10.2",
+        id: "project-1",
+        name: "Noir",
+        createdAt: "2026-10-01T00:00:00Z",
+        folders: {},
+      }]);
+    }
     if (/^\/api\/v1\/projects\/[^/]+\/assets$/.test(path)) return json(200, ASSETS);
     if (path === "/api/v1/models") return json(200, MODELS.map(model=>model.id==='my_h3'&&state.repairedModel?state.repairedModel:model));
     if (path === "/api/v1/loras") return json(200, []);
     if (path === "/api/v1/jobs") return json(200, state.jobs);
     if (path === "/api/v1/training/targets" || path === "/api/v1/training/presets") return json(200, []);
-    if (path === "/api/v1/library-roots") return json(200, { roots: [{ rootId: "r", path: "/models" }] });
-    if (path === "/api/v1/model-library") {
+    if (path === "/api/v1/models/library-roots") {
+      return json(200, { roots: [{ rootId: "r", path: "/models", label: "Models" }] });
+    }
+    // Typed ready responses for surfaces the shell reads every launch. Shapes follow the
+    // actual contracts (contracts.rs / list endpoints); empty is the legitimate ready state
+    // for this fixture deployment because nothing of that kind is registered.
+    if (path === "/api/v1/capabilities/mac") {
       return json(200, {
-        schemaVersion: 1,
-        configuredLibraryPath: "/models",
-        expectedLibrary: null,
-        probeStatus: "available",
-        available: true,
+        macGatingActive: false,
+        candleGatingActive: false,
+        platform: "linux",
+        features: {},
+        training: { supportedKernels: [], lokrOnWanSupported: false },
       });
     }
-    // Known empty collections the shell reads; anything else under /api is a 404.
+    if (path === "/api/v1/host-capabilities") {
+      return json(200, { platform: "linux", memoryKind: "dedicated", memoryGb: 32 });
+    }
+    if (path === "/api/v1/workers") return json(200, []);
+    if (path === "/api/v1/recipe-presets") return json(200, []);
+    if (path === "/api/v1/prompt-batches") return json(200, []);
+    if (path === "/api/v1/projects/project-1/characters") return json(200, []);
+    if (/^\/api\/v1\/projects\/[^/]+\/person-tracks$/.test(path)) return json(200, []);
+    if (path === "/api/v1/model-cache") {
+      return json(200, { entryCount: 0, entries: [], usedBytes: 0, reclaimableBytes: 0 });
+    }
+    // Legacy empty collections the shell still reads on some surfaces; anything else
+    // under /api is a 404.
     const EMPTY_COLLECTIONS = [
-      "/api/v1/characters",
-      "/api/v1/characters/looks",
       "/api/v1/presets",
       "/api/v1/poses",
       "/api/v1/keypoints",
       "/api/v1/voices",
-      "/api/v1/person-tracks",
       "/api/v1/timelines",
       "/api/v1/credentials",
       "/api/v1/cache",
-      "/api/v1/model-cache",
     ];
     if (method === "GET" && EMPTY_COLLECTIONS.includes(path)) return json(200, []);
 

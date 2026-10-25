@@ -49,6 +49,18 @@ export async function waitForRequest(recorder, method, pathname, options = {}) {
   });
 }
 
+// Awaiting actual DOM state instead of a one-shot assert: React state updates (e.g. the
+// repair-request effect that opens the import panel) land after the click returns.
+async function waitForCondition(predicate, { timeout = LONG, interval = 75, label = "condition" } = {}) {
+  const started = Date.now();
+  for (;;) {
+    const value = await predicate();
+    if (value) return value;
+    if (Date.now() - started > timeout) throw new CaseAssertionError(`timed out waiting for ${label}`);
+    await new Promise((done) => setTimeout(done, interval));
+  }
+}
+
 async function navTo(page, label) {
   await page.getByRole("button", { name: label, exact: true }).first().click();
 }
@@ -132,10 +144,21 @@ async function caseModelManagerReimport(page, recorder) {
 
   const toggle = page.locator(".checkpoint-import-toggle").first();
   await toggle.waitFor({ state: "visible", timeout: LONG });
+  // The repair-request effect opens the panel in a follow-up commit; assert the REAL
+  // rendered state rather than racing it.
+  await waitForCondition(
+    async () => (await toggle.getAttribute("aria-expanded")) === "true",
+    { label: "reimport must open the existing import panel" },
+  );
   assert((await toggle.getAttribute("aria-expanded")) === "true", "reimport must open the existing import panel");
 
   const form = page.locator('form[aria-label="Add to SceneWorks"]').first();
   await form.waitFor({ state: "visible", timeout: LONG });
+  // Wait for the managed repair seeding effect, not just the panel container.
+  await waitForCondition(
+    async () => (await form.getByLabel(/^Family$/).inputValue()) === "minimax-h3",
+    { label: "the reimport declaration to be seeded" },
+  );
 
   const ownership = page.locator('[role="radio"][aria-checked="true"]').first();
   assert(((await ownership.textContent()) ?? "").includes("Add to SceneWorks"), "managed ownership must stay selected");
@@ -161,6 +184,10 @@ async function caseModelManagerReimport(page, recorder) {
   await form.getByLabel(/^Source URL$/).fill("https://example.test/new.safetensors");
 
   await toggle.click();
+  await waitForCondition(
+    async () => (await toggle.getAttribute("aria-expanded")) === "false",
+    { label: "Hide options must collapse the panel" },
+  );
   assert((await toggle.getAttribute("aria-expanded")) === "false", "Hide options must collapse the panel");
 
   await new Promise((done) => setTimeout(done, SHORT));
@@ -169,6 +196,10 @@ async function caseModelManagerReimport(page, recorder) {
 
   await card.getByRole("button", { name: "Reimport transformer", exact: true }).click();
   await toggle.waitFor({ state: "visible", timeout: LONG });
+  await waitForCondition(
+    async () => (await toggle.getAttribute("aria-expanded")) === "true",
+    { label: "reopening the repair must show the panel again" },
+  );
   assert((await toggle.getAttribute("aria-expanded")) === "true", "reopening the repair must show the panel again");
   const reopenedName = await form.getByLabel(/^Name$/).inputValue();
   const reopenedUrl = await form.getByLabel(/^Source URL$/).inputValue();
