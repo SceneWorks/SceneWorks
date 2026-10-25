@@ -4,6 +4,8 @@
 // GitHub-hosted CI runner. This module holds that decision separately from the
 // browser work so it can be unit-tested locally without starting any server.
 import { createHash } from "node:crypto";
+import { readFileSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { isAbsolute, resolve, sep } from "node:path";
 
 // Stable receipt: the S8 merge that must be an ancestor of whatever the job checks
@@ -83,6 +85,88 @@ export function assertPlaywrightVersion(actual) {
     );
   }
   return actual;
+}
+
+/**
+ * Resolve Playwright ONLY from an explicit, isolated per-run tools prefix.
+ *
+ * The hosted job installs `playwright@1.59.1` into a private prefix instead of adding it
+ * to apps/web's npm graph, so the driver must not resolve through the app tree or a global
+ * module-path fallback. The manifest must exist inside `<root>/node_modules`, resolve to a
+ * real path still inside that private node_modules, and carry the exact pinned version.
+ * The package entry is then resolved from that manifest and confined the same way.
+ *
+ * @param {{root: string, realpath?: (path: string) => string, readManifest?: (path: string) => string}} options
+ * @returns {{root: string, manifest: string, entry: string, version: string}}
+ */
+export function resolvePlaywrightEntry({
+  root,
+  realpath = realpathSync,
+  readManifest = (path) => readFileSync(path, "utf8"),
+} = {}) {
+  if (typeof root !== "string" || !isAbsolute(root)) {
+    throw new Error("SC26687_PLAYWRIGHT_ROOT must be an absolute private tools prefix");
+  }
+  const privateRoot = resolve(root);
+  const nodeModules = resolve(privateRoot, "node_modules");
+  let realModules;
+  try {
+    realModules = realpath(nodeModules);
+  } catch (error) {
+    throw new Error(`playwright is not installed in the private tools root ${privateRoot}: ${error.message}`);
+  }
+  const manifestPath = resolve(nodeModules, "playwright", "package.json");
+  let manifest;
+  try {
+    manifest = realpath(manifestPath);
+  } catch (error) {
+    throw new Error(`playwright is not installed in the private tools root ${privateRoot}: ${error.message}`);
+  }
+  if (!isInside(realModules, manifest)) {
+    throw new Error(`resolved playwright manifest escapes the private tools root: ${manifest}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(readManifest(manifest));
+  } catch (error) {
+    throw new Error(`cannot read the private playwright manifest ${manifest}: ${error.message}`);
+  }
+  assertPlaywrightVersion(parsed.version);
+  const require = createRequire(manifest);
+  let entry;
+  try {
+    entry = require.resolve("playwright");
+  } catch (error) {
+    throw new Error(`cannot resolve playwright from the private tools root ${privateRoot}: ${error.message}`);
+  }
+  let realEntry;
+  try {
+    realEntry = realpath(entry);
+  } catch (error) {
+    throw new Error(`cannot read the private playwright entry ${entry}: ${error.message}`);
+  }
+  if (!isInside(realModules, realEntry)) {
+    throw new Error(`playwright resolved outside the private tools root: ${realEntry}`);
+  }
+  return { root: privateRoot, manifest, entry: realEntry, version: parsed.version };
+}
+
+/**
+ * Browser binaries must stay inside the same private tools prefix. Defaults to
+ * `<root>/browsers`; an explicit PLAYWRIGHT_BROWSERS_PATH is accepted only under the root.
+ */
+export function resolveBrowsersPath(env = {}, { root } = {}) {
+  if (typeof root !== "string" || !isAbsolute(root)) {
+    throw new Error("a private playwright tools root is required for browser binaries");
+  }
+  const privateRoot = resolve(root);
+  const declared = env.PLAYWRIGHT_BROWSERS_PATH;
+  const target = declared && declared.length > 0 ? declared : resolve(privateRoot, "browsers");
+  if (!isAbsolute(target)) throw new Error("PLAYWRIGHT_BROWSERS_PATH must be absolute");
+  if (!isInside(privateRoot, resolve(target))) {
+    throw new Error(`PLAYWRIGHT_BROWSERS_PATH must stay inside the private tools root: ${target}`);
+  }
+  return resolve(target);
 }
 
 export const REQUIRED_CASES = [

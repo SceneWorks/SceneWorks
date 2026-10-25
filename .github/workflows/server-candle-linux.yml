@@ -116,18 +116,32 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - name: Install source UI and exact browser tooling
+      - name: Install source UI and isolated per-run browser tooling
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: |
           set -euo pipefail
           npm ci --prefix apps/web 2>&1 | tee "$SC26687_ARTIFACT_DIR/npm-ci.log"
-          npm install --no-save --package-lock=false --prefix apps/web playwright@1.59.1 2>&1 | tee "$SC26687_ARTIFACT_DIR/playwright-install.log"
-      - name: Install hosted Chromium and its OS dependencies
-        working-directory: apps/web
+          tools="$RUNNER_TEMP/sc26687-playwright-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$tools"
+          mkdir -p "$tools"
+          printf '{"name":"sc26687-playwright-tools","private":true}\n' > "$tools/package.json"
+          npm install --prefix "$tools" --no-audit --no-fund playwright@1.59.1 2>&1 | tee "$SC26687_ARTIFACT_DIR/playwright-install.log"
+          node --input-type=module -e '
+            import {resolvePlaywrightEntry,resolveBrowsersPath,assertPlaywrightVersion} from "./apps/web/verify/hosted-browser/guard.mjs";
+            const root=process.env.RUNNER_TEMP+"/sc26687-playwright-"+process.env.GITHUB_RUN_ID+"-"+process.env.GITHUB_RUN_ATTEMPT;
+            const tools=resolvePlaywrightEntry({root});
+            assertPlaywrightVersion(tools.version);
+            const browsers=resolveBrowsersPath({PLAYWRIGHT_BROWSERS_PATH:root+"/browsers"},{root});
+            console.log(JSON.stringify({root:tools.root,entry:tools.entry,version:tools.version,browsers}));
+          ' 2>&1 | tee "$SC26687_ARTIFACT_DIR/playwright-resolution.log"
+          echo "SC26687_PLAYWRIGHT_ROOT=$tools" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$tools/browsers" >> "$GITHUB_ENV"
+      - name: Install hosted Chromium from the private tools root
         run: |
           set -euo pipefail
-          npx --no-install playwright install --with-deps chromium 2>&1 | tee "$SC26687_ARTIFACT_DIR/chromium-install.log"
+          test -x "$SC26687_PLAYWRIGHT_ROOT/node_modules/.bin/playwright"
+          "$SC26687_PLAYWRIGHT_ROOT/node_modules/.bin/playwright" install --with-deps chromium 2>&1 | tee "$SC26687_ARTIFACT_DIR/chromium-install.log"
       - name: Prove all S8 UI cases in real hosted Chromium
         env:
           SC26687_HOSTED_BROWSER_PROOF: "1"

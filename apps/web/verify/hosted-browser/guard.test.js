@@ -1,6 +1,8 @@
 // Pure unit tests for the sc-26687 hosted-browser driver contract.
 // These run locally with Node/jsdom-less environment and start NO server and NO browser.
-import { resolve } from "node:path";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,6 +16,8 @@ import {
   evaluateSourceIdentity,
   productionWebDigest,
   resolveArtifactDir,
+  resolveBrowsersPath,
+  resolvePlaywrightEntry,
 } from "./guard.mjs";
 import { CASES } from "./cases.mjs";
 import { Readable } from 'node:stream';
@@ -229,6 +233,84 @@ describe("case manifest", () => {
     for (const entry of CASES) {
       expect(entry.skipped).toBeUndefined();
       expect(typeof entry.run).toBe("function");
+    }
+  });
+});
+
+function fakePlaywrightPackage(version = PLAYWRIGHT_VERSION) {
+  const root = mkdtempSync(join(tmpdir(), "sc26687-playwright-"));
+  const packageDir = join(root, "node_modules", "playwright");
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "playwright", version, main: "index.js" }));
+  writeFileSync(join(packageDir, "index.js"), "module.exports = { chromium: {} };\n");
+  return root;
+}
+
+describe("private Playwright tools resolution", () => {
+  it("resolves the exact private root entry and pinned version without the apps/web graph", () => {
+    const root = fakePlaywrightPackage();
+    try {
+      const tools = resolvePlaywrightEntry({ root });
+      const realRoot = realpathSync(root);
+      expect(tools.root).toBe(resolve(root));
+      expect(tools.version).toBe(PLAYWRIGHT_VERSION);
+      expect(tools.manifest).toBe(resolve(realRoot, "node_modules", "playwright", "package.json"));
+      expect(tools.entry).toBe(resolve(realRoot, "node_modules", "playwright", "index.js"));
+      expect(tools.entry.startsWith(resolve(realRoot, "node_modules") + "/")).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  it("refuses a missing package, a wrong version and a symlink escaping the private root", () => {
+    const empty = mkdtempSync(join(tmpdir(), "sc26687-playwright-empty-"));
+    try {
+      expect(() => resolvePlaywrightEntry({ root: empty })).toThrow(/not installed in the private tools root/);
+      expect(() => resolvePlaywrightEntry({ root: "" })).toThrow(/absolute private tools prefix/);
+      expect(() => resolvePlaywrightEntry({ root: "apps/web" })).toThrow(/absolute private tools prefix/);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+    const wrong = fakePlaywrightPackage("1.59.0");
+    try {
+      expect(() => resolvePlaywrightEntry({ root: wrong })).toThrow(/requires exactly 1\.59\.1/);
+    } finally {
+      rmSync(wrong, { recursive: true, force: true });
+    }
+    const outside = fakePlaywrightPackage();
+    const linked = mkdtempSync(join(tmpdir(), "sc26687-playwright-linked-"));
+    try {
+      mkdirSync(join(linked, "node_modules"), { recursive: true });
+      symlinkSync(join(outside, "node_modules", "playwright"), join(linked, "node_modules", "playwright"), "dir");
+      expect(() => resolvePlaywrightEntry({ root: linked })).toThrow(/escapes the private tools root/);
+    } finally {
+      rmSync(linked, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+  it("never falls back to a global/NODE_PATH package outside the private root", () => {
+    const elsewhere = fakePlaywrightPackage();
+    const unrelated = mkdtempSync(join(tmpdir(), "sc26687-playwright-unrelated-"));
+    const previous = process.env.NODE_PATH;
+    try {
+      process.env.NODE_PATH = join(elsewhere, "node_modules");
+      expect(() => resolvePlaywrightEntry({ root: unrelated })).toThrow(/not installed in the private tools root/);
+    } finally {
+      if (previous === undefined) delete process.env.NODE_PATH;
+      else process.env.NODE_PATH = previous;
+      rmSync(elsewhere, { recursive: true, force: true });
+      rmSync(unrelated, { recursive: true, force: true });
+    }
+  });
+  it("keeps browser binaries inside the private tools root", () => {
+    const root = mkdtempSync(join(tmpdir(), "sc26687-playwright-browsers-"));
+    try {
+      expect(resolveBrowsersPath({}, { root })).toBe(resolve(root, "browsers"));
+      expect(resolveBrowsersPath({ PLAYWRIGHT_BROWSERS_PATH: join(root, "custom") }, { root })).toBe(resolve(root, "custom"));
+      expect(() => resolveBrowsersPath({ PLAYWRIGHT_BROWSERS_PATH: join(tmpdir(), "outside-browsers") }, { root })).toThrow(/must stay inside the private tools root/);
+      expect(() => resolveBrowsersPath({ PLAYWRIGHT_BROWSERS_PATH: "relative/browsers" }, { root })).toThrow(/must be absolute/);
+      expect(() => resolveBrowsersPath({}, { root: "relative" })).toThrow(/private playwright tools root/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
