@@ -388,7 +388,7 @@ function editorCase() {
   const asset={id:'actual-ui-scratch',projectId:'target-project',type:'image',createdAt:at(1),file:{path:'assets/scratch.png'}};
   const lockSha256=sha('inert-candidate'),bindingSha256=sha('inert-binding');
   const capture={version:VERSION,rowId:row.id,lockSha256,bindingSha256,observer:'INERT_FIXTURE_NOT_RUNTIME',capturedAt:at(4),
-    sourceUpload:{inputId:'B',file:'observed-upload.png',sha256:sha(uploadBytes),observedAt:at(1),network:{method:'POST',path:'/api/v1/projects/target-project/assets',request:{fileSha256:sha(uploadBytes)},response:{id:asset.id}}},
+    sourceUpload:{inputId:'B',file:'observed-upload.png',sha256:sha(uploadBytes),observedAt:at(1),byteObserver:'authenticated-product-asset-readback',network:{method:'POST',path:'/api/v1/projects/target-project/assets',request:{observer:'playwright-request-metadata-and-product-response',fileSha256:null,postDataState:'file-bytes-unavailable-in-observer',contentType:'multipart/form-data'},response:{id:asset.id}}},
     network:{method:'POST',path:'/api/v1/image/jobs',observedAt:at(2),request:{...structuredClone(expected),referenceAssetIds:[asset.id]},response:{id:'actual-editor-job'}},
     history:{originJobId:origin.jobId,originAssetId:originAsset.id,originSampleIndex:0,hydrationObserved:true,selectedRecipe:originAsset.recipe}};
   return {row,expected,capture,intent:{startedAt:at(0),lockSha256,bindingSha256},original,uploadBytes,servedBytes:uploadBytes,asset,origin,originJob,originAsset,historyJob:structuredClone(originJob),historyAsset:structuredClone(originAsset)};
@@ -397,7 +397,7 @@ test('v4 Editor source binding admits only the observed opaque original raster a
   const fixture=editorCase(),before=JSON.stringify(fixture.capture);
   const proof=validateEditorSource(fixture);assert.equal(proof.assetId,fixture.asset.id);assert.equal(proof.semanticRequestSha256,digest(fixture.expected));assert.equal(JSON.stringify(fixture.capture),before);
   assert.notEqual(sha(fixture.uploadBytes),sha(png([10,20,30]))); // Real canvas PNG encoding may differ; RGB cannot.
-  const mutateBytes=(f,bytes)=>{f.uploadBytes=bytes;f.servedBytes=bytes;f.capture.sourceUpload.sha256=sha(bytes);f.capture.sourceUpload.network.request.fileSha256=sha(bytes);};
+  const mutateBytes=(f,bytes)=>{f.uploadBytes=bytes;f.servedBytes=bytes;f.capture.sourceUpload.sha256=sha(bytes);};
   const mutations=[f=>f.row.transport='ui-full',f=>f.row.id='quality-mlx-base-single',f=>f.capture.bindingSha256=sha('other-binding'),f=>f.capture.network.method='GET',f=>f.capture.sourceUpload.inputId='L',f=>f.asset.projectId='foreign-project',f=>f.asset.lineage={jobId:'generated-output'},
     f=>f.capture.sourceUpload.network.response.id='other-upload',f=>f.capture.sourceUpload.network.path='/api/v1/projects/foreign/assets',f=>f.capture.sourceUpload.sha256=sha('unobserved-file'),f=>f.servedBytes=png([11,20,30]),
     f=>mutateBytes(f,png([10,20,30,0],6)),f=>mutateBytes(f,png([11,20,30,255],6)),f=>f.original.width=2,

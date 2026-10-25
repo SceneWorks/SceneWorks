@@ -140,8 +140,13 @@ test('H18 pre-POST UI failure retries the exact unresolved intent once and keeps
   const original=await filesUnder(evidence),fields={transport:'ui',requestSha256:'b'.repeat(64),bindingSha256:'c'.repeat(64),lockSha256};
   const ticket=await reserveAttempt(evidence,'mlx','advanced-mlx-sft-replay',fields);
   const capture={rowId:ticket.id,lockSha256,error:"locator.click: Error: strict mode violation: getByRole('link', { name: 'Download portable workflow (.json)', exact: true }) resolved to 2 elements",submissions:[],imageJobPosts:[]};
-  assert.equal(validateFailedUiCapture(capture,lockSha256),true);
-  for(const mutation of [{submissions:[{}]},{imageJobPosts:[{}]},{error:'different UI failure'}])assert.throws(()=>validateFailedUiCapture({...capture,...mutation},lockSha256),/pre-submission/);
+  assert.equal(validateFailedUiCapture(capture,lockSha256,{historical:'h18'}),true);
+  for(const mutation of [{submissions:[{}]},{imageJobPosts:[{}]},{error:'different UI failure'}])assert.throws(()=>validateFailedUiCapture({...capture,...mutation},lockSha256,{historical:'h18'}),/pre-submission/);
+  const h19={...capture,error:'observed upload lacks multipart file bytes',actions:[{action:'drop-workflow-file'}]};
+  assert.equal(validateFailedUiCapture(h19,lockSha256,{historical:'h19'}),true);
+  assert.throws(()=>validateFailedUiCapture({...h19,actions:[...h19.actions,{action:'click',control:'Generate'}]},lockSha256,{historical:'h19'}),/pre-submission/);
+  assert.equal(validateFailedUiCapture({...capture,error:'unrecognized selector',submissionPhase:'before-generate-attempt'},lockSha256),true);
+  assert.throws(()=>validateFailedUiCapture({...capture,error:'Generate click timed out',submissionPhase:'generate-attempted'},lockSha256),/pre-submission/);
   const remaining=await retryRemainingRows(evidence,plan,lockSha256);
   assert.deepEqual(remaining.map(row=>row.id),rows.slice(7).map(row=>row.id));
   assert.deepEqual(rows.map(row=>continuationRowDisposition(row,remaining,{retry:true})),rows.map((_,index)=>({run:index>=7,reuseUiIntent:index===7})));
@@ -163,6 +168,11 @@ test('H18 checkpoint permits only two sealed post-upload log prefixes and archiv
   await unlink(resolve(root,'evidence/attempts/mlx/dispatch.lock'));
   assert.equal(await assertH18CheckpointFiles(retained,checkpoint,{retained:true}),303);
   await writeFile(resolve(retained,'continuation-h18-root/api-continuation.log'),'artifact-prefix\nchanged-tail');await assert.rejects(()=>assertH18CheckpointFiles(retained,checkpoint,{retained:true}),/stopped bytes changed/);
+  const chained=await temporary('chained');t.after(()=>rm(chained,{recursive:true,force:true}));
+  const next={files:files.filter(item=>!['api-continuation.log','journal-continuation.jsonl'].includes(item.file)),appendOnlyTails:[]};
+  for(const item of next.files){const path=resolve(chained,item.file==='evidence/attempts/mlx/dispatch.lock'?'continuation-prior-2-dispatch.lock':item.file.startsWith('evidence/')?item.file.slice(9):`continuation-prior-2-root/${item.file}`);await mkdir(resolve(path,'..'),{recursive:true});await writeFile(path,await readFile(item.file==='evidence/attempts/mlx/dispatch.lock'?resolve(retained,'continuation-h18-dispatch.lock'):resolve(root,item.file)));}
+  assert.equal(await assertH18CheckpointFiles(chained,next,{retained:true,archiveTag:'prior-2'}),301);
+  await writeFile(resolve(chained,'continuation-prior-2-dispatch.lock'),'changed mutex');await assert.rejects(()=>assertH18CheckpointFiles(chained,next,{retained:true,archiveTag:'prior-2'}),/artifact bytes changed/);
 });
 test('fixture aliases require real upload/readback IDs and preserve actual lexical nonfinite bytes',()=>{
   const bindings={campaignProject:'actual-project',foreign:{asset:{id:'actual-foreign-id'}}};
@@ -254,7 +264,10 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   assert.throws(()=>repaired({...continuation,original_inventory_sha256:'e'.repeat(64)}),/sealed local original-evidence/);
   const retry={...continuation,retry_inventory_path:'/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/h18-actual-artifact-inventory.json',retry_inventory_sha256:H18_RETRY_INVENTORY_SHA256};
   assert.equal(repaired(retry).retry_inventory_sha256,H18_RETRY_INVENTORY_SHA256);
-  assert.throws(()=>repaired({...retry,retry_inventory_sha256:'e'.repeat(64)}),/sealed checkpoint/);
+  assert.throws(()=>repaired({...retry,retry_inventory_sha256:'e'.repeat(64)}),/sealed or downloaded failed-attempt artifact/);
+  const chained={...retry,retry_inventory_path:'/Users/michael/.codex/epic-runs/sc-26752/terminal57-final-input-prep-r16/h19-actual-artifact-inventory.json',retry_inventory_sha256:'d7bcbe27f63ef072376585feaf2ae6f9bbe3bf9f16c0857254aa28a2e3bcaed8',retry_run_id:'40210686983',retry_artifact_id:'12604389896'};
+  assert.equal(repaired(chained).retry_run_id,'40210686983');
+  assert.throws(()=>repaired({...chained,retry_artifact_id:''}),/failed-attempt artifact/);
   assert.throws(()=>validateDispatchEnvelope(JSON.stringify({...retry,tooling_sha:'82c534d50b72c1a5984514b90548002da212d735'}),'82c534d50b72c1a5984514b90548002da212d735',identity.inferenceSha,'82c534d50b72c1a5984514b90548002da212d735'),/distinct tooling/);
   assert.throws(()=>repaired({...execute,retry_inventory_path:retry.retry_inventory_path,retry_inventory_sha256:retry.retry_inventory_sha256}),/cannot consume/);
   assert.throws(()=>repaired({...continuation,review_artifact_id:'999'}),/no review/);
@@ -297,9 +310,9 @@ test('first bundle copies only exact fixed inputs, provenance and declared fixtu
 });
 test('actual PNG workflow inspector evidence preserves original exported bytes and rejects substitutions',async()=>{
   const contract=await json(resolve(sourceRoot,'scripts/fixtures/moss-edit-product-contract-v2.json')),bytes=rgbPng(1,1,Buffer.from([1,2,3]));
-  const inspection={status:'workflow',workflow:contract.exportedWorkflow,resolution:{missing:[]}},workflow={file:'actual-download.png',sha256:sha(bytes),inspectUploadSha256:sha(bytes),inspection,inspectionNetwork:{method:'POST',path:'/api/v1/workflows/inspect',request:{fileSha256:sha(bytes)},response:inspection}},origin={outputs:[{sha256:sha(bytes)}]};
+  const inspection={status:'workflow',workflow:contract.exportedWorkflow,resolution:{missing:[]}},startedAt=new Date(Date.now()-2000).toISOString(),observedAt=new Date(Date.now()-1000).toISOString(),workflow={file:'actual-download.png',sha256:sha(bytes),inspectUploadSha256:sha(bytes),browserFile:{startedAt,byteLength:bytes.length,sha256:sha(bytes)},inspection,inspectionNetwork:{method:'POST',path:'/api/v1/workflows/inspect',status:200,observedAt,request:{observer:'playwright-request-metadata-and-product-response',fileSha256:null,byteLength:null,postDataState:'file-bytes-unavailable-in-observer',contentType:'multipart/form-data'},response:inspection}},origin={outputs:[{sha256:sha(bytes)}]};
   validatePortableCapture(workflow,bytes,origin,contract.originalReport,0);
-  for(const mutate of [value=>value.inspectUploadSha256=sha('other'),value=>value.inspectionNetwork.path='/api/v1/fake',value=>value.inspectionNetwork.response={},value=>value.inspection.workflow.advanced.mossImageEditExecutionReport.adapter_path='/private/leak']){
+  for(const mutate of [value=>value.inspectUploadSha256=sha('other'),value=>value.browserFile.sha256=sha('other'),value=>value.inspectionNetwork.path='/api/v1/fake',value=>value.inspectionNetwork.response={},value=>value.inspection.workflow.advanced.mossImageEditExecutionReport.adapter_path='/private/leak']){
     const changed=structuredClone(workflow);mutate(changed);assert.throws(()=>validatePortableCapture(changed,bytes,origin,contract.originalReport,0));
   }
   assert.throws(()=>validatePortableCapture(workflow,rgbPng(1,1,Buffer.from([4,5,6])),origin,contract.originalReport,0));

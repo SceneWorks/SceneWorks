@@ -409,6 +409,8 @@ jobs:
       original_inventory_sha256: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).original_inventory_sha256 }}
       retry_inventory_path: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).retry_inventory_path }}
       retry_inventory_sha256: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).retry_inventory_sha256 }}
+      retry_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).retry_run_id }}
+      retry_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).retry_artifact_id }}
       native_run_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).native_run_id }}
       native_run_attempt: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).native_run_attempt }}
       review_artifact_id: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).review_artifact_id }}

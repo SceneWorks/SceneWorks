@@ -46,11 +46,19 @@ on:
         required: false
         type: string
       retry_inventory_path:
-        description: Exact sealed H18 failed-continuation artifact inventory; retry only
+        description: Exact sealed prior failed-continuation artifact inventory; retry only
         required: false
         type: string
       retry_inventory_sha256:
-        description: SHA256 of the H18 failed-continuation artifact inventory; retry only
+        description: SHA256 of the prior failed-continuation artifact inventory; retry only
+        required: false
+        type: string
+      retry_run_id:
+        description: Prior failed retry run retaining immutable artifact bytes; chained retry only
+        required: false
+        type: string
+      retry_artifact_id:
+        description: Exact prior failed retry artifact ID; chained retry only
         required: false
         type: string
       upload_path:
@@ -123,6 +131,12 @@ on:
         required: false
         type: string
       retry_inventory_sha256:
+        required: false
+        type: string
+      retry_run_id:
+        required: false
+        type: string
+      retry_artifact_id:
         required: false
         type: string
       upload_path:
@@ -502,15 +516,25 @@ jobs:
           node-version: 22
       - name: Normalize exact stopped private root
         run: node tooling/scripts/moss-edit-terminal-actions.mjs normalize-env
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.retry_artifact_id != ''
+        with:
+          artifact-ids: ${{ inputs.retry_artifact_id }}
+          run-id: ${{ inputs.retry_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/moss-prior-retry
       - name: Recover the completed original job and run only untouched MLX rows
         env:
           MOSS_ORIGINAL_INVENTORY_PATH: ${{ inputs.original_inventory_path }}
           MOSS_ORIGINAL_INVENTORY_SHA256: ${{ inputs.original_inventory_sha256 }}
           MOSS_RETRY_INVENTORY_PATH: ${{ inputs.retry_inventory_path }}
           MOSS_RETRY_INVENTORY_SHA256: ${{ inputs.retry_inventory_sha256 }}
+          MOSS_RETRY_RUN_ID: ${{ inputs.retry_run_id }}
+          MOSS_RETRY_ARTIFACT_ID: ${{ inputs.retry_artifact_id }}
         run: |
           test "$RUNNER_NAME" = nax-macos
-          node tooling/scripts/moss-edit-terminal-actions.mjs continue-mlx "$MOSS_ROOT/runtime.json" "$GITHUB_WORKSPACE/tooling" "${{ inputs.tooling_sha }}" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "$MOSS_ORIGINAL_INVENTORY_PATH" "$MOSS_ORIGINAL_INVENTORY_SHA256" "$MOSS_RETRY_INVENTORY_PATH" "$MOSS_RETRY_INVENTORY_SHA256"
+          node tooling/scripts/moss-edit-terminal-actions.mjs continue-mlx "$MOSS_ROOT/runtime.json" "$GITHUB_WORKSPACE/tooling" "${{ inputs.tooling_sha }}" "${{ inputs.execution_run_id }}" "${{ inputs.execution_run_attempt }}" "$MOSS_ORIGINAL_INVENTORY_PATH" "$MOSS_ORIGINAL_INVENTORY_SHA256" "$MOSS_RETRY_INVENTORY_PATH" "$MOSS_RETRY_INVENTORY_SHA256" "$MOSS_RETRY_RUN_ID" "$MOSS_RETRY_ARTIFACT_ID" "$RUNNER_TEMP/moss-prior-retry"
       - name: Retain original and appended actual MLX evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0

@@ -15,7 +15,7 @@ export const H18_RETRY_ARTIFACT_ID = 12604596938;
 export const H18_RETRY_INVENTORY_SHA256 = 'f849b52f0e7724e13b1f8d5a8c7f2797038e22d0d8dfb1ab8e6e2cfd9af03668';
 export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha) {
   requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&/^[a-f0-9]{40}$/.test(dispatchSha)&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires exact product/tooling/inference commits');
-  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256'];
+  const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id'];
   requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&required.every(key=>typeof value[key]==='string'&&value[key])&&Object.keys(value).every(key=>[...required,...optional].includes(key)&&typeof value[key]==='string'),'MOSS dispatch JSON has missing, unknown or non-string fields');
   requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.candidate_id)&&/^[a-f0-9]{64}$/.test(value.bundle_manifest_sha256),'MOSS dispatch candidate or manifest SHA is invalid');
   requireThat(['upload','execute','continue','verify'].includes(value.phase),'MOSS dispatch phase must be upload, execute, continue or verify');
@@ -24,19 +24,20 @@ export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha)
   requireThat(sourceSha===dispatchSha&&(!repair?empty(['tooling_sha','product_sha']):value.tooling_sha===dispatchSha&&/^[a-f0-9]{40}$/.test(value.product_sha??'')&&value.product_sha!==dispatchSha),'MOSS workflow commit must equal the exact product source or separately identify H17 product and H18 repair tooling');
   if(value.phase==='upload') {
     requireThat(['bundle','review'].includes(value.upload_kind)&&typeof value.upload_path==='string'&&value.upload_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.upload_path)===value.upload_path,'MOSS upload requires a canonical directory inside the owned epic run');
-    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256']),'MOSS upload cannot consume execution or prior artifact IDs');
+    requireThat(empty(['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id']),'MOSS upload cannot consume execution or prior artifact IDs');
   } else {
     requireThat([value.bundle_run_id,value.bundle_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS execution/verify requires exact bundle IDs');
     requireThat(empty(['upload_path','upload_kind']),'MOSS execution/verify cannot upload host files');
     if(value.phase==='verify') {
       requireThat([value.execution_run_id,value.review_artifact_id,value.review_run_id??value.bundle_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??'')),'MOSS verify requires exact execution run, attempt and review artifact/run IDs');
-      requireThat(empty(['original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256'])&&(!repair?empty(['native_run_id','native_run_attempt']):[value.native_run_id,value.native_run_attempt].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS repaired verify requires original native run/attempt and no host inventory path');
+      requireThat(empty(['original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id'])&&(!repair?empty(['native_run_id','native_run_attempt']):[value.native_run_id,value.native_run_attempt].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS repaired verify requires original native run/attempt and no host inventory path');
     } else if(value.phase==='continue') {
       requireThat([value.execution_run_id,value.execution_run_attempt??'1'].every(id=>/^[1-9][0-9]*$/.test(id??''))&&empty(['review_artifact_id','review_run_id','native_run_id','native_run_attempt']),'MOSS continuation requires one exact original execution attempt and no review/native override');
       requireThat(typeof value.original_inventory_path==='string'&&value.original_inventory_path.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.original_inventory_path)===value.original_inventory_path&&value.original_inventory_sha256===R16_ORIGINAL_INVENTORY_SHA256,'MOSS continuation requires the exact sealed local original-evidence boundary');
       const retry=value.retry_inventory_path!==undefined||value.retry_inventory_sha256!==undefined;
-      if(retry)requireThat(value.tooling_sha!==H18_RETRY_TOOLING_SHA&&value.retry_inventory_path?.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.retry_inventory_path)===value.retry_inventory_path&&value.retry_inventory_sha256===H18_RETRY_INVENTORY_SHA256,'H18 retry needs a distinct tooling commit and exact sealed checkpoint inventory');
-    } else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256']),'MOSS execute cannot consume prior execution or review evidence');
+      if(retry)requireThat(value.tooling_sha!==H18_RETRY_TOOLING_SHA&&value.retry_inventory_path?.startsWith('/Users/michael/.codex/epic-runs/sc-26752/')&&resolve(value.retry_inventory_path)===value.retry_inventory_path&&/^[a-f0-9]{64}$/.test(value.retry_inventory_sha256??'')&&(value.retry_inventory_sha256===H18_RETRY_INVENTORY_SHA256?empty(['retry_run_id','retry_artifact_id']):[value.retry_run_id,value.retry_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??''))),'MOSS retry needs a distinct tooling commit and exact sealed or downloaded failed-attempt artifact');
+      else requireThat(empty(['retry_run_id','retry_artifact_id']),'MOSS continuation cannot name an artifact without a retry inventory');
+    } else requireThat(empty(['execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id']),'MOSS execute cannot consume prior execution or review evidence');
   }
   const legacy=optional.slice(0,8),repairFields=optional.slice(8);
   return Object.fromEntries([...required,...legacy,...repairFields.filter(key=>value[key]!==undefined)].map(key=>[key,value[key]??(key==='execution_run_attempt'?'1':key==='review_run_id'&&value.phase==='verify'?value.bundle_run_id:'')]));
@@ -65,12 +66,12 @@ export async function assertOriginalEvidence(root,manifest,{exact=false}={}) {
   }
   return manifest.files.length;
 }
-export async function assertH18CheckpointFiles(root,checkpoint,{retained=false}={}) {
+export async function assertH18CheckpointFiles(root,checkpoint,{retained=false,archiveTag='h18'}={}) {
   const tails=checkpoint.appendOnlyTails;
-  requireThat(Array.isArray(checkpoint.files)&&checkpoint.files.length>=300&&new Set(checkpoint.files.map(item=>item.file)).size===checkpoint.files.length&&Array.isArray(tails)&&canonical(tails.map(item=>item.file).sort())===canonical(['api-continuation.log','journal-continuation.jsonl']),'H18 artifact inventory or exact post-upload append-only logs changed');
+  requireThat(Array.isArray(checkpoint.files)&&checkpoint.files.length>=300&&new Set(checkpoint.files.map(item=>item.file)).size===checkpoint.files.length&&Array.isArray(tails)&&new Set(tails.map(item=>item.file)).size===tails.length&&tails.length<=2&&tails.every(item=>archiveTag==='h18'?['api-continuation.log','journal-continuation.jsonl'].includes(item.file):/^(?:api-continuation-retry(?:-[2-9][0-9]*)?\.log|journal-continuation-retry(?:-[2-9][0-9]*)?\.jsonl)$/.test(item.file))&&(archiveTag!=='h18'||canonical(tails.map(item=>item.file).sort())===canonical(['api-continuation.log','journal-continuation.jsonl'])),'prior artifact inventory or exact post-upload append-only logs changed');
   for(const item of checkpoint.files) {
     const tail=tails.find(entry=>entry.file===item.file);
-    const relativeFile=retained?(item.file==='evidence/attempts/mlx/dispatch.lock'?'continuation-h18-dispatch.lock':item.file.startsWith('evidence/')?item.file.slice('evidence/'.length):`continuation-h18-root/${item.file}`):item.file;
+    const relativeFile=retained?(item.file==='evidence/attempts/mlx/dispatch.lock'?`continuation-${archiveTag}-dispatch.lock`:item.file.startsWith('evidence/')?item.file.slice('evidence/'.length):`continuation-${archiveTag}-root/${item.file}`):item.file;
     const path=safePath(root,relativeFile),info=await lstat(path);
     requireThat(info.isFile()&&!info.isSymbolicLink(),`H18 checkpoint file is not regular: ${item.file}`);
     if(tail) {
@@ -104,8 +105,10 @@ export async function retryRemainingRows(evidenceRoot,plan,lockSha256) {
   }
   return rows.slice(7);
 }
-export function validateFailedUiCapture(capture,lockSha256) {
-  requireThat(capture.rowId==='advanced-mlx-sft-replay'&&capture.lockSha256===lockSha256&&capture.error?.includes('strict mode violation')&&capture.error?.includes('Download portable workflow (.json)')&&Array.isArray(capture.submissions)&&capture.submissions.length===0&&Array.isArray(capture.imageJobPosts)&&capture.imageJobPosts.length===0,'H18 UI failure was not a proven pre-submission selector failure');
+export function validateFailedUiCapture(capture,lockSha256,{historical=null}={}) {
+  const oldSelector=historical==='h18'&&capture.error?.includes('strict mode violation')&&capture.error.includes('Download portable workflow (.json)');
+  const oldObserver=historical==='h19'&&capture.error==='observed upload lacks multipart file bytes'&&capture.actions?.some(item=>item.action==='drop-workflow-file')&&!capture.actions.some(item=>item.action==='click'&&/^Generate(?: edit| [0-9]+ images?)?$/.test(item.control));
+  requireThat(capture.rowId==='advanced-mlx-sft-replay'&&capture.lockSha256===lockSha256&&typeof capture.error==='string'&&capture.error.length>0&&(oldSelector||oldObserver||(!historical&&capture.submissionPhase==='before-generate-attempt'))&&Array.isArray(capture.submissions)&&capture.submissions.length===0&&Array.isArray(capture.imageJobPosts)&&capture.imageJobPosts.length===0,'failed UI capture was not a proven pre-submission attempt');
   return true;
 }
 export function continuationRowDisposition(row,remaining,{retry=false}={}) {
@@ -203,7 +206,7 @@ export async function startStack(config,token) {
     requireThat((await filesUnder(resolve(config.stateRoot,'config'))).length>0,'original stopped stack configuration missing');
   } else await cp(resolve(config.sourceRoot,'config'),resolve(config.stateRoot,'config'),{recursive:true,errorOnExist:true,force:false});
   const env=childEnvironment(config,token),children=[],handles=[];
-  const continuationSuffix=config.continuation?(config.continuation.retry?'-continuation-retry':'-continuation'):'';
+  const continuationSuffix=config.continuation?(config.continuation.retry?`-continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}`:'-continuation'):'';
   const launch=async(name,extra)=>{const handle=await open(resolve(config.root,`${name}${continuationSuffix}.log`),'wx',0o600);handles.push(handle);const child=spawn(config.apiBinary,[],{cwd:config.sourceRoot,env:{...env,...extra},stdio:[name.startsWith('worker')?'pipe':'ignore',handle.fd,handle.fd],windowsHide:true});child.once('error',error=>{child.startError=error;});children.push(child);return child;};
   const api=await launch('api',utilityWorkerEnvironment(config)),client=new Api(env.SCENEWORKS_API_URL,token);let worker=await launch('worker',standaloneWorkerEnvironment()),restarts=0;
   const stopOne=async(child,isWorker)=>{if(child.exitCode!==null||child.signalCode!==null)return;let timer;try {
@@ -217,7 +220,7 @@ export async function startStack(config,token) {
     requireThat(worker.exitCode===null&&worker.signalCode===null&&!worker.startError,'owned worker exited unexpectedly; do not silently restart a failed campaign');
     const oldPid=worker.pid;await stopOne(worker,true);requireThat(worker.exitCode!==null||worker.signalCode!==null,'owned worker cache process still running');
     const oldExit={code:worker.exitCode,signal:worker.signalCode};
-    await sourceIdentity(config);await nativeDevice(config.backend);config.observationJournal=resolve(config.root,`journal-${config.continuation?(config.continuation.retry?'continuation-retry-':'continuation-'):''}${++restarts}.jsonl`);
+    await sourceIdentity(config);await nativeDevice(config.backend);config.observationJournal=resolve(config.root,`journal-${config.continuation?(config.continuation.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:'continuation-'):''}${++restarts}.jsonl`);
     worker=await launch(`worker-restart-${restarts}`,{...standaloneWorkerEnvironment(),SCENEWORKS_MOSS_OBSERVATION_JOURNAL:config.observationJournal});
     return {reason,oldPid,oldExit,newPid:worker.pid,journal:config.observationJournal,source:await sourceIdentity(config),workerId:config.workerId,at:new Date().toISOString(),meaning:'actual idle owned worker process exited; its native resident caches cannot be reused by reentry'};
   };
@@ -232,7 +235,7 @@ export async function startStack(config,token) {
     const registered=ready?.gpuId===(config.backend==='cuda'?'1':'mlx')&&ready.status==='idle'&&utility;
     if(!registered)await save(resolve(config.root,'startup-readiness.json'),stackReadinessSnapshot({health:lastHealth,workers:lastWorkers,children,workerId:config.workerId,httpStatus:lastHttpStatus}));
     requireThat(registered,'actual native/CPU model_download workers never registered on their bound identities; inspect startup-readiness.json');
-    await save(resolve(config.root,config.continuation?(config.continuation.retry?'stack-continuation-retry.json':'stack-continuation.json'):'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString(),...(config.continuation?{tooling:config.continuation.toolingSha}:{})});
+    await save(resolve(config.root,config.continuation?`stack${continuationSuffix}.json`:'stack.json'),{version:VERSION,backend:config.backend,source:await sourceIdentity(config),binary:await fileIdentity(config.apiBinary),apiUrl:client.base.href,worker:ready,utilityWorker:utility,pids:{api:api.pid,worker:worker.pid},at:new Date().toISOString(),...(config.continuation?{tooling:config.continuation.toolingSha}:{})});
     return {api:client,children,stop,restartIdleWorker,async restartWorker(canceledJobId){
       const job=await client.request(`/api/v1/jobs/${encodeURIComponent(canceledJobId)}`);
       requireThat(job.status==='canceled'&&job.workerId===config.workerId&&!(job.result?.assets?.length)&&job.result?.outputPublication?.state!=='pending','owned cancellation/publication is not drained; do not restart');

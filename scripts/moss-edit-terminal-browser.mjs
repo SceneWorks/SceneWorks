@@ -62,9 +62,9 @@ export function describeUiRow(row) {
 }
 
 // Response observation is passive: no routing, fulfillment, synthetic responses or fetches.
-function observe(page, apiOrigin) {
+export function observe(page, apiOrigin) {
   const pending = new Set(), errors = [], requests = new WeakMap();
-  const result = { submissions: [], installations: [], uploads: [], inspections: [], progress: [], posts: [] };
+  const result = { submissions: [], installations: [], uploads: [], inspections: [], progress: [], posts: [], uploadDiagnostics: [] };
   page.on('request', request => {
     if (new URL(request.url()).origin !== apiOrigin) return;
     const observedAt = now(); requests.set(request, observedAt);
@@ -82,8 +82,13 @@ function observe(page, apiOrigin) {
         const network = { method, path, observedAt, responseObservedAt: now(), status: response.status(), response: body };
         if (installation || path === '/api/v1/image/jobs') { network.request = request.postDataJSON(); (installation ? result.installations : result.submissions).push(network); }
         else {
-          const bytes = multipartFile(request.postDataBuffer(), request.headers()['content-type']);
-          network.request = { fileSha256: sha(bytes), byteLength: bytes.length };
+          const contentType=(await request.allHeaders())['content-type']??request.headers()['content-type'],body=request.postDataBuffer();
+          requireThat(/^multipart\/form-data;\s*boundary=/i.test(contentType??''),'observed product upload lacks multipart content type');
+          let bytes=null,parseError=null;
+          if(Buffer.isBuffer(body))try{bytes=multipartFile(body,contentType);}catch(error){parseError=error.message;}
+          const shape={path,method,contentType:'multipart/form-data',postDataByteLength:body?.length??null,postDataState:bytes?'complete-file-bytes':'file-bytes-unavailable-in-observer',...(parseError?{parseError}:{})};
+          result.uploadDiagnostics.push(shape);
+          network.request={fileSha256:bytes?sha(bytes):null,byteLength:bytes?.length??null,observer:bytes?'playwright-request-post-data':'playwright-request-metadata-and-product-response',...shape};
           (path === '/api/v1/workflows/inspect' ? result.inspections : result.uploads).push({ network, bytes });
         }
       } else if (/^\/api\/v1\/(?:jobs(?:\/|$)|image\/jobs(?:\/|$))/.test(path) && response.ok() && (response.headers()['content-type'] ?? '').includes('json')) {
@@ -125,6 +130,12 @@ async function readonly(context, base, path, token) {
   requireThat(path.startsWith('/api/v1/'), 'readback must use a product API path');
   const response = await context.request.get(new URL(path, base).href, { headers: { 'X-SceneWorks-Token': token }, maxRedirects: 0 });
   requireThat(response.ok(), `authenticated UI identity readback failed: ${path} HTTP ${response.status()}`); return response.json();
+}
+async function readonlyBytes(context,base,path,token) {
+  requireThat(path.startsWith('/api/v1/'),'readback must use a product API path');
+  const response=await context.request.get(new URL(path,base).href,{headers:{'X-SceneWorks-Token':token},maxRedirects:0});
+  requireThat(response.ok(),`authenticated UI byte readback failed: ${path} HTTP ${response.status()}`);
+  return response.body();
 }
 
 async function shell(page, kind, actions) {
@@ -176,9 +187,16 @@ async function dropFile(page, path, actions) {
   const bytes = await readFile(path);
   // Real HTML file drag/drop, dispatched at the global unclaimed-drop target. No React state injection.
   const transfer = await page.evaluateHandle(({ data, name, type }) => { const transfer = new DataTransfer(); transfer.items.add(new File([Uint8Array.from(data)], name, { type })); return transfer; }, { data: [...bytes], name: basename(path), type: path.endsWith('.png') ? 'image/png' : 'application/json' });
-  try { await page.locator('body').dispatchEvent('dragover', { dataTransfer: transfer }); await page.locator('body').dispatchEvent('drop', { dataTransfer: transfer }); }
+  let browserFile;
+  try {
+    browserFile=await transfer.evaluate(async value=>{const file=value.files[0],bytes=await file.arrayBuffer(),hash=await crypto.subtle.digest('SHA-256',bytes);return {name:file.name,type:file.type,byteLength:bytes.byteLength,sha256:Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('')};});
+    requireThat(browserFile.name===basename(path)&&browserFile.byteLength===bytes.length&&browserFile.sha256===sha(bytes),'browser DataTransfer File differs from the downloaded workflow bytes');
+    const startedAt=now();
+    await page.locator('body').dispatchEvent('dragover', { dataTransfer: transfer }); await page.locator('body').dispatchEvent('drop', { dataTransfer: transfer });
+    const proof={...browserFile,startedAt,finishedAt:now()};actions.push({ at: proof.finishedAt, action: 'drop-workflow-file', file: basename(path), sha256: sha(bytes), browserFile:proof });
+    return proof;
+  }
   finally { await transfer.dispose(); }
-  actions.push({ at: now(), action: 'drop-workflow-file', file: basename(path), sha256: sha(bytes) });
 }
 
 export async function selectedAssetExport(page,state,asset) {
@@ -207,9 +225,9 @@ async function workflowReplay(page, state, row, origin, expected, uploaded, obse
   actions.push({ at: now(), action: 'download-workflow', file, sha256: sha(bytes), originAssetId: origin.asset.id });
   await page.keyboard.press('Escape');
   const inspectionsBefore = observation.inspections.length;
-  await dropFile(page, resolve(root, file), actions);
+  const browserFile=await dropFile(page, resolve(root, file), actions);
   const inspection = await waitFor(page, observation, () => observation.inspections[inspectionsBefore], 'real workflow inspection did not occur');
-  requireThat(inspection.network.status === 200 && inspection.network.response.status === 'workflow' && inspection.network.response.workflow && inspection.network.request.fileSha256 === sha(bytes), 'actual export is not a portable workflow');
+  requireThat(inspection.network.status === 200 && inspection.network.response.status === 'workflow' && inspection.network.response.workflow && Date.parse(inspection.network.observedAt)>=Date.parse(browserFile.startedAt) && (inspection.network.request.fileSha256===null||inspection.network.request.fileSha256===sha(bytes)), 'actual export is not a portable workflow');
   const dialog = page.getByRole('dialog'), use = dialog.getByRole('button', { name: 'Use this workflow', exact: true });
   await use.waitFor({ state: 'visible' });
   await noPostAttempt(page, observation, use, actions, root, 'workflow-unresolved', { resolution: inspection.network.response.resolution, visibleText: await dialog.innerText() });
@@ -230,7 +248,7 @@ async function workflowReplay(page, state, row, origin, expected, uploaded, obse
   await click(use, actions, 'Use this workflow');
   await dialog.waitFor({ state: 'hidden' });
   await waitValue(page,page.getByLabel('Prompt', { exact: true }),row.request.prompt);
-  return { file, sha256: sha(bytes), inspectUploadSha256: inspection.network.request.fileSha256, inspection: inspection.network.response, inspectionNetwork: inspection.network,
+  return { file, sha256: sha(bytes), inspectUploadSha256: browserFile.sha256, browserFile, inspection: inspection.network.response, inspectionNetwork: inspection.network,
     originRowId: row.replayOf ?? 'quality-mlx-base-four', originJobId: origin.receipt.jobId, originSampleIndex: 0, reacquired };
 }
 
@@ -399,7 +417,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
   // Chromium reports the browser's actual EventSource network frames. No injected listener,
   // replacement EventSource, direct polling or synthetic progress is used as UI evidence.
   await observeSse(context,page,base,observation,actions).catch(setupFailure);
-  let capture;
+  let capture, submissionPhase='before-generate-attempt';
   try {
     await page.goto(base.href, { waitUntil: 'domcontentloaded' });
     await page.getByRole('radio', { name: 'Advanced', exact: true }).or(page.getByLabel('Password', { exact: true })).waitFor({ state: 'visible' });
@@ -430,7 +448,9 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
         await select(labelledSelect(page,'Engine'), engine, actions, 'Engine');
         const error = page.getByText('MOSS latent output cannot use inline upscale', { exact: false });
         await error.first().waitFor({ state: 'visible' });
+        submissionPhase='generate-attempted';
         await noPostAttempt(page, observation, page.getByRole('button', { name: 'Generate', exact: true }), actions, captureRoot, guard, { engine, output: 'latents', error: await error.first().innerText() });
+        submissionPhase='before-generate-attempt';
         await checked(page.getByLabel('Upscale', { exact: true }), false, actions, 'Upscale');
       }
     }
@@ -439,6 +459,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     const generateName = route.shell === 'editor' ? 'Generate edit' : route.shell === 'simple' ? `Generate ${expected.count} image${expected.count > 1 ? 's' : ''}` : 'Generate';
     const generate = page.getByRole('button', { name: generateName, exact: true });
     requireThat(await generate.isEnabled(), 'frozen UI request is not runnable; inspect the retained screen');
+    submissionPhase='generate-attempted';
     await click(generate, actions, generateName);
     const network = await waitFor(page, observation, async () => { if(observation.submissions[0])return observation.submissions[0];await acknowledgeRecipeChoice(page,actions);return observation.submissions[0]; }, 'actual UI did not submit the allocated image job');
     requireThat(network.status >= 200 && network.status < 300 && network.response?.id && observation.posts.length === 1, 'UI created other than one successful allocated job');
@@ -447,8 +468,12 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
       const actualId = network.request.referenceAssetIds?.[0], upload = observation.uploads.find(item => item.network.response?.id === actualId);
       requireThat(upload, 'Editor scratch upload was not observed');
       const bound = structuredClone(expected); bound.referenceAssetIds = [actualId]; verifyUiRequestBinding(bound, network.request);
-      const file = 'source-upload.png'; await writeFile(resolve(captureRoot,file), upload.bytes, { flag: 'wx', mode: 0o600 });
-      sourceUpload = { inputId: 'B', file, sha256: sha(upload.bytes), observedAt: upload.network.observedAt, network: upload.network };
+      const asset=await read(`/api/v1/projects/${encodeURIComponent(expected.projectId)}/assets/${encodeURIComponent(actualId)}`);
+      requireThat(asset.id===actualId&&asset.projectId===expected.projectId&&asset.file?.path,'Editor upload did not persist the observed project asset');
+      const served=await readonlyBytes(context,base,`/api/v1/projects/${encodeURIComponent(expected.projectId)}/files/${asset.file.path.split('/').map(encodeURIComponent).join('/')}`,token);
+      requireThat(!upload.bytes||sha(upload.bytes)===sha(served),'Editor observed multipart bytes differ from authenticated served asset');
+      const file='source-upload.png';await writeFile(resolve(captureRoot,file),served,{flag:'wx',mode:0o600});
+      sourceUpload={inputId:'B',file,sha256:sha(served),observedAt:upload.network.observedAt,network:upload.network,byteObserver:upload.bytes?'playwright-request-post-data':'authenticated-product-asset-readback'};
     } else verifyUiRequestBinding(expected, network.request);
     await waitFor(page, observation, () => {
       const jobs = observation.progress.filter(job => job.id === network.response.id);
@@ -468,7 +493,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
   } catch (error) {
     await screenshot(page,captureRoot,'failure').catch(() => {});
     await save(resolve(captureRoot,'failure.json'), { version: VERSION, rowId, lockSha256: digest(state.lock), bindingSha256: digest(state.binding), at: now(), error: error.message, actions, screenshots: shots,
-      submissions: observation.submissions, progress: observation.progress, imageJobPosts: observation.posts }).catch(() => {});
+      submissionPhase, submissions: observation.submissions, progress: observation.progress, imageJobPosts: observation.posts, uploadDiagnostics:observation.uploadDiagnostics }).catch(() => {});
     throw error;
   } finally { try { await context.close(); } finally { await browser.close(); } }
 }
