@@ -767,7 +767,7 @@ jobs:
         run: node tooling/scripts/moss-edit-terminal-actions.mjs continue-cuda-only "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/tooling" "${{ inputs.tooling_sha }}" "${{ env.MOSS_ROOT }}/completed-mlx-artifact.json"
       - name: Run fresh corrected CUDA candidate from the authenticated completed Mac handoff
         if: inputs.phase == 'cuda-rebase'
-        run: node tooling/scripts/moss-edit-terminal-actions.mjs execute-cuda-rebase "${{ env.MOSS_ROOT }}/runtime.json" "${{ env.MOSS_ROOT }}/cuda-rebase.json"
+        run: node source/scripts/moss-edit-terminal-actions.mjs execute-cuda-rebase "${{ env.MOSS_ROOT }}/runtime.json" "${{ env.MOSS_ROOT }}/cuda-rebase.json"
       - name: Retain complete and partial CUDA evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0

@@ -3,10 +3,10 @@ import { constants } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm, cp, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
@@ -23,6 +23,24 @@ globalThis.fetch=async()=>{throw Error('LIVE_NETWORK_FORBIDDEN');};
 const temporary=label=>mkdtemp(resolve(tmpdir(),`moss-actions-${label}-`));
 const sourceRoot=fileURLToPath(new URL('../',import.meta.url));
 const coverage='moss_image_base+sft; bounded cache-context before bind; cache-dispatch; runtime load before media catalog; actual MOSS generate/edit calls after admission';
+test('CUDA rebase invokes the protocol from its declared source checkout, not the separate tooling checkout',async t=>{
+ const root=await temporary('two-checkouts');t.after(()=>rm(root,{recursive:true,force:true}));
+ for(const name of ['source','tooling']){
+  await cp(resolve(sourceRoot,'scripts'),resolve(root,name,'scripts'),{recursive:true});
+  await appendFile(resolve(root,name,'scripts/moss-edit-terminal.mjs'),`\nglobalThis.__mossProtocolOrigin = '${name}';\n`);
+ }
+ const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
+ const step=workflow.match(/- name: Run fresh corrected CUDA candidate from the authenticated completed Mac handoff\n\s+if: inputs\.phase == 'cuda-rebase'\n\s+run: node (source|tooling)\/scripts\/moss-edit-terminal-actions\.mjs execute-cuda-rebase/);
+ assert.ok(step,'exact corrected CUDA launch step required');
+ const invokedController=resolve(root,step[1],'scripts/moss-edit-terminal-actions.mjs');
+ delete globalThis.__mossProtocolOrigin;
+ await import(pathToFileURL(invokedController).href);
+ assert.equal(globalThis.__mossProtocolOrigin,'source','the controller loaded the protocol from the runtime-declared source checkout');
+ delete globalThis.__mossProtocolOrigin;
+ await import(pathToFileURL(resolve(root,'tooling/scripts/moss-edit-terminal-actions.mjs')).href);
+ assert.equal(globalThis.__mossProtocolOrigin,'tooling','the wrong checkout would load a different protocol before freeze');
+ delete globalThis.__mossProtocolOrigin;
+});
 test('official pin output permits only regenerated closure facts and exact audited source population',()=>{
   const old='a'.repeat(40),next='b'.repeat(40),path='crates/media/candle-gen/candle-gen-moss-image/src/lib.rs',oldBlob='c'.repeat(40),newBlob='d'.repeat(40);
   const manifest=(sha)=>`moss = { git = "https://github.com/SceneWorks/inference", rev = "${sha}" }\n`;
