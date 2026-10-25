@@ -214,6 +214,7 @@ export function assertCliEnvironment({ env = process.env, platform = process.pla
   assert.ok(STAGE_BACKENDS.includes(selected), 'backend must be mlx or cuda');
   if (selected === 'mlx') { assert.equal(platform, 'darwin', 'mlx staging is macOS-only'); assert.equal(env.RUNNER_NAME, MLX_RUNNER, `mlx staging requires ${MLX_RUNNER}`); }
   else { assert.equal(platform, 'win32', 'cuda staging is Windows-only'); assert.ok(CUDA_RUNNERS.includes(env.RUNNER_NAME), 'approved full-weights CUDA listener required'); }
+  assert.equal(env.H3_TERMINAL_ROUTE,`h3-terminal-${selected}`,'asset ensure is available only inside the existing h3-terminal-mlx/cuda routes');
   return { backend: selected, codeSha: env.GITHUB_SHA };
 }
 // HF hub repo directory prefix: model repos use models--, dataset repos datasets-- (same hub root).

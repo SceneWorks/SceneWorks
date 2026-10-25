@@ -10,6 +10,13 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
+import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
+export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases():requiredCases();}
+export function executionCases(p) {
+  if(p.matrixDecision){validateMatrixDecision(p.matrixDecision);if(p.matrixDecision.status==='selected'){assert.ok(p.matrixAnchors,'measured inline anchors required before asymmetry');assert.deepEqual(p.matrixDecision,chooseMatrixBackend({anchors:p.matrixAnchors}),'matrix choice must derive from measured anchors');}}
+  return p.cases.filter(c=>!(p.inventory==='reduced-v1'&&p.matrixDecision?.status==='selected'&&c.backend===p.matrixDecision.displacedBackend&&BROAD_MATRIX_CASES.includes(c.slug)));
+}
+export const isSourceCancelCase = c => c.kind==='source-cancel'||c.id.endsWith('.generation-source-prep-cancel');
 const exec = promisify(execFile);
 export const SOURCE = { repo: 'WarmBloodAban/Minimax-h3_Singularity', revision: 'a56850c870825d6a8ae501a595c4dbbbc77bbc7e' };
 export const ARTIFACTS = [
@@ -37,7 +44,7 @@ const sha64 = v => assert.match(v ?? '', /^[a-f0-9]{64}$/);
 const positive = v => assert.ok(Number.isFinite(v) && v > 0, 'positive measured value required');
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
 // Final delivery links arrive after hardware execution; they are not execution inputs.
-const digest = ({ delivery: _delivery, ...inputs }) => createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
+const digest = ({ delivery: _delivery, matrixDecision:_decision, matrixAnchors:_anchors, proofIndex:_retainedProofs, ...inputs }) => createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
 export const executionPlanDigest = digest;
 export async function hashFile(p) {
   const h = createHash('sha256');
@@ -55,11 +62,12 @@ export function validatePlan(p) {
   assert.ok(absolutePath(p.output), 'external absolute output required');
   assert.ok(p.responsibleTask === 'sc-26691');
   assert.ok(typeof p.nextAuthorizedAction === 'string' && p.nextAuthorizedAction.length > 10);
-  assert.equal(p.cases.length, requiredCases().length, 'complete acceptance inventory required');
+  assert.equal(p.cases.length, plannedCases(p).length, 'complete declared operational inventory required');
   assert.equal(new Set(p.cases.map(c => c.id)).size, p.cases.length);
-  for (const expected of requiredCases()) {
+  for (const expected of plannedCases(p)) {
     const c = p.cases.find(c => c.id === expected.id);
-    for (const [k, v] of Object.entries(expected)) assert.equal(c?.[k], v, `missing/mismatched ${expected.id}.${k}`);
+    for (const [k, v] of Object.entries(expected)) assert.deepEqual(c?.[k], v, `missing/mismatched ${expected.id}.${k}`);
+    if(p.inventory==='reduced-v1'&&c.group==='artifact')assert.equal(c.artifact,ARTIFACTS[c.index-1],'frozen source cannot be relabeled');
     assert.ok(Number.isInteger(c.timeoutSeconds) && c.timeoutSeconds > 0 && c.timeoutSeconds <= 7200);
     assert.ok(Array.isArray(c.command) && c.command.length > 0 && c.command.every(s => typeof s === 'string'));
     assert.ok(Array.isArray(c.inputs) && c.inputs.length > 0);
@@ -70,7 +78,8 @@ export function validatePlan(p) {
       assert.ok(absolutePath(c.runtime.scenario) && c.inputs.some(i => i.path === c.runtime.scenario && i.role === 'scenario'), 'actual bound API scenario required');
       assert.ok(Number.isInteger(c.runtime.port) && c.runtime.port > 1024 && c.runtime.port <= 65535 && typeof c.runtime.gpuId === 'string', 'owned service port/device configuration required');
     }
-    if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
+    if(c.kind==='actual-artifact-probe'){assert.ok(c.actualArtifactProbe && c.inputs.some(i=>i.role==='checkpoint') && (p.preparationState==='awaiting-inline-assets'||c.inputs.some(i=>i.role==='staging-receipt')),'actual payload probe and full staging authority required');}
+    else if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
       sha40(c.referenceRevision);
       assert.ok(c.numericProof.tests?.length && c.inputs.some(i => i.role === 'numeric-fixture') && c.inputs.some(i => i.role === 'reference'), 'actual native comparisons and pinned fixture/reference inputs required');
     } else if (c.group === 'numeric') {
@@ -81,6 +90,13 @@ export function validatePlan(p) {
     if (c.group === 'capability') { positive(c.minimumControlDelta); assert.ok(['video', 'audio'].includes(c.controlStream)); }
   }
   return p;
+}
+export function authorized(p, c) {
+  assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
+  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'real services/native commands are explicit Actions-only');
+  assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`);
+  if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos-2'); }
+  else assert.equal(process.platform,'win32');
 }
 export async function sourcePair(p, root, inferenceRoot) {
   for (const [dir, revision] of [[root, p.sceneworks], [inferenceRoot, p.inference]]) {
@@ -96,6 +112,19 @@ export async function sourcePair(p, root, inferenceRoot) {
     assert.ok(rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel), 'outputs must be outside source trees');
   }
 }
+export async function verifiedStagingRoot(p) {
+  if(!p.assetStaging)return null;
+  const spec=p.assetStaging;sha64(spec.receipt.sha256);assert.ok(absolutePath(spec.root)&&absolutePath(spec.receipt.path));
+  const root=await realpath(spec.root);assert.equal(path.basename(path.dirname(root)),'sc26691-private','only the private run staging root is admitted');
+  assert.match(path.basename(root),/^\d+-\d+$/,'per-run staging root required');
+  assert.equal(await realpath(spec.receipt.path),path.join(root,'h3-stage-receipt.json'));
+  assert.equal(await hashFile(spec.receipt.path),spec.receipt.sha256,'full staging receipt changed');
+  const receipt=await json(spec.receipt.path);assert.equal(receipt.kind,'h3-finetune-stage-receipt');assert.equal(receipt.proof_kind,'frozen_stage_content');assert.equal(receipt.status,'completed');assert.equal(receipt.producer.codeSha,p.sceneworks);assert.equal(await realpath(receipt.settings.privateRoot),root);
+  const marker=await json(path.join(root,'sc26691-owner.json'));assert.equal(marker.codeSha,p.sceneworks);assert.equal(marker.runId,receipt.producer.runId);assert.equal(marker.runAttempt,receipt.producer.runAttempt);assert.equal(await realpath(marker.root),root);
+  for(const file of receipt.files){assert.equal(file.status,'completed');assert.equal(file.observedSha256,file.expectedSha256);assert.equal(file.actualBytes,file.expectedBytes);assert.ok(file.explicitAcknowledgment,'explicit per-asset legal authority required');const relative=path.relative(root,await realpath(file.finalPath));assert.ok(relative&&!relative.startsWith('..')&&!path.isAbsolute(relative));}
+  return root;
+}
+export async function allowedInputRoots(p,root,inferenceRoot){return [p.output,root,inferenceRoot,...(p.nativeEvidence?.root?[p.nativeEvidence.root]:[]),...(p.assetStaging?[await verifiedStagingRoot(p)]:[])];}
 export async function verifyInputs(c, allowedRoots) {
   const roots = allowedRoots ? await Promise.all(allowedRoots.map(async root => ({ logical: path.resolve(root), actual: await realpath(root) }))) : undefined;
   const below = (root, file) => { const rel = path.relative(root, file); return rel && !rel.startsWith('..') && !path.isAbsolute(rel); };
@@ -103,6 +132,15 @@ export async function verifyInputs(c, allowedRoots) {
     if (roots) { const candidate = path.resolve(input.path); assert.ok(roots.some(r => below(r.logical, candidate) || below(r.actual, candidate)), 'input outside task staging or paired source roots'); const actual = await realpath(candidate); assert.ok(roots.some(r => below(r.actual, actual)), 'input symlink escapes task/source roots'); }
     assert.equal(await hashFile(input.path), input.sha256, `content changed: ${input.path}`);
   }
+}
+export async function verifyCaseInputs(p,c,roots) {
+  if(c.kind!=='actual-artifact-probe')return verifyInputs(c,roots);
+  const parent=c.inputs.find(i=>i.role==='staging-receipt');assert.ok(parent,'actual probe needs the completed full staging receipt');
+  await verifyInputs({...c,inputs:c.inputs.filter(i=>i.role!=='checkpoint')},roots);
+  const receipt=await json(parent.path),root=await verifiedStagingRoot({...p,assetStaging:{root:receipt.settings.privateRoot,receipt:parent}});
+  for(const input of c.inputs.filter(i=>i.role==='checkpoint')){const actual=await realpath(input.path),relative=path.relative(root,actual);assert.ok(relative&&!relative.startsWith('..')&&!path.isAbsolute(relative));const file=receipt.files.find(f=>path.resolve(f.finalPath)===path.resolve(input.path)&&f.observedSha256===input.sha256);assert.ok(file,'checkpoint is not an actually full-hash-verified staged artifact');assert.equal((await stat(actual)).size,file.actualBytes);}
+  // No second whole-file read: the native/CPU probes bind only the selected raw ranges and trust
+  // the full-file digest already established by the stager. Both trust boundaries are recorded.
 }
 export function verifyFrozenArtifact(c, catalog) {
   assert.equal(catalog.sha, SOURCE.revision, 'wrong frozen HF revision');
@@ -457,16 +495,18 @@ export function normalizeLoadEvent(raw) {
   return { kind: 'prepared-native-load-closure', jobId: fields.jobId, providerId: fields.provider, backend: fields.native_backend, deviceLabel: fields.backend, identity: parse(fields.identity), prepared_sources: parse(fields.prepared_sources), seed: fields.seed, operation: fields.operation, steps: optionNumber(fields.steps), schedulerShift: optionNumber(fields.scheduler_shift), cacheState: fields.cache_state };
 }
 export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta = decodedDelta) {
-  const canonical = requiredCases().find(item => item.id === c.id);
+  const canonical = plannedCases(p).find(item => item.id === c.id);
   assert.ok(canonical, 'unknown acceptance case');
-  for (const [key, value] of Object.entries(canonical)) assert.equal(c[key], value, 'case reclassification cannot weaken acceptance');
+  for (const [key, value] of Object.entries(canonical)) assert.deepEqual(c[key], value, 'case reclassification cannot weaken acceptance');
+  if(c.kind==='actual-artifact-probe'){const {verifyActualArtifactProbe}=await import('./h3-finetune-terminal-artifact-probe.mjs');return verifyActualArtifactProbe(p,c,dir,{contentReadback:true});}
   const e = await json(contained(dir, c.evidence));
   assert.equal(e.status, 'executed');
   assert.notEqual(e.proof_kind, 'unit_fake', 'unit_fake cannot be campaign evidence');
   assert.equal(e.sceneworks, p.sceneworks); assert.equal(e.inference, p.inference);
   assert.equal(e.caseId, c.id); assert.equal(e.backend, c.backend);
+  if(isSourceCancelCase(c))for(const key of ['av','loadEvent','completedJob','runtimeIdentity','metrics'])assert.equal(e[key],undefined,'cold cancellation proves teardown only: no completed load, AV or peak');
   assert.ok(e.hardware?.device && e.hardware?.driver, 'physical hardware identity required');
-  const modelExecution = ['artifact', 'capability'].includes(c.group) || /\.(bounded-loading|cold-warm-staged)$/.test(c.id);
+  const modelExecution = c.kind==='full-av' || ['artifact', 'capability'].includes(c.group) || /\.(bounded-loading|cold-warm-staged)$/.test(c.id);
   if (modelExecution) {
     // Honest post-acquisition sealed closure, not a per-tensor read census or intended plan.
     assert.ok(e.runtimeIdentity?.checkpointSha256, 'actual loaded checkpoint content identity required');
@@ -501,7 +541,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
   for (const name of e.files ?? []) { const f = contained(dir, name); files.push({ path: name, sha256: await hashFile(f) }); }
   assert.ok(files.length > 0, 'missing supporting evidence');
   let av, numeric;
-  if (['artifact', 'capability'].includes(c.group)) {
+  if (c.kind==='full-av' || ['artifact', 'capability'].includes(c.group)) {
     assert.equal(e.completedJob.output, e.av, 'successful output not bound to native job');
     av = await decode(contained(dir, e.av));
     if (c.group === 'artifact') {
@@ -510,7 +550,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       verifyFrozenArtifact(c, await json(catalogPath));
       files.push({ path: 'source-catalog.json', sha256: await hashFile(catalogPath) });
       assert.equal(e.runtimeIdentity.checkpointSha256, c.inputs.find(i => i.artifact === c.artifact)?.sha256);
-    } else {
+    } else if(c.group==='capability') {
       // Paired intervention: same checkpoint/seed, changed conditioning/routing/adapter.
       assert.ok(e.control?.intervention, 'causal conditioning control required');
       assert.equal(e.control.checkpointSha256, e.runtimeIdentity.checkpointSha256);
@@ -560,7 +600,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
     }
   }
   let runtime, sourceCancel;
-  if (c.id.endsWith('.generation-source-prep-cancel')) {
+  if (isSourceCancelCase(c)) {
     const { verifyGenerationSourcePrepCancel } = await import('./h3-finetune-terminal-runtime.mjs');
     sourceCancel = await verifyGenerationSourcePrepCancel(p, c, dir, { receiptName: e.sourceCancelReceipt });
     assert.equal(e.runtimeBindings,'source-job-output.json','canceled preparation still requires actual service/source/binary verification, not a successful load');
@@ -580,24 +620,43 @@ export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds }) {
   const child = spawn(argv[0], argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
   child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
   let expired = false;
-  const timer = setTimeout(() => { expired = true; }, timeoutSeconds * 1000);
+  const timer = setTimeout(() => { expired = true; output.write('H3_CASE_TIMEOUT: explicit case deadline exceeded; failure, cooperative shutdown only, never a GPU force kill.\n'); }, timeoutSeconds * 1000);
   try {
     const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
     assert.ok(!expired, 'case exceeded timeout; failed, never accepted on resume');
     assert.equal(code, 0, 'case process failed');
   } finally { clearTimeout(timer); await new Promise(resolve => output.end(resolve)); }
 }
+export async function laneBudget(p,backend,{now=Date.now(),startedAt=process.env.H3_TERMINAL_LANE_STARTED_AT}={}) {
+  const filename=contained(p.output,`lane-budget-${backend}.json`),totalSeconds=86400;
+  let budget;try{budget=await json(filename);}catch(error){if(error.code!=='ENOENT')throw error;}
+  if(!budget){const start=startedAt===undefined?now:Date.parse(startedAt);assert.ok(Number.isFinite(start)&&start<=now,'valid original lane start required');budget={kind:'h3-terminal-lane-budget',backend,sceneworks:p.sceneworks,inference:p.inference,planSha256:digest(p),startedAt:new Date(start).toISOString(),deadline:new Date(start+totalSeconds*1000).toISOString(),totalSeconds};await writeFile(filename,JSON.stringify(budget,null,2)+'\n',{flag:'wx'});}
+  assert.equal(budget.backend,backend);assert.equal(budget.planSha256,digest(p),'lane budget cannot be reset by changing the execution plan');assert.equal(budget.totalSeconds,totalSeconds);assert.equal(Date.parse(budget.deadline)-Date.parse(budget.startedAt),totalSeconds*1000);
+  const remainingSeconds=Math.floor((Date.parse(budget.deadline)-now)/1000);assert.ok(remainingSeconds>0,'whole terminal lane exceeded its original 24-hour budget; a new dispatch cannot reset it');return {...budget,remainingSeconds};
+}
+export async function verifyMatrixAdmission(p) {
+  if(p.matrixDecision?.status!=='selected')return;
+  executionCases(p);
+  const proofs=await loadRetainedProofIndex(p);for(const backend of ['mlx','cuda'])assert.ok(proofs.some(proof=>proof.kind==='cheap-causal-witness'&&proof.backend===backend&&proof.surfaceEvidence),'cannot omit real matrix cases before both actual encoded-native witnesses have passed');
+  const anchors=Array.isArray(p.matrixAnchors)?p.matrixAnchors:Object.values(p.matrixAnchors).flat();
+  for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,p.sceneworks);assert.equal(row.inference,p.inference);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,p.sceneworks);assert.equal(anchor.pinSha,p.inference);}
+}
 export async function runCase(p, id, root, inferenceRoot) {
   assert.notEqual(p.proof_kind, 'unit_fake', 'unit_fake plan is not campaign authorization');
+  assert.notEqual(p.preparationState,'awaiting-inline-assets','reduced plan incomplete: inline assets and full staging receipt must bind before execution');
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'native campaign execution is Actions-only');
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`, 'explicit final pair authorization required');
   validatePlan(p); await sourcePair(p, root, inferenceRoot);
-  const c = p.cases.find(c => c.id === id); assert.ok(c, 'unknown case');
+  const c = executionCases(p).find(c => c.id === id); assert.ok(c, 'unknown or intentionally omitted operational case');
   if (c.backend === 'mlx') { assert.equal(process.platform, 'darwin'); assert.equal(process.env.RUNNER_NAME, 'nax-macos-2'); }
   else assert.equal(process.platform, 'win32');
-  await verifyInputs(c, [p.output, root, inferenceRoot]);
+  await verifyMatrixAdmission(p);
+  const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
+  const caseDeadline=Math.min(Date.now()+c.timeoutSeconds*1000,budget?Date.parse(budget.deadline):Infinity);
+  await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot));
+  assert.ok(Date.now()<caseDeadline,'single-case timeout expired during input validation');
   const dir = contained(p.output, c.id); await mkdir(dir, { recursive: true });
-  const identity = { planSha256: digest(p), caseId: id, command: c.command, sceneworks: p.sceneworks, inference: p.inference, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, responsibleTask: p.responsibleTask, timeoutSeconds: c.timeoutSeconds, nextAuthorizedAction: p.nextAuthorizedAction };
+  const identity = { planSha256: digest(p), caseId: id, command: c.command, sceneworks: p.sceneworks, inference: p.inference, runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT, responsibleTask: p.responsibleTask, timeoutSeconds: c.timeoutSeconds, ...(budget?{laneBudget:{startedAt:budget.startedAt,deadline:budget.deadline,totalSeconds:budget.totalSeconds}}:{}), nextAuthorizedAction: p.nextAuthorizedAction };
   const statePath = path.join(dir, 'execution.json');
   let previous;
   try { previous = await json(statePath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
@@ -608,24 +667,25 @@ export async function runCase(p, id, root, inferenceRoot) {
     assert.deepEqual(verified, previous.verified, 'resume evidence drift');
     return previous;
   }
-  await save(statePath, { ...identity, status: 'running', started: new Date().toISOString() });
+  const started=new Date().toISOString();
+  await save(statePath, { ...identity, status: 'running', started });
   try {
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
-    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(c.timeoutSeconds) }, timeoutSeconds: c.timeoutSeconds };
-    if (c.group === 'numeric' && c.numericProof?.kind !== 'native-pinned-fixture') {
+    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(Math.max(1,Math.floor((caseDeadline-Date.now())/1000))), H3_CASE_DEADLINE_MS:String(caseDeadline) }, timeoutSeconds: Math.max(1,Math.floor((caseDeadline-Date.now())/1000)) };
+    if (c.group === 'numeric' && c.kind!=='actual-artifact-probe' && c.numericProof?.kind !== 'native-pinned-fixture') {
       await runProcess(c.referenceCommand, { ...options, logPath: path.join(dir, 'reference.log') });
       await save(path.join(dir, 'reference-execution.json'), { command: c.referenceCommand, revision: c.referenceRevision, outputSha256: await hashFile(contained(dir, c.referenceOutput)) });
     }
     let command = c.command;
-    if (c.runtime?.scenario || c.numericProof?.kind === 'native-pinned-fixture' || c.fixtureProof?.kind === 'source-bound-assertions') {
+    if (c.kind==='actual-artifact-probe' || c.runtime?.scenario || c.numericProof?.kind === 'native-pinned-fixture' || c.fixtureProof?.kind === 'source-bound-assertions') {
       const adapterPlan = path.join(dir, 'adapter-plan.json'); await save(adapterPlan, p);
-      command = [process.execPath, path.join(root, 'scripts/h3-finetune-terminal-runtime.mjs'), c.numericProof?.kind === 'native-pinned-fixture' ? 'numeric' : c.fixtureProof?.kind === 'source-bound-assertions' ? 'fixture' : 'api', adapterPlan, id, root, inferenceRoot];
+      command = [process.execPath, path.join(root, 'scripts/h3-finetune-terminal-runtime.mjs'), c.kind==='actual-artifact-probe' ? 'actual-artifact-probe' : c.numericProof?.kind === 'native-pinned-fixture' ? 'numeric' : c.fixtureProof?.kind === 'source-bound-assertions' ? 'fixture' : 'api', adapterPlan, id, root, inferenceRoot];
       await save(path.join(dir, 'adapter-command.json'), { command, responsibleTask: p.responsibleTask });
     }
     await runProcess(command, { ...options, logPath: path.join(dir, 'process.log') });
-    await sourcePair(p, root, inferenceRoot); await verifyInputs(c, [p.output, root, inferenceRoot]);
+    await sourcePair(p, root, inferenceRoot); await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot));
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
-    const receipt = { ...identity, status: 'passed', completed: new Date().toISOString(), verified };
+    const receipt = { ...identity, started, status: 'passed', completed: new Date().toISOString(), verified };
     await save(statePath, receipt); return receipt;
   } catch (error) { await save(statePath, { ...identity, status: 'failed', error: error.message }); throw error; }
 }
@@ -663,7 +723,7 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
   assert.equal(r.backend, backend); validatePlan(r.plan); if (!allowUnitFake) assert.notEqual(r.plan.proof_kind, 'unit_fake');
   assert.equal(r.plan.sceneworks, p.sceneworks); assert.equal(r.plan.inference, p.inference); assert.deepEqual(r.plan.source, p.source);
   assert.equal(r.planSha256, digest(r.plan)); assert.ok(r.verificationRunId && r.verificationRunAttempt);
-  const expected = requiredCases().filter(c => c.backend === backend);
+  const expected = executionCases(r.plan).filter(c => c.backend === backend);
   assert.equal(r.cases.length, expected.length); assert.equal(new Set(r.cases.map(c => c.id)).size, expected.length);
   for (const c of expected) {
     const row = r.cases.find(v => v.id === c.id), planned = r.plan.cases.find(v => v.id === c.id);
@@ -673,7 +733,7 @@ export function validateBackendReadback(p, backend, r, { allowUnitFake = false }
   return r;
 }
 export async function backendComplete(p, backend) {
-  const selected = p.cases.filter(v => v.backend === backend); assert.ok(selected.length);
+  const selected = executionCases(p).filter(v => v.backend === backend); assert.ok(selected.length);
   for (const c of selected) {
     let r; try { r = await json(path.join(contained(p.output, c.id), 'execution.json')); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
     if (r.status !== 'passed' || r.planSha256 !== digest(p)) return false;
@@ -681,11 +741,12 @@ export async function backendComplete(p, backend) {
   return true;
 }
 export async function verifyBackend(p, backend, root, inferenceRoot) {
-  validatePlan(p); const { authorized } = await import('./h3-finetune-terminal-runtime.mjs');
-  const selected = p.cases.filter(c => c.backend === backend); assert.ok(selected.length); authorized(p, selected[0]);
+  assert.notEqual(p.preparationState,'awaiting-inline-assets','cannot verify an unbound inline-asset plan');
+  validatePlan(p); await verifyMatrixAdmission(p); const { authorized } = await import('./h3-finetune-terminal-runtime.mjs');
+  const selected = executionCases(p).filter(c => c.backend === backend); assert.ok(selected.length); authorized(p, selected[0]);
   await sourcePair(p, root, inferenceRoot); const cases = [];
   for (const c of selected) {
-    await verifyInputs(c, [p.output, root, inferenceRoot]); const dir = contained(p.output, c.id), executionPath = path.join(dir, 'execution.json'), r = await json(executionPath);
+    await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot)); const dir = contained(p.output, c.id), executionPath = path.join(dir, 'execution.json'), r = await json(executionPath);
     assert.equal(r.status, 'passed'); assert.equal(r.planSha256, digest(p)); assert.ok(r.runId && r.runAttempt);
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
     assert.deepEqual(verified, r.verified);
@@ -693,6 +754,7 @@ export async function verifyBackend(p, backend, root, inferenceRoot) {
   }
   await sourcePair(p, root, inferenceRoot);
   const r = { kind: 'backend-content-readback', proof_kind: 'campaign_content_reverified', backend, plan: p, planSha256: digest(p), verificationRunId: process.env.GITHUB_RUN_ID, verificationRunAttempt: process.env.GITHUB_RUN_ATTEMPT, readAt: new Date().toISOString(), cases };
+  if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');r.crossCaseControls=await verifyReducedControls(p,backend);r.coverage=await reducedCoverageReport(p,cases.map(row=>({c:p.cases.find(c=>c.id===row.id),row,dir:contained(p.output,row.id)})),await loadRetainedProofIndex(p));}
   validateBackendReadback(p, backend, r);
   const filename = path.join(p.output, `backend-readback-${backend}.json`);
   try { await writeFile(filename, JSON.stringify(r, null, 2) + '\n', { flag: 'wx' }); }
@@ -702,6 +764,7 @@ export async function verifyBackend(p, backend, root, inferenceRoot) {
 export async function verifyPortableCase(p, c, dir, row) {
   assert.equal(await hashFile(path.join(dir, 'execution.json')), row.executionSha256, 'downloaded execution record differs from backend readback');
   const execution = await json(path.join(dir, 'execution.json')); assert.equal(execution.status, 'passed'); assert.equal(execution.planSha256, row.planSha256); assert.equal(execution.runId, row.runId); assert.equal(execution.runAttempt, row.runAttempt); assert.deepEqual(execution.verified, row.verified);
+  if(c.kind==='actual-artifact-probe'){const {verifyActualArtifactProbe}=await import('./h3-finetune-terminal-artifact-probe.mjs');return verifyActualArtifactProbe(p,c,dir,{contentReadback:false});}
   const v = row.verified, log = await readFile(path.join(dir, 'process.log'), 'utf8');
   assert.equal(createHash('sha256').update(log).digest('hex'), v.processLogSha256);
   const e = await json(contained(dir, c.evidence)); assert.equal(e.status, 'executed'); assert.notEqual(e.proof_kind, 'unit_fake');
@@ -725,38 +788,139 @@ export async function verifyPortableCase(p, c, dir, row) {
   } else if (c.group === 'numeric') compareNumeric(await json(contained(dir, e.numeric.candidate)), await json(contained(dir, e.numeric.reference)), c.tolerance);
   else if (e.apiTranscript) { const t = await json(contained(dir, e.apiTranscript)); assert.equal(t.caseId, c.id); const a = t.transcript.filter(r => r.assertion); assert.ok(a.length); for (const item of a) assertRecordedAssertion(item); assert.ok(log.includes(`H3_API_ASSERTIONS_EXECUTED=${a.length}`)); }
   else if (!['artifact','capability'].includes(c.group)) executedTests(log);
-  if (c.id.endsWith('.generation-source-prep-cancel')) {
+  if (isSourceCancelCase(c)) {
     const { verifyGenerationSourcePrepCancel } = await import('./h3-finetune-terminal-runtime.mjs');
     assert.deepEqual(await verifyGenerationSourcePrepCancel(p, c, dir, { contentReadback: true, receiptName: e.sourceCancelReceipt }), v.sourceCancel);
   }
   return { id: c.id, inputContentReverifiedOn: c.backend, evidenceReverifiedLocally: true };
 }
+export async function loadRetainedProofIndex(p) {
+  const proofs=[];
+  for(const proof of p.proofIndex??[]){
+    assert.ok(proof.receiptInput&&proof.logInputs?.length,'retained proof needs a hash-bound receipt and actual execution logs');
+    for(const input of [proof.receiptInput,...proof.logInputs]){sha64(input.sha256);assert.equal(await hashFile(input.path),input.sha256,'retained proof content changed');}
+    assert.ok(typeof proof.claim==='string'&&proof.claim.length>10&&Array.isArray(proof.limitations),'retained proof must state its exact claim and limitations');
+    const {fixtureBindings}=await import('./h3-finetune-terminal-cases.mjs');
+    for(const id of proof.catalogIds){const [,group,...suffix]=id.split('.');const check=suffix.join('.'),selector=group==='numeric'&&check==='tensor-mapping'?'minimax_h3_codec::tests::actual_native_bytes_normalize_through_persisted_plan_and_shared_cache_in_all_precisions':fixtureBindings[group]?.[check]?.[2];if(proof.kind!=='cheap-causal-witness')assert.ok(selector&&proof.testSelectors.includes(selector),`no specific retained CPU/API selector authority for ${id}; leave it UNPROVEN`);}
+    const receipt=await json(proof.receiptInput.path);assert.notEqual(receipt.proof_kind,'unit_fake');
+    assert.ok(receipt.status==='passed'||receipt.job_conclusion==='success','retained proof did not pass');
+    assert.equal(receipt.sourceSha??receipt.source,proof.sourceSha,'retained source receipt mismatch');
+    assert.equal(proof.sourceSha,proof.repository==='sceneworks'?p.sceneworks:(p.nativeEvidence?.sha??p.inference),'retained proof must identify the executed paired source');
+    const logs=(await Promise.all(proof.logInputs.map(i=>readFile(i.path,'utf8')))).join('\n');
+    for(const selector of proof.testSelectors){const exact=logs.split('\n').some(line=>line.trim()===`test ${selector} ... ok`),named=logs.includes(`test ${selector} ...`)&&(receipt.executed_names?.includes(selector)||receipt.cases?.some(c=>c.name===selector&&c.exitCode===0&&c.command.includes('--exact')));assert.ok(exact||named,'retained selector has not actually passed');}
+    const surfaceEvidence=proof.kind==='cheap-causal-witness'?validateNativeWitnessMarkers(logs,{backend:proof.backend,testSelectors:proof.testSelectors,adapters:proof.adapterStack===true}):undefined;
+    assert.ok(executedTests(logs)>0,'no actual native/CPU test completion');
+    assert.ok(!/test result: FAILED|[1-9]\d* failed;|[1-9]\d* ignored;/.test(logs),'failed or ignored native execution is not proof');
+    proofs.push({...proof,...(surfaceEvidence?{surfaceEvidence}:{})});
+  }
+  return proofs;
+}
+export async function writeInlineAnchorBundle(p,backend) {
+  const {normalizedControlRequest}=await import('./h3-finetune-terminal-runtime.mjs');
+  const directory=contained(p.output,`inline-anchor-bundle-${backend}`);await mkdir(directory);
+  const files=[],anchors=[],proofs=[];
+  const copy=async(input,name)=>{const destination=contained(directory,name);await copyFile(input.path,destination);assert.equal(await hashFile(destination),input.sha256);files.push({path:name,sha256:input.sha256});return {path:name,sha256:input.sha256};};
+  for(const c of p.cases.filter(c=>c.backend===backend&&[1,15].includes(c.index))){
+    const dir=contained(p.output,c.id),executionPath=path.join(dir,'execution.json'),row=await json(executionPath);assert.equal(row.status,'passed');assert.equal(row.planSha256,digest(p));assert.ok(row.runId&&row.runAttempt);
+    const e=await json(contained(dir,c.evidence)),bundle=await json(path.join(dir,'source-job-output.json')),binding=bundle.bindings[0],request=bundle.requests.find(v=>v.route==='/api/v1/video/jobs')?.request;
+    const normalized=normalizedControlRequest(request,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:binding.runtimeIdentity,declaredSourceBindings:c.declaredSourceBindings});
+    const recipe=Object.fromEntries(['model','mode','prompt','seed','advanced','loras','sourceAssetId','lastFrameAssetId','referenceAssetIds','sourceClipAssetIds','referenceAudioAssetIds'].filter(k=>normalized[k]!==undefined).map(k=>[k,normalized[k]]));
+    const wallMs=Date.parse(row.completed)-Date.parse(row.started);positive(wallMs);
+    const receiptInput=await copy({path:executionPath,sha256:await hashFile(executionPath)},`${c.index}.execution.json`);
+    anchors.push({backend,caseId:c.id,role:c.index===1?'reference':'prompt',wallMs,recipe,geometry:Object.fromEntries(['width','height','duration','fps'].map(k=>[k,request[k]])),sourceSha:p.sceneworks,pinSha:p.inference,hardware:JSON.stringify(e.hardware),receiptInput,measurement:'actual inline execution/build/acquisition/AV-validation elapsed; initial input audit excluded'});
+  }
+  assert.equal(anchors.length,2,'first actual reference and hybrid anchors required');
+  for(const proof of(await loadRetainedProofIndex(p)).filter(v=>v.kind==='cheap-causal-witness'&&v.backend===backend)){
+    const receiptInput=await copy(proof.receiptInput,`witness-${proofs.length}.json`),logInputs=[];for(const input of proof.logInputs)logInputs.push(await copy(input,`witness-${proofs.length}-${logInputs.length}.log`));proofs.push({...proof,receiptInput,logInputs});
+  }
+  const packet={version:1,backend,sceneworks:p.sceneworks,productPin:p.inference,nativeEvidenceSha:p.nativeEvidence.sha,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,anchors,proofs,files};await writeFile(path.join(directory,'anchors.json'),JSON.stringify(packet,null,2)+'\n',{flag:'wx'});return directory;
+}
+export async function receiveInlineAnchorBundle(p,backend,directory,{expectedRunId}={}) {
+  assert.ok((await stat(contained(directory,'anchors.json'))).size<=8*1024*1024,'anchor metadata size bound exceeded');
+  const packet=await json(contained(directory,'anchors.json'));assert.equal(packet.version,1);assert.equal(packet.backend,backend==='mlx'?'cuda':'mlx');assert.ok(Array.isArray(packet.files)&&packet.files.length<=32);assert.equal(packet.anchors?.length,2);assert.equal(packet.sceneworks,p.sceneworks);assert.equal(packet.productPin,p.inference);assert.equal(packet.nativeEvidenceSha,p.nativeEvidence.sha);assert.equal(String(packet.runId),String(expectedRunId));
+  for(const file of packet.files){const name=contained(directory,file.path),actual=await realpath(name);contained(await realpath(directory),actual);assert.ok((await stat(actual)).size<=64*1024*1024,'anchor exchange contains metadata only');assert.equal(await hashFile(actual),file.sha256);}
+  const rebase=input=>{assert.ok(packet.files.some(f=>f.path===input.path&&f.sha256===input.sha256),'anchor packet omitted a referenced receipt/log');return {...input,path:contained(directory,input.path)};};
+  const peerAnchors=packet.anchors.map(anchor=>({...anchor,receiptInput:rebase(anchor.receiptInput)}));
+  const own=await json(contained(p.output,`inline-anchor-bundle-${backend}/anchors.json`));
+  p.matrixAnchors=[...own.anchors.map(anchor=>({...anchor,receiptInput:{...anchor.receiptInput,path:contained(p.output,`inline-anchor-bundle-${backend}/${anchor.receiptInput.path}`)}})),...peerAnchors];
+  for(const proof of packet.proofs){const value={...proof,receiptInput:rebase(proof.receiptInput),logInputs:proof.logInputs.map(rebase)};if(!(p.proofIndex??[]).some(v=>v.id===value.id))p.proofIndex=[...(p.proofIndex??[]),value];}
+  p.matrixDecision=chooseMatrixBackend({anchors:p.matrixAnchors});await verifyMatrixAdmission(p);return p.matrixDecision;
+}
+export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProcess,productRoot}={}) {
+  authorized(p,{backend});assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
+  assert.ok(productRoot,'separate product checkout is required');await sourcePair(p,swRoot,productRoot);await laneBudget(p,backend);
+  const retained=await loadRetainedProofIndex(p),existing=retained.find(v=>v.kind==='cheap-causal-witness'&&v.backend===backend&&v.adapterStack===true&&v.surfaceEvidence);
+  if(existing)return {status:'reused-passed-receipt',proof:existing};
+  assert.equal(backend,'mlx','CUDA requires its completed hash-bound targeted witness receipt; do not repeat the full suite');
+  const native=p.nativeEvidence;assert.ok(native?.root&&native.sha);sha40(native.sha);
+  const sourceCheck=async()=>{assert.equal((await exec('git',['rev-parse','HEAD'],{cwd:native.root})).stdout.trim(),native.sha);assert.equal((await exec('git',['status','--porcelain'],{cwd:native.root})).stdout.trim(),'');};await sourceCheck();
+  const dir=contained(p.output,'native-witnesses-mlx');await mkdir(dir);
+  const receiptPath=path.join(dir,'receipt.json'),log=path.join(dir,'native.log'),selectors=[CONDITIONING_WITNESS_SELECTOR,ADAPTER_WITNESS_SELECTOR];
+  const receipt={schema:1,status:'running',sourceSha:native.sha,productPin:p.inference,nativeEvidence:native,backend,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,configuration:{syntheticOnly:true,encodedSeamOnly:true,downloads:false,mlxTreeCapGiB:8},cases:[]};await save(receiptPath,receipt);
+  try{
+    for(const leaf of ['hf','data','tmp'])await mkdir(path.join(dir,leaf));
+    const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${native.sha}-${backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',SCENEWORKS_DATA_DIR:path.join(dir,'data'),TMPDIR:path.join(dir,'tmp')};
+    const build=['cargo','test','--locked','--manifest-path',path.join(native.root,'Cargo.toml'),'-p','mlx-gen-minimax-h3','--test','integration','--no-run','--message-format=json'];
+    await run(build,{cwd:native.root,env,logPath:path.join(dir,'build.log'),timeoutSeconds:3600});
+    const binaries=[];for(const line of(await readFile(path.join(dir,'build.log'),'utf8')).split('\n')){try{const v=JSON.parse(line);if(v.reason==='compiler-artifact'&&v.target?.name==='integration'&&v.profile?.test&&v.executable)binaries.push(v.executable);}catch{}}
+    assert.equal(new Set(binaries).size,1,'one exact native integration executable required');
+    const {observeMetalCase}=await import('./ci/h3-import-native-proof.mjs');observeMetalCase('inline-two-native-causal-witnesses',receipt,()=>{});await save(receiptPath,receipt);
+    const args=[...selectors,'--exact','--ignored','--nocapture','--test-threads=1'];
+    const command=['python3.12','-I',path.join(swRoot,'scripts/ci/iris-mlx-real-weights/tree_guard.py'),'8','360',log,'--',binaries[0],...args];
+    await run(command,{cwd:swRoot,env,logPath:path.join(dir,'guard.log'),timeoutSeconds:420});
+    const text=await readFile(log,'utf8');assert.equal(executedTests(text),2,'exactly the two approved ignored native witnesses must pass');for(const selector of selectors)assert.ok(text.includes(`test ${selector} ...`),'both exact witness names must actually execute');
+    receipt.surfaceEvidence=validateNativeWitnessMarkers(text,{backend,testSelectors:selectors,adapters:true});await sourceCheck();receipt.status='passed';receipt.cases=selectors.map(name=>({name,exitCode:0,command:[binaries[0],...args],log:'native.log'}));await save(receiptPath,receipt);
+    const proof={id:`native-encoded-surface-${backend}-${native.sha}`,kind:'cheap-causal-witness',status:'passed',repository:'inference',sourceSha:native.sha,backend,adapterStack:true,catalogIds:requiredCases().filter(c=>c.backend===backend&&c.group==='capability').map(c=>c.id),config:receipt.configuration,runRef:`actions:${receipt.runId}/${receipt.runAttempt}`,testSelectors:selectors,claim:'Actual native encoded conditioning and adapter-stack causal witnesses; no raw preprocessing or end-to-end AV claim.',limitations:['Encoded DiT seam only; omitted AV contrasts remain NOT proven.'],receiptInput:{path:receiptPath,sha256:await hashFile(receiptPath)},logInputs:[{path:log,sha256:await hashFile(log)}]};
+    p.proofIndex=[...(p.proofIndex??[]),proof];return {status:'executed-two-native-witnesses',proof};
+  }catch(error){receipt.status='failed';receipt.error=error.message;await save(receiptPath,receipt);throw error;}
+}
+export async function reducedCoverageReport(p,caseRecords,proofs=[]) {
+  const realReceipts=[],executionRows=[];
+  for(const {c,row,dir}of caseRecords){
+    assert.equal(row.status??'passed','passed');
+    const v=row.verified;assert.ok(v,'verified actual execution required');
+    const evidence=c.kind==='full-av'?{jobIds:v.runtime?.jobs??[]}:c.kind==='source-cancel'?{cancelReceipt:v.sourceCancel?.jobId?`${c.id}/${v.sourceCancel.jobId}`:null}:{artifactSha256:c.inputs.find(i=>i.role==='checkpoint')?.sha256,probeReceipt:c.actualArtifactProbe?.receipt};
+    realReceipts.push({caseId:c.id,backend:c.backend,status:'passed',sourceSha:p.sceneworks,runRef:`actions:${row.runId}/${row.runAttempt}`,evidence});
+    for(const jobId of evidence.jobIds??[])executionRows.push({caseId:c.id,backend:c.backend,jobId,sourceSha:p.sceneworks,modelKey:c.modelKey});
+  }
+  const mapping=buildCatalogCoverage({catalog:requiredCases(),realReceipts,proofIndex:proofs,matrixDecision:p.matrixDecision});
+  const uniqueJobs=summarizeUniqueExecutions(executionRows);assert.equal(uniqueJobs.conflicts.length,0,'one real job cannot have conflicting identities');
+  const unproven=mapping.unproven.map(item=>({...item,surfaceEvidence:item.cellId.includes('.capability.')?'Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend.':null}));
+  return {inventory:'reduced-v1',catalogCells:mapping.coverage.length,operationalCases:executionCases(p).length,manifestCases:p.cases.length,counts:catalogCoverageCounts(mapping.coverage),coverage:mapping.coverage,unproven,uniqueJobs,matrixDecision:p.matrixDecision??{status:'unresolved',reason:'No measured inline anchors yet; no backend assumed faster.'},retainedSurfaceEvidence:proofs.filter(v=>v.kind==='cheap-causal-witness').map(v=>({id:v.id,backend:v.backend,sourceSha:v.sourceSha,scope:v.surfaceEvidence})),nativeEvidence:p.nativeEvidence??null,productPin:p.inference,scope:'Actual-artifact probes prove selected projections, not full QKV/FFN mapping. Cold cancellation completes no native load and claims no peak. Native encoded witnesses do not prove raw preprocessing or omitted AV contrasts.'};
+}
 export async function verifyCampaign(p) {
   validatePlan(p);
   if (p.backendReadbacks) {
+    await verifyMatrixAdmission(p);
+    const records=[];
     for (const backend of ['mlx', 'cuda']) {
       const spec = p.backendReadbacks[backend]; assert.ok(spec?.path && spec.caseRoot, 'both native backend content readbacks and retained case files required');
-      const r = validateBackendReadback(p, backend, await json(spec.path));
-      for (const row of r.cases) await verifyPortableCase(r.plan, r.plan.cases.find(c => c.id === row.id), contained(spec.caseRoot, row.id), row);
+      const r = validateBackendReadback(p, backend, await json(spec.path));assert.deepEqual(r.plan.matrixDecision,p.matrixDecision);
+      for (const row of r.cases){const c=r.plan.cases.find(c=>c.id===row.id),dir=contained(spec.caseRoot,row.id);await verifyPortableCase(r.plan,c,dir,row);records.push({c,row,dir});}
+      if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');await verifyReducedControls(r.plan,backend,{caseRoot:spec.caseRoot});}
     }
     validateDelivery(p);
-    return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: requiredCases().length, inputVerification: 'actual native host readbacks; all retained evidence/AV reverified locally' };
+    if(p.inventory==='reduced-v1'){const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',...coverage};}
+    return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: p.cases.length, inputVerification: 'actual native host readbacks; all retained evidence/AV reverified locally' };
   }
-  for (const c of p.cases) {
+  const records=[];
+  for (const c of executionCases(p)) {
     await verifyInputs(c);
     const dir = contained(p.output, c.id), r = await json(path.join(dir, 'execution.json'));
     assert.equal(r.status, 'passed', `not executed: ${c.id}`); assert.equal(r.planSha256, digest(p));
     assert.ok(r.runId && r.runAttempt, 'missing Actions execution identity');
     assert.deepEqual(await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8')), r.verified);
+    records.push({c,row:r,dir});
   }
   // Hardware evidence alone is not integrated delivery / tracker completion.
   validateDelivery(p);
+  if(p.inventory==='reduced-v1'){const {verifyReducedControls}=await import('./h3-finetune-terminal-runtime.mjs');for(const backend of ['mlx','cuda'])await verifyReducedControls(p,backend);const coverage=await reducedCoverageReport(p,records,await loadRetainedProofIndex(p));return {status:coverage.unproven.length?'reduced-evidence-reverified-with-explicit-unproven':'reduced-evidence-reverified',...coverage};}
   return { status: 'hardware-evidence-complete-delivery-recorded', sceneworks: p.sceneworks, inference: p.inference, cases: p.cases.length };
 }
 async function terminalCLI() {
   const [mode, planFile, ...args] = process.argv.slice(2);
   try {
-    if (mode === 'list') console.log(JSON.stringify({ source: SOURCE, cases: requiredCases() }, null, 2));
+    if (mode === 'list') console.log(JSON.stringify({ source: SOURCE, inventory:'reduced-v1', cases: operationalCases(), regressionCatalog:requiredCases() }, null, 2));
     else if (mode === 'compare-control') {
       assert.equal(args.length, 5, 'compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA');
       console.log(JSON.stringify(await compareControlMedia(planFile, args[0], args[1], args[2], Number(args[3]), Number(args[4])), null, 2));

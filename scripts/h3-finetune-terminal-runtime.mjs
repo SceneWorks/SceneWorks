@@ -9,7 +9,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, open, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia } from './h3-finetune-terminal.mjs';
+import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
@@ -86,13 +86,7 @@ function ownedBelow(root, value) {
   const resolved=paths.resolve(value),relative=paths.relative(paths.resolve(root),resolved);
   return relative&&!relative.startsWith('..')&&!paths.isAbsolute(relative)?resolved:undefined;
 }
-export function authorized(p, c) {
-  assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
-  assert.equal(process.env.GITHUB_ACTIONS, 'true', 'real services/native commands are explicit Actions-only');
-  assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`);
-  if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos-2'); }
-  else assert.equal(process.platform,'win32');
-}
+export {authorized};
 export async function hardware(backend, deviceId, deps={}) {
   const execute=deps.exec??exec;
   if (backend === 'mlx') {
@@ -138,7 +132,7 @@ export function validateComparisonProof(c, proof, log, { allowUnitFake = false }
 }
 export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const fake=deps.proof_kind==='unit_fake';
-  if(!fake) { authorized(p,c); await sourcePair(p,swRoot,inferenceRoot); await verifyInputs(c,[p.output,swRoot,inferenceRoot]); }
+  if(!fake) { authorized(p,c); await sourcePair(p,swRoot,inferenceRoot); await verifyInputs(c,await allowedInputRoots(p,swRoot,inferenceRoot)); }
   const runner=deps.runProcess ?? runProcess, n=c.numericProof; assert.equal(n.kind,'native-pinned-fixture');
   assert.ok(n.tests?.length && new Set(n.tests).size===n.tests.length);
   const fixtureInputs=c.inputs.filter(i=>i.role==='numeric-fixture'), refs=c.inputs.filter(i=>i.role==='reference');
@@ -185,12 +179,12 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   await save(path.join(dir,'native-comparison.json'),proof);
   const e={status:'executed',proof_kind:proof.proof_kind,caseId:c.id,backend:c.backend,sceneworks:p.sceneworks,inference:p.inference,hardware:h,testInputSha256:fixtureInputs[0].sha256,files:[...files,'native-comparison.json'],nativeComparison:'native-comparison.json'};
   await save(path.join(dir,c.evidence),e);
-  if(!fake) {await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,[p.output,swRoot,inferenceRoot]);}
+  if(!fake) {await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,await allowedInputRoots(p,swRoot,inferenceRoot));}
   return {evidence:e,proof,log:logs.join('\n')};
 }
 
 export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
-  const fake=deps.proof_kind==='unit_fake';if(!fake){authorized(p,c);await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,[p.output,swRoot,inferenceRoot]);}
+  const fake=deps.proof_kind==='unit_fake';if(!fake){authorized(p,c);await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,await allowedInputRoots(p,swRoot,inferenceRoot));}
   assert.equal(c.fixtureProof.kind,'source-bound-assertions');assert.equal(c.command[0],'cargo');assert.ok(c.command.includes('test')&&c.command.includes(path.join(swRoot,'Cargo.toml')));
   assert.ok(c.inputs.length);for(const input of c.inputs)assert.equal(await hashFile(input.path),input.sha256);
   const state=path.join(dir,'fixture-state');await mkdir(state);
@@ -200,7 +194,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const proof={kind:'source-bound-assertions',proof_kind:fake?'unit_fake':'campaign_fixture',sceneworks:p.sceneworks,inference:p.inference,command:c.command,passed,inputs:c.inputs,meaning:'Executed source-bound synthetic contract assertions; no real-model/native load or measured peak claimed'};
   await save(path.join(dir,'assertion-proof.json'),proof);
   const e={status:'executed',proof_kind:proof.proof_kind,caseId:c.id,backend:c.backend,sceneworks:p.sceneworks,inference:p.inference,hardware:await(deps.hardware??hardware)(c.backend,c.fixtureProof.deviceId),testInputSha256:c.inputs[0].sha256,files:['assertions.log','assertion-proof.json']};
-  await save(path.join(dir,c.evidence),e);if(!fake){await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,[p.output,swRoot,inferenceRoot]);}return {evidence:e,proof,log};
+  await save(path.join(dir,c.evidence),e);if(!fake){await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,await allowedInputRoots(p,swRoot,inferenceRoot));}return {evidence:e,proof,log};
 }
 function spawnOwned(argv,env,cwd,logPath) {
   const child=spawn(argv[0],argv.slice(1),{env,cwd,stdio:['pipe','pipe','pipe'],shell:false});
@@ -232,12 +226,16 @@ export function privateEnvironment(runDir,runtime,token) {
   if(runtime.memoryCap){assert.equal(runtime.memoryCap.kind,runtime.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb');assert.ok(Number.isFinite(runtime.memoryCap.value)&&runtime.memoryCap.value>0);env[runtime.backend==='cuda'?'SCENEWORKS_CUDA_VRAM_CAP_GB':'SCENEWORKS_MLX_MEMORY_CAP_GB']=String(runtime.memoryCap.value);}
   return env;
 }
+async function confinedTaskSource(p,value,{allowRoot=false}={}) {
+  for(const root of [p.output,...(p.assetStaging?[await verifiedStagingRoot(p)]:[])]){const rel=path.relative(path.resolve(root),path.resolve(value));if(allowRoot&&rel==='')return realpath(root);if(rel&&!rel.startsWith('..')&&!path.isAbsolute(rel))return confined(root,value);}
+  throw new Error('source outside task output or verified private staging root');
+}
 export class OwnedService {
   constructor(p,c,swRoot,inferenceRoot,dir,deps={}) {
     Object.assign(this,{p,c,swRoot,inferenceRoot,dir,deps});this.fake=deps.proof_kind==='unit_fake';this.jobs=new Set();this.epochs=[];this.drainRecords=[];this.quiescence=[];this.token=randomUUID();this.generation=0;this.startTime=undefined;this.stopped=false;
   }
   async initialize() {
-    if(!this.fake){authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await verifyInputs(this.c,[this.p.output,this.swRoot,this.inferenceRoot]);}
+    if(!this.fake){authorized(this.p,this.c);await sourcePair(this.p,this.swRoot,this.inferenceRoot);await verifyInputs(this.c,await allowedInputRoots(this.p,this.swRoot,this.inferenceRoot));}
     assert.ok(this.c.declaredSourceBindings?.length,'every API case requires declared source and legal authority inputs');
     for(const source of this.c.declaredSourceBindings){assertLicenseAuthority(source,{allowUnitFake:this.fake});const role=source.family==='ltx'?'adapter':'checkpoint',sha256=source.family==='ltx'?source.ltxAdapter.sha256:source.model.sha256;assert.ok(this.c.inputs.some(input=>input.role===role&&input.sha256===sha256),'explicit source authority must bind a verified source-role input before any import');for(const component of source.model.components)assert.ok(this.c.inputs.some(input=>input.role==='component'&&input.sha256===component.sha256),'inherited component authority must bind actual staged input bytes');for(const adapter of source.adapters??[])assert.ok(this.c.inputs.some(input=>input.role==='adapter'&&input.sha256===adapter.sha256),'adapter authority must bind actual staged adapter-role bytes');}
     this.sourceDtypeFacts=await verifyDenseSourceDtypes(this.c,this.p.output);
@@ -255,7 +253,7 @@ export class OwnedService {
     this.seeded=new Set();this.seededInputs=new Map();
     for(const seed of r.seedFiles??[]) {
       const input=this.c.inputs.find(i=>i.path===seed.input);assert.ok(input,'seed must be an independently bound input');
-      const canonicalInput=await confined(input.role==='source-config'?this.swRoot:this.p.output,input.path); // No user/shared-cache seeds; only explicitly staged task bytes or source config.
+      const canonicalInput=await (input.role==='source-config'?confined(this.swRoot,input.path):confinedTaskSource(this.p,input.path)); // No user/shared-cache seeds; only explicitly staged task bytes or source config.
       assert.equal(await hashFile(input.path),input.sha256);
       assert.ok(/^(config|data|hf)\//.test(seed.destination) && !/credentials|gpu_telemetry|jobs\.db/.test(seed.destination),'only explicit clean platform state, never credentials/stale counters/database seeds');
       const dest=inside(this.runDir,seed.destination);await mkdir(path.dirname(dest),{recursive:true});
@@ -364,7 +362,7 @@ export class OwnedService {
     }
     if(step.method==='POST'&&route==='/api/v1/loras/import'){
       const selected=this.c.declaredSourceBindings.find(v=>v.family==='ltx'&&v.ltxAdapter.id===body.loraId);assert.ok(selected,'undeclared LTX adapter import');assertLicenseAuthority(selected,{allowUnitFake:this.fake});
-      assert.equal(body.licenseAcknowledged,selected.licenseAuthority.acknowledged);assert.equal(body.expectedSha256,selected.ltxAdapter.sha256);assert.equal(body.baseModel,selected.model.modelId);assert.ok(!body.repo&&!body.sourceUrl,'LTX baseline uses its actual staged adapter, not an implicit download');await confined(this.p.output,body.sourcePath);
+      assert.equal(body.licenseAcknowledged,selected.licenseAuthority.acknowledged);assert.equal(body.expectedSha256,selected.ltxAdapter.sha256);assert.equal(body.baseModel,selected.model.modelId);assert.ok(!body.repo&&!body.sourceUrl,'LTX baseline uses its actual staged adapter, not an implicit download');await confinedTaskSource(this.p,body.sourcePath);
     }
     if(step.method==='POST'&&route==='/api/v1/models/import') {
       assert.ok(body.ownershipMode===undefined||body.ownershipMode==='managed','linked ownership must be omitted; the only ownership enum is managed');
@@ -377,14 +375,14 @@ export class OwnedService {
         for(const file of files){const target=await confined(snapshot,inside(snapshot,file)),seed=this.seededInputs.get(target);assert.ok(seed,'HF import must reuse an actually seeded private snapshot, not download missing weights');if(files.length===1&&body.expectedSha256)assert.equal(seed.sha256,body.expectedSha256);}
         return; // The EXISTING importer/registry still owns provenance, licensing, interpretation and ingestion.
       }
-      const source=body.sourcePath??body.source?.path??body.source?.stagedPath;if(source)await confined(this.p.output,source);
+      const source=body.sourcePath??body.source?.path??body.source?.stagedPath;if(source)await confinedTaskSource(this.p,source);
       else {
         assert.ok(body.ownershipMode===undefined&&body.linkedRootId&&body.linkedRelativePath,'actual linked DTO requires root/path with ownership omitted');
         const roots=await this.request('GET','/api/v1/models/library-roots'),root=roots.roots.find(r=>r.rootId===body.linkedRootId);assert.ok(root,'owned approved linked root required');
-        if(await realpath(root.path)!==await realpath(this.p.output))await confined(this.p.output,root.path);await confined(root.path,path.resolve(root.path,body.linkedRelativePath));
+        await confinedTaskSource(this.p,root.path,{allowRoot:true});await confined(root.path,path.resolve(root.path,body.linkedRelativePath));
       }
     }
-    if(route.startsWith('/api/v1/models/library-roots')&&body?.path)await confined(this.p.output,body.path);
+    if(route.startsWith('/api/v1/models/library-roots')&&body?.path)await confinedTaskSource(this.p,body.path,{allowRoot:true});
   }
   // Retained JSON events from the live owned worker/API buffers plus every prior epoch log.
   async preparationTrace() {
@@ -452,7 +450,7 @@ export class OwnedService {
       const planned=job.modelProvenance?.plan??job.payload?.modelProvenance?.plan??job.payload?.expectedImportedModelRef;
       assert.ok(planned?.checkpointId&&planned.semanticDigest,'canceled preparation must bind the actual queued planned import commitment');
       receipt.plannedImportRef=structuredClone(planned);
-      const deadline=Date.now()+this.c.timeoutSeconds*1000;
+      const deadline=Math.min(Date.now()+this.c.timeoutSeconds*1000,this.fake?Infinity:Number(process.env.H3_CASE_DEADLINE_MS??Infinity));
       const reading=await this.waitColdPartialReading(jobId,deadline);
       const fields=traceFields(reading),sourceBytes=observedSourceBytes(fields.source_bytes),partialBytes=Number(fields.hashed_bytes);
       assert.equal(fields.acquisition,'ColdContentRead');assert.equal(fields.state,'Reading');
@@ -623,7 +621,7 @@ export async function bindCompletedMedia(service,job,dir,name,decode=decodeAV) {
 }
 export function semanticAssembly(value){
   if(Array.isArray(value))return value.map(semanticAssembly);
-  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key,v])=>!['checkpointId','planId','rootId','linkedRootId','ownershipMode'].includes(key)&&!(typeof v==='string'&&path.isAbsolute(v)&&/path$/i.test(key))).map(([key,v])=>[key,semanticAssembly(v)]));
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).filter(([key,v])=>!['checkpointId','planId','rootId','linkedRootId','ownershipMode'].includes(key)&&!(typeof v==='string'&&(path.isAbsolute(v)||path.win32.isAbsolute(v))&&/path$/i.test(key))).map(([key,v])=>[key,semanticAssembly(v)]));
   return value;
 }
 export async function verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode=decodeAV,delta){
@@ -654,7 +652,7 @@ export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{
   assert.equal(control.sourcePath,spec.originalPath);assert.equal(control.sourceExpectedSHA,spec.expectedSha256);assert.equal(control.sourceActualSHA,spec.expectedSha256);assert.equal(control.renamed.actualSHA,spec.expectedSha256);assert.notEqual(control.renamed.path,control.sourcePath);assert.notEqual(control.differentBytes.actualSHA,spec.expectedSha256);assert.equal(control.differentBytes.expectedOriginalSHA,spec.expectedSha256);
   for(const [file,sha256]of [[control.sourcePath,spec.expectedSha256],[control.renamed.path,spec.expectedSha256],[control.differentBytes.path,control.differentBytes.actualSHA]])assert.ok(c.inputs.some(value=>value.role==='checkpoint'&&value.path===file&&value.sha256===sha256),'all original/copied/different source bytes must be actual verified input roles');
   const positive=bundle.captures?.[`${spec.positive}_av0_done`],binding=byJob.get(positive?.id);assert.ok(binding,'renamed source must actually generate with a native closure/output');assert.equal(binding.runtimeIdentity.checkpointSha256,spec.expectedSha256);
-  const selected=c.declaredSourceBindings.find(value=>value.model.modelId===positive.payload.model);assert.equal(selected?.model.sourcePath,control.renamed.path,'the actual renamed copy must be the selected import source');assert.ok(bundle.requests.some(record=>record.route==='/api/v1/models/import'&&record.request?.modelId===selected.model.modelId&&record.request.sourcePath===control.renamed.path&&record.request.expectedSha256===spec.expectedSha256),'renamed source must be actually submitted, not substituted by an original/builtin');
+  const selected=c.declaredSourceBindings.find(value=>value.model.modelId===positive.payload.model);assert.equal(selected?.model.sourcePath,control.renamed.path,'the actual renamed copy must be the selected import source');assert.ok(bundle.requests.some(record=>record.route==='/api/v1/models/import'&&record.request?.modelId===selected.model.modelId&&(selected.ownershipMode==='linked'?record.request.linkedRootId===selected.linkedRootId&&record.request.linkedRelativePath===selected.linkedRelativePath:record.request.sourcePath===control.renamed.path)&&record.request.expectedSha256===spec.expectedSha256),'renamed source must be actually submitted, not substituted by an original/builtin');
   const negative=bundle.captures?.[`${spec.negative}_refused`];assert.equal(negative?.status,'failed','different bytes must not be accepted as the original source');assert.equal(negative.payload.expectedSha256,spec.expectedSha256);assert.ok(negative.error?.includes('integrity check')&&negative.error.includes(control.differentBytes.actualSHA)&&negative.error.includes(spec.expectedSha256),'actual API checksum refusal must identify both observed and expected content');
   const request=bundle.requests.find(record=>record.route==='/api/v1/models/import'&&record.result?.id===negative.id);assert.ok(request&&request.request.sourcePath===control.differentBytes.path&&request.request.expectedSha256===spec.expectedSha256,'negative refusal must bind the actually submitted different-byte fixture');
   return {sameContentRecognized:{original:control.sourcePath,relocated:control.renamed.path,sha256:spec.expectedSha256,nativeJobId:positive.id},differentContentRefused:{jobId:negative.id,observedSha256:control.differentBytes.actualSHA,expectedSha256:spec.expectedSha256},meaning:'content identity independent of name/path/repository layout; no new training claimed'};
@@ -757,8 +755,11 @@ export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=fa
 }
 export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUnitFake=false,contentReadback=false}={}) {
   const bundle=await json(inside(dir,'source-job-output.json'));
+  if(c.kind==='full-av'){assert.equal(bundle.bindings.length,1,'one actual native binding per reduced AV case');assert.equal(bundle.media.length,1,'one actual AV output per reduced AV case');assert.equal(bundle.requests.filter(r=>r.route==='/api/v1/video/jobs').length,1,'no hidden render fan-out');}
+  if(isSourceCancelCase(c)){assert.equal(bundle.bindings.length,0,'cold cancellation completes no load');assert.equal(bundle.media.length,0,'cold cancellation produces no AV');assert.equal(bundle.metrics,undefined,'cold cancellation claims no completed-load peak');}
   assert.ok(bundle.proof_kind==='campaign_native'||(allowUnitFake&&bundle.proof_kind==='unit_fake'),'unit_fake is never campaign proof');
   assert.ok(c.declaredSourceBindings?.length,'declared input authority cannot be absent during readback');for(const source of c.declaredSourceBindings)assertLicenseAuthority(source,{allowUnitFake});
+  if(c.kind==='full-av')for(const source of bundle.conditioningBindings??[]){assert.ok(c.inputs.some(i=>i.sha256===source.sha256),'undeclared actual conditioning source');assert.equal(await hashFile(await confined(dir,inside(dir,source.file))),source.sha256,'retained conditioning bytes changed');}
   const scenarioInput=c.inputs.find(i=>i.role==='scenario'&&i.path===c.runtime.scenario);assert.ok(scenarioInput&&typeof bundle.scenarioText==='string');assert.equal(createHash('sha256').update(bundle.scenarioText).digest('hex'),scenarioInput.sha256,'actual scenario bytes differ from bound input');const scenario=JSON.parse(bundle.scenarioText);assert.equal(scenario.caseId,c.id);
   assert.equal(bundle.build.sceneworks,p.sceneworks);assert.equal(bundle.build.inference,p.inference);
   if(!contentReadback){await confined(p.output,bundle.build.binary);assert.equal(await hashFile(bundle.build.binary),bundle.build.sha256,'owned service binary drift');}
@@ -776,6 +777,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     if(c.declaredSourceBindings){
       assert.ok(selected,'completed job selected an undeclared/stock model');assert.equal(identity.checkpointSha256,selected.model.sha256);assert.equal(normalizeLoadEvent(binding.event).identity.assembly.partition,selected.model.partition,'actual native partition differs from declared import');if(selected.model.topology==='pruned')assert.ok(normalizeLoadEvent(binding.event).identity.assembly.adalnPruning,'pruned declaration requires actual pruned assembly');
       const request=bundle.requests?.find(r=>r.result.id===binding.job.id&&r.route==='/api/v1/video/jobs')?.request;
+      if(c.kind==='full-av')normalizedControlRequest(request,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:identity,declaredSourceBindings:c.declaredSourceBindings},{allowUnitFake});
       const requested=request?.loras??binding.job.payload.loras??[];
       const adapters=requestedAdapterBindings(selected.adapters??[],requested),prepared=normalizeLoadEvent(binding.event).prepared_sources;
       for(const input of [...(selected.model.components??[]),...adapters])assert.ok(prepared.some(s=>s.sha256===input.sha256),'requested component/adapter missing from actual prepared closure');
@@ -800,7 +802,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     const actual=await compareControlMedia(inside(dir,b.media.av),inside(dir,r.media.av),inside(dir,i.media.av),comparison.stream,comparison.minimumDelta,comparison.maximumBaselineDelta,decode,delta);
     if(!contentReadback)for(const key of ['interventionDelta','repeatedBaselineDelta','threshold'])assert.equal(actual[key],comparison[key],'retained sensitivity differs from actual decoded media'); // Portable decoding rechecks declared bounds, not a host-specific ffmpeg scalar golden.
   }
-  const identification=c.id.endsWith('.renamed')?await verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake}):undefined;
+  const identification=(c.sourceVariant==='opaque-renamed-linked'||c.id.endsWith('.renamed'))?await verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake}):undefined;
   const ownership=c.id.endsWith('.managed-linked-equivalence')?await verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode,delta):undefined;
   const cache=c.id.endsWith('.cold-warm-staged')?verifyCacheCoverage(bundle,scenario,byJob,observed):undefined;
   return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(identification?{identification}:{}),...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
@@ -812,7 +814,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   try {
     const scenarioText=await readFile(c.runtime.scenario,'utf8'),scenario=JSON.parse(scenarioText);assert.equal(scenario.caseId,c.id);assert.equal(scenario.baseUrl,service.baseUrl,'scenario must target newly owned service');
     if(scenario.identificationControl){const input=c.inputs.find(value=>value.role==='identity-control-fixture'&&value.path===scenario.identificationControl.receipt);assert.ok(input,'staged identity-control metadata input required');assert.ok((await stat(input.path)).size<=1024*1024,'identity control receipt must be bounded metadata, never a weight payload');assert.equal(await hashFile(input.path),input.sha256);await copyFile(input.path,inside(dir,'identification-input.json'));}
-    result=await runScenario(scenario,{fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
+    result=await runScenario(scenario,{deadlineMs:deps.deadlineMs??(service.fake?Infinity:Number(process.env.H3_CASE_DEADLINE_MS??Infinity)),fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
       records.push(r);
       if(r.result?.id && r.method==='POST' && (r.route==='/api/v1/models/import'||r.route==='/api/v1/loras/import'||r.route==='/api/v1/video/jobs'||/\/(retry|duplicate)$/.test(r.route)))service.jobs.add(r.result.id);
       await writeFile(path.join(dir,'api-transcript.json'),JSON.stringify({caseId:c.id,proof_kind:service.fake?'unit_fake':'campaign_native',transcript:records},null,2));
@@ -822,7 +824,9 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
       assert.ok(imported.some(id=>records.some(r=>r.method==='POST'&&r.route===`/api/v1/jobs/${encodeURIComponent(id)}/cancel`)&&Object.values(result.captures).some(j=>j?.id===id&&j.status==='canceled')),'cancel case requires an actually cancelled submitted import, not import-only success');
     }
     const jobs=[...new Map(Object.values(result.captures).filter(v=>v?.id&&v.status==='completed'&&v.payload?.model).map(j=>[j.id,j])).values()];
-    const measured=['artifact','capability'].includes(c.group)||/\.(bounded-loading|cold-warm-staged)$/.test(c.id);
+    if(c.kind==='full-av')assert.equal(jobs.length,1,'each reduced full-AV cell must contain exactly one actual generation, not hidden fan-out');
+    const conditioningBindings=c.kind==='full-av'?await bindConditioningSources(service,c,jobs,records,dir):[];
+    const measured=c.kind==='full-av'||['artifact','capability'].includes(c.group)||/\.(bounded-loading|cold-warm-staged)$/.test(c.id);
     if(measured)metrics=await observations.finish();
     else {observations.done=true;await observations.loop;assert.ok(!observations.budgetExceeded,'observed campaign bound exceeded');}
     await save(path.join(dir,'raw-observations.json'),{samples:observations.samples,gaps:observations.gaps,epochs:service.epochs,meaning:measured?'Whole case/load-inclusive observations':'Observed only; no successful model load or peak is invented for a refusal/cancel or multi-process restart'});
@@ -837,10 +841,10 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     const sourceCancel=actions.find(action=>action.actionKind==='source-cancel');
     // A canceled cold preparation has NO successful load, AV or peak requirement; only a
     // successful generation path requires one.
-    if(!c.id.endsWith('.generation-source-prep-cancel')&&scenario.steps.some(s=>s.path==='/api/v1/video/jobs'||typeof s.path==='string'&&s.path.endsWith('/duplicate')))assert.ok(loads.length>0,'no actual successful model execution');
-    if(c.id.endsWith('.generation-source-prep-cancel'))assert.ok(sourceCancel,'cold source-preparation cancellation case did not produce an actual action receipt');
+    if(!isSourceCancelCase(c)&&scenario.steps.some(s=>s.path==='/api/v1/video/jobs'||typeof s.path==='string'&&s.path.endsWith('/duplicate')))assert.ok(loads.length>0,'no actual successful model execution');
+    if(isSourceCancelCase(c))assert.ok(sourceCancel,'cold source-preparation cancellation case did not produce an actual action receipt');
     const proofs=matched.map(v=>({...v,runtimeIdentity:loadIdentity(v.event,v.job,c.inputs)}));
-    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,...(service.sourceDtypeFacts?{sourceDtypeFacts:service.sourceDtypeFacts}:{}),scenarioText,captures:result.captures,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
+    await save(path.join(dir,'source-job-output.json'),{proof_kind:service.fake?'unit_fake':'campaign_native',build:service.buildIdentity,epochs:service.epochs,...(service.sourceDtypeFacts?{sourceDtypeFacts:service.sourceDtypeFacts}:{}),scenarioText,conditioningBindings,captures:result.captures,bindings:proofs,jobs,requests:records.filter(r=>r.method==='POST'&&r.result?.id),media:bound,actions,metrics});
     const comparisons=[];
     for(const spec of scenario.comparisons??[]) {
       const find=name=>{const job=result.captures[name];const value=proofs.find(p=>p.job.id===job?.id);assert.ok(value,'actual completed comparison job/load/output binding missing');return value;};
@@ -852,7 +856,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     await save(path.join(dir,'comparisons.json'),comparisons);
     const primary=proofs[0];const h=await (deps.hardware??hardware)(c.backend,c.runtime.deviceId);
     const sourceCancelReceipt=sourceCancel?receiptNameFor(sourceCancel.jobId):undefined;
-    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
+    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...conditioningBindings.map(v=>v.file),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
     if(primary){Object.assign(e,{runtimeIdentity:primary.runtimeIdentity,loadEvent:primary.event,completedJob:{id:primary.job.id,status:primary.job.status,providerId:normalizeLoadEvent(primary.event).providerId,output:primary.media.av},av:primary.media.av});}
     if(c.artifact)Object.assign(e,{source:p.source,artifact:c.artifact});
     if(c.group==='capability') {assert.ok(comparisons.length);const control=proofs.find(v=>v.job.id===comparisons[0].interventionJobId);e.control={av:control.media.av,checkpointSha256:control.runtimeIdentity.checkpointSha256,seed:control.runtimeIdentity.seed,intervention:'Actual scenario comparison manifest; see all source-bound contrasts',comparisons:'comparisons.json',bindings:'source-job-output.json'};}
@@ -866,13 +870,76 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     try{await service.stop();await save(path.join(dir,'service-lifecycle.json'),{epochs:service.epochs,quiescence:service.quiescence,drains:await Promise.all(service.drainRecords.map(async name=>({path:name,sha256:await hashFile(path.join(dir,name))}))),observationWriteError:observationWriteError?.message,proof_kind:service.fake?'unit_fake':'campaign_native'});if(observationWriteError&&!error)throw observationWriteError;}catch(stopError){await save(path.join(dir,'shutdown-failure.json'),{error:stopError.message,originalError:error?.message,epochs:service.epochs});if(!error)throw stopError;}
   }
 }
+const conditioningFields={sourceAssetId:'image',lastFrameAssetId:'image',referenceAssetIds:'image',sourceClipAssetId:'video',sourceClipAssetIds:'video',referenceClipAssetId:'video',referenceAudioAssetIds:'audio'};
+async function bindConditioningSources(service,c,jobs,requests,dir){
+  const bindings=[];
+  for(const job of jobs){const request=submittedPayload(requests,job),projectId=request.projectId;assert.ok(typeof projectId==='string'&&projectId);
+    for(const [field,type]of Object.entries(conditioningFields))for(const id of (Array.isArray(request[field])?request[field]:request[field]?[request[field]]:[])){
+      if(bindings.some(v=>v.projectId===projectId&&v.assetId===id))continue;
+      const asset=await service.request('GET',`/api/v1/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(id)}`),project=await service.request('GET',`/api/v1/projects/${encodeURIComponent(projectId)}`);
+      assert.equal(asset.id,id);assert.equal(asset.projectId,projectId);assert.equal(asset.type,type);assert.equal(project.id,projectId);
+      const root=await confined(service.runDir,project.path),source=await confined(root,path.resolve(root,asset.file.path)),before=await stat(source);assert.ok(before.size>0&&before.size<=256*1024*1024,'conditioning evidence must be bounded media, never model weights');
+      const sha256=await hashFile(source);assert.ok(c.inputs.some(i=>i.sha256===sha256),'actual owned conditioning bytes must match a declared input SHA');
+      const extension=path.extname(source),file=`conditioning-${bindings.length}${/^\.[a-z0-9]{1,10}$/i.test(extension)?extension:'.bin'}`;await copyFile(source,inside(dir,file));assert.equal(await hashFile(inside(dir,file)),sha256);
+      const after=await stat(source);for(const key of ['dev','ino','size','mtimeMs','ctimeMs'])assert.equal(after[key],before[key],'conditioning changed during source binding');
+      bindings.push({projectId,assetId:id,source,file,sha256,metadata:{type:asset.type,...Object.fromEntries(['mimeType','width','height','duration','fps'].map(k=>[k,asset.file[k]??null]))}});
+    }
+  }
+  return bindings;
+}
+export function normalizedControlRequest(request,{conditioningBindings,runtimeIdentity,declaredSourceBindings}, {allowUnitFake=false}={}){
+  const result=creativePayload(request),source=declaredSourceBindings?.find(v=>v.model.modelId===request.model);
+  assert.ok(runtimeIdentity?.checkpointSha256,'actual resolved checkpoint identity required');
+  if(!allowUnitFake)assert.ok(Array.isArray(conditioningBindings)&&source,'actual conditioning bindings and declared imported source required');
+  result.projectId='verified-task-owned-project';
+  result.model={checkpointSha256:runtimeIdentity.checkpointSha256,topology:runtimeIdentity.topology??null,quantization:runtimeIdentity.quantization??null,components:(runtimeIdentity.components??[]).map(v=>v.sha256)};
+  for(const field of Object.keys(conditioningFields))if(result[field]!==undefined){
+    const resolve=id=>{const binding=conditioningBindings?.find(v=>v.projectId===request.projectId&&v.assetId===id);if(!binding){assert.ok(allowUnitFake,'reference asset has no actual retained source-byte binding');return id;}assert.equal(binding.metadata.type,conditioningFields[field]);return {sha256:binding.sha256,metadata:binding.metadata};};
+    result[field]=Array.isArray(result[field])?result[field].map(resolve):resolve(result[field]);
+  }
+  if(source&&result.loras)result.loras=result.loras.map(value=>{const selected=source.adapters?.find(a=>a.id===value.id);assert.ok(selected,'requested adapter lacks declared source identity');const {id,...controls}=value;return {...controls,sha256:selected.sha256};});
+  return result;
+}
+// Shared baselines refer to actual retained case jobs. No extra generation or copied execution.
+export async function verifyReducedControls(p,backend,{decode=decodeAV,delta=decodedDelta,caseRoot=p.output}={}) {
+  const rows=new Map();
+  for(const c of executionCases(p).filter(c=>c.backend===backend&&c.kind==='full-av')){
+    const dir=inside(caseRoot,c.id),bundle=await json(inside(dir,'source-job-output.json'));
+    assert.equal(bundle.bindings.length,1,'reduced AV receipt must identify one actual native job');
+    const binding=bundle.bindings[0];assert.equal(binding.job.status,'completed');
+    for(const source of bundle.conditioningBindings??[]){assert.equal(await hashFile(await confined(dir,inside(dir,source.file))),source.sha256);assert.ok(c.inputs?.some(i=>i.sha256===source.sha256),'retained conditioning must match a declared source input');}
+    const rawRequest=submittedPayload(bundle.requests??[],binding.job),request=normalizedControlRequest(rawRequest,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:binding.runtimeIdentity,declaredSourceBindings:c.declaredSourceBindings},{allowUnitFake:p.proof_kind==='unit_fake'});
+    rows.set(c.index,{c,dir,binding,request,rawRequest});
+  }
+  const results=[];
+  for(const [repeatIndex,baselineIndex] of [[5,1],[13,3],[22,15]]){
+    const repeat=rows.get(repeatIndex);if(!repeat)continue;const baseline=rows.get(baselineIndex);assert.ok(baseline,'actual repeated baseline source missing');
+    assert.notEqual(repeat.binding.job.id,baseline.binding.job.id,'a repeat must actually execute, not duplicate a job receipt');
+    assert.deepEqual(creativePayload(repeat.request),creativePayload(baseline.request),'unchanged baseline source/seed/recipe/conditioning required');
+    assert.equal(repeat.binding.runtimeIdentity.checkpointSha256,baseline.binding.runtimeIdentity.checkpointSha256);
+    for(const stream of ['video','audio']){const measured=await delta(inside(baseline.dir,baseline.binding.media.av),inside(repeat.dir,repeat.binding.media.av),stream);assert.ok(Number.isFinite(measured)&&measured<=repeat.c.sensitivity.maximumBaselineDelta,'unstable repeated baseline is UNPROVEN, not a causal pass');}
+  }
+  const controls={6:[1,5,'referenceAssetIds','video'],7:[1,5,'sourceClipAssetIds','video'],8:[1,5,'referenceAudioAssetIds','audio'],9:[1,5,'referenceAssetIds','video'],10:[1,5,'sourceClipAssetIds','video'],11:[1,5,'referenceAudioAssetIds','audio'],12:[1,5,'loras','video'],14:[3,13,'loras','video'],16:[15,22,'prompt','video']};
+  for(const [index,[baseIndex,repeatIndex,field,stream]]of Object.entries(controls)){
+    const changed=rows.get(Number(index));if(!changed)continue;
+    const baseline=rows.get(baseIndex),repeat=rows.get(repeatIndex);assert.ok(baseline&&repeat,'actual baseline and independently executed repeat required');
+    assert.equal(new Set([baseline.binding.job.id,repeat.binding.job.id,changed.binding.job.id]).size,3,'intervention and repeat cannot reuse the baseline job ID');
+    for(const other of [repeat,changed]){assert.equal(other.binding.runtimeIdentity.checkpointSha256,baseline.binding.runtimeIdentity.checkpointSha256);assert.deepEqual(other.binding.runtimeIdentity.samplingPolicy,baseline.binding.runtimeIdentity.samplingPolicy);}
+    assertControlledConfiguration(baseline.request,changed.request,[field]);assert.notDeepEqual(changed.request[field],baseline.request[field],'declared intervention did not change its actual request');
+    const thresholds=changed.c.sensitivity;assert.ok(thresholds&&Number.isFinite(thresholds.minimumControlDelta)&&thresholds.minimumControlDelta>0&&Number.isFinite(thresholds.maximumBaselineDelta)&&thresholds.maximumBaselineDelta>=0,'predeclared sensitivity thresholds required');
+    const measured=await compareControlMedia(inside(baseline.dir,baseline.binding.media.av),inside(repeat.dir,repeat.binding.media.av),inside(changed.dir,changed.binding.media.av),stream,thresholds.minimumControlDelta,thresholds.maximumBaselineDelta,decode,delta);
+    results.push({caseId:changed.c.id,baselineCaseId:baseline.c.id,repeatedCaseId:repeat.c.id,baselineJobId:baseline.binding.job.id,repeatedJobId:repeat.binding.job.id,interventionJobId:changed.binding.job.id,allowedChanges:[field],stream,locatorNormalization:{fields:['projectId','model',...Object.keys(conditioningFields).filter(k=>baseline.rawRequest[k]!==undefined),...(baseline.rawRequest.loras?['loras']:[])],referenceOrderPreserved:true,comparedLiterally:Object.keys(baseline.rawRequest).filter(k=>!['projectId','model','loras',...Object.keys(conditioningFields)].includes(k)),meaning:'Only organizational locators map to actual retained input bytes and resolved source identities; creative values and reference ordering remain literal.'},...measured});
+  }
+  return results;
+}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   try{const [mode,planPath,id,swRoot,inferenceRoot]=process.argv.slice(2);const p=await json(planPath),c=p.cases.find(v=>v.id===id);assert.ok(c);authorized(p,c);const dir=process.env.H3_CASE_DIR;assert.equal(process.env.H3_CASE_ID,id);assert.ok(dir);await confined(p.output,dir);
     if(mode==='generation-source-prep-cancel'){
-      assert.ok(id.endsWith('.generation-source-prep-cancel'),'this dispatcher is only for the canonical cold source-preparation cancellation case');
+      assert.ok(isSourceCancelCase(c),'this dispatcher is only for the canonical cold source-preparation cancellation case');
       const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);
       console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);
     }
+    else if(mode==='actual-artifact-probe'){const {executeActualArtifactProbe}=await import('./h3-finetune-terminal-artifact-probe.mjs');const r=await executeActualArtifactProbe(p,c,swRoot,p.nativeEvidence?.root??inferenceRoot,dir);console.log(JSON.stringify(r.proofSummary));}
     else if(mode==='numeric'){const r=await executeNativeComparison(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else if(mode==='fixture'){const r=await executeFixture(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else{assert.equal(mode,'api');const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);}

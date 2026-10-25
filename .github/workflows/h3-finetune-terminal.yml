@@ -15,6 +15,12 @@ on:
       inference_sha:
         required: true
         type: string
+      native_evidence_ref:
+        required: false
+        type: string
+      native_evidence_sha:
+        required: false
+        type: string
       backend:
         required: true
         type: string
@@ -28,49 +34,18 @@ on:
         required: true
         type: string
       case_id:
-        required: true
+        required: false
         type: string
+      campaign_request:
+        required: false
+        type: string
+        default: '{}'
     secrets:
       SCENEWORKS_INFERENCE_READ_TOKEN:
         required: false
-  workflow_dispatch:
-    inputs:
-      stationary_pair_authorized:
-        description: Coordinator confirmed final stationary pair after reviews, inference-main merge and permanent pin
-        required: true
-        type: boolean
-        default: false
-      sceneworks_sha:
-        description: Exact clean SceneWorks revision containing this workflow
-        required: true
-        type: string
-      inference_sha:
-        description: Exact permanent inference-main revision pinned by SceneWorks
-        required: true
-        type: string
-      backend:
-        description: Physical backend for this case (no CPU substitution)
-        required: true
-        type: choice
-        options: [mlx, cuda]
-      expected_runner:
-        description: Exact runner name; MLX must be nax-macos-2
-        required: true
-        type: string
-      plan_path:
-        description: Already staged external absolute campaign plan; no automatic model download
-        required: true
-        type: string
-      output_path:
-        description: Plan's external persistent evidence directory (never a checkout/cache)
-        required: true
-        type: string
-      case_id:
-        description: One exact case from scripts/h3-finetune-terminal.mjs list
-        required: true
-        type: string
 permissions:
   contents: read
+  actions: read
 # Do not cancel another pending/running acceptance case or introduce GPU ownership locks.
 concurrency:
   group: h3-finetune-terminal-${{ github.run_id }}-${{ github.run_attempt }}
@@ -82,7 +57,14 @@ jobs:
     concurrency:
       group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos-2' }}
       cancel-in-progress: false
-    timeout-minutes: 150
+    timeout-minutes: 1440
+    env:
+      H3_NATIVE_EVIDENCE_REF: ${{ inputs.native_evidence_ref }}
+      H3_NATIVE_EVIDENCE_SHA: ${{ inputs.native_evidence_sha }}
+      H3_STAGE_BACKEND: ${{ inputs.backend }}
+      H3_STAGE_SOURCE_SHA: ${{ inputs.sceneworks_sha }}
+      H3_TERMINAL_ROUTE: h3-terminal-${{ inputs.backend }}
+      H3_STAGE_REQUEST: ${{ inputs.campaign_request }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -98,6 +80,206 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        if: ${{ inputs.native_evidence_sha != '' }}
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.native_evidence_sha }}
+          path: inference-evidence
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Ensure selected assets and conditioning in this terminal route
+        id: stage
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          OUTPUT: ${{ inputs.output_path }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {bindStagedCampaignPlan} from "./scripts/h3-finetune-terminal-cases.mjs";
+          import {lockedInferenceRevision} from "./scripts/select-windows-cargo-cache.mjs";
+          import {
+            loadCasebook, selectStageFiles, parseStageRequest, runStage, prepareReferenceFixtures,
+            identityControlSourceEntry,
+          } from "./scripts/h3-finetune-terminal-stage.mjs";
+
+          const env = process.env;
+          const originalPlan=JSON.parse(await readFile(env.PLAN,"utf8"));
+          assert.equal(originalPlan.sceneworks,env.GITHUB_SHA,"plan must identify this exact caller source before assets");
+          assert.equal(originalPlan.output,env.OUTPUT,"owned output must match before assets");
+          await mkdir(env.OUTPUT,{recursive:true});
+          const laneStartPath=path.join(env.OUTPUT,`lane-start-${env.H3_STAGE_BACKEND}.json`);
+          let laneStart;try{laneStart=JSON.parse(await readFile(laneStartPath,"utf8"));}catch(error){if(error.code!=="ENOENT")throw error;}
+          if(!laneStart){laneStart={sceneworks:originalPlan.sceneworks,inference:originalPlan.inference,startedAt:new Date().toISOString(),budgetSeconds:86400};await writeFile(laneStartPath,JSON.stringify(laneStart,null,2)+"\n",{flag:"wx"});}
+          assert.equal(laneStart.sceneworks,originalPlan.sceneworks);assert.equal(laneStart.inference,originalPlan.inference);assert.equal(laneStart.budgetSeconds,86400);
+          assert.ok(Date.now()<Date.parse(laneStart.startedAt)+86400000,"whole lane exhausted its original 24h budget; a dispatch does not reset it");
+          await appendFile(env.GITHUB_ENV,`H3_TERMINAL_LANE_STARTED_AT=${laneStart.startedAt}\n`);
+          if(originalPlan.inventory==="reduced-v1"){
+            assert.match(env.H3_NATIVE_EVIDENCE_SHA??"",/^[a-f0-9]{40}$/,"exact native FEATURE evidence SHA required independently of the product pin");
+            assert.equal(env.H3_NATIVE_EVIDENCE_REF,"feature/sc-26679-h3-finetune-import");
+          }
+          const request = parseStageRequest(env.H3_STAGE_REQUEST ?? "{}");
+          const requestedSets = request.assetSets ?? [];
+          if (request.prepare_float_variants === true) {
+            const book = await loadCasebook();
+            assert.ok(book.stagingPlan?.profileSemantics?.[request.float_source_profile], "explicit eligible raw source profile required");
+            assert.ok(requestedSets.includes(request.float_source_profile), "float variants need the actually staged source set");
+          }
+          if (request.prepare_reference_fixtures === true) assert.ok(requestedSets.includes("singularity"), "reference fixtures require the singularity set staged in this route");
+          if (request.prepare_identity_controls === true) assert.ok(requestedSets.includes("singularity"), "identity controls require the canonical singularity source staged in this route");
+          const stageRequested = ["asset_sets", "assetSets", "license_authority", "licenseAuthority"].some(key => request[key] !== undefined)
+            || request.inspect_only === true || request.inspectOnly === true
+            || request.prepare_identity_controls === true || request.prepare_reference_fixtures === true
+            || request.prepare_float_variants === true || requestedSets.includes("speech");
+          const evidence = path.join(env.RUNNER_TEMP, `h3-terminal-stage-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          await mkdir(evidence, { recursive: true });
+          const consumerPin = lockedInferenceRevision(await readFile("Cargo.lock", "utf8"));
+          await appendFile(env.GITHUB_ENV, `H3_STAGE_EVIDENCE=${evidence}\nH3_STAGE_CONSUMER_PIN=${consumerPin}\n`);
+          await writeFile(path.join(evidence, "source-config.json"), JSON.stringify({ sourceSha: env.GITHUB_SHA, consumerPin, backend: env.H3_STAGE_BACKEND, runner: env.RUNNER_NAME, node: process.version, campaignProof: false }, null, 2) + "\n");
+          const binding = { kind: "h3-terminal-stage-binding", campaignProof: false, status: "skipped-no-request", stageRequested, root: null, receiptPath: null, producedFiles: [], boundInputs: 0, blockedByAllowedRoots: 0, conditioning: null, identityControls: null, inspectOnly: request.inspect_only === true || request.inspectOnly === true };
+          if (stageRequested) {
+            const planned = selectStageFiles(await loadCasebook(), request.assetSets);
+            await writeFile(path.join(evidence, "expected-assets-not-integrity-proof.json"), JSON.stringify({ requiredFiles: planned.length, completedFiles: 0, status: "not-attempted", files: planned }, null, 2) + "\n");
+            if (!binding.inspectOnly) {
+              const probeRequest = { ...request, assetSets: [...new Set([...requestedSets, "builtin-shards", "builtin-ref-shards", "community-shards-fl2va", "community-shards-ref2va"])], inspect_only: true, inspectOnly: true };
+              const probe = await runStage({ request: probeRequest, backend: env.H3_STAGE_BACKEND, env, platform: process.platform, evidenceDir: path.join(evidence, "cache-probe") });
+              await writeFile(path.join(evidence, "cache-probe.json"), JSON.stringify(probe, null, 2) + "\n");
+            }
+            const receipt = await runStage({ request, backend: env.H3_STAGE_BACKEND, env, platform: process.platform, evidenceDir: evidence });
+            binding.status = receipt.status ?? receipt.kind;
+            binding.root = receipt.settings?.privateRoot ?? null;
+            binding.receiptPath = binding.root ? path.join(binding.root, "h3-stage-receipt.json") : null;
+            binding.producedFiles = (receipt.files ?? []).map(file => ({ file: file.file, path: file.finalPath, sha256: file.observedSha256 ?? file.sha256, expectedBytes: file.expectedBytes }));
+            await writeFile(path.join(evidence, "expected-assets-not-integrity-proof.json"), JSON.stringify({ requiredFiles: (receipt.files ?? []).length, completedFiles: binding.producedFiles.length, status: binding.status, files: binding.producedFiles }, null, 2) + "\n");
+            if (request.prepare_reference_fixtures === true && binding.status === "completed" && binding.root) binding.conditioning = await prepareReferenceFixtures({ root: binding.root, evidenceDir: evidence, backend: env.H3_STAGE_BACKEND, env, platform: process.platform });
+            if (request.prepare_identity_controls === true && binding.status === "completed" && binding.root) binding.identityControls = receipt.identityControls;
+            if (binding.root) {
+              const plan = JSON.parse(await readFile(env.PLAN, "utf8"));
+              const bound = await bindStagedCampaignPlan(plan,{receiptPath:binding.receiptPath,root:binding.root,backend:env.H3_STAGE_BACKEND,identityControls:binding.identityControls});
+              binding.boundInputs = bound.boundInputs;
+              binding.blockedByAllowedRoots = bound.blockedByAllowedRoots;
+              binding.boundPlan = path.join(env.OUTPUT, "bound-plan.json");
+              await writeFile(binding.boundPlan, JSON.stringify(bound.plan, null, 2) + "\n");
+              await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${binding.boundPlan}\nH3_STAGE_ROOT=${binding.root}\n`);
+            }
+            if (binding.inspectOnly) await appendFile(env.GITHUB_ENV, "H3_TERMINAL_SKIP_RUN=1\n");
+            await appendFile(env.GITHUB_ENV, `H3_STAGE_PREPARE_FLOATS=${request.prepare_float_variants === true}\nH3_FLOAT_SOURCE_PROFILE=${request.float_source_profile ?? ""}\nH3_STAGE_PREPARE_SPEECH=${requestedSets.includes("speech") ? "true" : "false"}\n`);
+          }
+          const effectivePlanPath=binding.boundPlan??env.PLAN;
+          const effectivePlan=JSON.parse(await readFile(effectivePlanPath,"utf8"));
+          if(effectivePlan.inventory==="reduced-v1"){
+            const nativeRoot=path.join(env.GITHUB_WORKSPACE,"inference-evidence");
+            effectivePlan.nativeEvidence={ref:env.H3_NATIVE_EVIDENCE_REF,sha:env.H3_NATIVE_EVIDENCE_SHA,root:nativeRoot,productPin:effectivePlan.inference};
+            binding.boundPlan=path.join(env.OUTPUT,"evidence-bound-plan.json");
+            await writeFile(binding.boundPlan,JSON.stringify(effectivePlan,null,2)+"\n",{flag:"wx"});
+            await appendFile(env.GITHUB_ENV,`H3_PLAN_EFFECTIVE=${binding.boundPlan}\n`);
+          }
+          await writeFile(path.join(evidence, "stage-binding.json"), JSON.stringify(binding, null, 2) + "\n");
+          await appendFile(env.GITHUB_OUTPUT, `status=${binding.status}\nroot=${binding.root ?? ""}\nbound_inputs=${binding.boundInputs}\nblocked_by_allowed_roots=${binding.blockedByAllowedRoots}\n`);
+          console.log(JSON.stringify({ stageRequested, status: binding.status, root: binding.root, boundInputs: binding.boundInputs, blockedByAllowedRoots: binding.blockedByAllowedRoots }));
+          NODE
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
+        id: speech_python
+        with:
+          python-version: "3.12"
+      - name: Prepare private CPU-only conditioning and source-variant tools
+        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
+        shell: bash
+        env:
+          SPEECH_BASE_PYTHON: ${{ steps.speech_python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {appendFile} from "node:fs/promises";
+          import path from "node:path";
+          const env=process.env,venv=path.join(env.RUNNER_TEMP,`h3-speech-python-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          execFileSync(env.SPEECH_BASE_PYTHON,["-I","-m","venv",venv],{stdio:"inherit"});
+          const python=path.join(venv,process.platform==="win32"?"Scripts/python.exe":"bin/python");
+          const packages=[];if(env.H3_STAGE_PREPARE_SPEECH==="true")packages.push("pyarrow==19.0.1");if(env.H3_STAGE_PREPARE_FLOATS==="true")packages.push("numpy==2.2.6");
+          execFileSync(python,["-I","-m","pip","install","--isolated","--no-cache-dir",...packages],{stdio:"inherit"});
+          await appendFile(env.GITHUB_ENV,"H3_SPEECH_PYTHON="+python+"\n");
+          NODE
+      - name: Derive explicit dense source variants from the actually staged raw snapshot
+        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_FLOATS == 'true' }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {copyFile} from "node:fs/promises";
+          import path from "node:path";
+          const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;let failure;
+          try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-float-variants.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root,"--source-profile",env.H3_FLOAT_SOURCE_PROFILE],{stdio:"inherit"}); } catch(error) { failure=error; }
+          finally { try { await copyFile(path.join(root,"derived","float-variants-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"float-variants-receipt.json")); } catch(error) { if(!failure)throw error; } }
+          if(failure)throw failure;
+          NODE
+      - name: Extract the pinned public row as mono 32-kHz speech and retain attribution
+        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_SPEECH == 'true' }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {copyFile} from "node:fs/promises";
+          import path from "node:path";
+          const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;
+          let failure;
+          try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-speech.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root],{stdio:"inherit"}); } catch(error) { failure=error; }
+          finally { try { await copyFile(path.join(root,"conditioning","speech-1272-128104-0000","speech-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"speech-receipt.json")); } catch(error) { if(!failure)throw error; } }
+          if(failure)throw failure;
+          NODE
+      - name: Resolve the reduced operational case set for this backend
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN_INPUT: ${{ inputs.plan_path }}
+          OUTPUT: ${{ inputs.output_path }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {appendFile, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {executionCases,validatePlan} from "./scripts/h3-finetune-terminal.mjs";
+          const env = process.env;
+          const request = JSON.parse(env.H3_STAGE_REQUEST || "{}");
+          const planPath = env.H3_PLAN_EFFECTIVE || env.PLAN_INPUT;
+          const plan = JSON.parse(await readFile(planPath, "utf8"));
+          const planIds = new Set((plan.cases ?? []).map(item => item.id));
+          const explicit = Array.isArray(request.case_ids) ? request.case_ids.map(String) : (typeof request.case_id === "string" && request.case_id ? [request.case_id] : null);
+          let ids;
+          if (explicit) { for (const id of explicit) assert.ok(planIds.has(id), `explicit case ${id} is not in the plan`); ids = explicit; }
+          else {
+            validatePlan(plan);
+            assert.equal(plan.inventory,"reduced-v1","terminal execution defaults to the reduced operational inventory");
+            ids = executionCases(plan).filter(item=>item.backend===env.H3_STAGE_BACKEND).map(item => item.id);
+            const missing = ids.filter(id => !planIds.has(id));
+            assert.equal(missing.length, 0, `reduced operational cases are not in the plan; parent must wire the reduced cases API: ${missing.join(", ")}`);
+            assert.ok(ids.length===25||ids.length===18,"reduced inventory is 25 maximum or 18 on the measured displaced backend");
+          }
+          await writeFile(path.join(env.OUTPUT, "case-ids.json"), JSON.stringify(ids, null, 2) + "\n");
+          const evidencePaths=[...ids.map(id=>path.join(env.OUTPUT,id)),path.join(env.OUTPUT,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(env.OUTPUT,`native-witnesses-${env.H3_STAGE_BACKEND}`)];
+          await appendFile(env.GITHUB_ENV,`H3_CASE_ARTIFACT_PATHS<<H3_CASE_PATHS_END\n${evidencePaths.join("\n")}\nH3_CASE_PATHS_END\n`);
+          await appendFile(env.GITHUB_ENV, `H3_TERMINAL_CASES=${ids.join(",")}\nH3_PLAN_EFFECTIVE=${planPath}\n`);
+          console.log(JSON.stringify({ backend: env.H3_STAGE_BACKEND, cases: ids.length, plan: planPath }));
+          NODE
       - name: Validate explicit inputs before any product execution
         shell: bash
         env:
@@ -109,6 +291,7 @@ jobs:
           SW_SHA: ${{ inputs.sceneworks_sha }}
           INF_SHA: ${{ inputs.inference_sha }}
         run: |
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
           node --input-type=module -e '
             import assert from "node:assert/strict";
             import {readFile} from "node:fs/promises";
@@ -118,7 +301,9 @@ jobs:
             assert.equal(e.RUNNER_NAME,e.EXPECTED_RUNNER);
             assert.equal(p.output,e.OUTPUT);
             assert.equal(p.sceneworks,e.SW_SHA); assert.equal(p.inference,e.INF_SHA);
-            assert.equal(p.cases.find(c=>c.id===e.CASE_ID)?.backend,e.BACKEND);
+            const ids=(e.H3_TERMINAL_CASES??e.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);
+            assert.ok(ids.length>0,"at least one operational case id required");
+            for(const id of ids){const c=p.cases.find(v=>v.id===id);assert.ok(c,"case "+id+" is not in the plan");assert.equal(c.backend,e.BACKEND,"case "+id+" backend");}
           '
       - name: Read the checked-out root Rust pin
         shell: bash
@@ -142,7 +327,7 @@ jobs:
           rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update -c rustfmt -c clippy
           rustup run "$RUSTUP_TOOLCHAIN" rustc --version
           rustup run "$RUSTUP_TOOLCHAIN" cargo --version
-      - name: Execute or reverify one durable source-bound case
+      - name: Execute or reverify the reduced operational cases
         shell: bash
         working-directory: sceneworks
         env:
@@ -152,16 +337,108 @@ jobs:
           CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
           CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
           SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || '' }}
-        run: node scripts/h3-finetune-terminal.mjs run-case "$PLAN" "$CASE_ID" "$GITHUB_WORKSPACE/sceneworks" "$GITHUB_WORKSPACE/inference"
-      - name: Retain evidence including failure and resume identity
+        run: |
+          set -euo pipefail
+          if [ "${H3_TERMINAL_SKIP_RUN:-0}" = "1" ]; then echo "inspect-only request: no model execution"; exit 0; fi
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {execFileSync} from "node:child_process";
+          import {readFile,writeFile,appendFile} from "node:fs/promises";
+          import {ensureInlineNativeWitnesses,writeInlineAnchorBundle} from "./scripts/h3-finetune-terminal.mjs";
+          const plan=JSON.parse(await readFile(process.env.PLAN,"utf8"));
+          if(plan.inventory==="reduced-v1"){
+            await ensureInlineNativeWitnesses(plan,process.env.H3_STAGE_BACKEND,`${process.env.GITHUB_WORKSPACE}/sceneworks`,{productRoot:`${process.env.GITHUB_WORKSPACE}/inference`});
+            await writeFile(process.env.PLAN,JSON.stringify(plan,null,2)+"\n");
+          }
+          const env=process.env,ids=(env.H3_TERMINAL_CASES??env.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);
+          assert.ok(ids.length>0,"resolved operational cases required");
+          const request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
+          const adaptive=plan.inventory==="reduced-v1"&&ids.length>2&&request.adaptive_matrix!==false;
+          const selected=adaptive?plan.cases.filter(c=>c.backend===env.H3_STAGE_BACKEND&&[1,15].includes(c.index)).map(c=>c.id):ids;
+          for(const id of selected)execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
+          if(adaptive){const directory=await writeInlineAnchorBundle(plan,env.H3_STAGE_BACKEND);await appendFile(env.GITHUB_ENV,`H3_INLINE_ANCHORS=${directory}\nH3_MATRIX_PENDING=1\n`);}
+
+          NODE
+      - name: Publish only measured inline anchor metadata
+        if: env.H3_MATRIX_PENDING == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: h3-anchors-${{ inputs.backend }}-${{ inputs.sceneworks_sha }}-${{ inputs.inference_sha }}-${{ inputs.native_evidence_sha }}
+          path: ${{ env.H3_INLINE_ANCHORS }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Choose the measured matrix backend and finish this lane
+        if: env.H3_MATRIX_PENDING == '1'
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          GH_TOKEN: ${{ github.token }}
+          H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
+          CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || '' }}
+        run: |
+          set -euo pipefail
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import path from "node:path";
+          import {readFile,writeFile,mkdir} from "node:fs/promises";
+          import {execFileSync} from "node:child_process";
+          import {laneBudget,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
+          const name=`h3-anchors-${peer}-${p.sceneworks}-${p.inference}-${p.nativeEvidence.sha}`;
+          const budget=await laneBudget(p,backend),deadline=Math.min(Date.parse(budget.deadline),Date.now()+6*3600000);
+          let artifact;
+          while(!artifact){
+            assert.ok(Date.now()<deadline,"bounded peer-anchor wait expired; no backend or timing is guessed");
+            const pages=JSON.parse(execFileSync("gh",["api","--paginate","--slurp",`repos/${env.GITHUB_REPOSITORY}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`],{encoding:"utf8",maxBuffer:16*1024*1024,env}));
+            artifact=pages.flatMap(page=>page.artifacts).filter(a=>a.name===name&&!a.expired&&a.workflow_run?.head_sha===p.sceneworks&&String(a.workflow_run.id)!==env.GITHUB_RUN_ID).sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at))[0];
+            if(!artifact)await new Promise(resolve=>setTimeout(resolve,15000));
+          }
+          const directory=path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}`);await mkdir(directory);
+          execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",name,"--dir",directory],{stdio:"inherit",env});
+          const decision=await receiveInlineAnchorBundle(p,backend,directory,{expectedRunId:artifact.workflow_run.id});
+          await writeFile(env.PLAN,JSON.stringify(p,null,2)+"\n");console.log(JSON.stringify({measuredMatrixDecision:decision,omittedAVStatus:"NOT proven on the displaced backend"}));
+          for(const c of executionCases(p).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
+          NODE
+      - name: Retain terminal staging and conditioning receipts without uploading weights
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-terminal-stage-${{ inputs.backend }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h3-terminal-stage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Retain reduced-case evidence including failure and resume identity
+        if: always() && inputs.case_id == ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h3-terminal-${{ inputs.backend }}-reduced-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.H3_CASE_ARTIFACT_PATHS }}
+            !${{ inputs.output_path }}/**/service/**
+            !${{ inputs.output_path }}/**/tmp/**
+            !${{ inputs.output_path }}/**/target/**
+            !${{ inputs.output_path }}/**/fixture-target/**
+            !${{ inputs.output_path }}/**/*.safetensors
+            !${{ inputs.output_path }}/**/*.gguf
+            !${{ inputs.output_path }}/**/*.bin
+            !${{ inputs.output_path }}/**/*.pt
+            !${{ inputs.output_path }}/**/*.pth
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain evidence including failure and resume identity
+        if: always() && inputs.case_id != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: h3-${{ inputs.case_id }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Receipts/media only. App/cache/build state lives outside the case directory;
           # also exclude accidentally staged checkpoint payloads from evidence publication.
           path: |
-            ${{ inputs.output_path }}/${{ inputs.case_id }}/
+            ${{ env.H3_CASE_ARTIFACT_PATHS }}
             !${{ inputs.output_path }}/${{ inputs.case_id }}/service/**
             !${{ inputs.output_path }}/${{ inputs.case_id }}/**/target/**
             !${{ inputs.output_path }}/${{ inputs.case_id }}/**/fixture-target/**

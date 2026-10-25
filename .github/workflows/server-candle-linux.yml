@@ -27,7 +27,7 @@ on:
         required: true
         default: standard
         type: choice
-        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof, h3-ui-proof, h3-stage-mlx, h3-stage-cuda, h3-terminal-mlx, h3-terminal-cuda]
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof, h3-ui-proof, h3-terminal-mlx, h3-terminal-cuda]
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
@@ -77,141 +77,13 @@ concurrency:
   # Preserve StarVector's non-canceling bridge and ordinary ref-keyed builds.
   # Explicit CPU, import and terminal runs have separate per-run caller groups,
   # distinct from reusable callees and the unchanged native-device queues below.
-  group: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-stage-mlx' || inputs.starvector_terminal_operation == 'h3-stage-cuda') && format('h3-assets-stage-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'))))) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
-  # Content-pinned staging is IO only: no model execution or stationary campaign gate.
-  h3-stage:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-stage-mlx' || inputs.starvector_terminal_operation == 'h3-stage-cuda') }}
-    runs-on: ${{ inputs.starvector_terminal_operation == 'h3-stage-mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-chroma"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
-    timeout-minutes: 240
-    defaults:
-      run:
-        shell: bash
-    env:
-      H3_STAGE_BACKEND: ${{ inputs.starvector_terminal_operation == 'h3-stage-mlx' && 'mlx' || 'cuda' }}
-      H3_STAGE_SOURCE_SHA: ${{ github.sha }}
-      H3_STAGE_REQUEST: ${{ inputs.campaign_run_id }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "22"
-      - name: Initialize private staging receipts without touching model bytes
-        run: |
-          node --input-type=module -e '
-            import assert from "node:assert/strict";
-            import {execFileSync} from "node:child_process";
-            import {mkdir,writeFile,appendFile,readFile} from "node:fs/promises";
-            import path from "node:path";
-            import {lockedInferenceRevision} from "./scripts/select-windows-cargo-cache.mjs";
-            import {loadCasebook,selectStageFiles,parseStageRequest} from "./scripts/h3-finetune-terminal-stage.mjs";
-            const env=process.env;
-            assert.equal(execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim(),env.GITHUB_SHA);
-            const evidence=path.join(env.RUNNER_TEMP,"h3-stage-"+env.GITHUB_SHA+"-"+env.GITHUB_RUN_ID+"-"+env.GITHUB_RUN_ATTEMPT);
-            await mkdir(evidence,{recursive:true});
-            const pin=lockedInferenceRevision(await readFile("Cargo.lock","utf8"));
-            await appendFile(env.GITHUB_ENV,"H3_STAGE_EVIDENCE="+evidence+"\nH3_STAGE_CONSUMER_PIN="+pin+"\n");
-            await writeFile(path.join(evidence,"source-config.json"),JSON.stringify({sourceSha:env.GITHUB_SHA,consumerPin:pin,backend:env.H3_STAGE_BACKEND,runner:env.RUNNER_NAME,node:process.version,campaignProof:false},null,2)+"\n");
-            const request=parseStageRequest(env.H3_STAGE_REQUEST),book=await loadCasebook(),files=selectStageFiles(book,request.assetSets);
-            if(request.prepare_float_variants===true){assert.ok(book.stagingPlan.profileSemantics[request.float_source_profile],"explicit eligible raw source profile required");assert.ok(request.assetSets.includes(request.float_source_profile),"float variants need the actually staged source set");}
-            await appendFile(env.GITHUB_ENV,"H3_STAGE_PREPARE_FLOATS="+String(request.prepare_float_variants===true)+"\nH3_FLOAT_SOURCE_PROFILE="+(request.float_source_profile??"")+"\n");
-            await appendFile(env.GITHUB_ENV,"H3_STAGE_PREPARE_SPEECH="+String(request.assetSets.includes("speech")&&request.inspect_only!==true&&request.inspectOnly!==true)+"\nH3_STAGE_PREPARE_REFERENCES="+String(request.prepare_reference_fixtures===true)+"\n");
-            await writeFile(path.join(evidence,"expected-assets-not-integrity-proof.json"),JSON.stringify({requiredFiles:files.length,completedFiles:0,status:"not-attempted",files},null,2)+"\n");
-          '
-      - name: Probe exact builtin and community snapshots before any download
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import path from "node:path";
-            import {runStage} from "./scripts/h3-finetune-terminal-stage.mjs";
-            const request=JSON.parse(process.env.H3_STAGE_REQUEST);
-            request.asset_sets=[...new Set([...(request.asset_sets??request.assetSets??["singularity"]),"builtin-shards","builtin-ref-shards","community-shards-fl2va","community-shards-ref2va"])];
-            request.inspect_only=true;
-            const result=await runStage({request,backend:process.env.H3_STAGE_BACKEND,evidenceDir:path.join(process.env.H3_STAGE_EVIDENCE,"cache-probe")});
-            console.log(JSON.stringify(result));
-          ' 2>&1 | tee "$H3_STAGE_EVIDENCE/cache-probe.log"
-      - name: Stage every explicitly selected asset and verify actual complete bytes
-        if: ${{ toJSON(fromJSON(inputs.campaign_run_id).inspect_only) != 'true' }}
-        id: stage
-        run: |
-          set -euo pipefail
-          node scripts/h3-finetune-terminal-stage.mjs "$H3_STAGE_BACKEND" 2>&1 | tee "$H3_STAGE_EVIDENCE/stage-command.log"
-      - name: Prepare explicit CC0 image clip and tone conditioning inputs
-        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_REFERENCES == 'true' }}
-        env:
-          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import {prepareReferenceFixtures} from "./scripts/h3-finetune-terminal-stage.mjs";
-            console.log(JSON.stringify(await prepareReferenceFixtures({root:process.env.H3_PRIVATE_STAGE_ROOT,evidenceDir:process.env.H3_STAGE_EVIDENCE,backend:process.env.H3_STAGE_BACKEND})));
-          ' 2>&1 | tee "$H3_STAGE_EVIDENCE/reference-fixtures.log"
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
-        id: speech_python
-        with:
-          python-version: "3.12"
-      - name: Prepare private CPU-only conditioning and source-variant tools
-        if: ${{ steps.stage.outputs.status == 'completed' && (env.H3_STAGE_PREPARE_SPEECH == 'true' || env.H3_STAGE_PREPARE_FLOATS == 'true') }}
-        env:
-          SPEECH_BASE_PYTHON: ${{ steps.speech_python.outputs.python-path }}
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import {execFileSync} from "node:child_process";
-            import {appendFile} from "node:fs/promises";
-            import path from "node:path";
-            const env=process.env,venv=path.join(env.RUNNER_TEMP,"h3-speech-python-"+env.GITHUB_RUN_ID+"-"+env.GITHUB_RUN_ATTEMPT);
-            execFileSync(env.SPEECH_BASE_PYTHON,["-I","-m","venv",venv],{stdio:"inherit"});
-            const python=path.join(venv,process.platform==="win32"?"Scripts/python.exe":"bin/python");
-            const packages=[];if(env.H3_STAGE_PREPARE_SPEECH==="true")packages.push("pyarrow==19.0.1");if(env.H3_STAGE_PREPARE_FLOATS==="true")packages.push("numpy==2.2.6");
-            execFileSync(python,["-I","-m","pip","install","--isolated","--no-cache-dir",...packages],{stdio:"inherit"});
-            await appendFile(env.GITHUB_ENV,"H3_SPEECH_PYTHON="+python+"\n");
-          ' 2>&1 | tee "$H3_STAGE_EVIDENCE/speech-tools.log"
-      - name: Derive explicit dense source variants from the actually staged raw snapshot
-        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_FLOATS == 'true' }}
-        env:
-          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import {execFileSync} from "node:child_process";
-            import {copyFile} from "node:fs/promises";
-            import path from "node:path";
-            const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;let failure;
-            try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-float-variants.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root,"--source-profile",env.H3_FLOAT_SOURCE_PROFILE],{stdio:"inherit"}); } catch(error) { failure=error; }
-            finally { try { await copyFile(path.join(root,"derived","float-variants-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"float-variants-receipt.json")); } catch(error) { if(!failure)throw error; } }
-            if(failure)throw failure;
-          ' 2>&1 | tee "$H3_STAGE_EVIDENCE/float-variants.log"
-      - name: Extract the pinned public row as mono 32-kHz speech and retain attribution
-        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_SPEECH == 'true' }}
-        env:
-          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
-        run: |
-          set -euo pipefail
-          node --input-type=module -e '
-            import {execFileSync} from "node:child_process";
-            import {copyFile} from "node:fs/promises";
-            import path from "node:path";
-            const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;
-            let failure;
-            try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-speech.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root],{stdio:"inherit"}); } catch(error) { failure=error; }
-            finally { try { await copyFile(path.join(root,"conditioning","speech-1272-128104-0000","speech-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"speech-receipt.json")); } catch(error) { if(!failure)throw error; } }
-            if(failure)throw failure;
-          ' 2>&1 | tee "$H3_STAGE_EVIDENCE/speech-extraction.log"
-      - name: Keep staging and interruption receipts without uploading weights
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: h3-assets-${{ inputs.starvector_terminal_operation }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.H3_STAGE_EVIDENCE }}
-          if-no-files-found: error
-          retention-days: 30
+  # Asset staging is folded into the registered h3-terminal-mlx/cuda reusable execution, which
+  # ensure-assets and conditioning inside the SAME terminal route before the reduced 25/backend
+  # operational cases are run. There is no separate staging phase or route.
 
   # Source UI proof is independent of the permanent model pin and hardware campaign.
   h3-ui-proof:
@@ -562,11 +434,14 @@ jobs:
       stationary_pair_authorized: ${{ toJSON(fromJSON(inputs.campaign_run_id).stationary_pair_authorized) == 'true' }}
       sceneworks_sha: ${{ fromJSON(inputs.campaign_run_id).sceneworks_sha }}
       inference_sha: ${{ fromJSON(inputs.campaign_run_id).inference_sha }}
+      native_evidence_ref: ${{ fromJSON(inputs.campaign_run_id).native_evidence_ref }}
+      native_evidence_sha: ${{ fromJSON(inputs.campaign_run_id).native_evidence_sha }}
       backend: ${{ inputs.starvector_terminal_operation == 'h3-terminal-mlx' && 'mlx' || 'cuda' }}
       expected_runner: ${{ fromJSON(inputs.campaign_run_id).expected_runner }}
       plan_path: ${{ fromJSON(inputs.campaign_run_id).plan_path }}
       output_path: ${{ fromJSON(inputs.campaign_run_id).output_path }}
       case_id: ${{ fromJSON(inputs.campaign_run_id).case_id }}
+      campaign_request: ${{ inputs.campaign_run_id }}
     secrets:
       SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || secrets.INFERENCE_READ_TOKEN }}
 

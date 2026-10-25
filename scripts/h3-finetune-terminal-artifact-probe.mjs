@@ -6,8 +6,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { open, readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
-import { authorized } from './h3-finetune-terminal-runtime.mjs';
-import { runProcess, executedTests, hashFile } from './h3-finetune-terminal.mjs';
+import { authorized, runProcess, executedTests, hashFile } from './h3-finetune-terminal.mjs';
 
 export const ACTUAL_SELECTOR='artifact_probe::actual_checkpoint_projections_match_pinned_cpu_oracle';
 export const FROZEN_PROVENANCE=[
@@ -37,7 +36,7 @@ const json=async(file,cap=8*1024*1024)=>JSON.parse((await bounded(file,cap)).toS
 async function boundJSON(file,expected,cap){sha(expected);const bytes=await bounded(file,cap);assert.equal(digest(bytes),expected,'metadata sha256 mismatch');return JSON.parse(bytes.toString('utf8'));}
 export function validateProbeManifest(m,backend) {
   assert.equal(m.schema,'sceneworks.h3.actual_checkpoint_probe');assert.equal(m.schema_version,1);assert.equal(m.backend,backend==='cuda'?'candle':backend);
-  assert.ok(path.isAbsolute(m.artifact?.path));sha(m.artifact.sha256);positive(m.artifact.bytes);
+  assert.ok(path.isAbsolute(m.artifact?.path??'')||path.win32.isAbsolute(m.artifact?.path??''));sha(m.artifact.sha256);positive(m.artifact.bytes);
   assert.ok(m.staging?.receipt_path);sha(m.staging.receipt_sha256);assert.equal(m.staging.verified_artifact_sha256,m.artifact.sha256);
   const ceilings={max_cases:64,max_selected_tensors:8192,max_selected_bytes:512*1024*1024};
   for(const [key,cap]of Object.entries(ceilings)){const n=m.limits?.[key]??cap;positive(n);assert.ok(n<=cap,'manifest raises hard selection bound');}
@@ -55,10 +54,10 @@ async function stagingBinding(m,p,c,roots) {
   const s=await boundJSON(receiptPath,m.staging.receipt_sha256,4*1024*1024);
   assert.equal(s.schema,'sceneworks.h3.staging_receipt');assert.equal(s.schema_version,1);assert.ok(typeof s.producer==='string'&&s.producer.trim());assert.equal(s.full_file_digest_verified,true);
   assert.equal(s.artifact_path,m.artifact.path);assert.equal(s.artifact_sha256,m.artifact.sha256);assert.equal(s.artifact_bytes,m.artifact.bytes);
-  const parentPath=await outside(s.parent_receipt_path,...roots,{root:p.output});
+  const parentPath=await outside(s.parent_receipt_path,...roots,{root:p.assetStaging?.root??p.output});
   assert.ok(c.inputs.some(i=>i.role==='staging-receipt'&&i.path===s.parent_receipt_path&&i.sha256===s.parent_receipt_sha256),'full staging parent must be input-bound');
   const parent=await boundJSON(parentPath,s.parent_receipt_sha256,64*1024*1024);
-  assert.equal(parent.kind,'h3-finetune-stage-receipt');assert.equal(parent.version,1);assert.equal(parent.status,'completed');assert.equal(parent.proof_kind,'frozen_stage_content');assert.equal(parent.producer?.codeSha,p.sceneworks);assert.equal(await realpath(parent.settings.privateRoot),await realpath(p.output));
+  assert.equal(parent.kind,'h3-finetune-stage-receipt');assert.equal(parent.version,1);assert.equal(parent.status,'completed');assert.equal(parent.proof_kind,'frozen_stage_content');assert.equal(parent.producer?.codeSha,p.sceneworks);assert.equal(await realpath(parent.settings.privateRoot),await realpath(p.assetStaging?.root??p.output));
   const f=parent.files?.find(v=>v.finalPath===m.artifact.path);assert.ok(f,'artifact absent from staging parent');assert.equal(f.status,'completed');assert.equal(f.expectedBytes,m.artifact.bytes);assert.equal(f.actualBytes,m.artifact.bytes);assert.equal(f.expectedSha256,m.artifact.sha256);assert.equal(f.observedSha256,m.artifact.sha256);
   // Legal inputs are consumed as staged, never filled or inferred by this adapter.
   assert.ok(f.explicitAcknowledgment,'staging operator acknowledgment missing');return s;
@@ -141,11 +140,11 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
   try {
     const deadline=process.env.H3_CASE_DEADLINE_MS===undefined?Date.now()+c.timeoutSeconds*1000:Number(process.env.H3_CASE_DEADLINE_MS);
     const remaining=()=>{assert.ok(Number.isFinite(deadline)&&deadline>Date.now(),'case deadline expired');return Math.min(c.timeoutSeconds,(deadline-Date.now())/1000);};remaining();
-    if(!fake){authorized(p,c);assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch','actual probe is dispatch-only');await verifyEvidenceSource(p,swRoot,inferenceRoot);}
+    if(!fake){authorized(p,c);assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch','actual probe is dispatch-only');if(c.backend==='cuda'){assert.equal(process.env.CUDA_VISIBLE_DEVICES,'0','manual probe retains GPU zero');assert.equal(process.env.CUDA_DEVICE_ORDER,'PCI_BUS_ID');}await verifyEvidenceSource(p,swRoot,inferenceRoot);}
     await outside(dir,swRoot,inferenceRoot,{root:p.output});assert.equal(contract?.kind,'actual-artifact-probe');assert.ok(contract.noAV===true);
     const spec=await outside(contract.spec.path,swRoot,inferenceRoot,{root:p.output});assert.ok(c.inputs.some(i=>i.role==='actual-artifact-probe-spec'&&i.path===contract.spec.path&&i.sha256===contract.spec.sha256));
-    manifest=await boundJSON(spec,contract.spec.sha256,8*1024*1024);const names=validateProbeManifest(manifest,c.backend);receipt.artifact=manifest.artifact;receipt.staging=manifest.staging;
-    await outside(manifest.artifact.path,swRoot,inferenceRoot,{root:p.output});assert.ok(c.inputs.some(i=>i.role==='checkpoint'&&i.path===manifest.artifact.path&&i.sha256===manifest.artifact.sha256),'actual source must be a bound checkpoint');
+    manifest=await boundJSON(spec,contract.spec.sha256,8*1024*1024);if(!fake){const book=JSON.parse(await readFile(path.join(swRoot,'docs/testing/sc-26691-h3-cases.json'),'utf8')),expected=book.artifacts[c.probe==='pruned-artifact'?2:3];assert.equal(manifest.artifact.sha256,expected.expectedSha256,'probe must consume the declared frozen artifact');assert.equal(manifest.artifact.bytes,expected.expectedBytes);}const names=validateProbeManifest(manifest,c.backend);receipt.artifact=manifest.artifact;receipt.staging=manifest.staging;
+    await outside(manifest.artifact.path,swRoot,inferenceRoot,{root:p.assetStaging?.root??p.output});assert.ok(c.inputs.some(i=>i.role==='checkpoint'&&i.path===manifest.artifact.path&&i.sha256===manifest.artifact.sha256),'actual source must be a bound checkpoint');
     await stagingBinding(manifest,p,c,[swRoot,inferenceRoot]);
     receipt.nativeEvidence=structuredClone(p.nativeEvidence);receipt.productPin=p.inference;
     const expected=fake?FROZEN_PROVENANCE:await expectedProvenance(inferenceRoot);if(manifest.oracle?.producer_provenance)provenance(manifest.oracle.producer_provenance,expected);
@@ -153,9 +152,9 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
     const mini=path.join(dir,'selected-tensors.safetensors'),selection=await extractSelectedRanges(manifest,names,mini,{deadline});await save(path.join(dir,'selected-ranges.json'),selection);
     const working=path.join(dir,'probe-manifest.json'),oraclePath=path.join(dir,'cpu-oracle.json'),producerPath=path.join(dir,'producer-receipt.json'),receiptDir=path.join(dir,'native-receipts');await mkdir(receiptDir);
     const specBytes=await bounded(spec,8*1024*1024);assert.equal(digest(specBytes),contract.spec.sha256);await writeFile(working,specBytes,{flag:'wx'});await writeFile(path.join(dir,'producer-spec.json'),specBytes,{flag:'wx'});
-    const producerCommand=['python3','-I',path.join(inferenceRoot,'scripts/h3_actual_checkpoint_oracle.py'),'--spec',working,'--selected-tensors',mini,'--output',oraclePath,'--receipt',producerPath];
+    const producerCommand=['python3','-I','-B',path.join(inferenceRoot,'scripts/h3_actual_checkpoint_oracle.py'),'--spec',working,'--selected-tensors',mini,'--output',oraclePath,'--receipt',producerPath];
     if(c.actualArtifactProbe.referenceDir){const referenceRoot=await outside(contract.referenceDir,swRoot,inferenceRoot);const references=c.inputs.filter(i=>i.role==='reference'&&below(referenceRoot,path.resolve(i.path)));assert.ok(references.length,'local pinned reference sources must be input-bound');for(const input of references){const file=await outside(input.path,swRoot,inferenceRoot,{root:referenceRoot});sha(input.sha256);assert.equal(digest(await bounded(file,8*1024*1024)),input.sha256,'local pinned reference source digest mismatch');}producerCommand.push('--reference-dir',contract.referenceDir);}
-    const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${p.inference}-${c.backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{})};
+    const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${p.nativeEvidence.sha}-${c.backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{})};
     await runner(producerCommand,{cwd:inferenceRoot,env,logPath:path.join(dir,'producer.log'),timeoutSeconds:remaining()});
     const producer=await json(producerPath),oracleBytes=await bounded(oraclePath,256*1024*1024),oracle=JSON.parse(oracleBytes.toString('utf8'));assert.equal(producer.spec_sha256,digest(await bounded(working,8*1024*1024)));provenance(oracle.producer_provenance,expected);
     assert.equal(producer.status,'ok','producer did not succeed');provenance(producer.producer_provenance,expected);assert.equal(producer.selected_tensors_sha256,await hashFile(mini),'producer did not bind exact selected mini');
@@ -164,7 +163,7 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
     let nativeError;try{await runner(command,{cwd:inferenceRoot,env:{...env,H3_ACTUAL_PROBE_MANIFEST:working,H3_ACTUAL_PROBE_RECEIPT_DIR:receiptDir},logPath:path.join(dir,'native.log'),timeoutSeconds:remaining()});}catch(error){nativeError=error;}
     const native=await Promise.all(manifest.cases.map(k=>json(path.join(receiptDir,`${manifest.backend}.${k.id}.json`),256*1024*1024)));
     for(const n of native){assert.equal(n.manifest_path,working);assert.equal(n.manifest_sha256,digest(await bounded(working,8*1024*1024)));}
-    const cases=mergeProbeReceipts(manifest,producer,oracle,native,selection,expected).map(value=>campaignCase(p,value,authority));receipt={...receipt,manifest,producerCommand,nativeCommand:command,cases,status:cases.every(r=>r.pass)&&!nativeError?'PASS':'FAIL',pass:cases.every(r=>r.pass)&&!nativeError};
+    const cases=mergeProbeReceipts(manifest,producer,oracle,native,selection,expected).map(value=>campaignCase(p,value,authority));receipt={...receipt,manifest,manifestPath:working,producerCommand,nativeCommand:command,cases,status:cases.every(r=>r.pass)&&!nativeError?'PASS':'FAIL',pass:cases.every(r=>r.pass)&&!nativeError};
     const log=await readFile(path.join(dir,'native.log'),'utf8');assert.equal(executedTests(log),1,'ignored native selector must actually pass exactly once');assert.ok(!/\bSKIP\b/.test(log));if(nativeError)throw nativeError;assert.equal(receipt.pass,true,'actual probe failed or CPU fallback is not device proof');remaining();
     if(!fake)await verifyEvidenceSource(p,swRoot,inferenceRoot);
   }catch(error){receipt.status='FAIL';receipt.pass=false;receipt.refusal={code:'actual_artifact_probe_refused',detail:error.message};if(!receipt.cases.length)receipt.cases=(manifest?.cases??[{id:c.id}]).map(k=>({case_id:k.id,kind:k.kind,status:'FAIL',pass:false,device_proof:false,productPin:p.inference,nativeEvidence:structuredClone(p.nativeEvidence),refusal:receipt.refusal}));await save(path.join(dir,receiptName),receipt);throw error;}
@@ -182,7 +181,7 @@ export async function verifyActualArtifactProbe(p,c,dir,{allowUnitFake=false,con
   const producer=await json(path.join(dir,'producer-receipt.json'));assert.equal(producer.spec_sha256,digest(await bounded(path.join(dir,'producer-spec.json'),8*1024*1024)));
   const oracle=await boundJSON(path.join(dir,'cpu-oracle.json'),manifest.oracle.sha256,256*1024*1024),selection=await json(path.join(dir,'selected-ranges.json')),native=await Promise.all(manifest.cases.map(k=>json(path.join(dir,`native-receipts/${manifest.backend}.${k.id}.json`),256*1024*1024)));
   assert.deepEqual(receipt.nativeEvidence,p.nativeEvidence);assert.equal(receipt.productPin,p.inference);provenance(manifest.oracle.producer_provenance,FROZEN_PROVENANCE);
-  for(const n of native){assert.equal(n.manifest_path,path.join(dir,'probe-manifest.json'));assert.equal(n.manifest_sha256,digest(await bounded(path.join(dir,'probe-manifest.json'),8*1024*1024)));}
+  for(const n of native){assert.equal(n.manifest_path,receipt.manifestPath);assert.equal(n.manifest_sha256,digest(await bounded(path.join(dir,'probe-manifest.json'),8*1024*1024)));}
   if(contentReadback)assert.deepEqual(await extractSelectedRanges(manifest,validateProbeManifest(manifest,c.backend)),selection,'selected source bytes changed since native proof');
   const authority=await readOracleAuthority(dir,{retained:true,unitFake:e.proof_kind==='unit_fake'&&allowUnitFake});
   const merged=mergeProbeReceipts(manifest,producer,oracle,native,selection,FROZEN_PROVENANCE).map(value=>campaignCase(p,value,authority));assert.ok(merged.every(r=>r.pass),'not all native probes passed on device');assert.deepEqual(receipt.cases,merged);
