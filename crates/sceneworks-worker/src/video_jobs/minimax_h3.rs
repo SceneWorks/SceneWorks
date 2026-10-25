@@ -1973,11 +1973,11 @@ pub(super) fn with_imported_h3_source_seals<T>(
     result
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(super) const H3_PREPARATION_CANCELED: &str =
     sceneworks_core::minimax_h3_load::H3_PREPARATION_CANCELED_MARKER;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(super) fn h3_preparation_checkpoint(cancel: &gen_core::CancelFlag) -> std::io::Result<()> {
     if cancel.is_cancelled() {
         Err(std::io::Error::new(
@@ -1991,7 +1991,7 @@ pub(super) fn h3_preparation_checkpoint(cancel: &gen_core::CancelFlag) -> std::i
 
 /// CPU preparation is cooperative, not an abortable GPU operation. The blocking closure owns
 /// every source/derivative lease; even an abandoned async owner cannot release a reader's leases.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(super) async fn supervise_h3_preparation<R, P, F>(
     cancel: gen_core::CancelFlag,
     task: tokio::task::JoinHandle<WorkerResult<R>>,

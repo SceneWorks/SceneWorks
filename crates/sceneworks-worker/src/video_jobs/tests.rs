@@ -1440,12 +1440,16 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         "the prepared source identity and native spec must reach the original request-aware \
          callback together, not an alternate cache route or an identity-free LoadSpec"
     );
+    let normalized_funnel = funnel.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         funnel.contains("h3_preparation_checkpoint(")
             && funnel.contains("input.imported_h3_authority.clone()")
-            && funnel.contains("verify_prepared_h3_component_closure("),
+            && normalized_funnel.contains(
+                "sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure_with_staging( &preparation_data_dir, &assembly, receipt.files(), &receipt.component_staging(), )",
+            ),
         "the checked preparation must carry the retained request state: the cancellation \
-         checkpoint, the imported source authority, and the frozen component-closure comparison"
+         checkpoint, the imported source authority, and the staging-aware frozen component-closure \
+         comparison over the acquired receipt files and staging authority"
     );
     assert_eq!(
         funnel.matches("(spec, prepared_h3_context),").count(),
