@@ -221,11 +221,22 @@ test("H3 dispatch queues are unique per run and leave old StarVector and ordinar
   const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
   const expression = workflowExpression(root, "group");
   const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
-  assert.ok(expression.includes(original), "old group-key expression remains byte-identical");
   assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
-  const evaluate = (event, operation, id) => Function("github", "inputs", "format", `return (${expression});`)(
-    { event_name: event, ref: "refs/heads/feature", run_id: id }, { starvector_terminal_operation: operation },
-    (template, value) => template.replace("{0}", value));
+  const evaluate = (event, operation, id, attempt = 1, selected = expression) => Function("github", "inputs", "format", `return (${selected});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation },
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]));
+  // Parentheses may change when a dispatch-only arm is removed. Preserve the actual legacy
+  // keys for every event instead of freezing a byte substring of the expression's formatting.
+  const legacy = ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "unknown", undefined];
+  for (const event of ["workflow_dispatch", "push", "pull_request", "merge_group", "schedule", undefined]) {
+    for (const operation of legacy) assert.equal(evaluate(event, operation, 10), evaluate(event, operation, 10, 1, original), `legacy queue changed: ${event}/${operation}`);
+    if (event !== "workflow_dispatch") for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof", "h3-ui-proof", "h3-terminal-mlx", "h3-terminal-cuda"]) assert.equal(evaluate(event, operation, 10), "starvector-terminal-bridge", "H3 queue isolation is positively manual");
+  }
+  for (const operation of ["h3-terminal-mlx", "h3-terminal-cuda"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10, 2), "h3-terminal-bridge-10-2");
+    assert.notEqual(evaluate("workflow_dispatch", operation, 10, 2), evaluate("workflow_dispatch", operation, 10, 3));
+  }
+  assert.equal(evaluate("workflow_dispatch", "h3-ui-proof", 10, 2), "h3-ui-hosted-10-2");
   for (const operation of ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", undefined]) {
     assert.equal(evaluate("workflow_dispatch", operation, 10), ["standard", ""].includes(operation) ? "server-candle-linux-refs/heads/feature" : "starvector-terminal-bridge");
   }
