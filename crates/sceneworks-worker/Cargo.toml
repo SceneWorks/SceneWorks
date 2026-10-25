@@ -58,6 +58,7 @@ tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "r
 uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
+sceneworks-core = { path = "../sceneworks-core", features = ["test-support"] }
 axum = "0.7"
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "1585120a63170b493789ffcaa97659b920a09960" }
 quote = "1.0"
@@ -73,6 +74,8 @@ tracing-subscriber = { workspace = true }
 sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 
 [features]
+# Synthetic CPU import fixtures shared with mounted API/real-utility-worker tests only.
+test-support = ["sceneworks-core/test-support"]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
 backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:candle-gen-ltx", "dep:ort"]

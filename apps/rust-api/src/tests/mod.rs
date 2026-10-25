@@ -8,6 +8,7 @@ mod compression;
 mod dataset_catalogs;
 #[cfg(feature = "embed-web")]
 mod embedded_web;
+mod import_repair;
 // `pub(crate)` so the sc-22714 review suite can drive the same in-process API + fake worker
 // instead of standing up a second one.
 pub(crate) mod film_harness;

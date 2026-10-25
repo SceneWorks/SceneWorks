@@ -3514,6 +3514,24 @@ pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
+    model_import_request(state, request, None).await
+}
+
+#[allow(clippy::result_large_err)]
+pub(crate) async fn repair_model_import_job(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+    request: AxumRequest,
+) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
+    model_import_request(state, request, Some(model_id)).await
+}
+
+#[allow(clippy::result_large_err)]
+async fn model_import_request(
+    state: AppState,
+    request: AxumRequest,
+    repair_model_id: Option<String>,
+) -> Result<(StatusCode, Json<JobSnapshot>), Response> {
     // sc-7081 (epic 7080): refuse before staging/queueing, covering both the JSON and
     // multipart entrypoints. The route stays mounted so a direct API client gets an
     // actionable 403 rather than a 404. See `model_import_enabled` for the rationale.
@@ -3533,7 +3551,7 @@ pub(crate) async fn create_model_import_job(
         let (payload, staged_path) = model_import_request_from_multipart(&state, multipart)
             .await
             .map_err(IntoResponse::into_response)?;
-        let result = queue_model_import_job(state, payload).await;
+        let result = queue_model_import_job(state, payload, repair_model_id).await;
         if result.is_err() {
             cleanup_staged_model_upload(&staged_path).await;
         }
@@ -3544,7 +3562,7 @@ pub(crate) async fn create_model_import_job(
         .await
         .map(|Json(payload)| payload)
         .map_err(json_rejection_response)?;
-    queue_model_import_job(state, payload)
+    queue_model_import_job(state, payload, repair_model_id)
         .await
         .map_err(IntoResponse::into_response)
 }
@@ -3981,7 +3999,41 @@ fn resolve_managed_variant_pin(payload: &mut ModelImportRequest) -> Result<(), A
 pub(crate) async fn queue_model_import_job(
     state: AppState,
     mut payload: ModelImportRequest,
+    repair_model_id: Option<String>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let repair = if let Some(model_id) = repair_model_id {
+        if payload.model_id.as_deref().is_some_and(|id| id != model_id) {
+            return Err(ApiError::bad_request(
+                "Repair modelId must match the selected model",
+            ));
+        }
+        if linked_checkpoint_selection(&payload)?.is_some() {
+            return Err(ApiError::bad_request(
+                "Linked originals use relink/rescan, not managed repair",
+            ));
+        }
+        let model = model_catalog(&state)
+            .await?
+            .into_iter()
+            .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+            .ok_or_else(|| ApiError {
+                status: StatusCode::NOT_FOUND,
+                detail: "The imported model to repair no longer exists".into(),
+                code: None,
+                context: None,
+            })?;
+        let binding = sceneworks_core::model_artifacts::provenance::managed_repair_binding(
+            &state.settings.data_dir,
+            model
+                .as_object()
+                .ok_or_else(|| ApiError::bad_request("Invalid imported model"))?,
+        )
+        .map_err(ApiError::bad_request)?;
+        payload.model_id = Some(model_id);
+        Some(binding)
+    } else {
+        None
+    };
     // A curated managed NVFP4 variant is identified by its `modelId`, and its pin is re-resolved
     // from the registry before anything else reads the body — so no client-supplied repo,
     // revision, file or (absent) checksum can record unverified bytes under that identity.
@@ -4141,12 +4193,22 @@ pub(crate) async fn queue_model_import_job(
         .into_iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
-    if existing_ids.contains(&model_id) {
+    if existing_ids.contains(&model_id) && repair.is_none() {
         return Err(ApiError::bad_request(format!(
-            "Model id '{model_id}' already exists. Pick a different id or delete the existing model first."
+            "Model id '{model_id}' already exists. Use its explicit repair operation to replace the selection."
         )));
     }
-    let target_name = safe_download_dir(&model_id);
+    // A repair never writes over the original installation. Publication changes one catalog
+    // selection atomically; old jobs/leases still name their exact original plan and bytes.
+    let target_name = if repair.is_some() {
+        format!(
+            "{}-repair-{}",
+            safe_download_dir(&model_id),
+            Uuid::new_v4().simple()
+        )
+    } else {
+        safe_download_dir(&model_id)
+    };
     // The install id the WORKER will use is the SANITIZED `target_name`, not the raw model id, and
     // it has to be a usable directory name before a job exists: the ingest resolves it through
     // `CheckpointPlanStore::install_dir`, which validates. Without this a caller-supplied `modelId`
@@ -4371,6 +4433,9 @@ pub(crate) async fn queue_model_import_job(
         Value::String(manifest_path.display().to_string()),
     );
     payload.insert("manifestEntry".to_owned(), manifest_entry);
+    if let Some(binding) = repair {
+        payload.insert("repairExpectedBinding".into(), binding);
+    }
     if let Some((base, rows, _)) = import_components {
         // sc-26687 / sc-26690: the SAME inherited-component gate at the DOWNLOAD boundary. Closing
         // only the generation door would still let an unacknowledged component's bytes land, so a

@@ -325,11 +325,16 @@ fn h3_duplicate_equivalence_preserves_declared_routing_and_unknown_history() {
         json!({
             "family":"minimax-h3", "baseModel":"minimax_h3", "minimaxH3Partition":"fl2va",
             "importQuantFormat":"native", "importComponentTier":"bf16",
+            "downloads":[{"repo":"fixture/components","revision":"1".repeat(40),"files":["tokenizer/tokenizer.json"]}],
         })
         .as_object()
         .unwrap(),
     )
     .unwrap();
+    let download = plan.context[MODEL_DECLARATION_KEY]["componentDownloads"][0].clone();
+    plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = json!([{
+        "download":download,"revision":"1".repeat(40),"files":[{"relativePath":"tokenizer/tokenizer.json","sizeBytes":2,"sha256":format!("sha256:{}","b".repeat(64))}]
+    }]);
     let reference = plan.plan_reference().unwrap();
     let original_json = plan.canonical_json().unwrap();
     let baseline = plan.duplicate_equivalence_digest().unwrap();

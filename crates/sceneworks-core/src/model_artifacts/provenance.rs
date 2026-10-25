@@ -71,15 +71,501 @@ pub fn import_declaration_context(
             semantics.insert(key.into(), value.clone());
         }
     }
+    let mut declaration = json!({
+        "schemaVersion":if h3 {2} else {1}, "baseLineage":lineage,
+        "declaredSemantics":semantics,
+        "inheritedLicenseAcknowledgments":normalized.get("inheritedLicenseAcknowledgments").cloned().unwrap_or_else(||json!([])),
+    });
+    if h3 {
+        declaration["componentDownloads"] = frozen_h3_component_downloads(entry)?;
+    }
     Ok(BTreeMap::from([(
         MODEL_DECLARATION_KEY.into(),
-        json!({
-            "schemaVersion": 1,
-            "baseLineage": lineage,
-            "declaredSemantics": semantics,
-            "inheritedLicenseAcknowledgments": normalized.get("inheritedLicenseAcknowledgments").cloned().unwrap_or_else(|| json!([])),
-        }),
+        declaration,
     )]))
+}
+
+/// Authenticate the existing selection without opening missing original bytes. Only the managed
+/// plan store may authorize repair; a path/model-ID match cannot turn linked or builtin weights
+/// into application-owned bytes. The binding is also the publication compare-and-swap token.
+pub fn managed_repair_binding(
+    data_dir: &Path,
+    entry: &Map<String, Value>,
+) -> Result<Value, String> {
+    let id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("repair selection has no ID")?;
+    if crate::builtin_manifests::builtin_model_entry(id).is_some() {
+        return Err("Builtin models cannot be replaced by a managed import".into());
+    }
+    let checkpoint = crate::jobs_store::checkpoint_plan_checkpoint_id(entry)
+        .ok_or("Only an existing managed checkpoint import can be repaired")?;
+    let store = CheckpointPlanStore::open(data_dir);
+    let record = store.record(checkpoint).map_err(|e| e.to_string())?;
+    let plan = store
+        .plan(checkpoint, &record.plan.plan_id)
+        .map_err(|e| e.to_string())?;
+    record
+        .validate_loaded_plan(&plan)
+        .map_err(|e| e.to_string())?;
+    let install = checkpoint
+        .strip_prefix("managed/")
+        .ok_or("Linked originals use relink/rescan, not managed repair")?;
+    let directory = store.install_dir(install).map_err(|e| e.to_string())?;
+    if plan.layers.iter().any(|layer| !matches!(&layer.source,
+        crate::checkpoint_import::SourceLocatorV1::Managed { install_id, .. } if install_id == install)) {
+        return Err("Repair selection does not own its original managed installation".into());
+    }
+    let supplied = entry
+        .get("paths")
+        .and_then(|v| v.get("model"))
+        .and_then(Value::as_str)
+        .ok_or("Repair selection has no managed installation path")?;
+    // Normalize only the parent of a missing install, never a source's filename/extension.
+    let normalized = |path: &Path| -> std::path::PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| {
+            path.parent()
+                .and_then(|parent| std::fs::canonicalize(parent).ok())
+                .zip(path.file_name())
+                .map(|(parent, name)| parent.join(name))
+                .unwrap_or_else(|| path.to_owned())
+        })
+    };
+    if normalized(Path::new(supplied)) != normalized(&directory) {
+        return Err("Repair selection does not match its managed installation".into());
+    }
+    let binding = entry
+        .get("importPlan")
+        .ok_or("Repair selection has no import plan")?;
+    if binding
+        .get("planId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id != plan.plan_id)
+        || binding
+            .get("semanticDigest")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id != record.plan.semantic_digest)
+    {
+        return Err("Repair selection has a stale import-plan binding".into());
+    }
+    Ok(
+        json!({"modelId":id,"importPlan":binding,"paths":entry.get("paths"),"source":entry.get("source")}),
+    )
+}
+
+/// Freeze the complete download declaration, not just its tier. Config-only provisioning is
+/// omitted because the actual configuration bytes/provenance live in transformerConfig.
+pub fn frozen_h3_component_downloads(entry: &Map<String, Value>) -> Result<Value, String> {
+    let mut rows: Vec<_> = entry
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| {
+            row.get("componentId").and_then(Value::as_str) != Some("import_transformer_config")
+        })
+        .cloned()
+        .collect();
+    for row in &rows {
+        let repo = row
+            .get("repo")
+            .and_then(Value::as_str)
+            .ok_or("component repository is missing")?;
+        let revision = row
+            .get("revision")
+            .and_then(Value::as_str)
+            .ok_or("component revision is missing")?;
+        crate::model_artifacts::ArtifactIdentity::pinned(
+            repo,
+            revision,
+            row.get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("component"),
+        )
+        .map_err(|e| e.to_string())?;
+        if row
+            .get("files")
+            .and_then(Value::as_array)
+            .is_none_or(Vec::is_empty)
+        {
+            return Err("component download has no file closure".into());
+        }
+    }
+    rows.sort_by_key(|row| serde_json::to_string(row).expect("JSON row"));
+    Ok(Value::Array(rows))
+}
+
+/// Expand only the frozen component rows in the existing approved source library. The caller
+/// hashes once while importing, under cancellation supervision; paths never enter semantic identity.
+pub fn h3_component_source_files(
+    data_dir: &Path,
+    entry: &Map<String, Value>,
+) -> Result<Vec<(Value, std::path::PathBuf, Vec<String>)>, String> {
+    let rows = frozen_h3_component_downloads(entry)?;
+    let rows = rows.as_array().expect("array");
+    if rows.is_empty() {
+        return Err(
+            "H3 component closure is missing; provision components and retry the import".into(),
+        );
+    }
+    let resolver = crate::model_artifacts::ModelArtifactResolver::new(
+        crate::hf_home::model_source_library(data_dir),
+    );
+    let mut result = Vec::new();
+    for row in rows {
+        let repo = row["repo"].as_str().expect("validated repo");
+        let revision = row["revision"].as_str().expect("validated revision");
+        let (_, snapshot) = resolver
+            .discover_source_snapshot(repo, Some(revision))
+            .map_err(|e| {
+                format!("component unavailable; finish component downloads and retry: {e}")
+            })?;
+        if !crate::minimax_h3_import::import_component_files_complete(&snapshot, row) {
+            return Err(format!(
+                "component {repo}@{revision} is incomplete; finish component downloads and retry"
+            ));
+        }
+        let mut files = std::collections::BTreeSet::new();
+        for pattern in row["files"].as_array().expect("validated files") {
+            let pattern = pattern.as_str().ok_or("invalid component file pattern")?;
+            // Globs are permitted, escapes and absolute paths are not.
+            crate::checkpoint_plan_store::portable_relative_path_parts(pattern)?;
+            let absolute = snapshot.join(pattern);
+            let mut matched = false;
+            for path in glob::glob(absolute.to_str().ok_or("non-UTF8 component path")?)
+                .map_err(|e| e.to_string())?
+            {
+                let path = path.map_err(|e| e.to_string())?;
+                if !path.is_file()
+                    || !path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|ext| {
+                            matches!(
+                                ext,
+                                "safetensors"
+                                    | "gguf"
+                                    | "json"
+                                    | "yaml"
+                                    | "yml"
+                                    | "model"
+                                    | "txt"
+                                    | "tiktoken"
+                            )
+                        })
+                {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(&snapshot)
+                    .map_err(|e| e.to_string())?
+                    .to_str()
+                    .ok_or("non-UTF8 component file")?
+                    .replace('\\', "/");
+                files.insert(relative);
+                matched = true;
+            }
+            if !matched {
+                return Err(format!(
+                    "component file {repo}:{pattern} is missing; finish downloads and retry"
+                ));
+            }
+        }
+        let files: Vec<_> = files.into_iter().collect();
+        // Discovery can select an approved local-preference snapshot rather than the primary
+        // library root. Confine links to THAT discovered repository, not a guessed cache path.
+        let repository_root = snapshot
+            .parent()
+            .and_then(Path::parent)
+            .ok_or("invalid component snapshot")?;
+        let library_root = repository_root
+            .parent()
+            .ok_or("invalid component library")?;
+        let names: Vec<_> = files.iter().map(String::as_str).collect();
+        crate::hf_repo_renames::validate_huggingface_snapshot_files(
+            library_root,
+            repository_root,
+            &snapshot,
+            &names,
+        )
+        .ok_or("component files escape their approved source-library repository")?;
+        result.push((row.clone(), snapshot, files));
+    }
+    Ok(result)
+}
+
+/// Structural validation at plan serialization/deserialization. Legacy declarations keep their
+/// old bytes; v2 must contain actual complete immutable content, never default unknowns to authority.
+pub(crate) fn validate_h3_component_declaration(declaration: &Value) -> Result<(), String> {
+    let downloads = declaration
+        .get("componentDownloads")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty())
+        .ok_or("missing frozen component downloads")?;
+    let closure = declaration
+        .get("componentClosure")
+        .and_then(Value::as_array)
+        .filter(|v| !v.is_empty())
+        .ok_or("missing frozen component content")?;
+    let normalized =
+        frozen_h3_component_downloads(json!({"downloads":downloads}).as_object().expect("object"))?;
+    if normalized != *declaration.get("componentDownloads").expect("checked")
+        || closure.len() != downloads.len()
+    {
+        return Err("noncanonical/incomplete frozen component closure".into());
+    }
+    for (download, member) in downloads.iter().zip(closure) {
+        if member.get("download") != Some(download)
+            || member.get("revision") != download.get("revision")
+        {
+            return Err("component content does not match its frozen revision/declaration".into());
+        }
+        let files = member
+            .get("files")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or("missing frozen component files")?;
+        let mut previous = None;
+        for file in files {
+            let path = file
+                .get("relativePath")
+                .and_then(Value::as_str)
+                .ok_or("missing frozen component path")?;
+            crate::checkpoint_plan_store::portable_relative_path_parts(path)?;
+            if previous.is_some_and(|old: &str| old >= path) {
+                return Err("component file paths must be uniquely sorted".into());
+            }
+            previous = Some(path);
+            if file.get("sizeBytes").and_then(Value::as_u64).is_none() {
+                return Err("missing frozen component size".into());
+            }
+            let digest = file
+                .get("sha256")
+                .and_then(Value::as_str)
+                .and_then(|s| s.strip_prefix("sha256:"))
+                .ok_or("missing frozen component digest")?;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err("invalid frozen component digest".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One import/rescan acquisition over the platform source closure, with bounded cooperative
+/// hashing and source leases. Observations are ephemeral; only revisions/content enter the plan.
+pub fn capture_h3_component_closure_with_check(
+    data_dir: &Path,
+    entry: &Map<String, Value>,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> Result<Value, String> {
+    use crate::checkpoint_plan_store::{SourceStampV1, StoreClockV1};
+    use crate::model_artifacts::{
+        ArtifactAvailability, ArtifactFile, ArtifactIdentity, ArtifactMemberRole,
+        ModelArtifactResolver, ResolvedBundleClosure, ResolvedBundleMember,
+    };
+    check().map_err(|e| e.to_string())?;
+    let sources = h3_component_source_files(data_dir, entry)?;
+    let resolver = ModelArtifactResolver::new(crate::hf_home::model_source_library(data_dir));
+    let mut observations = Vec::new();
+    let mut leases = Vec::new();
+    let mut closure = Vec::new();
+    for (row, snapshot, paths) in &sources {
+        check().map_err(|e| e.to_string())?;
+        let identity = ArtifactIdentity::pinned(
+            row["repo"].as_str().expect("validated"),
+            row["revision"].as_str().expect("validated"),
+            row.get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("component"),
+        )
+        .map_err(|e| e.to_string())?;
+        let bundle = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: row
+                .get("componentId")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            source: identity.clone(),
+            tier: row
+                .get("variant")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            source_subpath: "".into(),
+            destination: "".into(),
+            files: paths
+                .iter()
+                .map(ArtifactFile::new)
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?,
+        }])
+        .map_err(|e| e.to_string())?;
+        let artifact = resolver
+            .resolve_source(identity, bundle, ArtifactAvailability::Available)
+            .map_err(|e| e.to_string())?;
+        leases.push(
+            resolver
+                .acquire_runtime_lease(&std::sync::Arc::new(artifact))
+                .map_err(|e| e.to_string())?,
+        );
+        let mut files = Vec::new();
+        for relative in paths {
+            check().map_err(|e| e.to_string())?;
+            let path = snapshot.join(relative);
+            let before =
+                SourceStampV1::of(&path, StoreClockV1::SYSTEM).map_err(|e| e.to_string())?;
+            let target = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+            let hash = crate::checkpoint_plan_store::source_file_sha256_with_check(&path, check)
+                .map_err(|e| e.to_string())?;
+            files.push(json!({"relativePath":relative,"sha256":format!("sha256:{hash}"),"sizeBytes":before.size_bytes}));
+            observations.push((path, target, before));
+        }
+        closure.push(json!({"revision":row["revision"],"download":row,"files":files}));
+    }
+    for (path, target, before) in observations {
+        check().map_err(|e| e.to_string())?;
+        let after = SourceStampV1::of(&path, StoreClockV1::SYSTEM).map_err(|e| e.to_string())?;
+        if !before.identifies_same_entry(&after)
+            || std::fs::canonicalize(&path).map_err(|e| e.to_string())? != target
+        {
+            return Err("H3 component source changed while binding the assembly; retry after files are stable".into());
+        }
+    }
+    if h3_component_source_files(data_dir, entry)? != sources {
+        return Err("H3 component membership changed while binding the assembly; retry after files are stable".into());
+    }
+    check().map_err(|e| e.to_string())?;
+    Ok(json!(closure))
+}
+
+/// Compare already acquired component seals to the persisted assembly. No rehash and no fresh
+/// authority: a changed cache object, revision, or unconsumed commitment is a hard refusal.
+pub fn verify_prepared_h3_component_closure(
+    data_dir: &Path,
+    assembly: &Value,
+    files: &[gen_core::PinnedWeightsFile],
+) -> Result<(), String> {
+    let closure = assembly.get("componentClosure").and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+        .ok_or("historical H3 component content is unknown; explicitly repair/reimport or rescan before generation")?;
+    let resolver = crate::model_artifacts::ModelArtifactResolver::new(
+        crate::hf_home::model_source_library(data_dir),
+    );
+    fn logical_path(relative: &str) -> &str {
+        relative
+            .strip_prefix("q4/")
+            .or_else(|| relative.strip_prefix("q8/"))
+            .or_else(|| relative.strip_prefix("bf16/"))
+            .unwrap_or(relative)
+    }
+    let logical_files: Vec<_> = closure
+        .iter()
+        .filter_map(|row| row.get("files").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|file| file.get("relativePath").and_then(Value::as_str))
+        .map(logical_path)
+        .collect();
+    let mut committed_paths = std::collections::BTreeSet::new();
+    let mut snapshot_roots = std::collections::BTreeSet::new();
+    let mut acquired_component_dirs = std::collections::BTreeSet::new();
+    for member in closure {
+        let row = member
+            .get("download")
+            .ok_or("missing frozen component declaration")?;
+        let repo = row
+            .get("repo")
+            .and_then(Value::as_str)
+            .ok_or("missing component repo")?;
+        let revision = member
+            .get("revision")
+            .and_then(Value::as_str)
+            .ok_or("missing component revision")?;
+        if row.get("revision").and_then(Value::as_str) != Some(revision) {
+            return Err("component revision commitment is inconsistent".into());
+        }
+        let (_, snapshot) = resolver
+            .discover_source_snapshot(repo, Some(revision))
+            .map_err(|e| e.to_string())?;
+        snapshot_roots.insert(snapshot.clone());
+        for expected in member
+            .get("files")
+            .and_then(Value::as_array)
+            .filter(|v| !v.is_empty())
+            .ok_or("empty frozen component closure")?
+        {
+            let relative = expected
+                .get("relativePath")
+                .and_then(Value::as_str)
+                .ok_or("missing component path")?;
+            crate::checkpoint_plan_store::portable_relative_path_parts(relative)?;
+            let path = snapshot.join(relative);
+            committed_paths.insert(path.clone());
+            // Source-library snapshots and supported operator roots can be aliases of the same
+            // semantic component. Match its logical relative path, never ownership/root metadata.
+            let logical = logical_path(relative);
+            let candidates: Vec<_> = files
+                .iter()
+                .filter(|pin| {
+                    let matches = pin.loader_path() == path
+                        || pin.loader_path().ends_with(relative)
+                        || pin.loader_path().ends_with(logical)
+                        || pin.canonical_target_path().ends_with(relative);
+                    // The FL2VA source audio descriptor is distinct from audio_vae/config.json.
+                    // Choose the most-specific logical binding, never every matching suffix.
+                    matches
+                        && !logical_files.iter().any(|other| {
+                            other.len() > logical.len()
+                                && (pin.loader_path().ends_with(other)
+                                    || pin.canonical_target_path().ends_with(other))
+                        })
+                })
+                .collect();
+            if candidates.is_empty() {
+                return Err(format!(
+                    "frozen H3 component was not acquired: {}",
+                    path.display()
+                ));
+            }
+            for pin in candidates {
+                let digest = format!(
+                    "sha256:{}",
+                    pin.content_sha256()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
+                if expected.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
+                    return Err(format!(
+                        "H3 component content drift: {}; explicitly repair/reimport or rescan",
+                        pin.loader_path().display()
+                    ));
+                }
+                committed_paths.insert(pin.loader_path().to_owned());
+                if let Some(parent) = pin.loader_path().parent() {
+                    acquired_component_dirs.insert(parent.to_owned());
+                }
+            }
+        }
+    }
+    for pin in files {
+        if snapshot_roots
+            .iter()
+            .chain(acquired_component_dirs.iter())
+            .any(|root| pin.loader_path().starts_with(root))
+            && !committed_paths.contains(pin.loader_path())
+        {
+            return Err(format!(
+                "uncommitted H3 component was acquired: {}",
+                pin.loader_path().display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A portable, compact explanation of a validated immutable plan. The full configuration stays
@@ -101,9 +587,13 @@ pub fn checkpoint_model_provenance(plan: &ImportPlanV1, model_id: &str) -> Resul
         for key in [
             "baseLineage",
             "declaredSemantics",
+            "componentDownloads",
+            "componentClosure",
             "inheritedLicenseAcknowledgments",
         ] {
-            provenance[key] = declaration[key].clone();
+            if let Some(value) = declaration.get(key) {
+                provenance[key] = value.clone();
+            }
         }
     }
     if let Some(encoding) = plan.context.get("sourceEncoding") {
@@ -170,8 +660,46 @@ pub fn validate_entry_declaration(
     plan: &ImportPlanV1,
     entry: &Map<String, Value>,
 ) -> Result<(), String> {
+    if plan.family == crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY {
+        let declaration = plan.context.get(MODEL_DECLARATION_KEY).ok_or(
+            "historical H3 component content is unknown; explicitly repair/reimport or rescan",
+        )?;
+        if declaration.get("schemaVersion").and_then(Value::as_f64) != Some(2.0)
+            || declaration
+                .get("componentClosure")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+        {
+            return Err(
+                "historical H3 component content is unknown; explicitly repair/reimport or rescan"
+                    .into(),
+            );
+        }
+        let downloads = frozen_h3_component_downloads(entry)?;
+        if declaration.get("componentDownloads") != Some(&downloads) {
+            return Err("component downloads differ from the immutable import declaration; explicitly repair/reimport or rescan".into());
+        }
+        let closure = declaration["componentClosure"].as_array().expect("checked");
+        if closure
+            .iter()
+            .map(|member| member.get("download"))
+            .collect::<Vec<_>>()
+            != downloads
+                .as_array()
+                .expect("array")
+                .iter()
+                .map(Some)
+                .collect::<Vec<_>>()
+        {
+            return Err("component content closure does not cover the frozen downloads".into());
+        }
+    }
     if let Some(declaration) = plan.context.get(MODEL_DECLARATION_KEY) {
-        if declaration.get("schemaVersion").and_then(Value::as_f64) != Some(1.0) {
+        if !declaration
+            .get("schemaVersion")
+            .and_then(Value::as_f64)
+            .is_some_and(|version| version == 1.0 || version == 2.0)
+        {
             return Err("unsupported immutable model declaration".into());
         }
         for (path, key) in [
@@ -283,6 +811,226 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn managed_recovery_transaction_is_bound_but_never_changes_content_equivalence() {
+        use crate::checkpoint_import::ManagedProvenanceV1;
+        let linked = plan();
+        let mut managed = linked.clone();
+        let mut provenance = ManagedProvenanceV1::of_source("local-copy");
+        provenance.import_job_id = Some("original-job".into());
+        provenance.import_commitment = Some(format!("sha256:{}", "b".repeat(64)));
+        managed.layers[0].source = SourceLocatorV1::managed(
+            "owned-install",
+            "model.safetensors",
+            "a".repeat(64),
+            provenance.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            managed.semantic_digest().unwrap(),
+            linked.semantic_digest().unwrap()
+        );
+        assert_eq!(
+            managed.duplicate_equivalence_digest().unwrap(),
+            linked.duplicate_equivalence_digest().unwrap()
+        );
+        let bound = managed.source_binding_identity().unwrap();
+        let document = managed.canonical_json().unwrap();
+        let decoded: ImportPlanV1 = serde_json::from_str(&document).unwrap();
+        assert_eq!(decoded.source_binding_identity().unwrap(), bound);
+        provenance.import_job_id = Some("unrelated-job".into());
+        managed.layers[0].source = SourceLocatorV1::managed(
+            "owned-install",
+            "model.safetensors",
+            "a".repeat(64),
+            provenance.clone(),
+        )
+        .unwrap();
+        assert_ne!(managed.source_binding_identity().unwrap(), bound);
+        assert_eq!(
+            managed.semantic_digest().unwrap(),
+            linked.semantic_digest().unwrap()
+        );
+        provenance.import_commitment = None;
+        assert!(
+            provenance.validate().is_err(),
+            "half-present legacy fields cannot invent authority"
+        );
+        let old: ManagedProvenanceV1 =
+            serde_json::from_value(json!({"source":"legacy-import"})).unwrap();
+        assert!(old.import_job_id.is_none() && old.import_commitment.is_none());
+        assert_eq!(
+            serde_json::to_value(old).unwrap(),
+            json!({"source":"legacy-import"})
+        );
+    }
+
+    fn frozen_h3_plan() -> (ImportPlanV1, Map<String, Value>) {
+        let mut plan = plan();
+        plan.family = "minimax-h3".into();
+        let entry = json!({"family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4",
+            "downloads":[{"provider":"huggingface","repo":"fixture/components","revision":"1111111111111111111111111111111111111111","files":["tokenizer/tokenizer.json"]}]}).as_object().unwrap().clone();
+        plan.context = import_declaration_context(&entry).unwrap();
+        let rows = frozen_h3_component_downloads(&entry).unwrap();
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = json!([{"download":rows[0],"revision":rows[0]["revision"],"files":[{"relativePath":"tokenizer/tokenizer.json","sizeBytes":2,"sha256":format!("sha256:{}","a".repeat(64))}]}]);
+        (plan, entry)
+    }
+
+    #[test]
+    fn component_revisions_and_bytes_are_immutable_replay_identity() {
+        let (plan, entry) = frozen_h3_plan();
+        validate_entry_declaration(&plan, &entry).unwrap();
+        let baseline = plan.semantic_digest().unwrap();
+        let provenance = checkpoint_model_provenance(&plan, "selection").unwrap();
+        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/schemas/model-manifest.schema.json");
+        let schema: Value = serde_json::from_slice(&std::fs::read(schema_path).unwrap()).unwrap();
+        let validator = jsonschema::validator_for(
+            &json!({"$defs":schema["$defs"],"$ref":"#/$defs/modelProvenance"}),
+        )
+        .unwrap();
+        assert!(
+            validator.is_valid(&provenance),
+            "full component authority round-trips on the public output schema"
+        );
+        assert_eq!(
+            provenance["componentClosure"],
+            plan.context[MODEL_DECLARATION_KEY]["componentClosure"]
+        );
+        let mut changed_revision = entry.clone();
+        changed_revision["downloads"][0]["revision"] = json!("2".repeat(40));
+        assert!(validate_entry_declaration(&plan, &changed_revision)
+            .unwrap_err()
+            .contains("downloads differ"));
+        let mut changed_bytes = plan.clone();
+        changed_bytes
+            .context
+            .get_mut(MODEL_DECLARATION_KEY)
+            .unwrap()["componentClosure"][0]["files"][0]["sha256"] =
+            json!(format!("sha256:{}", "b".repeat(64)));
+        assert_ne!(baseline, changed_bytes.semantic_digest().unwrap());
+        // Complete source/declaration topology is bound, not a selected handful of component IDs.
+        let mut additional = entry;
+        additional["downloads"].as_array_mut().unwrap().push(json!({"repo":"fixture/companion","revision":"3".repeat(40),"files":["transformer_ref/model.safetensors"]}));
+        assert!(validate_entry_declaration(&plan, &additional).is_err());
+    }
+
+    #[test]
+    fn unknown_legacy_h3_content_cannot_gain_immutable_authority_by_serde_default() {
+        let (mut plan, entry) = frozen_h3_plan();
+        plan.context
+            .get_mut(MODEL_DECLARATION_KEY)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("componentClosure");
+        assert!(
+            plan.canonical_json().is_err(),
+            "v2 cannot serialize unknown content as immutable authority"
+        );
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["schemaVersion"] = json!(1);
+        let decoded: ImportPlanV1 = serde_json::from_str(&plan.canonical_json().unwrap()).unwrap();
+        assert!(validate_entry_declaration(&decoded, &entry)
+            .unwrap_err()
+            .contains("content is unknown"));
+        plan.context.clear();
+        assert!(validate_entry_declaration(&plan, &entry)
+            .unwrap_err()
+            .contains("content is unknown"));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn component_acquisition_refuses_drift_extra_files_and_cancellation_without_adopting_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let hub = dir.path().join("hub");
+        let _guard = crate::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        let (mut plan, mut entry) = frozen_h3_plan();
+        entry["downloads"][0]["files"] = json!(["tokenizer/*.json"]);
+        let snapshot = hub
+            .join("models--fixture--components/snapshots")
+            .join("1".repeat(40));
+        let file = snapshot.join("tokenizer/tokenizer.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"{}").unwrap();
+        let closure = capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap();
+        plan.context = import_declaration_context(&entry).unwrap();
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = closure.clone();
+        let baseline = plan.semantic_digest().unwrap();
+        let assembly = json!({"componentClosure":closure});
+        let first = gen_core::PinnedWeightsFile::pin(&file).unwrap();
+        verify_prepared_h3_component_closure(&data, &assembly, &[first]).unwrap();
+        let canceled = capture_h3_component_closure_with_check(&data, &entry, &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "canceled",
+            ))
+        });
+        assert!(canceled.unwrap_err().contains("canceled"));
+        assert_eq!(
+            plan.semantic_digest().unwrap(),
+            baseline,
+            "cancellation cannot mutate persisted authority"
+        );
+        std::fs::write(&file, b"[]").unwrap();
+        let replacement = gen_core::PinnedWeightsFile::pin(&file).unwrap();
+        assert!(verify_prepared_h3_component_closure(
+            &data,
+            &assembly,
+            std::slice::from_ref(&replacement)
+        )
+        .unwrap_err()
+        .contains("content drift"));
+        let explicit = capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap();
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = explicit.clone();
+        assert_ne!(
+            plan.semantic_digest().unwrap(),
+            baseline,
+            "explicit rescan/reimport is a NEW replay identity"
+        );
+        let extra_path = snapshot.join("tokenizer/new.json");
+        std::fs::write(&extra_path, b"{}").unwrap();
+        let extra = gen_core::PinnedWeightsFile::pin(extra_path).unwrap();
+        assert!(verify_prepared_h3_component_closure(
+            &data,
+            &json!({"componentClosure":explicit}),
+            &[replacement, extra]
+        )
+        .unwrap_err()
+        .contains("uncommitted"));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn prepared_component_matching_distinguishes_audio_vae_from_nested_source_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let hub = dir.path().join("hub");
+        let _guard = crate::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        let (_, mut entry) = frozen_h3_plan();
+        entry["downloads"][0]["files"] =
+            json!(["audio_vae/config.json", "FL2VA/audio_vae/config.json"]);
+        let snapshot = hub
+            .join("models--fixture--components/snapshots")
+            .join("1".repeat(40));
+        let paths = [
+            snapshot.join("audio_vae/config.json"),
+            snapshot.join("FL2VA/audio_vae/config.json"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("{{\"component\":{index}}}")).unwrap();
+        }
+        let closure = capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap();
+        let pins: Vec<_> = paths
+            .iter()
+            .map(|path| gen_core::PinnedWeightsFile::pin(path).unwrap())
+            .collect();
+        verify_prepared_h3_component_closure(&data, &json!({"componentClosure":closure}), &pins)
+            .unwrap();
     }
 
     #[test]
@@ -612,10 +1360,13 @@ mod tests {
             config_binding, stamp_imported_minimax_h3_entry, verify_entry_assembly,
             MiniMaxH3ImportAssembly,
         };
-        let mut plan = plan();
-        plan.family = "minimax-h3".into();
-        let mut entry = json!({"id":"my-import","family":"minimax-h3","baseModel":"minimax_h3_ref","minimaxH3Partition":"ref2va"}).as_object().unwrap().clone();
+        let (mut plan, mut entry) = frozen_h3_plan();
+        entry.insert("id".into(), json!("my-import"));
+        entry.insert("baseModel".into(), json!("minimax_h3_ref"));
+        entry.insert("minimaxH3Partition".into(), json!("ref2va"));
+        let closure = plan.context[MODEL_DECLARATION_KEY]["componentClosure"].clone();
         plan.context = import_declaration_context(&entry).unwrap();
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = closure;
         plan.context.insert(
             "transformerConfig".into(),
             config_binding(

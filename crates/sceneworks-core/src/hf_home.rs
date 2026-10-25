@@ -82,6 +82,18 @@ pub mod test_support {
     pub struct CacheRootGuard(PathBuf);
 
     impl CacheRootGuard {
+        /// A shared fixture may be nested in an API fixture that already owns its private root.
+        /// Keep that owner's mapping, otherwise install a scoped private root atomically.
+        pub fn new_if_unregistered(data_dir: PathBuf, hub: PathBuf) -> Option<Self> {
+            assert!(data_dir.is_absolute() && hub.is_absolute());
+            let mut roots = roots().lock();
+            if roots.contains_key(&data_dir) {
+                return None;
+            }
+            roots.insert(data_dir.clone(), hub);
+            Some(Self(data_dir))
+        }
+
         pub fn new(data_dir: PathBuf, hub: PathBuf) -> Self {
             assert!(data_dir.is_absolute() && hub.is_absolute());
             let mut roots = roots().lock();

@@ -5871,6 +5871,70 @@ async fn import_plan_context(
     job: &JobSnapshot,
     source: &Path,
 ) -> WorkerResult<std::collections::BTreeMap<String, Value>> {
+    let mut context = import_plan_context_configuration(api, settings, job, source).await?;
+    let Some(entry) = job
+        .payload
+        .get("manifestEntry")
+        .and_then(Value::as_object)
+        .filter(|entry| {
+            sceneworks_core::minimax_h3_import::entry_requires_minimax_h3_family(entry)
+        })
+    else {
+        return Ok(context);
+    };
+    let entry = entry.clone();
+    let data_dir = settings.data_dir.clone();
+    let cancel = gen_core::CancelFlag::new();
+    let task_cancel = cancel.clone();
+    let span = tracing::info_span!("h3_import_component_acquisition", jobId = %job.id);
+    let task = tokio::task::spawn_blocking(move || {
+        let _span = span.enter();
+        let result =
+            sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
+                &data_dir,
+                &entry,
+                &|| {
+                    if task_cancel.is_cancelled() {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "H3 import component acquisition canceled",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+        if task_cancel.is_cancelled() {
+            return Err(WorkerError::Canceled(
+                "Model import canceled while binding components.".into(),
+            ));
+        }
+        result.map_err(WorkerError::InvalidPayload)
+    });
+    let closure = run_blocking_with_heartbeat(
+        api,
+        settings,
+        &job.id,
+        Some(cancel),
+        "Model import canceled while binding components.",
+        "H3 component closure",
+        None::<fn() -> std::future::Ready<WorkerResult<()>>>,
+        task,
+    )
+    .await?;
+    context
+        .get_mut(sceneworks_core::model_artifacts::provenance::MODEL_DECLARATION_KEY)
+        .ok_or_else(|| WorkerError::InvalidPayload("missing import declaration".into()))?
+        ["componentClosure"] = closure;
+    Ok(context)
+}
+
+async fn import_plan_context_configuration(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    source: &Path,
+) -> WorkerResult<std::collections::BTreeMap<String, Value>> {
     let entry = job.payload.get("manifestEntry").and_then(Value::as_object);
     let mut context = entry
         .map(sceneworks_core::model_artifacts::provenance::import_declaration_context)
@@ -5932,37 +5996,6 @@ async fn import_plan_context(
     let entry = entry.expect("checked");
     sceneworks_core::minimax_h3_import::MiniMaxH3Partition::from_entry(entry)
         .map_err(WorkerError::InvalidPayload)?;
-    let checkpoint_id = match (
-        optional_payload_string(&job.payload, "linkedRootId"),
-        optional_payload_string(&job.payload, "linkedRelativePath"),
-    ) {
-        (Some(root), Some(path)) => {
-            Some(sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(root, path))
-        }
-        _ => optional_payload_string(&job.payload, "modelId")
-            .map(sceneworks_core::checkpoint_plan_store::managed_checkpoint_id),
-    };
-    let plans = CheckpointPlanStore::open(&settings.data_dir);
-    if let Some(id) = checkpoint_id {
-        if let Ok(record) = plans.record(&id) {
-            let plan = plans
-                .plan(&id, &record.plan.plan_id)
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-            record
-                .validate_loaded_plan(&plan)
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-            if plan
-                .context
-                .get("transformerConfig")
-                .is_some_and(|b| b["provenance"]["kind"] == "selected-base")
-                && sceneworks_core::minimax_h3_import::bound_config(&plan.context)
-                    .map_err(WorkerError::InvalidPayload)?
-                    .is_some()
-            {
-                return Ok(plan.context);
-            }
-        }
-    }
     let rows: Vec<_> = entry
         .get("downloads")
         .and_then(Value::as_array)
@@ -6083,6 +6116,7 @@ async fn run_linked_checkpoint_import_job(
     .await
     {
         Ok(context) => context,
+        Err(error @ WorkerError::Canceled(_)) => return Err(error),
         Err(error) => {
             return fail_job(
                 api,
@@ -6293,6 +6327,8 @@ fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<Managed
         version_id: field("versionId"),
         file_id: field("fileId"),
         credential_host: field("credentialHost"),
+        import_job_id: None,
+        import_commitment: None,
     };
     provenance
         .validate()
@@ -6339,8 +6375,67 @@ fn managed_staged_relative_path(staging_dir: &Path, file: &Path) -> WorkerResult
     Ok(parts.join("/"))
 }
 
-/// Resume the commit→manifest publication boundary after a process interruption. Only the SAME
-/// job's sealed H3 install is recoverable; another job's install is never overwritten or removed.
+/// Resume only an unchanged import's authenticated retry lineage. Neither caller-supplied
+/// source_job_id nor destination equality is authority to adopt another transaction's bytes.
+async fn authenticate_import_recovery(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    marker: &Value,
+) -> WorkerResult<bool> {
+    let Some(owner) = marker.get("jobId").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let commitment = crate::imports::model_import_commitment(&job.payload);
+    if marker.get("importCommitment").and_then(Value::as_str) != Some(commitment.as_str()) {
+        return Err(WorkerError::InvalidPayload(
+            "Committed import request changed; retry cannot adopt this installation".into(),
+        ));
+    }
+    // Even the original ID must still be owned by this worker. A stale snapshot is not recovery
+    // authority; read ancestry from the authenticated control plane, never a mutable payload.
+    let mut current: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+    if current.id != job.id
+        || current.worker_id.as_deref() != Some(api.worker_id.as_str())
+        || matches!(
+            current.status,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        )
+    {
+        return Ok(false);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..64 {
+        if !seen.insert(current.id.clone())
+            || current.job_type != JobType::ModelImport
+            || current.project_id != job.project_id
+            || crate::imports::model_import_commitment(&current.payload) != commitment
+        {
+            return Ok(false);
+        }
+        if current.id == owner {
+            return Ok(true);
+        }
+        let Some(parent) = current.source_job_id.as_deref() else {
+            return Ok(false);
+        };
+        // IDs are server-generated, but do not interpolate an arbitrary persisted path.
+        if parent.is_empty()
+            || !parent
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Ok(false);
+        }
+        let previous: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{parent}")).await?;
+        if previous.attempts.checked_add(1) != Some(current.attempts) {
+            return Ok(false);
+        }
+        current = previous;
+    }
+    Ok(false)
+}
+
+/// Resume the commit→manifest publication boundary without overwriting unrelated installations.
 async fn recover_committed_h3_import(
     api: &ApiClient,
     settings: &Settings,
@@ -6352,11 +6447,12 @@ async fn recover_committed_h3_import(
         Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
         Err(_) => None,
     };
-    let Some(marker) = marker
-        .filter(|marker| marker.get("jobId").and_then(Value::as_str) == Some(job.id.as_str()))
-    else {
+    let Some(marker) = marker else {
         return Ok(false);
     };
+    if !authenticate_import_recovery(api, job, &marker).await? {
+        return Ok(false);
+    }
     if marker.get("modelId") != job.payload.get("modelId") {
         return Err(WorkerError::InvalidPayload(
             "Recovered import marker names a different model".into(),
@@ -6368,6 +6464,14 @@ async fn recover_committed_h3_import(
     let resolved = store
         .resolve(&checkpoint_id)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let owner = marker.get("jobId").and_then(Value::as_str);
+    let commitment = marker.get("importCommitment").and_then(Value::as_str);
+    if resolved.plan.layers.iter().any(|layer| !matches!(&layer.source,
+        sceneworks_core::checkpoint_import::SourceLocatorV1::Managed { install_id: owner_install, provenance, .. }
+        if owner_install == &install_id && provenance.import_job_id.as_deref() == owner
+            && provenance.import_commitment.as_deref() == commitment)) {
+        return Err(WorkerError::InvalidPayload("Committed import marker does not match immutable installation ownership; explicitly reimport".into()));
+    }
     if resolved.plan.family != MINIMAX_H3_IMPORT_FAMILY {
         return Ok(false);
     }
@@ -6431,7 +6535,18 @@ async fn recover_committed_h3_import(
     )
     .await?;
     let manifest = model_manifest_target(settings, &job.payload)?;
-    upsert_manifest_entry(&manifest, "models", entry).await?;
+    sceneworks_core::model_artifacts::provenance::validate_entry_declaration(
+        &resolved.plan,
+        &entry,
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    crate::manifest::publish_model_import_manifest(
+        &manifest,
+        &settings.data_dir,
+        entry,
+        job.payload.get("repairExpectedBinding"),
+    )
+    .await?;
     update_job(
         api,
         &job.id,
@@ -6513,7 +6628,9 @@ pub(crate) async fn run_model_import_job(
     if target_dir.exists() && recover_committed_h3_import(api, settings, job, &target_dir).await? {
         return Ok(());
     }
-    let provenance = managed_provenance_from_payload(&job.payload)?;
+    let mut provenance = managed_provenance_from_payload(&job.payload)?;
+    provenance.import_job_id = Some(job.id.clone());
+    provenance.import_commitment = Some(crate::imports::model_import_commitment(&job.payload));
     let ingest = match ManagedIngest::begin(&plan_store, &install_id, provenance) {
         Ok(ingest) => ingest,
         Err(error) => {
@@ -6892,6 +7009,7 @@ pub(crate) async fn run_model_import_job(
     .await
     {
         Ok(context) => context,
+        Err(error @ WorkerError::Canceled(_)) => return Err(error),
         Err(error) => {
             return fail_job(
                 api,
@@ -7094,7 +7212,14 @@ pub(crate) async fn run_model_import_job(
             return Err(error);
         }
         let manifest_path = model_manifest_target(settings, &job.payload)?;
-        if let Err(error) = upsert_manifest_entry(&manifest_path, "models", manifest_entry).await {
+        if let Err(error) = crate::manifest::publish_model_import_manifest(
+            &manifest_path,
+            &settings.data_dir,
+            manifest_entry,
+            job.payload.get("repairExpectedBinding"),
+        )
+        .await
+        {
             plan_store
                 .remove_managed(&install.install_id)
                 .map_err(|rollback| {

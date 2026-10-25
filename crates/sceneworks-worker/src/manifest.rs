@@ -54,6 +54,58 @@ pub(crate) async fn upsert_manifest_entry(
     .map_err(|error| task_join_error("manifest upsert", error))?
 }
 
+/// Publish an import with compare-and-swap semantics under the existing cross-process manifest
+/// lock. Repair replaces the selection, not arbitrary existing IDs; failure leaves it untouched.
+pub(crate) async fn publish_model_import_manifest(
+    path: &Path,
+    data_dir: &Path,
+    entry: serde_json::Map<String, Value>,
+    expected: Option<&Value>,
+) -> WorkerResult<()> {
+    let path = path.to_owned();
+    let data_dir = data_dir.to_owned();
+    let expected = expected.cloned();
+    tokio::task::spawn_blocking(move || {
+        let id = entry.get("id").and_then(Value::as_str).ok_or_else(|| WorkerError::InvalidPayload("import requires model ID".into()))?;
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        let _guard = ManifestLock::acquire(&path)?;
+        let mut manifest: Value = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&strip_jsonc_comments(&text))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"schemaVersion":1,"models":[]}),
+            Err(error) => return Err(error.into()),
+        };
+        let models = manifest.get_mut("models").and_then(Value::as_array_mut)
+            .ok_or_else(|| WorkerError::InvalidPayload("models manifest must contain an array".into()))?;
+        let current = models.iter().position(|model| model.get("id").and_then(Value::as_str) == Some(id));
+        let mut replacement = Value::Object(entry.clone());
+        match (current, expected.as_ref()) {
+            (Some(index), expected) => {
+                let old = models[index].as_object().ok_or_else(|| WorkerError::InvalidPayload("invalid existing model".into()))?;
+                // A replay after successful publication is idempotent only for the exact same
+                // persisted installation/plan, never just the same ID or display name.
+                let same_install = old.get("importPlan").is_some_and(|plan| entry.get("importPlan") == Some(plan))
+                    && old.get("paths").is_some_and(|paths| entry.get("paths") == Some(paths));
+                if same_install { return Ok(()); } // Preserve subsequent user metadata on replay.
+                {
+                    let actual = sceneworks_core::model_artifacts::provenance::managed_repair_binding(&data_dir, old)
+                        .map_err(WorkerError::InvalidPayload)?;
+                    if expected != Some(&actual) || expected.and_then(|v| v.get("modelId")).and_then(Value::as_str) != Some(id) {
+                        return Err(WorkerError::InvalidPayload("Import selection changed before repair publication; original selection was not modified".into()));
+                    }
+                    if old.get("paths") == entry.get("paths") {
+                        return Err(WorkerError::InvalidPayload("Repair must stage a separate managed installation".into()));
+                    }
+                }
+                if let Some(created) = old.get("createdAt") { replacement["createdAt"] = created.clone(); }
+                models[index] = replacement;
+            }
+            (None, Some(_)) => return Err(WorkerError::InvalidPayload("Repair selection was removed before publication".into())),
+            (None, None) => models.push(replacement),
+        }
+        write_json_value_blocking(&path, &manifest)
+    }).await.map_err(|error| task_join_error("import publication", error))?
+}
+
 /// Merge `entry` into an entry that ALREADY EXISTS in `collection_key`, and write
 /// nothing at all when its id is absent. Returns whether the merge landed.
 ///

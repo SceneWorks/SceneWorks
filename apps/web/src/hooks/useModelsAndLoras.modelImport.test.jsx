@@ -54,6 +54,20 @@ afterEach(async () => {
 });
 
 describe("createModelImportJob type-field contract (sc-14020)", () => {
+  it.each(["json", "multipart"])("submits %s managed repair to the original selection, not ordinary create", async (kind) => {
+    const metadata = { repairModelId: "original-selection", modelId: "original-selection", name: "Renamed replacement", type: "image" };
+    const payload = kind === "multipart" ? { ...metadata, file: new File(["fixture"], "replacement.safetensors") }
+      : { ...metadata, source: { kind: "url", url: "https://example.test/replacement.safetensors" } };
+    await act(async () => { await hookApi.createModelImportJob(payload); });
+    const [path, , options] = apiFetchMock.mock.calls[0];
+    expect(path).toBe("/api/v1/models/original-selection/repair");
+    const body = kind === "multipart" ? Object.fromEntries(options.body.entries()) : JSON.parse(options.body);
+    expect(body.modelId).toBe("original-selection");
+    expect(body.name).toBe("Renamed replacement");
+    expect(body).not.toHaveProperty("repairModelId");
+    expect(body).not.toHaveProperty("repairExpectedBinding");
+    expect(body).not.toHaveProperty("licenseAcknowledged");
+  });
   it("multipart upload keys the type as `type` (the field the backend reads), never `modelType`", async () => {
     const file = new File([new Uint8Array([1, 2, 3])], "krea2-checkpoint.safetensors");
 
