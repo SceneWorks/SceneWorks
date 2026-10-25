@@ -3,7 +3,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
+import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 export { labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
@@ -425,7 +425,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     const generate = page.getByRole('button', { name: generateName, exact: true });
     requireThat(await generate.isEnabled(), 'frozen UI request is not runnable; inspect the retained screen');
     await click(generate, actions, generateName);
-    const network = await waitFor(page, observation, () => observation.submissions[0], 'actual UI did not submit the allocated image job');
+    const network = await waitFor(page, observation, async () => { if(observation.submissions[0])return observation.submissions[0];await acknowledgeRecipeChoice(page,actions);return observation.submissions[0]; }, 'actual UI did not submit the allocated image job');
     requireThat(network.status >= 200 && network.status < 300 && network.response?.id && observation.posts.length === 1, 'UI created other than one successful allocated job');
     let sourceUpload;
     if (route.shell === 'editor') {

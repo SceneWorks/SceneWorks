@@ -4,7 +4,7 @@ import { act } from 'react';
 import { click, setSelect } from './dom.js';
 const text=node=>(node?.textContent??'').replace(/\s+/g,' ').trim();
 const matches=(value,wanted,exact=true)=>wanted instanceof RegExp?wanted.test(value):exact?value===wanted:value.includes(wanted);
-const named=(node)=>node.getAttribute('aria-label')??text(node);
+const named=(node)=>node.getAttribute('aria-label')??(node.hasAttribute('aria-labelledby')?node.getAttribute('aria-labelledby').split(/\s+/).map(id=>text(node.ownerDocument.getElementById(id))).join(' '):text(node));
 const role=node=>node.getAttribute('role')??({BUTTON:'button',SELECT:'combobox',FIELDSET:'group',INPUT:node.type==='checkbox'?'checkbox':undefined}[node.tagName]);
 export function terminalBrowserDom(root) {
   const wrap=(query,description='root')=>{

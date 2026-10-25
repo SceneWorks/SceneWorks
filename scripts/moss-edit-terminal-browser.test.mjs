@@ -195,3 +195,8 @@ test('production control extraction remains frozen and latent guards use the sam
   assert.match(driver,/await select\(labelledSelect\(page,'Engine'\), engine/);
   assert.doesNotMatch(controls,/\bfetch\s*\(|\.request\.|\.route\s*\(|node:|process\./);
 });
+
+test('submission polling acknowledges only the real positive recipe choice before awaiting the actual POST',async()=>{
+  const source=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8');
+  assert.match(source,/await acknowledgeRecipeChoice\(page,actions\);return observation.submissions\[0\]/);
+});

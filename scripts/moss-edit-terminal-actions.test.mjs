@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { constants } from 'node:fs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm } from 'node:fs/promises';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -144,9 +145,18 @@ test('owned adapter negative states are real missing/corrupt bytes and restore e
   const corrupt=Buffer.from('actual corrupt bytes'),mutation=await adapterRefusalState(config,'corrupt-adapter',{adapterFile:file,corruptBytesBase64:corrupt.toString('base64'),corruptSha256:sha(corrupt)});assert.deepEqual(await readFile(resolve(config.hfHome,file)),corrupt);await mutation.restore();assert.deepEqual(await readFile(resolve(config.hfHome,file)),original);
   await assert.rejects(()=>adapterRefusalState(config,'missing-adapter',{adapterFile:'../shared'}));
 });
-test('private HF projection dereferences exact source bytes without changing shared inputs',async()=>{
-  const root=await temporary('packages'),source=resolve(root,'source'),run=resolve(root,'run'),bytes=Buffer.from('frozen model bytes');await mkdir(source);await writeFile(resolve(source,'weights'),bytes);
-  const config={root:run,hfHome:resolve(run,'hf'),packageSource:source,packageFiles:[{file:'weights',sha256:sha(bytes)}]};await isolatePackages(config);await writeFile(resolve(config.hfHome,'weights'),'owned negative state');assert.deepEqual(await readFile(resolve(source,'weights')),bytes);
+test('private HF projection independently owns exact dereferenced bytes and refuses existing targets',async t=>{
+  const root=await temporary('packages');t.after(()=>rm(root,{recursive:true,force:true}));const source=resolve(root,'source'),run=resolve(root,'run'),bytes=Buffer.from('frozen model bytes');await mkdir(source);await writeFile(resolve(source,'blob'),bytes);await symlink(resolve(source,'blob'),resolve(source,'weights'));
+  const config={root:run,hfHome:resolve(run,'hf'),packageSource:source,packageFiles:[{file:'weights',sha256:sha(bytes)}]},target=resolve(config.hfHome,'weights');await isolatePackages(config);
+  const info=await lstat(target),original=await lstat(resolve(source,'blob'));assert.equal(info.isFile(),true);assert.equal(info.isSymbolicLink(),false);assert.equal(info.nlink,1);assert.equal(info.size,bytes.length);assert.notEqual(info.ino,original.ino);assert.deepEqual(await readFile(target),bytes);assert.equal(sha(await readFile(target)),config.packageFiles[0].sha256);
+  await writeFile(target,'owned negative state');assert.deepEqual(await readFile(resolve(source,'blob')),bytes);
+  await assert.rejects(()=>isolatePackages(config),{code:'EEXIST'});assert.equal(await readFile(target,'utf8'),'owned negative state');assert.deepEqual(await readFile(resolve(source,'blob')),bytes);
+  await writeFile(target,bytes);await writeFile(resolve(source,'blob'),'changed shared fixture');assert.deepEqual(await readFile(target),bytes);await assert.rejects(()=>isolatePackages({...config,hfHome:resolve(root,'other/hf'),root:resolve(root,'other')}),/source package file differs/);
+});
+test('optional APFS clone flags retain exclusive creation and ordinary copy fallback on other devices/platforms',()=>{
+  assert.equal(projectionCopyFlags('darwin',1,1),constants.COPYFILE_EXCL|constants.COPYFILE_FICLONE);
+  for(const [platform,source,target]of [['darwin',1,2],['linux',1,1],['win32',1,1]])assert.equal(projectionCopyFlags(platform,source,target),constants.COPYFILE_EXCL);
+  assert.equal(projectionCopyFlags('darwin',1,1)&constants.COPYFILE_FICLONE_FORCE,0);
 });
 test('installer omits unavailable source adapter and refuses copying installed projections',async()=>{
   const root=await temporary('installed-projection'),source=resolve(root,'shared'),buildRoot=resolve(root,'build'),backbone=Buffer.from('exact backbone');

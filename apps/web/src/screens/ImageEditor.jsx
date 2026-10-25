@@ -1215,6 +1215,7 @@ export function ImageEditor() {
     requestedGpu,
     jobs,
     importAsset,
+    confirmWorkflowEmbeddingBeforeGeneration,
     purgeAsset,
     // App-level scratch-op survivor coordination (sc-8850). The editor stages an ephemeral
     // scratch asset per AI op; these let App purge it (and the result) even if the user
@@ -2937,6 +2938,11 @@ export function ImageEditor() {
       let scratch;
       let maskScratch = null;
       try {
+        // Share the durable recipe choice while retaining this scratch job's
+        // original transport and cleanup (no deferred library-retry callback).
+        if (endpoint === "/api/v1/image/jobs") {
+          if ((await confirmWorkflowEmbeddingBeforeGeneration()) === false || !mountedRef.current) return false;
+        }
         const staged =
           sourceFile ?? (layerSource === "composite" ? await workingImageToFile() : await activeLayerToFile());
         scratch = await importAsset(staged, { throwOnError: true });
@@ -2980,7 +2986,7 @@ export function ImageEditor() {
         return false;
       }
     },
-    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset, trackEditorScratchOp],
+    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, confirmWorkflowEmbeddingBeforeGeneration, token, purgeAsset, trackEditorScratchOp],
   );
   // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
   // stages a scratch image_segment job through this exact seam.

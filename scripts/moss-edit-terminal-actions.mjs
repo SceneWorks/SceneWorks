@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // sc-26757 native Actions controller. Imports are inert; only explicit CLI phases execute.
+import { constants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir, lstat, realpath, mkdtemp, unlink, rmdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir, lstat, realpath, mkdtemp, unlink, rmdir, stat, copyFile } from 'node:fs/promises';
 import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, basename } from 'node:path';
@@ -33,13 +34,14 @@ export function runtimeConfig(bundle,{sourceRoot,inferenceRoot,root,backend,buil
     workerId:`moss-${bundle.candidateId}-${backend}`,observationJournal:resolve(root,'journal-0.jsonl'),playwrightModule:resolve(root,'playwright/node_modules/playwright/index.mjs'),
     handoffRoot:resolve(root,'prior/handoff'),priorEvidenceRoot:resolve(root,'prior/evidence'),reviewRoot:resolve(root,'reviews')};
 }
+export const projectionCopyFlags=(platform,sourceDev,targetDev)=>constants.COPYFILE_EXCL|(platform==='darwin'&&sourceDev===targetDev?constants.COPYFILE_FICLONE:0);
 export async function isolatePackages(config,{omitAdapter=false,installedInventory=null}={}) {
   requireThat(config.hfHome===resolve(config.root,'hf')&&config.packageSource!==config.hfHome,'native jobs require their own HF projection; shared caches are read-only');
   requireThat(!installedInventory,'installed private HF must transfer ownership without copying');
   for(const item of config.packageFiles) {
     if(omitAdapter&&(config.editAdapterFiles??[]).includes(item.file))continue;
     const source=safePath(config.packageSource,item.file);requireThat((await fileIdentity(source)).sha256===item.sha256,'source package file differs from immutable input inventory');
-    const target=safePath(config.hfHome,item.file);await mkdir(dirname(target),{recursive:true,mode:0o700});await cp(source,target,{dereference:true,errorOnExist:true,force:false});
+    const target=safePath(config.hfHome,item.file);await mkdir(dirname(target),{recursive:true,mode:0o700});requireThat((await stat(source)).isFile(),'package projection source must be a regular file');await copyFile(source,target,projectionCopyFlags(process.platform,(await stat(source)).dev,(await stat(dirname(target))).dev));
   }
 }
 export function validatePackagePlan(config,manifest) {

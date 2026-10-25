@@ -17,6 +17,7 @@ export const OWNED_RUNS = Object.freeze([
   { run: '40163530825', candidate: 'sc-26752-final-r10', source: 'c17fd74650f2464427b30cea7669c7a284ea4a73', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40163530825-1-cuda', runtimeSha: '546808654e2a0d44d26a5d594b9e7c20961b2b9d947e900effdefdf9f8c2d625', cacheBinarySha256: '93dbe1db05a946517484539199b69927ebc4eb9bae3bab508ba2636529b81b97', metadataRequired: true },
   { run: '40167292776', candidate: 'sc-26752-final-r12', source: 'e6475176bf1cf07a46530adbe659aa0d6492c71a', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40167292776-1-cuda', runtimeSha: '47a25951ea0e1d6fd076802c2ca68421e36d90a296fa1813fc344e6d0a461355', cacheBinarySha256: '07cb4ef31caba2f875d6750c461715f880c79288201af88af11997e31809d69d', metadataRequired: true },
   { run: '40169818205', candidate: 'sc-26752-final-r13', source: 'ba6bdd824823f01f8c4dc435f9fad50f45f97893', inference: native, workspace: 'D:\\actions-runner\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40169818205-1-cuda', runtimeSha: '76554eb462c580cd6afa7b5102aaeaa434de85049fe1b6701fe7ba2347f6d61f', cacheBinarySha256: '09088a12b26968177adf5a6ead76b088be2f791e5756224497db4fb7d20cf8fd', metadataRequired: true },
+  { run: '40174802721', candidate: 'sc-26752-final-r14', source: '12e1b364360b43b28e864879be4c68bb28a696bc', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40174802721-1-cuda', runtimeSha: '4082f9c28ae31aee7dda8e850d04b197d7741a01edbc3856aa53ddac6ba8a532', cacheBinarySha256: 'ab36062090356912f9131654fa5c3ec87ed808f5e0fc0cbd32e388773edb75c2', metadataRequired: true },
 ].map(item => Object.freeze({ ...item, attempt: 1, root: item.root ?? path.join(item.workspace, `moss-build-${item.run}-1-cuda`) })));
 // Bigint identities are serialized as decimal strings; never round Windows file IDs.
 export function entryIdentity(info) {
@@ -147,7 +148,7 @@ export async function maintain(env, io) {
     const stop = await io.stopped(binding), hf = path.join(binding.root, 'hf');
     const inventory = validateTree(await io.inspect(hf), hf);
     let cache = null, cacheProbeError = null;
-    if (binding.run === '40155160639' || binding.run === '40163530825' || binding.run === '40167292776' || binding.run === '40169818205') {
+    if (binding.run === '40155160639' || binding.run === '40163530825' || binding.run === '40167292776' || binding.run === '40169818205' || binding.run === '40174802721') {
       try { cache = validateTree(await io.inspect(path.join(binding.root, 'target')), path.join(binding.root, 'target')); }
       catch (error) { cacheProbeError = String(error.message).slice(0, 200); } // Optional seed stays untouched.
     }
@@ -168,13 +169,13 @@ export async function maintain(env, io) {
     if(candidate.metadataRequired) {
       const metadata = validateHfObservation(await io.metadata(runtime), leaf, runtime);
       check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'owned HF metadata changed before cleanup');
-      io.report({stage:candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
+      io.report({stage:candidate.run==='40174802721'?'fixed-r14-readonly-metadata-before-hf-cleanup':candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
     }
     await io.remove(leaf); // Exact fixed HF leaf only; no root/cache/model-source wildcard.
     receipt.operations.push({ kind: 'remove-owned-hf', path: leaf, after: await io.volume() });
     io.report({ stage: 'hf-reclaimed', operation: receipt.operations.at(-1) });
   }
-  const original = receipt.candidates.find(item => item.run === '40169818205' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40167292776' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
+  const original = receipt.candidates.find(item => item.run === '40174802721' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40169818205' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40167292776' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
   if (original.cache?.exists) {
     await io.stopped(original);
     validateRuntime(original, await io.read(path.join(original.root, 'runtime.json')));
@@ -182,7 +183,7 @@ export async function maintain(env, io) {
     const dest = validateTree(await io.inspect(target), target);
     const freeBeforeCopy = await io.volume();
     // Completeness is a property of the projection, never of which target cache was selected.
-    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (['40163530825', '40167292776', '40169818205'].includes(item.run) && item.metadata?.completeProjection === true)));
+    const completeProjections = receipt.candidates.filter(item => item.inventory.exists && (['40145054879', '40152001538'].includes(item.run) || (['40163530825', '40167292776', '40169818205', '40174802721'].includes(item.run) && item.metadata?.completeProjection === true)));
     const projectionReserveBytes = Math.max(0, ...completeProjections.map(item => item.inventory.bytes));
     const rebuildReserveBytes = 4 * 1024 ** 3;
     const requiredFreeBytes = cacheInventory.bytes + projectionReserveBytes + rebuildReserveBytes;

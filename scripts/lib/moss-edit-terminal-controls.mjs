@@ -113,3 +113,16 @@ export async function configure(page, expected, kind, actions) {
   const adapter = page.getByText(/^Edit adapter: installed\./);
   await adapter.waitFor({ state: 'visible' }); actions.push({ at: now(), action: 'observe-installed-adapter', text: await adapter.innerText(), model: expected.model });
 }
+
+// This frozen campaign requires embedded portable recipes. Acknowledge only the
+// normal first-use product choice, through its actual positive UI action.
+export async function acknowledgeRecipeChoice(page,actions) {
+  const dialog=page.getByRole('dialog',{name:'Include the recipe in generated images?',exact:true});
+  if(!await dialog.count())return false;
+  requireThat(await dialog.count()===1,'ambiguous first-use recipe choice');
+  const error=dialog.getByRole('alert');
+  requireThat(!await error.count(),`recipe choice persistence failed${await error.count()?': '+await error.innerText():''}`);
+  const accept=dialog.getByRole('button',{name:'Ok, got it',exact:true});
+  if(!await accept.count()||!await accept.isEnabled())return false;
+  await click(accept,actions,'Include recipe in generated images: Ok, got it');return true;
+}
