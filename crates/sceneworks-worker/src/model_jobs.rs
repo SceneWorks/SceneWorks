@@ -6449,6 +6449,58 @@ fn managed_staged_relative_path(staging_dir: &Path, file: &Path) -> WorkerResult
     Ok(parts.join("/"))
 }
 
+/// Reusable claim fence: an old authenticated snapshot cannot authorize a later catalog mutation.
+pub(crate) fn validate_import_publication_claim(
+    worker_id: &str,
+    expected: &JobSnapshot,
+    current: &JobSnapshot,
+) -> WorkerResult<()> {
+    if current.cancel_requested {
+        return Err(WorkerError::Canceled(
+            "Model import canceled before publication.".into(),
+        ));
+    }
+    if current.id != expected.id
+        || current.job_type != JobType::ModelImport
+        || expected.job_type != JobType::ModelImport
+        || current.worker_id.as_deref() != Some(worker_id)
+        || !sceneworks_core::jobs_store::ACTIVE_STATUSES.contains(&current.status.as_str())
+        || current.attempts != expected.attempts
+        || current.project_id != expected.project_id
+        || current.source_job_id != expected.source_job_id
+        || crate::imports::model_import_commitment(&current.payload)
+            != crate::imports::model_import_commitment(&expected.payload)
+    {
+        return Err(WorkerError::InvalidPayload(
+            "Import claim changed or was interrupted before publication; no selection was modified"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn publish_claimed_model_import_manifest(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    path: &Path,
+    data_dir: &Path,
+    entry: JsonObject,
+    expected: Option<&Value>,
+) -> WorkerResult<()> {
+    let api = api.clone();
+    let job = job.clone();
+    let runtime = tokio::runtime::Handle::current();
+    crate::manifest::publish_model_import_manifest(path, data_dir, entry, expected, move || {
+        // Called on the publication blocking thread INSIDE the acquired manifest lock, not
+        // before the wait. The async API client remains on its owning runtime; no new listener.
+        runtime.block_on(async {
+            let current: JobSnapshot = api.get_json(&format!("/api/v1/jobs/{}", job.id)).await?;
+            validate_import_publication_claim(&api.worker_id, &job, &current)
+        })
+    })
+    .await
+}
+
 /// Resume only an unchanged import's authenticated retry lineage. Neither caller-supplied
 /// source_job_id nor destination equality is authority to adopt another transaction's bytes.
 async fn authenticate_import_recovery(
@@ -6614,7 +6666,9 @@ async fn recover_committed_h3_import(
         &entry,
     )
     .map_err(WorkerError::InvalidPayload)?;
-    crate::manifest::publish_model_import_manifest(
+    publish_claimed_model_import_manifest(
+        api,
+        job,
         &manifest,
         &settings.data_dir,
         entry,
@@ -7286,7 +7340,9 @@ pub(crate) async fn run_model_import_job(
             return Err(error);
         }
         let manifest_path = model_manifest_target(settings, &job.payload)?;
-        if let Err(error) = crate::manifest::publish_model_import_manifest(
+        if let Err(error) = publish_claimed_model_import_manifest(
+            api,
+            job,
             &manifest_path,
             &settings.data_dir,
             manifest_entry,

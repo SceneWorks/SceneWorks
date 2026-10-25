@@ -1270,6 +1270,8 @@ async fn spawn_tree_stub_with_bodies(
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
+    type ClaimedRows = Arc<Mutex<Option<(tempfile::TempDir, sceneworks_core::jobs_store::JobsStore)>>>;
+    type StubState = (Posts, ClaimedRows);
     let bodies: Arc<std::collections::HashMap<String, Vec<u8>>> =
         Arc::new(files.into_iter().collect());
     let tree = Arc::new(Value::Array(
@@ -1304,11 +1306,41 @@ async fn spawn_tree_stub_with_bodies(
             }
         }
     };
-    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+    async fn job_route(
+        State((_, claims)): State<StubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        if let Some((_, store)) = claims.lock().unwrap().as_ref() {
+            if let Ok(job) = store.get_job(&job_id) { return Json(job).into_response(); }
+        }
         Json(job_snapshot_json(&job_id, false)).into_response()
     }
+    async fn claim_fixture_job(
+        State((_, claims)): State<StubState>,
+        Json(job): Json<JobSnapshot>,
+    ) -> Response {
+        use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
+        assert_eq!(job.job_type, super::JobType::ModelImport);
+        let temp = tempfile::tempdir().unwrap();
+        let store = JobsStore::new(temp.path().join("claims.db"));
+        store.initialize().unwrap();
+        store.create_job_with_id(job.id.clone(), CreateJob {
+            job_type: job.job_type, project_id: job.project_id, project_name: job.project_name,
+            payload: job.payload, requested_gpu: job.requested_gpu, source_job_id: job.source_job_id,
+            duplicate_of_job_id: job.duplicate_of_job_id, attempts: job.attempts, initial_status: None,
+        }).unwrap();
+        let worker_id = job.worker_id.expect("fixture worker owns its claim");
+        store.register_worker(RegisterWorker {
+            worker_id: worker_id.clone(), gpu_id: "cpu".into(), gpu_name: None,
+            capabilities: vec![super::WorkerCapability::ModelImport], loaded_models: vec![], utilization: None,
+        }).unwrap();
+        let claimed = store.claim_next_job(&worker_id).unwrap().expect("actual fixture row is claimable");
+        assert_eq!(claimed.id, job.id);
+        *claims.lock().unwrap() = Some((temp, store));
+        Json(claimed).into_response()
+    }
     async fn progress_route(
-        State(posts): State<Posts>,
+        State((posts, _)): State<StubState>,
         axum::extract::Path(job_id): axum::extract::Path<String>,
         Json(body): Json<Value>,
     ) -> Response {
@@ -1330,11 +1362,12 @@ async fn spawn_tree_stub_with_bodies(
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
         .route("/api/v1/jobs/:job_id", get(job_route))
         .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route("/fixture/claimed-model-import", post(claim_fixture_job))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
             post(heartbeat_route),
         )
-        .with_state(posts.clone());
+        .with_state((posts.clone(), Arc::new(Mutex::new(None))));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener binds");
@@ -2151,6 +2184,19 @@ fn sha256_hex(path: &std::path::Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Hosted HTTP-fixture setup: create and claim a REAL JobsStore row before exercising the worker.
+/// The job GET route then returns that exact row, not a permissive generic lora-import snapshot.
+async fn run_claimed_model_import_fixture(
+    api: &ApiClient,
+    settings: &Settings,
+    client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> super::WorkerResult<()> {
+    let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
+    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)?;
+    super::model_jobs::run_model_import_job(api, settings, client, job).await
+}
+
 struct ManagedImportFixture {
     _temp: tempfile::TempDir,
     _cache: sceneworks_core::hf_home::test_support::CacheRootGuard,
@@ -2303,7 +2349,7 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .expect("a linked twin compiles");
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2425,7 +2471,7 @@ async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_regis
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2476,7 +2522,7 @@ async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2580,7 +2626,7 @@ async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2880,7 +2926,7 @@ async fn linked_family_preflight_refuses_before_components_without_invalidating_
     entry.insert("baseModel".into(),json!("minimax_h3"));
     entry.insert("minimaxH3Partition".into(),json!("fl2va"));
     // No resident/config rows: source mismatch must be conclusive BEFORE any component work.
-    super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+    run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
     let updates = posts.lock().unwrap();
     assert!(updates.iter().any(|update| update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains("family-mismatch") && error.contains("sdxl"))),"{updates:?}");
     assert!(!updates.iter().any(|update|update["status"]=="completed"));
@@ -2964,7 +3010,7 @@ async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_byt
             job.payload
                 .insert("linkedRelativePath".into(), json!("community.safetensors"));
         }
-        super::model_jobs::run_model_import_job(
+        run_claimed_model_import_fixture(
             &ApiClient::new(&fixture.settings),
             &fixture.settings,
             &reqwest::Client::new(),
@@ -3090,7 +3136,7 @@ async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports(
             job.payload
                 .insert("linkedRelativePath".into(), json!("community.safetensors"));
         }
-        super::model_jobs::run_model_import_job(
+        run_claimed_model_import_fixture(
             &ApiClient::new(&fixture.settings),
             &fixture.settings,
             &reqwest::Client::new(),
@@ -3150,7 +3196,7 @@ async fn h3_import_reports_missing_or_unresolvable_residents_without_publication
         };
         posts.lock().unwrap().clear();
         // Ok means the failure report was accepted, NOT that the import completed/published.
-        super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+        run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
         let updates = posts.lock().unwrap();
         let reason = if missing {"component unavailable"} else {"component closure is missing"};
         assert!(updates.iter().any(|update|update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains(reason))),"{updates:?}");
@@ -3210,7 +3256,7 @@ async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
     assert!(source.join("diffusion_pytorch_model.safetensors").is_file());
     std::fs::remove_dir(&fixture.manifest_path).unwrap();
     std::fs::write(&fixture.manifest_path, r#"{"schemaVersion":1,"models":[]}"#).unwrap();
-    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &job)
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
         .await
         .unwrap();
     assert!(fixture.manifest_entry().is_some());
@@ -3235,7 +3281,7 @@ async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchange
         .insert("linkedRelativePath".into(), json!("shared_h3"));
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
-    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &job)
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
         .await
         .unwrap();
     let original = fixture.manifest_entry().unwrap();
@@ -3248,7 +3294,7 @@ async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchange
         .as_object_mut()
         .unwrap()
         .remove("minimaxH3Partition");
-    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &job)
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
         .await
         .unwrap();
     {
@@ -3409,7 +3455,7 @@ async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision(
             job.payload
                 .insert("linkedRelativePath".into(), json!("community.safetensors"));
         }
-        super::model_jobs::run_model_import_job(
+        run_claimed_model_import_fixture(
             &ApiClient::new(&fixture.settings),
             &fixture.settings,
             &reqwest::Client::new(),
