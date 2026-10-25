@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan } from './moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -456,6 +456,18 @@ test('completed Mac hidden handoff supplement merges exact absent metadata and r
     await assert.rejects(()=>validateCompletedMlxHandoffSupplement(root,{...identity,artifactId:1}),/wrong original producer/);
     await writeFile(resolve(data,H27_HIDDEN_HANDOFF_FILES[0]),'tampered');
     await assert.rejects(()=>validateCompletedMlxHandoffSupplement(root,identity),/differs from completed manifest/);
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+test('cross-backend history saves both actual GET bodies before rejecting any changed authored field',async()=>{
+  const root=await temporary('history-readback');
+  try {
+    const rows=['quality-mlx-base-four','quality-mlx-sft-single'],originals=rows.map((rowId,index)=>({id:`job_${index}`,payload:{prompt:rowId,orderedReferences:[1,2,3,4]},result:{assetIds:[`asset_${index}`]}}));
+    for(let index=0;index<rows.length;index++)await save(resolve(root,'rows',rows[index],'terminal-job.json'),originals[index]);
+    const routes=[],api={request:async route=>{routes.push(route);const index=Number(route.slice(-1));return {...originals[index],payload:index===0?{...originals[index].payload,prompt:'changed on readback'}:originals[index].payload};}};
+    await assert.rejects(()=>authenticateCrossBackendHistory(api,root),/cross-backend history handoff changed/);
+    const retained=await json(resolve(root,'external/cross-backend-history-readback.json'));
+    assert.deepEqual(routes,['/api/v1/jobs/job_0','/api/v1/jobs/job_1']);
+    assert.equal(retained.comparisons.length,2);assert.equal(retained.comparisons[0].actual.payload.prompt,'changed on readback');assert.equal(retained.comparisons[0].payloadEqual,false);assert.equal(retained.comparisons[0].resultEqual,true);assert.equal(retained.comparisons[1].payloadEqual,true);
   } finally {await rm(root,{recursive:true,force:true});}
 });
 test('first bundle copies only exact fixed inputs, provenance and declared fixtures, then seals every byte',async()=>{

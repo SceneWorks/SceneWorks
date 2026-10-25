@@ -352,6 +352,17 @@ async function harness(config,args,label) {
   const prefix=config.continuation?.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:config.toolingRoot||config.continuation?'continuation-':'';
   await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
 }
+export async function authenticateCrossBackendHistory(api,evidenceRoot) {
+  const comparisons=[];
+  for(const rowId of ['quality-mlx-base-four','quality-mlx-sft-single']) {
+    const path=resolve(evidenceRoot,'rows',rowId,'terminal-job.json'),origin=await json(path);
+    const actual=await api.request(`/api/v1/jobs/${encodeURIComponent(origin.id)}`);
+    comparisons.push({rowId,originFile:await fileIdentity(path),actual,payloadEqual:canonical(actual.payload)===canonical(origin.payload),resultEqual:canonical(actual.result)===canonical(origin.result)});
+  }
+  await save(resolve(evidenceRoot,'external/cross-backend-history-readback.json'),{version:VERSION,name:'cross-backend-history-before-first-cuda-dispatch',comparisons});
+  requireThat(comparisons.every(item=>item.payloadEqual&&item.resultEqual),'cross-backend history handoff changed original authored job/result identities');
+  return comparisons;
+}
 function buildPaths(config) {
   const out=resolve(config.buildRoot,config.backend),binary=resolve(out,config.backend==='cuda'?'sceneworks-rust-api.exe':'sceneworks-rust-api');
   return {apiBinary:binary,workerBinary:binary,webPackage:resolve(out,'web.json'),packages:resolve(out,'packages.json'),toolchain:resolve(out,'toolchain.json')};
@@ -515,10 +526,7 @@ export async function executeBackend(config) {
     } else {
       config.guardRequests=await json(resolve(config.root,'evidence','resolved-guards.json'));
       const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);requireThat(project.id===config.projectId,'target API did not reopen the original transferred project identity');
-      for(const id of ['quality-mlx-base-four','quality-mlx-sft-single']) {
-        const origin=await json(resolve(config.root,'evidence','rows',id,'terminal-job.json')),actual=await stack.api.request(`/api/v1/jobs/${encodeURIComponent(origin.id)}`);
-        requireThat(canonical(actual.payload)===canonical(origin.payload)&&canonical(actual.result)===canonical(origin.result),'cross-backend history handoff changed original authored job/result identities');
-      }
+      await authenticateCrossBackendHistory(stack.api,resolve(config.root,'evidence'));
     }
     if(config.backend==='mlx'&&!continuing)for(const backend of ['mlx','cuda']) {
       const toolchain=await json(resolve(config.buildRoot,backend,'toolchain.json'));requireThat(toolchain.installation?.files?.length,'actual installer capture missing from native artifact');
