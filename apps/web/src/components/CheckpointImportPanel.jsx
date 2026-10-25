@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "./WorkerProgressCard.jsx";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes } from "../formatting.js";
@@ -12,6 +12,7 @@ import {
   MANAGED_SOURCE_CREDENTIAL_HOST,
   OWNERSHIP_CHOICES,
   OWNERSHIP_LINKED,
+  OWNERSHIP_MANAGED,
   approveLibraryRoot,
   describeRefusal,
   duplicateWarningText,
@@ -100,6 +101,7 @@ export function CheckpointImportPanel({
   onOpenSettings,
   compact = false,
   defaultOpen = false,
+  repairRequest = null,
   library = DEFAULT_LIBRARY,
   pickFolder = isDesktop ? () => tauriInvoke("choose_folder") : null,
   headingId = "checkpoint-import-heading",
@@ -147,6 +149,24 @@ export function CheckpointImportPanel({
     baseModel: "",
     minimaxH3Partition: "",
   });
+  const consumedRepairRequest = useRef(null);
+  useEffect(() => {
+    const model = repairRequest?.model;
+    if (!model || model.importedSource?.ownershipMode !== "managed" || consumedRepairRequest.current === repairRequest) return;
+    consumedRepairRequest.current = repairRequest;
+    setOpen(true);
+    setOwnership(OWNERSHIP_MANAGED);
+    // Only seed an untouched declaration. The source chooser and any existing draft stay the
+    // user's; a repair never guesses a source path/partition or submits anything automatically.
+    setManaged((current) => current.family ? current : ({
+      ...current,
+      name: current.name || model.name || "",
+      family: model.family || "",
+      type: model.type || "image",
+      baseModel: current.baseModel || model.importedSource.baseModel || "",
+      minimaxH3Partition: current.minimaxH3Partition || model.importedSource.declaredPartition || "",
+    }));
+  }, [repairRequest]);
   const [fileInputKey, setFileInputKey] = useState(0);
   // The last submission, kept so "Try again" re-sends exactly what failed rather than whatever the
   // form happens to hold by then.

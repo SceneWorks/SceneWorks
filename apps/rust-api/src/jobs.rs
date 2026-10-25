@@ -880,6 +880,20 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let permitted_inline_loras = persisted_character_inline_loras(&merged);
     let persisted = merged.clone();
     merged.extend(payload_changes.clone());
+    if merged.get("model") == persisted.get("model") {
+        // A retry of the same selection retains the admitted identity even when a patch replaces
+        // other settings. Same-id catalog rebinding cannot opt out of the original checkpoint.
+        if let Some(expected) = persisted
+            .get("expectedImportedModelRef")
+            .filter(|value| !value.is_null())
+        {
+            merged.insert("expectedImportedModelRef".to_owned(), expected.clone());
+        }
+    } else if !payload_changes.contains_key("expectedImportedModelRef") {
+        // Deliberately choosing another model is a new selection. Null clears the old key through
+        // the store's shallow merge, rather than leaving an invisible stale replay constraint.
+        merged.insert("expectedImportedModelRef".to_owned(), Value::Null);
+    }
     let canonical_raw_image = matches!(job_type, JobType::ImageDetail)
         || crate::model_sources::canonical_utility_model_carrier(&job_type);
     if canonical_raw_image {
@@ -962,6 +976,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // trusting the original job's modelManifestEntry. This is the replay counterpart to the
         // typed `/video/jobs` pre-enqueue platform gate.
         let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        ensure_expected_imported_model_reference(state, &merged, &model_manifest_entry)?;
         // Retry/duplicate are video creation boundaries too. Validate the exact shallow-merged
         // reference array against the CURRENT server-owned entry before stamping it: malformed
         // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
@@ -975,6 +990,18 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &model_manifest_entry,
             crate::generation::video_job_platform(state),
         )?;
+        if let Some(entry) = model_manifest_entry.as_object() {
+            // Re-freeze the identity that will actually be enqueued: the entry above was resolved
+            // from the CURRENT catalog, so it is authority for what runs, not for what the original
+            // replay named (checked above, before this point).
+            let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir, entry,
+            ).map_err(|error| ApiError::bad_request(format!("Cannot verify imported replay identity: {error}. Reimport the original checkpoint.")))?;
+            if let Some(reference) = imported_reference_from_provenance(entry, provenance.as_ref())
+            {
+                merged.insert("expectedImportedModelRef".to_owned(), reference);
+            }
+        }
         canonical_selection = true;
         merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
     }

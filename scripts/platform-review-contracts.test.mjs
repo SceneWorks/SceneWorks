@@ -53,6 +53,18 @@ function workflowStep(job, name) {
   return job.slice(at, next === -1 ? undefined : next);
 }
 
+test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
+    "pruned/W4 model forwards belong only in explicitly selected manual validation");
+  assert.doesNotMatch(hosted, /--ignored\b/,
+    "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
+  assert.match(hosted, /run: cargo test -- --skip nax_16bit_sdpa_is_correct/,
+    "retain the ordinary workspace unit/math checks");
+  assert.match(hosted, /cargo clippy/,
+    "retain ordinary compilation/lint coverage");
+});
+
 test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
   const server = await source(".github/workflows/server-candle-linux.yml");
   assert.match(server, /^on:\n  workflow_dispatch:/m);

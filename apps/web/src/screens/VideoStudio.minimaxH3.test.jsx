@@ -267,6 +267,85 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect([...container.querySelectorAll("button")].find(b=>b.textContent.includes("Render clip")).disabled).toBe(true);
   });
 
+  for (const partition of ["fl2va", "hybrid"]) {
+    const imported = { ...MINIMAX, id: `imported_${partition}`, family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint", planId: "plan", assembly: { schemaVersion: 1, partition } }, minimaxH3Partition: partition };
+    it(`restores imported ${partition} last-only without seeding the selected first frame`, async () => {
+      window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({ mode: "image_to_video", model: imported.id, prompt: "A cyclist rides", lastFrameAssetId: "last", sourceAssetId: "" }));
+      const context = baseContext({ videoModels: [imported], assets: [asset("last", "image", "last"), asset("other", "image", "other")], selectedAsset: asset("other", "image", "other") });
+      await render(context);
+      expect(fieldLabelled("Last frame")).toBeTruthy();
+      const button = [...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip"));
+      expect(button.disabled).toBe(false);
+      await click(button);
+      expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: imported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
+    });
+    it(`replays imported ${partition} last frame and original checkpoint identity`, async () => {
+      const importedModelRef = { modelId: imported.id, checkpointId: "original", planId: "plan_original", declaredPartition: partition, baseModel: "minimax_h3", family: "minimax-h3" };
+      const context = baseContext({ videoModels: [imported], assets: [asset("last", "image", "last")], studioLaunch: { id: "replay", view: "Video", recipe: { mode: "image_to_video", model: imported.id, prompt: "A cyclist rides", importedModelRef, normalizedSettings: { sourceAssetId: null, lastFrameAssetId: "last", width: 768, height: 768, duration: 5.1667 }, rawAdapterSettings: {} } } });
+      await render(context);
+      const button = [...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip"));
+      expect(button.disabled).toBe(false);
+      await click(button);
+      expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: imported.id, sourceAssetId: null, lastFrameAssetId: "last", expectedImportedModelRef: importedModelRef });
+      expect(JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1")).expectedImportedModelRef).toEqual(importedModelRef);
+      await act(async () => setSelect(selectLabelled("Model"), imported.id));
+      await click(button);
+      expect(context.createVideoJob.mock.calls.at(-1)[0].expectedImportedModelRef).toBeUndefined();
+    });
+  }
+
+  it("restores the original imported identity from a saved replay snapshot", async () => {
+    const imported = { ...MINIMAX, id: "saved-import", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint", planId: "plan" }, minimaxH3Partition: "hybrid" };
+    const expectedImportedModelRef = { modelId: imported.id, checkpointId: "original", planId: "original-plan" };
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({ mode: "image_to_video", model: imported.id, sourceAssetId: "", lastFrameAssetId: "last", expectedImportedModelRef }));
+    const context = baseContext({ videoModels: [imported], assets: [asset("last", "image", "last")] });
+    await render(context);
+    await click([...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip")));
+    expect(context.createVideoJob.mock.calls[0][0].expectedImportedModelRef).toEqual(expectedImportedModelRef);
+  });
+  it("drops a replayed imported identity when the next recipe records none", async () => {
+    const imported = { ...MINIMAX, id: "boundary-import", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint" }, minimaxH3Partition: "fl2va" };
+    const recipe = { mode: "text_to_video", model: imported.id, prompt: "A cyclist rides", importedModelRef: { modelId: imported.id, checkpointId: "original" }, normalizedSettings: {}, rawAdapterSettings: {} };
+    const context = baseContext({ videoModels: [imported], studioLaunch: { id: "first", view: "Video", recipe } });
+    await render(context);
+    const button = [...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip"));
+    await click(button);
+    await act(async () => {});
+    expect(context.createVideoJob.mock.calls[0][0].expectedImportedModelRef).toEqual(recipe.importedModelRef);
+    await act(async () => {
+      root.render(<AppContext.Provider value={{ ...context, studioLaunch: { id: "second", view: "Video", recipe: { ...recipe, importedModelRef: undefined } } }}><VideoStudio /></AppContext.Provider>);
+    });
+    await act(async () => {});
+    const nextButton = [...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip"));
+    await click(nextButton);
+    expect(context.createVideoJob).toHaveBeenCalledTimes(2);
+    expect(context.createVideoJob.mock.calls[1][0].expectedImportedModelRef).toBeUndefined();
+  });
+
+  it("drops a replayed imported identity at the next non-recipe launch boundary", async () => {
+    const imported = { ...MINIMAX, id: "boundary-import-2", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint" }, minimaxH3Partition: "fl2va" };
+    const recipe = { mode: "text_to_video", model: imported.id, prompt: "A cyclist rides", importedModelRef: { modelId: imported.id, checkpointId: "original" }, normalizedSettings: {}, rawAdapterSettings: {} };
+    const context = baseContext({ videoModels: [imported], studioLaunch: { id: "first", view: "Video", recipe } });
+    await render(context);
+    const snapshot = () => JSON.parse(window.localStorage.getItem("sceneworks-studio-video-project_1") ?? "{}");
+    expect(snapshot().expectedImportedModelRef).toEqual(recipe.importedModelRef);
+    await act(async () => {
+      root.render(<AppContext.Provider value={{ ...context, studioLaunch: { id: "second", view: "Video" } }}><VideoStudio /></AppContext.Provider>);
+    });
+    await act(async () => {});
+    expect(snapshot().expectedImportedModelRef).toBeNull();
+  });
+
+  for (const override of [{ minimaxH3Partition: "ref2va" }, { family: "other" }, { baseModel: "minimax_h3_ref" }, { minimaxH3Partition: undefined }, { importSourceShape: undefined }, { importPlan: { checkpointId: " " } }]) {
+    it(`does not widen last-only support for mismatched catalog declarations ${JSON.stringify(override)}`, async () => {
+      const entry = { ...MINIMAX, id: "other-model", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint" }, minimaxH3Partition: "fl2va", ...override };
+      window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({ mode: "image_to_video", model: entry.id, sourceAssetId: "", lastFrameAssetId: "last" }));
+      await render(baseContext({ videoModels: [entry], assets: [asset("last", "image", "last")] }));
+      expect(fieldLabelled("Last frame")).toBeFalsy();
+      expect([...container.querySelectorAll("button")].find(b => b.textContent.includes("Render clip")).disabled).toBe(true);
+    });
+  }
+
   // ------------------------------------------------------------------- modes
 
   it("drives t2va and fl2va from the base partition and hides the axes it has none of", async () => {

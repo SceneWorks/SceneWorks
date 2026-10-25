@@ -352,6 +352,9 @@ export function useModelsAndLoras({
         if (options.variant) {
           body.variant = options.variant;
         }
+        if (options.componentId) {
+          body.componentId = options.componentId;
+        }
         // Co-requisite choice groups (sc-22998 / sc-23000): e.g. YuE2's `{ decoder: "legacy" }`
         // installs the legacy decoder add-on instead of the manifest default. Sent only when a
         // caller names one, so every other download's body is unchanged.

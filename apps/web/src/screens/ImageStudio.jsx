@@ -1964,13 +1964,24 @@ export function ImageStudio() {
     }
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
-    setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
-    // sc-15952: the reference images the user supplied in the shared-workflow panel. Guarded on
-    // presence rather than assigned unconditionally — a recorded recipe carries no
-    // `referenceAssetIds`, and clearing the multi-reference picker on every "Use this recipe"
-    // would drop a selection the user had already made.
-    if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
-      setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+    setReferenceAssetId(settings.referenceAssetId ?? rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952 / sc-26687: the ordered reference images. Guarded on the KEY rather than assigned
+    // unconditionally — a recipe that records neither spelling must not clear a selection the user
+    // had already made, while an explicit empty list is authoritative and does clear it.
+    //
+    // `referenceAssetIds` is a TOP-LEVEL request key, not part of `advanced`, so it never reached
+    // `rawAdapterSettings` and this reader could never see it: "Use this recipe" silently rebuilt an
+    // edit with the ordered multi-reference conditioning dropped. The recipe now records the list in
+    // `normalizedSettings` — the replay record — and that spelling is authoritative. The `advanced`
+    // spelling is kept as the fallback for a shared-workflow envelope that carries it there.
+    const recordedReferences =
+      Array.isArray(settings.referenceAssetIds)
+        ? settings.referenceAssetIds
+        : Array.isArray(rawSettings.referenceAssetIds)
+          ? rawSettings.referenceAssetIds
+          : null;
+    if (recordedReferences) {
+      setReferenceAssetIds(recordedReferences.filter(Boolean));
     }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
