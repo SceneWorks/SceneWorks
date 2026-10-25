@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
+import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -101,6 +101,41 @@ test('stopped registry relocation preserves all identities and rejects any unrel
   const original=[{id:'same-project',path:'/old/data/projects/campaign.sceneworks',name:'actual',other:{jobId:'same-job'}}];
   const moved=relocateRegistry(original,'/old/data','/new/data');assert.deepEqual({...moved[0],path:original[0].path},original[0]);assert.equal(moved[0].path,resolve('/new/data/projects/campaign.sceneworks'));
   for(const path of ['/outside/project','/old/data/../outside','/old/database/project'])assert.throws(()=>relocateRegistry([{id:'x',path}],'/old/data','/new/data'));
+});
+test('transferred Mac model-library binding is adopted through product dry-run and readback before CUDA submission',async t=>{
+  const root=await temporary('library-adoption');t.after(()=>rm(root,{recursive:true,force:true}));
+  const config={root,backend:'cuda',completedMlx:{runId:17},hfHome:resolve(root,'hf'),handoffRoot:resolve(root,'prior/handoff'),stateRoot:resolve(root,'state')};
+  const relative='data/models/.sceneworks-external-library-state.json',old={schemaVersion:1,configuredPath:'/old/mac/hf/hub',canonicalPath:'/old/mac/hf/hub',physicalIdentity:{volumeId:'mac',directoryId:7},boundAt:1};
+  await save(resolve(config.handoffRoot,relative),old);await save(resolve(config.stateRoot,relative),old);await mkdir(resolve(config.hfHome,'hub'),{recursive:true});
+  const hub=resolve(config.hfHome,'hub'),newBinding={...old,configuredPath:hub,canonicalPath:hub,physicalIdentity:{volumeId:'windows',directoryId:8},boundAt:2},calls=[];
+  const api={async request(path,options={}){
+    calls.push([path,options.method??'GET',options.body]);
+    if(path==='/api/v1/model-library')return calls.length===1?{configuredLibraryPath:hub,expectedLibrary:old,probeStatus:'unavailable',available:false}:{configuredLibraryPath:hub,expectedLibrary:newBinding,probeStatus:'available',available:true};
+    assert.equal(path,'/api/v1/model-library/relocate');assert.equal(options.method,'POST');assert.equal(options.body.path,config.hfHome);
+    if(options.body.dryRun)return {adopted:false,hfHome:config.hfHome,libraryRoot:hub};
+    await writeFile(resolve(config.stateRoot,relative),JSON.stringify(newBinding));return {adopted:true,hfHome:config.hfHome,libraryRoot:hub};
+  }};
+  const receipt=await relocateImportedCudaModelLibrary(api,config);
+  assert.deepEqual(calls.map(([path,method,body])=>[path,method,body?.dryRun]),[
+    ['/api/v1/model-library','GET',undefined],['/api/v1/model-library/relocate','POST',true],['/api/v1/model-library/relocate','POST',undefined],['/api/v1/model-library','GET',undefined]]);
+  assert.deepEqual(receipt.oldBinding,old);assert.deepEqual(receipt.newBinding,newBinding);
+  assert.equal((await json(resolve(config.root,'evidence/external/cuda-model-library-relocation.json'))).adoptedFile.sha256,receipt.adoptedFile.sha256);
+  assert.deepEqual(await json(resolve(config.handoffRoot,relative)),old);
+});
+test('model-library handoff refuses changed imported bytes, wrong API binding and failed closure dry-run without image submission',async t=>{
+  const root=await temporary('library-refusal');t.after(()=>rm(root,{recursive:true,force:true}));
+  const config={root,backend:'cuda',completedMlx:{runId:17},hfHome:resolve(root,'hf'),handoffRoot:resolve(root,'prior/handoff'),stateRoot:resolve(root,'state')};
+  const relative='data/models/.sceneworks-external-library-state.json',old={schemaVersion:1,configuredPath:'/old/mac/hf/hub',canonicalPath:'/old/mac/hf/hub',physicalIdentity:{volumeId:'mac',directoryId:7},boundAt:1};
+  await save(resolve(config.handoffRoot,relative),old);await save(resolve(config.stateRoot,relative),{...old,boundAt:2});
+  let calls=0;const api={async request(){calls++;throw Error('no product request expected');}};
+  await assert.rejects(()=>relocateImportedCudaModelLibrary(api,config),/handoff bytes changed/);assert.equal(calls,0);
+  await writeFile(resolve(config.stateRoot,relative),await readFile(resolve(config.handoffRoot,relative)));
+  const hub=resolve(config.hfHome,'hub');api.request=async(path,options={})=>{calls++;if(path==='/api/v1/model-library')return {configuredLibraryPath:hub,expectedLibrary:{...old,boundAt:2},available:false};throw Error('unexpected relocation');};
+  await assert.rejects(()=>relocateImportedCudaModelLibrary(api,config),/exact unavailable imported Mac library/);assert.equal(calls,1);
+  api.request=async(path,options={})=>{calls++;if(path==='/api/v1/model-library')return {configuredLibraryPath:hub,expectedLibrary:old,available:false};if(options.body?.dryRun)throw Object.assign(Error('product refused incomplete model closure'),{status:409});throw Error('no adoption or image POST allowed');};
+  await assert.rejects(()=>relocateImportedCudaModelLibrary(api,config),/incomplete model closure/);
+  assert.equal(calls,3);assert.equal((await json(resolve(config.stateRoot,relative))).boundAt,1);
+  await assert.rejects(()=>json(resolve(config.root,'evidence/external/cuda-model-library-relocation.json')),{code:'ENOENT'});
 });
 test('SQLite handoff requires actual jobs DB, successful checkpoint and integrity, never a live/busy copy',async()=>{
   const root=await temporary('database');await mkdir(resolve(root,'cache'));await writeFile(resolve(root,'cache/jobs.db'),'inert bytes');

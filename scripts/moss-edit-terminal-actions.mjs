@@ -380,6 +380,23 @@ export async function authenticateCrossBackendHistory(api,evidenceRoot) {
   requireThat(comparisons.every(item=>item.jobIdentityEqual&&item.payloadEqual&&item.typedResultEqual),'cross-backend history handoff changed original authored job/result identities');
   return comparisons;
 }
+export async function relocateImportedCudaModelLibrary(api,config) {
+  requireThat(config.backend==='cuda'&&config.completedMlx&&config.hfHome===resolve(config.root,'hf'),'only the authenticated cross-backend CUDA handoff may rebind its imported model library');
+  const relative='models/.sceneworks-external-library-state.json';
+  const imported=resolve(config.handoffRoot,'data',relative),live=resolve(config.stateRoot,'data',relative),hub=resolve(config.hfHome,'hub');
+  const [oldIdentity,liveIdentity,oldBinding]=await Promise.all([fileIdentity(imported),fileIdentity(live),json(imported)]);
+  requireThat(canonical(oldIdentity)===canonical(liveIdentity)&&oldBinding.configuredPath===oldBinding.canonicalPath&&oldBinding.configuredPath!==hub&&oldBinding.physicalIdentity,'imported Mac model-library binding or original handoff bytes changed');
+  const before=await api.request('/api/v1/model-library');
+  requireThat(before.available===false&&before.configuredLibraryPath===hub&&canonical(before.expectedLibrary)===canonical(oldBinding),'transferred API did not expose the exact unavailable imported Mac library and new private CUDA cache');
+  const dryRun=await api.request('/api/v1/model-library/relocate',{method:'POST',body:{path:config.hfHome,dryRun:true}});
+  requireThat(dryRun.adopted===false&&dryRun.hfHome===config.hfHome&&dryRun.libraryRoot===hub&&canonical(await fileIdentity(live))===canonical(liveIdentity),'product relocation dry run changed state or resolved another package root');
+  const adoption=await api.request('/api/v1/model-library/relocate',{method:'POST',body:{path:config.hfHome}});
+  const [after,newBinding,newIdentity]=await Promise.all([api.request('/api/v1/model-library'),json(live),fileIdentity(live)]);
+  requireThat(adoption.adopted===true&&adoption.hfHome===config.hfHome&&adoption.libraryRoot===hub&&after.available===true&&after.probeStatus==='available'&&after.configuredLibraryPath===hub&&canonical(after.expectedLibrary)===canonical(newBinding)&&newBinding.configuredPath===hub&&newBinding.physicalIdentity&&canonical(newIdentity)!==canonical(oldIdentity),'product did not prove the same complete private CUDA model library is available after adoption');
+  const receipt={version:VERSION,name:'cross-backend-model-library-adoption-before-first-cuda-dispatch',importedFile:oldIdentity,oldBinding,configuredHfHome:config.hfHome,before,dryRun,adoption,after,adoptedFile:newIdentity,newBinding};
+  await save(resolve(config.root,'evidence/external/cuda-model-library-relocation.json'),receipt);
+  return receipt;
+}
 function buildPaths(config) {
   const out=resolve(config.buildRoot,config.backend),binary=resolve(out,config.backend==='cuda'?'sceneworks-rust-api.exe':'sceneworks-rust-api');
   return {apiBinary:binary,workerBinary:binary,webPackage:resolve(out,'web.json'),packages:resolve(out,'packages.json'),toolchain:resolve(out,'toolchain.json')};
@@ -544,6 +561,7 @@ export async function executeBackend(config) {
       config.guardRequests=await json(resolve(config.root,'evidence','resolved-guards.json'));
       const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);requireThat(project.id===config.projectId,'target API did not reopen the original transferred project identity');
       await authenticateCrossBackendHistory(stack.api,resolve(config.root,'evidence'));
+      if(config.completedMlx)await relocateImportedCudaModelLibrary(stack.api,config);
     }
     if(config.backend==='mlx'&&!continuing)for(const backend of ['mlx','cuda']) {
       const toolchain=await json(resolve(config.buildRoot,backend,'toolchain.json'));requireThat(toolchain.installation?.files?.length,'actual installer capture missing from native artifact');
