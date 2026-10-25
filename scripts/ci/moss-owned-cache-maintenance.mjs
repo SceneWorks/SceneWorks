@@ -129,6 +129,13 @@ export async function stopped(binding, api) {
   }
   throw Error('Actions jobs page bound exceeded');
 }
+// The Node24 cp implementation creates an absent directory with exclusive mkdir.
+// Do not pre-create it: errorOnExist deliberately refuses an existing directory.
+export async function copyCacheExclusive(from,to) {
+  let existing;try{existing=await lstat(to);}catch(error){if(error.code!=='ENOENT')throw error;}
+  check(!existing,'cache destination already exists');
+  await cp(from,to,{recursive:true,dereference:false,force:false,errorOnExist:true});
+}
 export async function maintain(env, io) {
   const root = destination(env), target = path.join(root, 'target');
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, before: await io.volume(), candidates: [], operations: [] };
@@ -207,7 +214,7 @@ if (process.argv[2] === '--moss-disk-maintenance') {
   const token = process.env.MOSS_MAINTENANCE_TOKEN;
   try {
     await maintain(process.env, { volume, inspect: inspectTree, metadata: observeHf, hash: async file => hashMetadataFile(file,entryIdentity(await lstat(file,{bigint:true}))), stopped: binding => stopped(binding, route => actionsApi(token, route)), read: readFile,
-      remove: leaf => rm(leaf, { recursive: true, force: false }), copy: async (from, to) => { await mkdir(to); await cp(from, to, { recursive: true, dereference: false, force: false, errorOnExist: true }); }, ensure: root => mkdir(root, { recursive: true }),
+      remove: leaf => rm(leaf, { recursive: true, force: false }), copy: copyCacheExclusive, ensure: root => mkdir(root, { recursive: true }),
       write: (file, bytes) => writeFile(file, bytes, { flag: 'wx' }), report: value => console.log(JSON.stringify(value)) });
   } catch (error) { console.error(JSON.stringify({ status: 'STOP', stage: 'owned-disk-maintenance', message: error.message })); process.exitCode = 1; }
 }

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, mkdir, writeFile, link, symlink, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, writeFile, link, symlink, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { OWNED_RUNS, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import { OWNED_RUNS, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
 const runtimes = await Promise.all([4, 5, 6, 10].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.source, status: 'completed', conclusion: 'failure' });
@@ -119,7 +119,7 @@ test('action-free recovery gates native job preparation and keeps the normal fre
   assert.doesNotMatch(step, /WriteAllText|Set-Content|npm |cargo |nvidia-smi|Remove-Item/);
   assert.match(build, /node source\\scripts\\moss-edit-terminal-actions.mjs build/);
   const helper = await readFile(new URL('./ci/moss-owned-cache-maintenance.mjs', import.meta.url), 'utf8');
-  assert.match(helper, /await mkdir\(to\); await cp\(from, to, \{ recursive: true, dereference: false, force: false, errorOnExist: true \}\)/);
+  assert.match(helper, /copy: copyCacheExclusive/);
   assert.doesNotMatch(helper, /\brename\b/);
   assert.ok(helper.indexOf('GetAttributes($entry)') < helper.indexOf('$stack.Push($entry)'));
   assert.match(helper, /Reparse ancestor/); assert.match(helper, /Reparse descendant/);
@@ -177,4 +177,24 @@ test('mixed cache selection never promotes an incomplete R10 or unproved R6 proj
     const f=fixture({r10Cache});f.roots.delete(path.join(OWNED_RUNS[1].root,'hf'));f.roots.delete(path.join(OWNED_RUNS[2].root,'hf'));f.roots.delete(path.join(OWNED_RUNS[3].root,'hf'));
     const receipt=await maintain(env,f.io);assert.equal(receipt.cache.projectionReserveBytes,100);assert.ok(f.mutations.some(item=>item[0]==='copy'));
   }
+});
+
+test('production native filesystem cache copy creates absent nested destination and retains original',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-copy-native-'));t.after(()=>rm(root,{recursive:true,force:true}));const source=resolve(root,'original'),target=resolve(root,'fresh');
+  await mkdir(resolve(source,'release/build/native'),{recursive:true});const files=[['release/sceneworks-rust-api.exe','original binary bytes'],['release/build/native/object.o','original object bytes'],['CACHEDIR.TAG','cache tag']];
+  for(const [file,bytes] of files)await writeFile(resolve(source,file),bytes);
+  await copyCacheExclusive(source,target);for(const [file,bytes] of files){assert.equal(await readFile(resolve(source,file),'utf8'),bytes);assert.equal(await readFile(resolve(target,file),'utf8'),bytes);}
+  assert.deepEqual((await readdir(source)).sort(),(await readdir(target)).sort());
+});
+test('production native filesystem cache copy refuses existing empty and populated destinations without mutation',async t=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-copy-existing-'));t.after(()=>rm(root,{recursive:true,force:true}));const source=resolve(root,'original');await mkdir(resolve(source,'release'),{recursive:true});await writeFile(resolve(source,'release/api.exe'),'source binary');
+  for(const populated of [false,true]) {
+    const target=resolve(root,populated?'populated':'empty');await mkdir(target);
+    if(populated){await mkdir(resolve(target,'release'));await writeFile(resolve(target,'release/api.exe'),'existing user bytes');await writeFile(resolve(target,'sentinel'),'keep');}
+    await assert.rejects(()=>copyCacheExclusive(source,target),/already exists/);
+    if(populated){assert.equal(await readFile(resolve(target,'release/api.exe'),'utf8'),'existing user bytes');assert.equal(await readFile(resolve(target,'sentinel'),'utf8'),'keep');}
+    else assert.deepEqual(await readdir(target),[]);
+    assert.equal(await readFile(resolve(source,'release/api.exe'),'utf8'),'source binary');
+  }
+  await assert.rejects(()=>copyCacheExclusive(source,source),/already exists/);assert.equal(await readFile(resolve(source,'release/api.exe'),'utf8'),'source binary');
 });
